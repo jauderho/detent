@@ -29,3 +29,13 @@ arithmetic_side_effects = "warn"
 multiple_crate_versions = "allow"
 
 [dependencies]
+rustix = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+xattr = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile = { workspace = true }
