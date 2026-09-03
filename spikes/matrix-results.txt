@@ -1,0 +1,31 @@
+### aws-lc aarch64-unknown-linux-musl
+RESULT ok rc=0 secs=51 bytes=2900840
+FILE ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, stripped
+### aws-lc x86_64-unknown-linux-musl
+RESULT ok rc=0 secs=113 bytes=3433432
+FILE ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, stripped
+### aws-lc armv7-unknown-linux-musleabihf
+RESULT ok rc=0 secs=118 bytes=2571872
+FILE ELF 32-bit LSB executable, ARM, EABI5 version 1 (SYSV), statically linked, stripped
+### aws-lc riscv64gc-unknown-linux-musl
+RESULT ok rc=0 secs=98 bytes=2801976
+FILE ELF 64-bit LSB pie executable, UCB RISC-V, RVC, double-float ABI, version 1 (SYSV), static-pie linked, stripped
+### aws-lc x86_64-unknown-freebsd
+RESULT ok rc=0 secs=96 bytes=3497096
+FILE ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /libexec/ld-elf.so.1, for FreeBSD 14.0 (1400500), FreeBSD-style, stripped
+### ring aarch64-unknown-linux-musl
+RESULT ok rc=0 secs=49 bytes=2407864
+FILE ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, stripped
+### ring x86_64-unknown-linux-musl
+RESULT ok rc=0 secs=43 bytes=2740392
+FILE ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, stripped
+### ring armv7-unknown-linux-musleabihf
+RESULT ok rc=0 secs=38 bytes=2202592
+FILE ELF 32-bit LSB executable, ARM, EABI5 version 1 (SYSV), statically linked, stripped
+### ring riscv64gc-unknown-linux-musl
+RESULT ok rc=0 secs=33 bytes=2303944
+FILE ELF 64-bit LSB pie executable, UCB RISC-V, RVC, double-float ABI, version 1 (SYSV), static-pie linked, stripped
+### ring x86_64-unknown-freebsd
+RESULT ok rc=0 secs=49 bytes=2830536
+FILE ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /libexec/ld-elf.so.1, for FreeBSD 14.0 (1400500), FreeBSD-style, stripped
+MATRIX-DONE

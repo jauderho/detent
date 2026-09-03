@@ -1,0 +1,2 @@
+#!/bin/sh
+exec "$HOME/.local/share/uv/tools/cargo-zigbuild/bin/python" -m ziglang "$@"
