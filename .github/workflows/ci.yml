@@ -50,6 +50,40 @@ jobs:
       - name: cargo build (default features)
         run: cargo build -p detent
 
+      # PLAN §4.2: rcgen must build with default-features = false, because its
+      # defaults link `ring` even in aws-lc builds. This assertion is a no-op
+      # until a rustls dependency actually exists (Phase 4); once it does,
+      # `cargo tree -i ring` must be empty for the default feature set.
+      - name: cargo tree -i ring (rustls builds must not pull in ring)
+        run: |
+          set -euo pipefail
+          if cargo tree -e normal -p detent -i rustls >/dev/null 2>&1; then
+            ! cargo tree -e normal -p detent -i ring >/dev/null 2>&1
+          fi
+
+  rust-macos:
+    name: Rust (build, test, clippy) on macOS
+    runs-on: macos-latest
+    steps:
+      # step-security/harden-runner only supports Linux runners; omitted here.
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: cargo build
+        run: cargo build --workspace
+
+      - name: cargo test
+        run: cargo test --workspace --all-features
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
   supply-chain:
     name: Supply chain (deny, audit, cooldown)
     runs-on: ubuntu-26.04
@@ -118,6 +152,9 @@ jobs:
 
       - name: Install lcov
         run: sudo apt-get update && sudo apt-get install -y lcov
+
+      - name: coverage-merge.sh self-test
+        run: scripts/coverage-merge.sh --selftest
 
       - name: cargo llvm-cov
         run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov-linux.info
