@@ -37,7 +37,7 @@ in each phase's *Delegation* block.
 ### 1.1 Product goal
 
 `detent` is a single static Rust binary (default port **3333**) that manages and
-configures common system service config files on Linux (tier 1) and BSD (tier 2)
+configures common system service config files on Linux (tier 1; x86_64 and aarch64 only) and macOS (tier 1 for build, test, core, CLI, and web; modules where the file format exists). BSD, armv7, and riscv64 are deferred to a later pass (see §1.6)
 — the "busybox of config files" for SBC/IoT/GPS-server deployments. It ships:
 
 - A **core library** (`detent-core`, C‑ABI exposed as `libdetent`) that parses,
@@ -100,6 +100,14 @@ Vite admin app the following are applied deliberately (record in ADR‑006):
 - `AGENTS.md` mentions a "HeroInsight results pattern" and "Tufte chart
   conventions" that the contract does not define. Treat as not applicable; if
   charts are added later, follow the `dataviz` skill and the contract's tokens.
+
+### 1.6 Platform and architecture tiers (directed by the owner, 2026‑09‑03; ADR‑013)
+
+| Tier | Platforms | Meaning |
+|---|---|---|
+| 1 | Linux x86_64-musl, Linux aarch64-musl | Full feature set, release artifacts, privileged CI, budgets enforced. |
+| 1 (host/dev) | macOS aarch64, macOS x86_64 | Everything builds and tests here; `detent-core`, CLI, `libdetent`, web run natively. Modules whose file exists on macOS (`/etc/hosts`, `/etc/resolv.conf` read-only view, `/etc/fstab`, `/etc/exports`) work; service control and Linux sandboxing are `cfg(target_os = "linux")` with a documented no-op/`doctor` warning on macOS. Release artifacts built on GitHub macOS runners (no code signing/notarization in v1). |
+| 3 (deferred) | FreeBSD/OpenBSD/NetBSD, armv7, riscv64 | Keep the code portable (no design decisions that preclude them), but no CI, no artifacts, no phase work until a later pass. Phase 11 is parked. |
 
 ### 1.5 Open questions (answer before Phase 0 closes; defaults apply otherwise)
 
@@ -677,7 +685,7 @@ Both are commit-confirm modules. Network model is backend-neutral (interface →
 **Goal:** reproducible, attested, immutable releases; detent updates itself safely.
 
 **Deliverables**
-- `.github/workflows/release.yml` (on `v*` tags): harden-runner (egress audit→block); build matrix via `cargo zigbuild` + `cargo auditable` with `--locked`, `SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)`, `RUSTFLAGS="--remap-path-prefix=$PWD=/src --remap-path-prefix=$CARGO_HOME=/cargo"`, `bun install --frozen-lockfile` for the SPA; targets: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `armv7-unknown-linux-musleabihf`, `riscv64gc-unknown-linux-musl`, `x86_64-unknown-freebsd`, `aarch64-unknown-freebsd` (tier-3 in rustup: use `-Zbuild-std` on pinned nightly or the `cross` FreeBSD image; document choice in ADR‑013). **Two independent builds per target** on different runners; job fails unless SHA‑256 matches (reproducibility gate).
+- `.github/workflows/release.yml` (on `v*` tags): harden-runner (egress audit→block); build matrix via `cargo zigbuild` + `cargo auditable` with `--locked`, `SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)`, `RUSTFLAGS="--remap-path-prefix=$PWD=/src --remap-path-prefix=$CARGO_HOME=/cargo"`, `bun install --frozen-lockfile` for the SPA; targets (per §1.6): `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` (zigbuild on Linux runners), `aarch64-apple-darwin`, `x86_64-apple-darwin` (native on macOS runners; reproducibility gate applies to both OSes). armv7/riscv64/FreeBSD are out of the matrix until the deferred pass. **Two independent builds per target** on different runners; job fails unless SHA‑256 matches (reproducibility gate).
 - SBOMs: `cargo cyclonedx` (with `SOURCE_DATE_EPOCH`) + `cdxgen` for the web lockfile, merged; `actions/attest` (build provenance) and `actions/attest-sbom` for every artifact; `SHA256SUMS` + per-artifact `.sigstore.json` bundles published as assets; `gh release create --verify-tag`; repo setting **immutable releases** on.
 - `.github/workflows/rebuild-verify.yml`: weekly and on demand, rebuild the latest tag from source and compare to published hashes; `gh attestation verify` for each asset.
 - Repo rulesets documented in `docs/RELEASING.md`: main requires PR + review + status checks + signed commits + linear history; `v*` tags protected; force-push disabled; Actions SHA-pinned; Dependabot cooldowns.
@@ -712,7 +720,7 @@ Both are commit-confirm modules. Network model is backend-neutral (interface →
 
 ---
 
-### Phase 11 — BSD tier 2 (FreeBSD first) `[ ]`
+### Phase 11 — BSD tier 2 (FreeBSD first) `[deferred]` — parked per §1.6; do not schedule
 
 **Goal:** detent runs confined on FreeBSD; OpenBSD/NetBSD build but are documented as best-effort.
 
@@ -755,7 +763,8 @@ Both are commit-confirm modules. Network model is backend-neutral (interface →
 | `ci.yml` | PR, push main | fmt, clippy `-D warnings` (all features + minimal feature sets matrix), test (Linux x86_64 + aarch64 via QEMU for musl), `cargo deny`, `cargo audit`, `cargo llvm-cov` (100 % lines gate), web `biome ci` + vitest + Playwright, `i18n:check`, contrast check, `cbindgen --verify`, size-check, shellcheck/shfmt, `checkWorkflows.sh` |
 | `fuzz.yml` | PR (60 s/target), nightly (20 min/target) | cargo-fuzz all targets; crash artifacts uploaded; corpus cached |
 | `privileged-tests.yml` | PR | docker `--privileged` job for privsep/sandbox tests; systemd container; Alpine OpenRC container |
-| `freebsd.yml` | PR (paths: platform, modules), nightly | vmactions/freebsd-vm tests + coverage slice |
+| `freebsd.yml` | deferred (§1.6) | — |
+| `ci.yml` macOS job | PR | `cargo test --workspace` and web checks on `macos-latest` (aarch64) |
 | `acme.yml` | PR (paths: acme), nightly | Pebble + challtestsrv; step-ca + swtpm |
 | `release.yml` | `v*` tag | §Phase 9 |
 | `rebuild-verify.yml` | weekly, manual | rebuild + compare + `gh attestation verify` |
@@ -806,7 +815,7 @@ evidence (command + output), coverage delta, size delta, ADR references.
 | `device-attest-01` still a draft; `instant-acme` marks it experimental | API churn | feature-gated, tested against step-ca; pin draft version in docs |
 | Netplan YAML lossless editing is hard | fidelity bugs | scope to netplan's schema subset; unknown nodes preserved opaque; heavy fuzzing |
 | 100 % coverage on platform code | CI complexity | multi-slice LCOV merge; privileged/VM jobs from Phase 2 |
-| FreeBSD aarch64 is a rustup tier-3 target | release gaps | ADR‑013 chooses build-std on pinned nightly vs `cross`; if neither is reproducible, ship x86_64 FreeBSD only and document |
+| macOS host support drifts (module paths, no sandbox) | dev/test breakage | `cfg(target_os)` gates with unit tests on both OSes in CI (`macos-latest` job) |
 | Single-admin session store in memory | logout on restart | acceptable and documented; revisit if multi-admin arrives |
 | Cargo native cooldown not yet stable | window for malicious crates | Dependabot cooldown + `cargo-cooldown` CI check in the interim |
 
@@ -908,6 +917,7 @@ TLS 1.3 → session or Bearer → (cookie path) `Sec-Fetch-Site` + `Origin` + `X
 | Date | Change | By |
 |---|---|---|
 | 2026‑09‑03 | Initial draft for approval. | orchestrator (Fable) |
+| 2026‑09‑03 | Owner narrowed scope: x86_64 + aarch64 only; Linux and macOS first; BSD/armv7/riscv64 deferred (§1.6, ADR‑013, Phase 11 parked). | orchestrator (Fable) |
 | 2026‑09‑03 | Approved with all §1.5 defaults. Phase 0 done. Spike results folded in: §2.4 (Landlock ABI 1 minimum, degrade path, systemd score targets 2.5/1.8), §2.9 (in-tree Sigstore verifier instead of the `sigstore` crate), §4.1 (budgets re-based, CLI row excludes TLS stack, FreeBSD dynamic linking), §4.2 (rcgen default-features off), §2.2 (both crypto features may coexist, aws-lc wins), Phase 2/9/12 tasks, risks. | orchestrator (Fable) |
 
 ## 10. Checkpoint for the next session (read this first if resuming cold)
@@ -922,5 +932,7 @@ What exists and passes locally:
 - Local tooling installed: cargo-llvm-cov, cargo-deny, cargo-audit, cbindgen, cargo-cyclonedx, cargo-auditable, cargo-zigbuild (zig via `uv`; shim at `spikes/bin/zig`), musl/FreeBSD rustup targets. Docker is OrbStack.
 
 Known gaps carried into later phases: coverage gate must be raised to 100 % for `detent-core` and modules in Phase 1; `cargo tree -i ring` CI assertion lands with the first TLS dependency (Phase 4); Landlock-less kernel and Pi kernel untested (Phase 2); Capsicum untested (Phase 11); aarch64-freebsd unattempted (ADR-013, Phase 9).
+
+**Scope note:** §1.6 supersedes every earlier mention of BSD/armv7/riscv64 as active work.
 
 **Next action:** start Phase 1 task 1 (`detent-core` CST + `module_conformance!`) with an Opus/Fable-Low implementor; the prompt must cite §2.3 invariants 1–6 and Appendix A.
