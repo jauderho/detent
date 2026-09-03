@@ -1,0 +1,5 @@
+127.0.0.1	localhost
+::1	localhost
+
+# crlf throughout
+192.168.1.10	nas.lan	nas	# storage

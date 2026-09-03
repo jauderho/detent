@@ -1,0 +1,5 @@
+fe80::1%eth0	router.lan
+1.2.3.4
+999.1.1.1	bogus.lan
+not-an-ip	nonsense
+::1	localhost

@@ -36,7 +36,7 @@
 #     (requires lcov). With exactly 1 file: uses it directly as the merged
 #     file (no lcov dependency, so --selftest does not need lcov installed).
 #   - Computes line coverage (global, and per `per_path` entry) directly from
-#     the merged file's LF/LH (lines found / lines hit) records with awk.
+#     the merged file's DA (per-line hit count) records with awk.
 #   - Fails if global coverage is below baseline.lines_min_pct, or if any
 #     per_path coverage is below its configured minimum.
 #   - Prints one summary line per per_path entry, plus the global summary line.
@@ -91,8 +91,15 @@ lcov_totals() {
   local needle="${2:-}"
   awk -v needle="${needle}" '
     /^SF:/ { path = path_of($0) }
-    /^LF:/ { lf = $0; sub(/^LF:/, "", lf) }
-    /^LH:/ { lh = $0; sub(/^LH:/, "", lh) }
+    # Derive found/hit from DA records, as lcov itself does. cargo-llvm-cov
+    # emits LF/LH per function instantiation, so a crate compiled once for its
+    # unit tests and once for an integration test double-counts lines in LF/LH
+    # while the per-line DA records are already merged.
+    /^DA:/ {
+      rec = $0; sub(/^DA:/, "", rec); split(rec, parts, ",")
+      lf += 1
+      if (parts[2] + 0 > 0) { lh += 1 }
+    }
     /^end_of_record/ {
       if (needle == "" || index(path, needle) > 0) {
         total_lf += lf

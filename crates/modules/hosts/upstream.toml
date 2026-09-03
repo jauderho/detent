@@ -1,0 +1,16 @@
+# Upstream tracking for the `hosts` module (see docs/PLAN.md §2.3).
+# Kept in sync with `HOSTS_DESCRIPTOR.upstream` in src/lib.rs; the module's test
+# suite asserts the two agree.
+
+project = "glibc"
+repo_url = "https://sourceware.org/git/glibc.git"
+tracked_version = "2.42"
+docs = ["https://man7.org/linux/man-pages/man5/hosts.5.html"]
+
+# glibc publishes no release atom feed; the upstream-watch workflow compares
+# `tracked_version` against the tags in `repo_url` instead.
+release_feed = ""
+
+[fixtures]
+# fixtures/hosts/<dir>/ — real samples this version's parser is held to.
+dirs = ["glibc-2.42", "macos-15", "edge"]
