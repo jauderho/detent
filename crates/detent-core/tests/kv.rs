@@ -7,8 +7,8 @@
 //! could pass vacuously.
 
 use detent_core::conformance::{
-    check_apply_is_noop, check_bounded_parse, check_edit_fidelity, check_idempotent,
-    check_injection_rejected, check_render_parse_roundtrip,
+    Exercised, check_apply_is_noop, check_bounded_parse, check_edit_fidelity, check_idempotent,
+    check_injection_rejected, check_not_vacuous, check_render_parse_roundtrip,
 };
 use detent_core::descriptor::{
     ArgTemplate, CheckExpectation, ExternalCheck, HostProfile, InitSystem, ModuleDescriptor, Os,
@@ -315,8 +315,26 @@ impl ConfigModule for BadModule {
         Diagnostics::new()
     }
 
-    fn defaults(_profile: &HostProfile) -> Self::Model {
-        KvModel::default()
+    /// Host-aware just enough to prove `check_not_vacuous` catches a module
+    /// whose defaults do not read back: `apply`/`to_model` never see `profile`
+    /// or a hostname marker, so a non-empty result here can never round-trip.
+    fn defaults(profile: &HostProfile) -> Self::Model {
+        let mut pairs = BTreeMap::new();
+        if !profile.hostname.is_empty() {
+            pairs.insert("hostname".to_owned(), profile.hostname.clone());
+        }
+        KvModel { pairs }
+    }
+
+    /// Overrides the default `schema()` to prove an override reaches
+    /// `DynModule::schema_json` through `Dyn`, the way a real module attaches
+    /// `x-detent` hints.
+    fn schema() -> serde_json::Value {
+        let mut schema = schemars::schema_for!(KvModel).to_value();
+        if let Some(object) = schema.as_object_mut() {
+            object.insert("x-detent-marker".to_owned(), serde_json::json!(true));
+        }
+        schema
     }
 }
 
@@ -478,6 +496,26 @@ fn dyn_adapter_speaks_json() {
     );
 }
 
+/// `ConfigModule::schema` is a provided method: a module that never overrides
+/// it gets the bare `schemars` schema, and one that does (`BadModule`, here)
+/// has the override reach callers through `Dyn`/`DynModule::schema_json`
+/// exactly like every other trait method.
+#[test]
+fn schema_flows_through_dyn_default_and_override() {
+    let default_module: Box<dyn DynModule> = Box::new(Dyn::<KvModule>::new());
+    let bare = schemars::schema_for!(KvModel).to_value();
+    assert_eq!(default_module.schema_json(), bare);
+    assert_eq!(KvModule::schema(), bare);
+
+    let overridden: Box<dyn DynModule> = Box::new(Dyn::<BadModule>::new());
+    assert_eq!(
+        overridden.schema_json().get("x-detent-marker"),
+        Some(&serde_json::json!(true))
+    );
+    assert_eq!(BadModule::schema(), overridden.schema_json());
+    assert_ne!(overridden.schema_json(), default_module.schema_json());
+}
+
 #[test]
 fn dyn_adapter_maps_every_failure_to_an_error() {
     let kv: Dyn<KvModule> = Dyn::default();
@@ -558,25 +596,43 @@ fn conformance_checks_catch_violations() {
 
     // Invariant 2.
     assert!(check_apply_is_noop::<BadModule>("!parse").is_err());
-    assert_eq!(check_apply_is_noop::<BadModule>("!model"), Ok(()));
+    assert_eq!(
+        check_apply_is_noop::<BadModule>("!model"),
+        Ok(Exercised::No)
+    );
     assert!(check_apply_is_noop::<BadModule>("!applyerr").is_err());
     assert!(check_apply_is_noop::<BadModule>("!mutate").is_err());
     assert!(check_apply_is_noop::<BadModule>("!report").is_err());
-    assert_eq!(check_apply_is_noop::<BadModule>("plain"), Ok(()));
+    assert_eq!(
+        check_apply_is_noop::<BadModule>("plain"),
+        Ok(Exercised::Yes)
+    );
 
     // Invariant 3.
     assert!(check_edit_fidelity::<BadModule>("!parse", &m).is_err());
-    assert_eq!(check_edit_fidelity::<BadModule>("!applyerr", &m), Ok(()));
+    assert_eq!(
+        check_edit_fidelity::<BadModule>("!applyerr", &m),
+        Ok(Exercised::No)
+    );
     assert!(check_edit_fidelity::<BadModule>("!aftermodel", &empty).is_err());
     assert!(check_edit_fidelity::<BadModule>("plain", &m).is_err());
-    assert_eq!(check_edit_fidelity::<BadModule>("plain", &empty), Ok(()));
+    assert_eq!(
+        check_edit_fidelity::<BadModule>("plain", &empty),
+        Ok(Exercised::Yes)
+    );
 
     // Invariant 4.
     assert!(check_idempotent::<BadModule>("!parse", &empty).is_err());
-    assert_eq!(check_idempotent::<BadModule>("!applyerr", &empty), Ok(()));
+    assert_eq!(
+        check_idempotent::<BadModule>("!applyerr", &empty),
+        Ok(Exercised::No)
+    );
     assert!(check_idempotent::<BadModule>("!rfail", &empty).is_err());
     assert!(check_idempotent::<BadModule>("!requal", &empty).is_err());
-    assert_eq!(check_idempotent::<BadModule>("plain", &empty), Ok(()));
+    assert_eq!(
+        check_idempotent::<BadModule>("plain", &empty),
+        Ok(Exercised::Yes)
+    );
 
     // Invariant 5.
     assert!(check_injection_rejected::<BadModule>("!parse", &probe("a\nb")).is_err());
@@ -588,4 +644,34 @@ fn conformance_checks_catch_violations() {
 
     // Invariant 6 on a module that satisfies it.
     assert_eq!(check_bounded_parse::<KvModule>(7), Ok(()));
+}
+
+/// `check_not_vacuous` is what stops a module that refuses every edit from
+/// passing the conformance suite by never actually exercising `apply`.
+#[test]
+fn check_not_vacuous_catches_a_module_that_refuses_every_edit() {
+    let profile = HostProfile {
+        os: Os::Linux,
+        init: InitSystem::Systemd,
+        hostname: "detent-test".to_owned(),
+        service_versions: BTreeMap::new(),
+        ram_mib: 1024,
+    };
+
+    // "plain" has a representable model (empty `KvModel`) and `apply` accepts
+    // it, so the good module is not vacuous.
+    assert_eq!(check_not_vacuous::<KvModule>(&["a=1\n"], &profile), Ok(()));
+
+    // `BadModule::apply` refuses every input whose text contains `!applyerr`,
+    // so a fixture built from that marker has a model but is never actually
+    // applied — the vacuousness check must fail, not skip it.
+    assert!(check_not_vacuous::<BadModule>(&["!applyerr"], &profile).is_err());
+
+    // No fixture with a representable model at all is caught the same way.
+    assert!(check_not_vacuous::<BadModule>(&["!model"], &profile).is_err());
+
+    // The fixture loop is satisfied ("plain" has a model `apply` accepts), but
+    // `BadModule::defaults` reports a hostname `apply`/`to_model` cannot
+    // reproduce — a module whose defaults do not round-trip must fail too.
+    assert!(check_not_vacuous::<BadModule>(&["plain"], &profile).is_err());
 }

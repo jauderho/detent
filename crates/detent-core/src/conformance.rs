@@ -18,7 +18,25 @@
 //! );
 //! ```
 
+use crate::descriptor::HostProfile;
 use crate::module::ConfigModule;
+
+/// Whether a conformance check's central assertion actually ran, or the input
+/// had no representable model and was skipped.
+///
+/// [`check_apply_is_noop`], [`check_edit_fidelity`] and [`check_idempotent`]
+/// each skip an input `to_model`/`apply` cannot use, so they can report `Ok`
+/// without ever exercising the module. Reporting which happened is what lets
+/// [`check_not_vacuous`] tell a genuinely-passing suite from a vacuously
+/// passing one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exercised {
+    /// The check's central assertion ran.
+    Yes,
+    /// The input was skipped: it had no representable model, or the module
+    /// refused to apply it.
+    No,
+}
 
 /// Inputs every module is checked against by name, chosen to break naive parsers:
 /// empty input, missing trailing newline, mixed and lone terminators, embedded NUL,
@@ -95,10 +113,10 @@ pub fn check_render_parse_roundtrip<M: ConfigModule>(src: &str) -> Result<(), St
 /// # Errors
 ///
 /// `apply` failed, changed the text, or reported edits it did not make.
-pub fn check_apply_is_noop<M: ConfigModule>(src: &str) -> Result<(), String> {
+pub fn check_apply_is_noop<M: ConfigModule>(src: &str) -> Result<Exercised, String> {
     let mut doc = M::parse(src).map_err(|e| format!("{}: parse failed: {e}", M::ID))?;
     let Ok(model) = M::to_model(&doc) else {
-        return Ok(());
+        return Ok(Exercised::No);
     };
     let before = M::render(&doc);
     let report = M::apply(&mut doc, &model)
@@ -116,7 +134,7 @@ pub fn check_apply_is_noop<M: ConfigModule>(src: &str) -> Result<(), String> {
             M::ID
         ));
     }
-    Ok(())
+    Ok(Exercised::Yes)
 }
 
 /// Invariant 3: `to_model(apply(parse(s), m)) == m`.
@@ -127,10 +145,13 @@ pub fn check_apply_is_noop<M: ConfigModule>(src: &str) -> Result<(), String> {
 /// # Errors
 ///
 /// The model read back from the edited document differs from the one applied.
-pub fn check_edit_fidelity<M: ConfigModule>(src: &str, model: &M::Model) -> Result<(), String> {
+pub fn check_edit_fidelity<M: ConfigModule>(
+    src: &str,
+    model: &M::Model,
+) -> Result<Exercised, String> {
     let mut doc = M::parse(src).map_err(|e| format!("{}: parse failed: {e}", M::ID))?;
     if M::apply(&mut doc, model).is_err() {
-        return Ok(());
+        return Ok(Exercised::No);
     }
     let back =
         M::to_model(&doc).map_err(|e| format!("{}: to_model after apply failed: {e}", M::ID))?;
@@ -140,7 +161,7 @@ pub fn check_edit_fidelity<M: ConfigModule>(src: &str, model: &M::Model) -> Resu
             M::ID
         ));
     }
-    Ok(())
+    Ok(Exercised::Yes)
 }
 
 /// Invariant 4: an edited document's rendered output re-parses to an equal document.
@@ -148,10 +169,10 @@ pub fn check_edit_fidelity<M: ConfigModule>(src: &str, model: &M::Model) -> Resu
 /// # Errors
 ///
 /// The re-parsed document differs from the one that produced the text.
-pub fn check_idempotent<M: ConfigModule>(src: &str, model: &M::Model) -> Result<(), String> {
+pub fn check_idempotent<M: ConfigModule>(src: &str, model: &M::Model) -> Result<Exercised, String> {
     let mut doc = M::parse(src).map_err(|e| format!("{}: parse failed: {e}", M::ID))?;
     if M::apply(&mut doc, model).is_err() {
-        return Ok(());
+        return Ok(Exercised::No);
     }
     let rendered = M::render(&doc);
     let reparsed = M::parse(&rendered)
@@ -162,7 +183,7 @@ pub fn check_idempotent<M: ConfigModule>(src: &str, model: &M::Model) -> Result<
             M::ID
         ));
     }
-    Ok(())
+    Ok(Exercised::Yes)
 }
 
 /// Invariant 5: a model carrying `\n`, `\r` or NUL in a value must be rejected by
@@ -197,6 +218,53 @@ pub fn check_injection_rejected<M: ConfigModule>(
 pub fn check_bounded_parse<M: ConfigModule>(seed: u64) -> Result<(), String> {
     let input = pseudo_random_input(1024 * 1024, seed);
     check_render_parse_roundtrip::<M>(&input)
+}
+
+/// Whether the conformance suite actually exercised the module, rather than
+/// passing because every check found nothing to check.
+///
+/// Requires at least one of `fixtures` to produce a model `apply` accepts (so
+/// invariant 2 ran for real at least once — a fixture the module cannot
+/// represent, such as one testing the "no model" skip path, is allowed among
+/// the rest), and requires `M::defaults(profile)` to apply cleanly to an empty
+/// document and read back unchanged. A module that refuses every edit fails
+/// this even though it may satisfy invariants 1–6 vacuously.
+///
+/// # Errors
+///
+/// A fixture with a representable model was rejected by its own `apply`, no
+/// fixture had a representable model at all, or the module's own defaults
+/// could not be applied to an empty document and read back unchanged.
+pub fn check_not_vacuous<M: ConfigModule>(
+    fixtures: &[&str],
+    profile: &HostProfile,
+) -> Result<(), String> {
+    let mut any_exercised = false;
+    for fixture in fixtures {
+        if check_apply_is_noop::<M>(fixture)? == Exercised::Yes {
+            any_exercised = true;
+        }
+    }
+    if !any_exercised {
+        return Err(format!(
+            "{}: no fixture had a representable model; apply was never exercised",
+            M::ID
+        ));
+    }
+
+    let defaults = M::defaults(profile);
+    let mut doc = M::parse("").map_err(|e| format!("{}: parse(\"\") failed: {e}", M::ID))?;
+    M::apply(&mut doc, &defaults)
+        .map_err(|e| format!("{}: apply(parse(\"\"), defaults) failed: {e}", M::ID))?;
+    let back = M::to_model(&doc)
+        .map_err(|e| format!("{}: to_model after applying defaults failed: {e}", M::ID))?;
+    if back != defaults {
+        return Err(format!(
+            "{}: to_model(apply(parse(\"\"), defaults)) != defaults",
+            M::ID
+        ));
+    }
+    Ok(())
 }
 
 /// Generates the conformance test suite for a [`ConfigModule`].
@@ -255,8 +323,16 @@ macro_rules! module_conformance {
             fn invariant_2_apply_of_own_model_is_a_noop() {
                 for case in conformance_cases() {
                     let r = $crate::conformance::check_apply_is_noop::<$module>(case);
-                    assert_eq!(r, Ok(()));
+                    assert!(r.is_ok(), "{r:?}");
                 }
+            }
+
+            #[test]
+            fn conformance_is_not_vacuous() {
+                let fixtures = [$($fixture,)*];
+                let profile = $crate::descriptor::HostProfile::default_for_tests();
+                let r = $crate::conformance::check_not_vacuous::<$module>(&fixtures, &profile);
+                assert_eq!(r, Ok(()));
             }
 
             #[test]
@@ -285,19 +361,19 @@ macro_rules! module_conformance {
                 #[test]
                 fn invariant_2_apply_of_own_model_is_a_noop_prop(src in ".*") {
                     let r = $crate::conformance::check_apply_is_noop::<$module>(&src);
-                    ::proptest::prop_assert_eq!(r, Ok(()));
+                    ::proptest::prop_assert!(r.is_ok());
                 }
 
                 #[test]
                 fn invariant_3_edit_fidelity_prop(src in ".*", model in $strategy) {
                     let r = $crate::conformance::check_edit_fidelity::<$module>(&src, &model);
-                    ::proptest::prop_assert_eq!(r, Ok(()));
+                    ::proptest::prop_assert!(r.is_ok());
                 }
 
                 #[test]
                 fn invariant_4_render_reparse_idempotence_prop(src in ".*", model in $strategy) {
                     let r = $crate::conformance::check_idempotent::<$module>(&src, &model);
-                    ::proptest::prop_assert_eq!(r, Ok(()));
+                    ::proptest::prop_assert!(r.is_ok());
                 }
             }
         }

@@ -1,6 +1,6 @@
 # Upstream tracking for the `hosts` module (see docs/PLAN.md §2.3).
-# Kept in sync with `HOSTS_DESCRIPTOR.upstream` in src/lib.rs; the module's test
-# suite asserts the two agree.
+# Kept in sync with `HOSTS_DESCRIPTOR.upstream` in src/lib.rs — the unit test
+# `upstream_toml_matches_the_descriptor` fails when the two disagree.
 
 project = "glibc"
 repo_url = "https://sourceware.org/git/glibc.git"

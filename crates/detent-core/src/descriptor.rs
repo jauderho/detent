@@ -249,6 +249,22 @@ impl HostProfile {
     pub fn service_version(&self, service: &str) -> Option<&str> {
         self.service_versions.get(service).map(String::as_str)
     }
+
+    /// A representative host for module conformance tests: Linux/systemd, a
+    /// stable hostname, and enough memory that low-memory validation
+    /// recommendations do not fire. `Default::default()` stays the "nothing is
+    /// known" profile; this is the one `module_conformance!` hands to
+    /// `defaults` when checking that a module's own defaults apply cleanly.
+    #[must_use]
+    pub fn default_for_tests() -> Self {
+        Self {
+            os: Os::Linux,
+            init: InitSystem::Systemd,
+            hostname: "detent-test".to_owned(),
+            service_versions: BTreeMap::new(),
+            ram_mib: 1024,
+        }
+    }
 }
 
 /// Read-only context handed to `ConfigModule::validate`.

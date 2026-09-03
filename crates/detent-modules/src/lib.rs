@@ -31,6 +31,13 @@ fn hosts() -> Vec<Box<dyn DynModule>> {
     Vec::new()
 }
 
+// `module-resolver`, `module-chrony`, `module-mounts`, `module-nfs`,
+// `module-samba`, `module-dhcp` and `module-network` are all wired as far as
+// the feature flag and the (currently empty) crate: see
+// `crates/detent-modules/Cargo.toml`. None has a constructor pair here yet
+// because none has a `ConfigModule` impl yet (PLAN §2.3 Appendix A) — add one
+// alongside its module crate, following the `hosts()` shape above.
+
 /// The modules this build was compiled with, in registry order.
 #[must_use]
 pub fn modules() -> Vec<Box<dyn DynModule>> {

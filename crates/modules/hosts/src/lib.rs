@@ -276,13 +276,13 @@ static COMMENT_HINTS: FieldHints = FieldHints {
     requires_restart: false,
 };
 
-/// The JSON Schema of [`Model`] with the `x-detent` UI hints attached.
+/// Attaches the `x-detent` UI hints to the bare `schemars` schema of [`Model`].
 ///
-/// [`DynModule::schema_json`](detent_core::module::DynModule::schema_json) returns the
-/// bare `schemars` schema because the trait has no hook for hints; UI callers that
-/// want the hints call this instead.
-#[must_use]
-pub fn schema_with_hints() -> serde_json::Value {
+/// Used by [`ConfigModule::schema`](detent_core::module::ConfigModule::schema),
+/// so both `HostsModule::schema()` and, through `Dyn`,
+/// [`DynModule::schema_json`](detent_core::module::DynModule::schema_json) see
+/// the hinted schema.
+fn schema_with_hints() -> serde_json::Value {
     let mut schema = schemars::schema_for!(Model).to_value();
     for (pointer, hints) in [
         ("/properties/entries", &ENTRIES_HINTS),
@@ -611,15 +611,19 @@ impl ConfigModule for HostsModule {
         }
         Model { entries }
     }
+
+    fn schema() -> serde_json::Value {
+        schema_with_hints()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        DEBIAN_HOSTNAME_IP, DUPLICATE_CANONICAL, Entry, HOSTNAME_IS_IP, HostsModule,
-        INVALID_HOSTNAME, LOCALHOST_NOT_LOOPBACK, MISSING_IPV6_LOCALHOST, MISSING_LOCALHOST,
-        MULTIPLE_IPS, Model, NO_HOSTNAMES, TOO_MANY_ENTRIES, ZONE_UNSUPPORTED, is_valid_hostname,
-        parse_entry, render_line, schema_with_hints, zone_id_address,
+        DEBIAN_HOSTNAME_IP, DUPLICATE_CANONICAL, Entry, HOSTNAME_IS_IP, HOSTS_DESCRIPTOR,
+        HostsModule, INVALID_HOSTNAME, LOCALHOST_NOT_LOOPBACK, MISSING_IPV6_LOCALHOST,
+        MISSING_LOCALHOST, MULTIPLE_IPS, Model, NO_HOSTNAMES, TOO_MANY_ENTRIES, ZONE_UNSUPPORTED,
+        is_valid_hostname, parse_entry, render_line, schema_with_hints, zone_id_address,
     };
     use detent_core::descriptor::{HostProfile, InitSystem, Os, ValidationCtx};
     use detent_core::diag::{MessageId, Severity};
@@ -627,6 +631,9 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
     const CORE_FTL: &str = include_str!("../../../../locales/en-US/core.ftl");
+    /// Keeps `upstream.toml` and the descriptor from drifting. `upstream-watch`
+    /// reads the TOML; the UI reads the descriptor.
+    const UPSTREAM_TOML: &str = include_str!("../upstream.toml");
 
     /// Every `MessageId` string literal referenced in this crate must have a Fluent
     /// entry, or the UI would show a raw id.
@@ -655,6 +662,33 @@ mod tests {
                 "locales/en-US/core.ftl is missing `{id} =`"
             );
         }
+    }
+
+    /// `upstream.toml` is read by `upstream-watch`; the descriptor is read by
+    /// the UI. They must not drift apart.
+    #[test]
+    fn upstream_toml_matches_the_descriptor() {
+        let upstream = HOSTS_DESCRIPTOR.upstream;
+        for value in [
+            upstream.project,
+            upstream.repo_url,
+            upstream.tracked_version,
+        ] {
+            assert!(
+                UPSTREAM_TOML.contains(value),
+                "upstream.toml does not mention `{value}`"
+            );
+        }
+        for doc in upstream.docs {
+            assert!(
+                UPSTREAM_TOML.contains(doc),
+                "upstream.toml is missing {doc}"
+            );
+        }
+        // glibc publishes no release atom feed, so the descriptor carries
+        // `None` and upstream-watch falls back to comparing tags in `repo_url`.
+        assert_eq!(upstream.release_feed, None);
+        assert!(UPSTREAM_TOML.contains("release_feed = \"\""));
     }
 
     fn entry(ip: &str, hostnames: &[&str], comment: Option<&str>) -> Entry {
@@ -1139,6 +1173,7 @@ mod tests {
     #[test]
     fn schema_with_hints_attaches_every_hint() {
         let schema = schema_with_hints();
+        assert_eq!(schema, HostsModule::schema());
         for pointer in [
             "/properties/entries",
             "/$defs/Entry/properties/ip",
