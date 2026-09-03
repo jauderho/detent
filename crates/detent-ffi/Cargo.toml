@@ -1,0 +1,34 @@
+[package]
+name = "detent-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "libdetent: cdylib + staticlib, cbindgen -> include/detent.h."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+# Cannot use `[lints] workspace = true` here: the workspace forbids unsafe_code,
+# and forbid cannot be locally downgraded. This crate is the C ABI boundary and
+# needs targeted unsafe, so unsafe_code is denied instead of forbidden, which
+# permits `#[allow(unsafe_code)]` on individual items backed by a `// SAFETY:`
+# comment. All other lints mirror [workspace.lints] exactly.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+unused_must_use = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "warn"
+multiple_crate_versions = "allow"
+
+[dependencies]

@@ -1,0 +1,63 @@
+[workspace]
+resolver = "3"
+# NOTE: "crates/*" cannot be used verbatim together with "crates/modules/*":
+# glob member expansion requires every matched directory to contain its own
+# Cargo.toml, and `crates/modules/` is a plain container (no manifest) for the
+# nested module crates. Listing top-level crates explicitly avoids that glob
+# collision while keeping `crates/modules/*` as a glob for the module crates.
+members = [
+    "crates/detent-core",
+    "crates/detent-modules",
+    "crates/detent-platform",
+    "crates/detent-ops",
+    "crates/detent-acme",
+    "crates/detent-update",
+    "crates/detent-web",
+    "crates/detent-i18n",
+    "crates/detent-ffi",
+    "crates/detent-mcp",
+    "crates/detent",
+    "crates/modules/*",
+]
+exclude = ["spikes", "fuzz", "web"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.98"
+license = "BSD-3-Clause"
+repository = "https://github.com/jauderho/detent"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "warn"
+multiple_crate_versions = "allow"
+
+[workspace.dependencies]
+mimalloc = { version = "0.1.52", features = ["secure"] }
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+anyhow = "1"
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = false
+overflow-checks = true
+
+[profile.release.package."*"]
+opt-level = "z"

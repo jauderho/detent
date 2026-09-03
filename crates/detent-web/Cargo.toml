@@ -1,0 +1,13 @@
+[package]
+name = "detent-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Axum server: TLS, auth, sessions, CSRF, API v1, embedded SPA."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

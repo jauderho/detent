@@ -1,0 +1,13 @@
+[package]
+name = "detent-module-samba"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Samba module: smb.conf."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

@@ -1,0 +1,8 @@
+# [registry] global-min-publish-age = "7 days" will be enabled here once Cargo
+# stabilizes the feature (tracking: rust-lang/cargo#17335). Until then the
+# supply-chain cooldown (ADR-011) is enforced by other means (Dependabot
+# cooldown config, manual review).
+#
+# [build] rustflags = ["-D", "warnings"] is intentionally NOT set here: CI
+# passes -D warnings explicitly on its own invocations so that local
+# `cargo build`/`cargo check` runs stay unaffected by lint-as-error policy.

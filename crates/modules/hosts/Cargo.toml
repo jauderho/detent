@@ -1,0 +1,13 @@
+[package]
+name = "detent-module-hosts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Hosts module: /etc/hosts. Reference module (Phase 1)."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

@@ -1,0 +1,13 @@
+[package]
+name = "detent-modules"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Facade: registry of enabled modules (cfg(feature) per module)."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

@@ -1,0 +1,13 @@
+[package]
+name = "detent-module-chrony"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Chrony module: chrony time synchronization daemon configuration."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

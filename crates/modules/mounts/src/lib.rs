@@ -1,0 +1,1 @@
+//! Mounts module: /etc/fstab.
