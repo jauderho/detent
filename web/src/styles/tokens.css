@@ -1,0 +1,115 @@
+/* ============================================================
+   detent — catfu design tokens
+   Ported from AESTHETIC_CONTRACT.md §3. Do not invent new colors
+   here; every value must trace back to the contract's token block.
+   ============================================================ */
+
+:root,
+html[data-theme="dark"] {
+  /* ── surfaces (chassis — themeable) ─────────────────────────── */
+  --bg: #121316;
+  --chrome: #0e0f11;
+  --panel: #1a1a18;
+  --panel-2: #202123;
+  --panel-3: #2a2b2e;
+
+  /* ── ink (contrast-tuned to Apple HIG / WCAG AA) ────────────── */
+  --ink: #efece5;
+  --ink-dim: #b2b2ac;
+  --ink-faint: #909089;
+  --line: #303134;
+  --line-2: #43444a;
+  --alu: #d4d4d4;
+
+  /* ── blue system (sampled from the device) ──────────────────── */
+  --blue: #2e7dc4;
+  --blue-bright: #5fb0f0;
+  --blue-core: #235594;
+  --blue-deep: #15364f;
+  --blue-dim: #2a5e93;
+  --cyan: #58c8df;
+  --cta-ink: #04101c;
+
+  /* ── lit tokens (displays & LEDs — always bright, both themes) ─ */
+  --screen-blue: #6bb6f5;
+  --amber: #ff6a00;
+  --green: #36e27b;
+  --brass: #c9a24b;
+
+  /* ── background texture ──────────────────────────────────────── */
+  --scan: rgba(255, 255, 255, 0.012);
+  --dot: rgba(95, 176, 240, 0.05);
+
+  /* ── metrics ─────────────────────────────────────────────────── */
+  --grid: 8px;
+  --maxw: 1320px;
+}
+
+html[data-theme="light"] {
+  --bg: #ece7dc;
+  --chrome: #f4f0e7;
+  --panel: #f6f2ea;
+  --panel-2: #fbf8f1;
+  --panel-3: #ffffff;
+
+  --ink: #1a1a18;
+  --ink-dim: #54544d;
+  --ink-faint: #61615a;
+  --line: #cfc9bb;
+  --line-2: #b3ac9b;
+  --alu: #6b6b62;
+
+  --blue: #1f6fb8;
+  --blue-bright: #145ea6;
+  --blue-core: #235594;
+  --blue-deep: #15364f;
+  --blue-dim: #4a6e93;
+  --cta-ink: #f6fbff;
+  /* amber / green / brass / screen-blue / cyan inherit the dark-theme
+     values above — lit tokens never change with theme. */
+
+  --scan: rgba(0, 0, 0, 0.018);
+  --dot: rgba(35, 85, 148, 0.07);
+}
+
+/* ── shadcn/ui variable mapping onto catfu tokens ────────────────
+   Zero radius, no elevation — the contract's non-negotiables. */
+:root,
+html[data-theme="dark"],
+html[data-theme="light"] {
+  --background: var(--bg);
+  --foreground: var(--ink);
+  --card: var(--panel);
+  --card-foreground: var(--ink);
+  --popover: var(--panel-2);
+  --popover-foreground: var(--ink);
+  --primary: var(--blue);
+  --primary-foreground: var(--cta-ink);
+  --secondary: var(--panel-2);
+  --secondary-foreground: var(--ink);
+  --muted: var(--panel-2);
+  --muted-foreground: var(--ink-dim);
+  --accent: var(--panel-3);
+  --accent-foreground: var(--ink);
+  --destructive: var(--amber);
+  --destructive-foreground: var(--cta-ink);
+  --border: var(--line);
+  --input: var(--line-2);
+  --ring: var(--blue-bright);
+  --radius: 0px;
+
+  /* AESTHETIC_CONTRACT.md §9 — mechanical motion only. Tailwind's
+     `transition-*` utilities (used by shadcn's generated Button/Tooltip)
+     read this custom property for their easing curve; overriding it here
+     turns every such transition linear without editing generated files. */
+  --default-transition-timing-function: linear;
+}
+
+/* shadcn's tooltip arrow (radix Arrow, an <svg>) carries an arbitrary
+   `rounded-[2px]` Tailwind class. border-radius has no visual effect on an
+   <svg><polygon> (the shape isn't clipped by CSS box radius), but it is
+   neutralized here for the letter of the "zero border-radius on structure"
+   rule rather than left as dead CSS. */
+[data-slot="tooltip-content"] svg {
+  border-radius: 0;
+}
