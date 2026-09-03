@@ -11,3 +11,10 @@ publish = false
 workspace = true
 
 [dependencies]
+detent-core = { path = "../detent-core" }
+detent-module-hosts = { path = "../modules/hosts", optional = true }
+
+[features]
+default = []
+## One feature per module crate; `detent`'s `module-<id>` feature forwards here.
+module-hosts = ["dep:detent-module-hosts"]

@@ -19,7 +19,11 @@ members = [
     "crates/detent",
     "crates/modules/*",
 ]
-exclude = ["spikes", "fuzz", "web"]
+# `crates/modules/_template` is matched by the `crates/modules/*` member glob but
+# excluded here: it is the copy-me skeleton (see its README.md) and its `TEMPLATE`
+# placeholders are not valid everywhere they appear, so it must not take part in
+# `cargo build --workspace`. Exclusion wins over the glob.
+exclude = ["spikes", "fuzz", "web", "crates/modules/_template"]
 
 [workspace.package]
 version = "0.0.1"
@@ -54,6 +58,11 @@ serde_json = "1.0.151"
 schemars = "1.2.2"
 arbitrary = { version = "1.4.2", features = ["derive"] }
 proptest = "1.11.0"
+rustix = { version = "1.1.4", default-features = false, features = ["fs", "process", "std"] }
+sha2 = "0.10.9"
+time = { version = "0.3", default-features = false, features = ["std", "formatting", "macros"] }
+xattr = "1.6.1"
+tempfile = "3.27.0"
 
 [profile.release]
 opt-level = "z"
