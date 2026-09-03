@@ -44,7 +44,10 @@ jobs:
           MAX_TOTAL_TIME: ${{ github.event_name == 'schedule' && '1200' || '60' }}
         run: |
           set -euo pipefail
-          if [[ ! -f fuzz/Cargo.toml ]]; then
+          # fuzz/Cargo.toml exists from Phase 1 onward, but `cargo fuzz build`
+          # fails until at least one target is registered; guard on the
+          # presence of a fuzz_targets/*.rs file rather than the manifest.
+          if ! compgen -G "fuzz/fuzz_targets/*.rs" >/dev/null; then
             echo "no fuzz targets yet"
             exit 0
           fi

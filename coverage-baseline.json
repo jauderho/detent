@@ -1,1 +1,8 @@
-{"lines_min_pct": 0, "ratchet_note": "Phase 1 raises lines_min_pct to 100 for detent-core and modules; see PLAN §6.2"}
+{
+  "lines_min_pct": 0,
+  "per_path": {
+    "crates/detent-core/": 100,
+    "crates/modules/": 100
+  },
+  "ratchet_note": "Phase 1 raises lines_min_pct to 100 for detent-core and modules; see PLAN §6.2"
+}
