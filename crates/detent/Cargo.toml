@@ -1,0 +1,74 @@
+[package]
+name = "detent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "detent binary: clap CLI, wiring, feature gates."
+publish = false
+
+[[bin]]
+name = "detent"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+mimalloc = { workspace = true }
+clap = { workspace = true }
+
+detent-module-hosts = { path = "../modules/hosts", optional = true }
+detent-module-resolver = { path = "../modules/resolver", optional = true }
+detent-module-chrony = { path = "../modules/chrony", optional = true }
+detent-module-mounts = { path = "../modules/mounts", optional = true }
+detent-module-nfs = { path = "../modules/nfs", optional = true }
+detent-module-samba = { path = "../modules/samba", optional = true }
+detent-module-dhcp = { path = "../modules/dhcp", optional = true }
+detent-module-network = { path = "../modules/network", optional = true }
+detent-web = { path = "../detent-web", optional = true }
+detent-acme = { path = "../detent-acme", optional = true }
+detent-update = { path = "../detent-update", optional = true }
+detent-mcp = { path = "../detent-mcp", optional = true }
+
+[features]
+module-hosts = ["dep:detent-module-hosts"]
+module-resolver = ["dep:detent-module-resolver"]
+module-chrony = ["dep:detent-module-chrony"]
+module-mounts = ["dep:detent-module-mounts"]
+module-nfs = ["dep:detent-module-nfs"]
+module-samba = ["dep:detent-module-samba"]
+module-dhcp = ["dep:detent-module-dhcp"]
+module-network = ["dep:detent-module-network"]
+
+web = ["dep:detent-web"]
+
+acme-dns01 = ["dep:detent-acme"]
+acme-attest = ["acme-dns01"]
+
+update = ["dep:detent-update"]
+
+mcp = ["dep:detent-mcp"]
+
+init-systemd = []
+init-openrc = []
+init-bsdrc = []
+
+crypto-aws-lc = []
+crypto-ring = []
+
+default = [
+    "module-hosts",
+    "module-resolver",
+    "module-chrony",
+    "module-mounts",
+    "module-nfs",
+    "module-samba",
+    "module-dhcp",
+    "module-network",
+    "web",
+    "acme-dns01",
+    "update",
+    "init-systemd",
+    "crypto-aws-lc",
+]

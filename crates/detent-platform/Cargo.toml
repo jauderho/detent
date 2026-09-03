@@ -1,0 +1,31 @@
+[package]
+name = "detent-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OS layer: atomic file ops, backups, privsep monitor/worker, sandboxing, service managers, host detection, shared HTTP client."
+publish = false
+
+# Cannot use `[lints] workspace = true` here: the workspace forbids unsafe_code,
+# and forbid cannot be locally downgraded. This crate needs targeted unsafe
+# (syscalls, sandboxing) so unsafe_code is denied instead of forbidden, which
+# permits `#[allow(unsafe_code)]` on individual items backed by a `// SAFETY:`
+# comment. All other lints mirror [workspace.lints] exactly.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+unused_must_use = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "warn"
+multiple_crate_versions = "allow"
+
+[dependencies]

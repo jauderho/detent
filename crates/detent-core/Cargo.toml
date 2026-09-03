@@ -1,0 +1,13 @@
+[package]
+name = "detent-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure: doc model, schema types, diagnostics, planning. No I/O, no async."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

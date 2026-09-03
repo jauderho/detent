@@ -1,0 +1,13 @@
+[package]
+name = "detent-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "(Phase 10, optional) rmcp server over ops."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

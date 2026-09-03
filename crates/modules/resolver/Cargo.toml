@@ -1,0 +1,13 @@
+[package]
+name = "detent-module-resolver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Resolver module: /etc/resolv.conf, systemd-resolved, unbound."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

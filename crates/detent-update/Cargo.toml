@@ -1,0 +1,13 @@
+[package]
+name = "detent-update"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Self-update client and verifier."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

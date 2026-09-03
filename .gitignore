@@ -1,2 +1,12 @@
 
 .sops/**
+/target
+**/target
+node_modules
+web/dist
+web/coverage
+*.profraw
+lcov.info
+.DS_Store
+/spikes/artifacts
+/spikes/**/target
