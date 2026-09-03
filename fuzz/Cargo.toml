@@ -11,7 +11,28 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 detent-core = { path = "../crates/detent-core", features = ["fuzzing"] }
-detent-module-hosts = { path = "../crates/modules/hosts" }
+detent-module-hosts = { path = "../crates/modules/hosts", features = ["fuzzing"] }
 
 [profile.release]
 debug = 1
+
+[[bin]]
+name = "fuzz_hosts_parse"
+path = "fuzz_targets/fuzz_hosts_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_hosts_roundtrip"
+path = "fuzz_targets/fuzz_hosts_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_hosts_edit"
+path = "fuzz_targets/fuzz_hosts_edit.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,4 @@
+# aligned by hand, do not reformat
+10.0.0.1	gw.lan		gw	# default gateway
+10.0.0.2    ntp.lan     ntp     # gps disciplined clock
+10.0.0.3	printer.lan	#
