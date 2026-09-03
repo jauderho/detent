@@ -1,0 +1,263 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: read-all
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, test, feature matrix)
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --all-features
+
+      - name: cargo build (feature set A - hosts, ring)
+        run: cargo build -p detent --no-default-features --features "module-hosts,crypto-ring"
+
+      - name: cargo build (feature set B - resolver, web, systemd init, aws-lc)
+        run: cargo build -p detent --no-default-features --features "module-resolver,web,init-systemd,crypto-aws-lc"
+
+      - name: cargo build (default features)
+        run: cargo build -p detent
+
+  supply-chain:
+    name: Supply chain (deny, audit, cooldown)
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+
+      - name: cargo deny check
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: cargo-audit@0.22.2
+
+      - name: cargo audit
+        run: cargo audit
+
+      - name: Install cargo-cooldown
+        uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: cargo-cooldown@0.3.4
+
+      # cargo-cooldown has no `--days` CLI flag (verified against the upstream
+      # README at https://github.com/dertin/cargo-cooldown): the cooldown
+      # window is read from CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE (mirroring
+      # the Cargo-native setting tracked in PLAN.md §6.4 / rust-lang/cargo#17335).
+      # `check` is the guard-style subcommand that cools Cargo.lock before
+      # invoking `cargo check`.
+      - name: cargo cooldown check (7-day supply-chain cooldown, ADR-011)
+        env:
+          CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE: "7 days"
+        run: cargo cooldown check --locked
+        continue-on-error: false
+
+  coverage:
+    name: Coverage (llvm-cov + threshold gate)
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: cargo-llvm-cov@0.9.0
+
+      - name: Install lcov
+        run: sudo apt-get update && sudo apt-get install -y lcov
+
+      - name: cargo llvm-cov
+        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov-linux.info
+
+      - name: Merge coverage and enforce threshold
+        run: scripts/coverage-merge.sh --verbose --output merged.info lcov-linux.info
+
+      - name: Upload lcov artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lcov-linux
+          path: |
+            lcov-linux.info
+            merged.info
+          retention-days: 14
+
+  web:
+    name: Web (bun, biome, vitest, i18n, build)
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: bun install
+        working-directory: web
+        run: bun install --frozen-lockfile
+
+      - name: bun run lint
+        working-directory: web
+        run: bun run lint
+
+      - name: bun run typecheck
+        working-directory: web
+        run: bun run typecheck
+
+      - name: bun run test
+        working-directory: web
+        run: bun run test
+
+      - name: bun run i18n:check
+        working-directory: web
+        run: bun run i18n:check
+
+      - name: bun run build
+        working-directory: web
+        run: bun run build
+
+  shell:
+    name: Shell (shellcheck, shfmt)
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install shellcheck and shfmt
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y shellcheck shfmt
+
+      - name: shellcheck
+        run: |
+          set -euo pipefail
+          # checkWorkflows.sh and useCommitHash.sh predate this repo's shell standards (SC2155, 4-space indent); tracked separately.
+          mapfile -t files < <(find scripts packaging -name '*.sh' ! -name checkWorkflows.sh ! -name useCommitHash.sh 2>/dev/null | sort)
+          if [[ "${#files[@]}" -eq 0 ]]; then
+            echo "no shell scripts found"
+            exit 0
+          fi
+          shellcheck "${files[@]}"
+
+      - name: shfmt -d
+        run: |
+          set -euo pipefail
+          # checkWorkflows.sh and useCommitHash.sh predate this repo's shell standards (SC2155, 4-space indent); tracked separately.
+          mapfile -t files < <(find scripts packaging -name '*.sh' ! -name checkWorkflows.sh ! -name useCommitHash.sh 2>/dev/null | sort)
+          if [[ "${#files[@]}" -eq 0 ]]; then
+            echo "no shell scripts found"
+            exit 0
+          fi
+          shfmt -d -i 2 -ci "${files[@]}"
+
+  size:
+    name: Size check
+    runs-on: ubuntu-26.04
+    needs: rust
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: cargo build --release
+        run: cargo build --release -p detent
+
+      - name: size-check
+        run: scripts/size-check.sh --verbose target/release/detent
+
+  pins:
+    name: Action pins (SHA + version comment)
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Every `uses:` is pinned to a 40-hex SHA with a version comment
+        run: |
+          set -euo pipefail
+          bad=0
+          while IFS= read -r line; do
+            if ! [[ "$line" =~ uses:\ *[^@[:space:]]+@[0-9a-f]{40}\ +\#\ +[^[:space:]] ]]; then
+              echo "unpinned or uncommented: $line"
+              bad=1
+            fi
+          done < <(grep -hE '^\s*-?\s*uses:' .github/workflows/*.yml | grep -vE '^\s*#')
+          exit "$bad"

@@ -1,0 +1,74 @@
+name: Fuzz
+
+on:
+  pull_request:
+    paths:
+      - "crates/**"
+      - "fuzz/**"
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: read-all
+
+jobs:
+  fuzz:
+    name: cargo-fuzz
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install nightly Rust toolchain
+        uses: dtolnay/rust-toolchain@82fc405565b9cf90abfe700ba43b4751ce2fe422 # nightly
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: cargo-fuzz@0.13.2
+
+      - name: Run fuzz targets
+        env:
+          MAX_TOTAL_TIME: ${{ github.event_name == 'schedule' && '1200' || '60' }}
+        run: |
+          set -euo pipefail
+          if [[ ! -f fuzz/Cargo.toml ]]; then
+            echo "no fuzz targets yet"
+            exit 0
+          fi
+          targets="$(cargo fuzz list)"
+          if [[ -z "${targets}" ]]; then
+            echo "no fuzz targets yet"
+            exit 0
+          fi
+          status=0
+          while IFS= read -r target; do
+            [[ -z "${target}" ]] && continue
+            echo "::group::fuzz target: ${target}"
+            if ! cargo fuzz run "${target}" -- "-max_total_time=${MAX_TOTAL_TIME}"; then
+              status=1
+            fi
+            echo "::endgroup::"
+          done <<< "${targets}"
+          exit "${status}"
+
+      - name: Upload fuzz artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          retention-days: 14
+          if-no-files-found: ignore

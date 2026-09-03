@@ -10,3 +10,37 @@ updates:
       interval: "daily"
     cooldown:
       default-days: 7
+
+  # Maintain dependencies for the Cargo workspace (ADR-011: 7-day cooldown)
+  - package-ecosystem: "cargo"
+    directory: "/"
+    open-pull-requests-limit: 10
+    schedule:
+      interval: "daily"
+    cooldown:
+      default-days: 7
+    groups:
+      rust-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Maintain dependencies for the web app (ADR-011: 7-day cooldown).
+  # "bun" is a valid Dependabot package-ecosystem (confirmed against
+  # https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference).
+  - package-ecosystem: "bun"
+    directory: "/web"
+    open-pull-requests-limit: 10
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+
+  # Maintain dependencies for container images (ADR-011: 7-day cooldown).
+  - package-ecosystem: "docker"
+    directory: "/"
+    open-pull-requests-limit: 10
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
