@@ -489,7 +489,7 @@ technical unknowns before any feature work.
 
 ---
 
-### Phase 1 — Core model, module SDK, reference module (`hosts`) `[ ]`
+### Phase 1 — Core model, module SDK, reference module (`hosts`) `[x]` (2026-09-03)
 
 **Goal:** the extension point exists, is proven on the simplest real file, and the
 test/fuzz/coverage harness is in place at 100 %.
@@ -516,7 +516,7 @@ test/fuzz/coverage harness is in place at 100 %.
 
 ---
 
-### Phase 2 — Platform layer: files, privsep, sandbox, services `[ ]`
+### Phase 2 — Platform layer: files, privsep, sandbox, services `[~]` (task 1 done 2026-09-03; tasks 2–3 and 5 in progress)
 
 **Goal:** the monitor/worker split works with real files on a real Linux box,
 confined, with backups and rollback.
@@ -917,12 +917,19 @@ TLS 1.3 → session or Bearer → (cookie path) `Sec-Fetch-Site` + `Origin` + `X
 | Date | Change | By |
 |---|---|---|
 | 2026‑09‑03 | Initial draft for approval. | orchestrator (Fable) |
+| 2026‑09‑03 | Phase 1 closed (core, hosts, template, guide, registry). Phase 2 task 1 (atomic fs) done. Coverage gate now derives lines from `DA` records. | orchestrator (Fable) |
 | 2026‑09‑03 | Owner narrowed scope: x86_64 + aarch64 only; Linux and macOS first; BSD/armv7/riscv64 deferred (§1.6, ADR‑013, Phase 11 parked). | orchestrator (Fable) |
 | 2026‑09‑03 | Approved with all §1.5 defaults. Phase 0 done. Spike results folded in: §2.4 (Landlock ABI 1 minimum, degrade path, systemd score targets 2.5/1.8), §2.9 (in-tree Sigstore verifier instead of the `sigstore` crate), §4.1 (budgets re-based, CLI row excludes TLS stack, FreeBSD dynamic linking), §4.2 (rcgen default-features off), §2.2 (both crypto features may coexist, aws-lc wins), Phase 2/9/12 tasks, risks. | orchestrator (Fable) |
 
 ## 10. Checkpoint for the next session (read this first if resuming cold)
 
-**State on 2026‑09‑03, branch `phase-0-foundations` (from `main`):** Phase 0 complete; Phase 1 not started.
+**State on 2026‑09‑03 (later), branch `phase-0-foundations` (from `main`):** Phases 0 and 1 complete; Phase 2 in progress.
+
+Phase 1 delivered (all committed): `detent-core` (lossless `Document`, diagnostics, descriptor types incl. `x-detent` hints, `ConfigModule` with provided `schema()`, `DynModule`, `module_conformance!` with a non-vacuous check), `crates/modules/hosts` (62+ tests, 3 fuzz targets, fixtures, `locales/en-US/core.ftl`), `crates/modules/_template` (excluded from the workspace; README recipe validated by a fresh-copy dry run), `detent-modules` registry (`modules()`, all eight `module-*` features forwarded from the binary), `docs/MODULE_GUIDE.md`, coverage gate at 100 % for core and modules (computed from lcov `DA` records — see `scripts/coverage-merge.sh` comment on why not `LF/LH`).
+
+Phase 2 delivered so far: `detent_platform::fs::atomic` (`write_atomic`, `read_with_digest`, `list_backups`, `restore_backup`, `Sha256Digest`; 98 % lines — the 9 uncovered lines are `fchown` EPERM and xattr-failure arms that need the privileged CI job). In flight: `privsep` (proto/transport/allowlist/monitor/worker/spawn, commit-confirm timer + marker recovery) and `host` detection. Not started: sandbox (Landlock/seccomp/caps, Linux-only), service managers (systemd via zbus, OpenRC, launchd no-op), packaging, privileged CI job.
+
+Phase 0 state (still true):
 
 What exists and passes locally:
 - Workspace of 19 crates (`crates/*`, `crates/modules/*`), all empty except the `detent` binary (clap skeleton, mimalloc secure). `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace`, `cargo deny check` pass. Toolchain pinned to 1.98.0.
