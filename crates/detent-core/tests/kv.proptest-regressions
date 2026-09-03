@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc dcab44b8eeedd7c6d8a13aa892984434fe67345b052d459221cdc3394b82d334 # shrinks to src = "\r", model = KvModel { pairs: {"a": ""} }
