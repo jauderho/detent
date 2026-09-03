@@ -269,18 +269,18 @@ static VALUE_HINTS: FieldHints = FieldHints {
     requires_restart: true,
 };
 
-/// The JSON Schema of [`Model`] with the `x-detent` UI hints attached.
+/// Attaches the `x-detent` UI hints to the bare `schemars` schema of [`Model`].
 ///
-/// [`DynModule::schema_json`](detent_core::module::DynModule::schema_json) returns
-/// the bare `schemars` schema because the trait has no hook for hints; UI callers
-/// that want the hints call this instead.
+/// Used by [`ConfigModule::schema`](detent_core::module::ConfigModule::schema),
+/// so both `TemplateModule::schema()` and, through `Dyn`,
+/// [`DynModule::schema_json`](detent_core::module::DynModule::schema_json) see
+/// the hinted schema.
 ///
 /// TODO(hints): the JSON pointers depend on the shape `schemars` generates.
 /// `apply_hints` returns `false` when a pointer resolves to nothing, and the test
 /// below turns that into a failure — do not drop the assertion, a silently
 /// unattached hint is invisible in the UI.
-#[must_use]
-pub fn schema_with_hints() -> serde_json::Value {
+fn schema_with_hints() -> serde_json::Value {
     let mut schema = schemars::schema_for!(Model).to_value();
     for (pointer, hints) in [
         ("/properties/settings", &SETTINGS_HINTS),
@@ -512,6 +512,12 @@ impl ConfigModule for TemplateModule {
             settings.push(setting("node-name", profile.hostname.as_str()));
         }
         Model { settings }
+    }
+
+    /// TODO(hints): a module with no `x-detent` hints can drop this override
+    /// and rely on the trait's default (the bare `schemars` schema).
+    fn schema() -> serde_json::Value {
+        schema_with_hints()
     }
 }
 
@@ -878,6 +884,7 @@ mod tests {
     #[test]
     fn schema_with_hints_attaches_every_hint() {
         let schema = schema_with_hints();
+        assert_eq!(schema, TemplateModule::schema());
         for pointer in [
             "/properties/settings",
             "/$defs/Setting/properties/key",

@@ -19,30 +19,23 @@ mimalloc = { workspace = true }
 clap = { workspace = true }
 
 detent-modules = { path = "../detent-modules" }
-detent-module-resolver = { path = "../modules/resolver", optional = true }
-detent-module-chrony = { path = "../modules/chrony", optional = true }
-detent-module-mounts = { path = "../modules/mounts", optional = true }
-detent-module-nfs = { path = "../modules/nfs", optional = true }
-detent-module-samba = { path = "../modules/samba", optional = true }
-detent-module-dhcp = { path = "../modules/dhcp", optional = true }
-detent-module-network = { path = "../modules/network", optional = true }
 detent-web = { path = "../detent-web", optional = true }
 detent-acme = { path = "../detent-acme", optional = true }
 detent-update = { path = "../detent-update", optional = true }
 detent-mcp = { path = "../detent-mcp", optional = true }
 
 [features]
-# The hosts module is reached through the `detent-modules` registry facade
-# (PLAN §2.1 dependency direction); the remaining modules still carry their
-# placeholder crates directly until they are implemented.
+# Every module is reached through the `detent-modules` registry facade (PLAN
+# §2.1 dependency direction); `detent` never depends on a module crate
+# directly.
 module-hosts = ["detent-modules/module-hosts"]
-module-resolver = ["dep:detent-module-resolver"]
-module-chrony = ["dep:detent-module-chrony"]
-module-mounts = ["dep:detent-module-mounts"]
-module-nfs = ["dep:detent-module-nfs"]
-module-samba = ["dep:detent-module-samba"]
-module-dhcp = ["dep:detent-module-dhcp"]
-module-network = ["dep:detent-module-network"]
+module-resolver = ["detent-modules/module-resolver"]
+module-chrony = ["detent-modules/module-chrony"]
+module-mounts = ["detent-modules/module-mounts"]
+module-nfs = ["detent-modules/module-nfs"]
+module-samba = ["detent-modules/module-samba"]
+module-dhcp = ["detent-modules/module-dhcp"]
+module-network = ["detent-modules/module-network"]
 
 web = ["dep:detent-web"]
 

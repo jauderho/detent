@@ -197,6 +197,18 @@ pub trait ConfigModule: Send + Sync + 'static {
 
     /// Secure, host-appropriate defaults.
     fn defaults(profile: &HostProfile) -> Self::Model;
+
+    /// The JSON Schema of `Self::Model`, including any `x-detent` UI hints.
+    ///
+    /// The default is the bare `schemars` schema. A module that attaches
+    /// `x-detent` hints (via [`crate::descriptor::apply_hints`]) overrides this
+    /// instead of exposing a separate free function, so
+    /// [`DynModule::schema_json`] and any direct caller of the trait see the
+    /// same schema.
+    #[must_use]
+    fn schema() -> Value {
+        schemars::schema_for!(Self::Model).to_value()
+    }
 }
 
 /// Anything that can go wrong behind the JSON adapter.
@@ -311,7 +323,7 @@ impl<M: ConfigModule> DynModule for Dyn<M> {
     }
 
     fn schema_json(&self) -> Value {
-        schemars::schema_for!(M::Model).to_value()
+        M::schema()
     }
 
     fn parse_to_model_json(&self, src: &str) -> Result<Value, DynError> {

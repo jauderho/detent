@@ -202,13 +202,6 @@ dependencies = [
  "clap",
  "detent-acme",
  "detent-mcp",
- "detent-module-chrony",
- "detent-module-dhcp",
- "detent-module-mounts",
- "detent-module-network",
- "detent-module-nfs",
- "detent-module-resolver",
- "detent-module-samba",
  "detent-modules",
  "detent-update",
  "detent-web",
@@ -288,7 +281,14 @@ name = "detent-modules"
 version = "0.0.1"
 dependencies = [
  "detent-core",
+ "detent-module-chrony",
+ "detent-module-dhcp",
  "detent-module-hosts",
+ "detent-module-mounts",
+ "detent-module-network",
+ "detent-module-nfs",
+ "detent-module-resolver",
+ "detent-module-samba",
 ]
 
 [[package]]
@@ -299,6 +299,7 @@ version = "0.0.1"
 name = "detent-platform"
 version = "0.0.1"
 dependencies = [
+ "detent-core",
  "rustix",
  "serde",
  "serde_json",

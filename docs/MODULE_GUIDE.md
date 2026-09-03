@@ -99,10 +99,14 @@ is `Unknown` and is copied through untouched.
 API and the C ABI, and a typo must be a loud `ModelError::Shape`, not a silently
 dropped setting. Attach an `x-detent` hint to **every** field with
 `descriptor::apply_hints` and a JSON pointer into the generated schema
-(`/properties/entries`, `/$defs/Entry/properties/ip`, …). `apply_hints` returns
-`false` when the pointer resolves to nothing; the template's
-`schema_with_hints_attaches_every_hint` test is what stops a hint from silently
-applying to no field.
+(`/properties/entries`, `/$defs/Entry/properties/ip`, …), then expose the
+hinted schema by **overriding `ConfigModule::schema()`** — a provided trait
+method whose default is the bare `schemars` schema of `Self::Model`.
+`DynModule::schema_json` calls `M::schema()`, so the override reaches every
+caller through `Dyn` too; a module with no hints simply does not override it.
+`apply_hints` returns `false` when the pointer resolves to nothing; the
+template's `schema_with_hints_attaches_every_hint` test is what stops a hint
+from silently applying to no field.
 
 ### 3.4 Descriptor, `upstream.toml`, fixtures
 
@@ -196,6 +200,16 @@ to (round-tripping proves losslessness, not comprehension), an adversarial block
 one test that an edit actually reaches the file — a module that refuses every
 edit satisfies all six invariants.
 
+The macro also generates `conformance_is_not_vacuous`, which the six invariants
+above cannot catch by themselves: it requires at least one `fixtures` entry to
+produce a model `apply` actually accepts (`check_apply_is_noop` and
+`check_edit_fidelity`/`check_idempotent` now return
+`Result<conformance::Exercised, String>` so this can tell "ran and passed" from
+"skipped, nothing to check"), and requires `M::defaults(&HostProfile::
+default_for_tests())` to apply cleanly to an empty document and read back
+unchanged. A module that refuses every edit fails this test even though it may
+satisfy invariants 1–6 vacuously.
+
 ### 3.10 Fuzz targets and corpus
 
 Three targets per module, `fuzz_<id>_{parse,roundtrip,edit}`; the template ships
@@ -241,7 +255,13 @@ makes that local `unused_mut` in a build with no modules at all — both are
 and `module-<id> = ["dep:detent-module-<id>"]` to
 `crates/detent-modules/Cargo.toml`, and forward it from the binary in
 `crates/detent/Cargo.toml` as `module-<id> = ["detent-modules/module-<id>"]`.
-Check a minimal build, not just the full one:
+`detent` never depends on a module crate directly — every `module-<id>` feature
+in `crates/detent/Cargo.toml` forwards to `detent-modules`, even for the seven
+crates (`resolver`, `chrony`, `mounts`, `nfs`, `samba`, `dhcp`, `network`) that
+exist but have no `ConfigModule` yet: their optional dependency and feature are
+already wired in `crates/detent-modules/Cargo.toml`, just with no constructor
+pair in `modules()` until they land. Check a minimal build, not just the full
+one:
 
 ```bash
 cargo build -p detent --no-default-features --features "module-hosts,crypto-ring"
