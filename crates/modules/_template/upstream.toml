@@ -1,0 +1,30 @@
+# Upstream tracking for the `TEMPLATE` module (see docs/PLAN.md §2.3).
+#
+# TODO(upstream): replace every value below with the real upstream project.
+# `.github/workflows/upstream-watch.yml` reads this file weekly and opens an
+# issue when `tracked_version` falls behind the newest upstream release.
+# Keep it in sync with `TEMPLATE_DESCRIPTOR.upstream` in src/lib.rs — the unit
+# test `upstream_toml_matches_the_descriptor` fails when the two disagree.
+
+# Upstream project name, as it appears in its own documentation.
+project = "TEMPLATE-project"
+# Canonical source repository. Used by upstream-watch to list tags.
+repo_url = "https://example.invalid/TEMPLATE.git"
+# The upstream release this module's option set was derived from. Bump only
+# together with new fixtures under fixtures/TEMPLATE/<version>/.
+tracked_version = "0.0"
+# Documentation URLs shown in the UI (man pages, reference manual).
+docs = ["https://example.invalid/TEMPLATE.5.html"]
+
+# Atom/RSS feed of releases, when upstream publishes one. Leave as "" when it
+# does not (the hosts module does: glibc has no feed, so upstream-watch falls
+# back to comparing git tags in `repo_url`).
+release_feed = "https://example.invalid/TEMPLATE/tags?format=atom"
+
+[fixtures]
+# TODO(fixtures): one directory per upstream version or platform under
+# fixtures/TEMPLATE/. Real upstream sample files only — never hand-written
+# "representative" text, which hides the formatting quirks losslessness has to
+# survive. `edge` holds the hand-made adversarial cases (CRLF, no trailing
+# newline, tabs, unknown directives).
+dirs = ["TEMPLATE-0.0", "edge"]
