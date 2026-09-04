@@ -183,10 +183,22 @@ mod tests {
             ),
         ];
         assert_eq!(cases.len(), 11);
+        // The catalogue every localized build ships. Checking against the file
+        // rather than a hand-kept list means adding a variant without its
+        // message fails here instead of rendering a bare `[ops-...]` id at a
+        // user. `detent-i18n`'s parity test compares locales to each other; it
+        // cannot see ids that exist only in Rust.
+        let catalogue = include_str!("../../../locales/en-US/core.ftl");
         for (error, id) in cases {
             assert_eq!(error.message_id().as_str(), id);
             assert!(!error.to_string().is_empty(), "{error:?} renders empty");
             assert!(!format!("{error:?}").is_empty());
+            assert!(
+                catalogue
+                    .lines()
+                    .any(|line| line.split('=').next().is_some_and(|k| k.trim() == id)),
+                "`{id}` has no entry in locales/en-US/core.ftl"
+            );
         }
     }
 
