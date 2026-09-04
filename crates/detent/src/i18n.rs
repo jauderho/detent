@@ -22,20 +22,16 @@
 
 use detent_core::diag::{Diagnostics, MessageId, Severity};
 use detent_i18n::Localizer;
-use fluent_bundle::{FluentArgs, FluentBundle, FluentResource};
+use fluent_bundle::FluentArgs;
 use unic_langid::LanguageIdentifier;
 
 /// The CLI's own message catalogue, compiled in (PLAN §4.3: no runtime locale
 /// directory can be assumed on an appliance).
+#[cfg(test)]
 pub const CLI_FTL: &str = include_str!("../../../locales/en-US/cli.ftl");
-
-/// Fluent's bidirectional isolation marks, stripped from every rendered string:
-/// a terminal renders them as garbage where a browser hides them.
-const BIDI_MARKS: [char; 2] = ['\u{2068}', '\u{2069}'];
 
 /// Renders every message the CLI prints.
 pub struct Messages {
-    cli: FluentBundle<FluentResource>,
     core: Localizer,
 }
 
@@ -56,10 +52,7 @@ impl Messages {
             Some(langid) => Localizer::new(&[langid]),
             None => Localizer::for_env(),
         };
-        Self {
-            cli: build_cli_bundle(),
-            core,
-        }
+        Self { core }
     }
 
     /// The negotiated locale tag, e.g. `en-US`.
@@ -92,11 +85,7 @@ impl Messages {
     #[cfg(test)]
     #[must_use]
     pub fn has(&self, id: MessageId) -> bool {
-        self.cli
-            .get_message(id.as_str())
-            .and_then(|message| message.value())
-            .is_some()
-            || self.core.has(&id)
+        self.core.has(&id)
     }
 
     /// Renders every diagnostic, each prefixed with its localized severity.
@@ -112,24 +101,11 @@ impl Messages {
             .collect()
     }
 
-    /// CLI catalogue first, then everything `detent-i18n` knows.
+    /// Everything `detent-i18n` knows, including `cli.ftl`.
     fn resolve(&self, id: MessageId, args: Option<&FluentArgs<'_>>) -> String {
-        let from_cli = self
-            .cli
-            .get_message(id.as_str())
-            .and_then(|message| message.value())
-            .map(|pattern| {
-                let mut errors = Vec::new();
-                self.cli
-                    .format_pattern(pattern, args, &mut errors)
-                    .into_owned()
-            });
-        match from_cli {
-            Some(text) => strip_bidi(&text),
-            None => match args {
-                Some(args) => self.core.get_args(&id, args),
-                None => self.core.get(&id),
-            },
+        match args {
+            Some(args) => self.core.get_args(&id, args),
+            None => self.core.get(&id),
         }
     }
 }
@@ -143,27 +119,9 @@ const fn severity_id(severity: Severity) -> MessageId {
     }
 }
 
-/// Parses [`CLI_FTL`], keeping whatever Fluent recovers from a malformed file
-/// rather than failing to start; `the_cli_catalogue_parses_cleanly` guards the
-/// compiled-in file against ever actually being malformed.
-fn build_cli_bundle() -> FluentBundle<FluentResource> {
-    let langid: LanguageIdentifier = "en-US".parse().unwrap_or_default();
-    let mut bundle = FluentBundle::new(vec![langid]);
-    let resource = match FluentResource::try_new(CLI_FTL.to_owned()) {
-        Ok(resource) | Err((resource, _)) => resource,
-    };
-    let _ = bundle.add_resource(resource);
-    bundle
-}
-
-/// Removes Fluent's FSI/PDI marks.
-fn strip_bidi(text: &str) -> String {
-    text.chars().filter(|c| !BIDI_MARKS.contains(c)).collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{CLI_FTL, Messages, build_cli_bundle, severity_id, strip_bidi};
+    use super::{CLI_FTL, Messages, severity_id};
     use detent_core::diag::{Diagnostic, Diagnostics, MessageId, Severity};
     use fluent_bundle::FluentResource;
 
@@ -174,7 +132,6 @@ mod tests {
         let parsed = FluentResource::try_new(CLI_FTL.to_owned());
         let errors = parsed.as_ref().err().map(|(_, errors)| errors);
         assert!(parsed.is_ok(), "locales/en-US/cli.ftl: {errors:?}");
-        assert!(!format!("{:?}", build_cli_bundle().locales).is_empty());
     }
 
     #[test]
@@ -276,6 +233,5 @@ mod tests {
             &[("module", "hosts"), ("path", "/etc/hosts")],
         );
         assert!(!text.contains('\u{2068}') && !text.contains('\u{2069}'));
-        assert_eq!(strip_bidi("\u{2068}a\u{2069}b"), "ab");
     }
 }
