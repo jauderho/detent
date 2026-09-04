@@ -1,0 +1,9 @@
+NAME="Fedora Linux"
+VERSION="41 (Workstation Edition)"
+ID=fedora
+VERSION_ID=41
+VERSION_CODENAME=""
+PLATFORM_ID="platform:f41"
+PRETTY_NAME="Fedora Linux 41 (Workstation Edition)"
+HOME_URL="https://fedoraproject.org/"
+SUPPORT_URL="https://ask.fedoraproject.org/"
