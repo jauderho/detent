@@ -544,7 +544,7 @@ confined, with backups and rollback.
 
 ---
 
-### Phase 3 — Operations layer and CLI (Milestone M1) `[ ]` ← next
+### Phase 3 — Operations layer and CLI (Milestone M1) `[x]` (2026-09-04)
 
 **Goal:** everything is usable headless. `detent config hosts apply` edits a real
 box safely with backup, validation, and audit.
@@ -567,7 +567,7 @@ box safely with backup, validation, and audit.
 
 ---
 
-### Phase 4 — Web server, auth, API `[ ]`
+### Phase 4 — Web server, auth, API `[ ]` ← next
 
 **Goal:** the API is live over TLS 1.3 with a bootstrap cert, all §2.7 controls in
 place, fully covered by tests.
@@ -917,6 +917,7 @@ TLS 1.3 → session or Bearer → (cookie path) `Sec-Fetch-Site` + `Origin` + `X
 | Date | Change | By |
 |---|---|---|
 | 2026‑09‑03 | Initial draft for approval. | orchestrator (Fable) |
+| 2026‑09‑04 | Phase 3 closed; **Milestone M1 reached** (see `docs/spikes/m1-e2e.md`). Added `RollbackCommit` to the privsep protocol. Added an error-catalogue gate that caught every `detent-core` error id missing from the shipped Fluent file. CLI messages resolve through the shared catalogue. | orchestrator (Opus) |
 | 2026‑09‑04 | Phase 2 closed: privsep, sandbox, service managers, host detection, packaging. `decode` trailing-byte hole fixed; `CheckExpectation::StdoutPattern` documented as substring (its example used a regex anchor that could never match); root-drop test now skips when the account is absent; platform coverage floor set to 92 with the `_exit`/`atexit` limitation documented and partly recovered. | orchestrator (Opus) |
 | 2026‑09‑03 | Phase 1 closed (core, hosts, template, guide, registry). Phase 2 task 1 (atomic fs) done. Coverage gate now derives lines from `DA` records. | orchestrator (Fable) |
 | 2026‑09‑03 | Owner narrowed scope: x86_64 + aarch64 only; Linux and macOS first; BSD/armv7/riscv64 deferred (§1.6, ADR‑013, Phase 11 parked). | orchestrator (Fable) |
@@ -924,7 +925,7 @@ TLS 1.3 → session or Bearer → (cookie path) `Sec-Fetch-Site` + `Origin` + `X
 
 ## 10. Checkpoint for the next session (read this first if resuming cold)
 
-**State on 2026‑09‑04, branch `phase-0-foundations` (from `main`):** Phases 0, 1 and 2 complete; Phase 3 not started. 421 workspace tests pass; `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo fmt --all --check` and `cargo deny check` are clean.
+**State on 2026‑09‑04 (later), branch `phase-0-foundations` (from `main`):** Phases 0–3 complete, **Milestone M1 reached**; Phase 4 not started. 631 workspace tests pass; `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo fmt --all --check` and `cargo deny check` are clean.
 
 Phase 1 delivered (all committed): `detent-core` (lossless `Document`, diagnostics, descriptor types incl. `x-detent` hints, `ConfigModule` with provided `schema()`, `DynModule`, `module_conformance!` with a non-vacuous check), `crates/modules/hosts` (62+ tests, 3 fuzz targets, fixtures, `locales/en-US/core.ftl`), `crates/modules/_template` (excluded from the workspace; README recipe validated by a fresh-copy dry run), `detent-modules` registry (`modules()`, all eight `module-*` features forwarded from the binary), `docs/MODULE_GUIDE.md`, coverage gate at 100 % for core and modules (computed from lcov `DA` records — see `scripts/coverage-merge.sh` comment on why not `LF/LH`).
 
@@ -937,6 +938,19 @@ Phase 2 delivered (all committed):
 - `packaging/` — hardened systemd unit (measured `systemd-analyze security` **2.5** root-confined, **1.8** capability-user), drop-in, sysusers/tmpfiles, polkit allow-list, `install.sh` with `--dryrun`/`--prefix`/`--uninstall`.
 
 Coverage: core and modules 100 %; `detent-platform` gated at **92**, measured 92.55 % on Linux (97.5 % on macOS). The difference is structural, not missing tests — see `coverage-baseline.json`'s note: forked children exit via `_exit(2)`, which skips LLVM's `atexit` flush. `privsep::sys::exit_immediately` now calls `__llvm_profile_write_file()` first under `cfg(coverage)` (production builds contain no reference to it — verified with `nm`/`strings` on a release binary); confined children must use `exit_immediately_unflushed`, because writing a profile needs syscalls the seccomp filter denies.
+
+Phase 3 delivered (all committed):
+- `detent-ops` — `Operation`/`OpOutcome`, `OpsEngine`, `Authz`/`Identity`, append-only JSONL audit (hashes only, never bodies — asserted by test), and an **in-tree Myers diff** (no `similar`, per the size budget) whose property test caught a real hunk-numbering bug that made insertions into a non-empty file unappliable. 100 % lines.
+- `detent-i18n` — compiled-in Fluent catalogue (`include_str!`, not `i18n-embed`: appliances have no guaranteed locale directory), locale negotiation with `en-US` fallback, unknown ids degrading to the id itself, bidi marks stripped for terminals, and a **message-id parity test in both directions** so translation PRs are safe to accept. 100 % lines.
+- `privsep` gained `Request::RollbackCommit`/`Response::RolledBack`, closing the §2.5 gap where `RollbackCommit` returned `Unsupported`. `PROTO_VERSION` deliberately **not** bumped — appending to a closed enum only breaks "old peer reads new message", and `spawn_pair` forks the worker from the monitor's own image, so both ends are always the same binary; that bump belongs to whichever change implements `ReplaceBinary`.
+- `detent` CLI — `config <module> get|validate|plan|apply|defaults`, `commit confirm|rollback`, `service`, `backup list|restore`, `audit`, `host`, `doctor`, `completions`, `serve` (process-model skeleton). Global `--dryrun`, `--verbose`, `--json`, `--config`, `--locale`, `--state-root`. Exit codes 0/1/2/3, documented. Every user-facing string is a Fluent id, guarded by a test that fails on bare English in an output path.
+- **Error catalogue gate**: `detent-core` and `detent-ops` now assert every error `MessageId` exists in `locales/en-US/core.ftl`. Writing that guard immediately caught that *every* `detent-core` parse/model/edit error id was missing — users would have seen `[core-parse-malformed]` instead of a sentence.
+
+**M1 evidence:** `docs/spikes/m1-e2e.md` — a genuine `rust:1-bookworm` root run against a real `/etc/hosts`: get → validate → plan → dry-run (hash unchanged) → apply (hash changed, backup kept) → `backup list` → `backup restore` (hash back to the original) → `audit` → stale `--expect-hash` refused → all four exit codes → a real `serve` fork with privilege drop. Release binary 1.58 MB, inside the ≤ 3 MiB CLI budget.
+
+Deviations recorded in Phase 3: one-shot CLI commands run the monitor on a **background thread**, not a fork (`run.rs` module docs) — ADR-001's boundary exists to contain the *network-facing* worker, and a one-shot command run by root has no such side, so forking would only produce a second process with identical privileges; the id-only allow-list discipline is unchanged, and `serve` still forks for real. `--config` is resolved but not parsed (no TOML parser in the dependency set; Phase 4 needs the listen address and brings one). `setup` and `install` were deliberately deferred — `setup` writes admin credentials belonging to Phase 4's auth work, `install` duplicates `packaging/install.sh`.
+
+Coverage gate now: core/i18n/ops/modules 100, `detent-platform` 92 (measured 97.8), `detent` 95 (measured 96.7).
 
 Not started for Phase 2's CI story: the privileged Docker job and the Linux/macOS coverage-slice merge described in §6.1 (`ci.yml` currently runs one unprivileged Linux slice).
 
@@ -953,4 +967,4 @@ Known gaps carried into later phases: coverage gate must be raised to 100 % for 
 
 **Scope note:** §1.6 supersedes every earlier mention of BSD/armv7/riscv64 as active work.
 
-**Next action:** start Phase 3 (operations layer + CLI, Milestone M1). Build `detent-ops` first — `Operation` enum, `OpsEngine`, audit log, commit-confirm state machine wired to `privsep::monitor`'s existing timer — then `detent-i18n`, then the clap CLI. The `Plan` operation needs a unified diff; prefer a small in-tree Myers implementation over adding `similar` (PLAN §4.1 size budget). Note that `detent-modules::modules()` currently registers only `hosts`; the other seven module crates are empty.
+**Next action:** start Phase 4 (web server, auth, API). Order: TLS 1.3 listener with a bootstrap self-signed cert → session/auth store (Argon2id, `HostProfile.ram_mib` picks the parameters) → CSRF and security-header middleware → API v1 over `detent-ops` (the engine is front-end agnostic, so handlers should be thin) → embedded SPA serving. A TOML parser must be added for `/etc/detent/detent.toml` (`--config` is currently resolved but not parsed). `Authz` currently has only `AllowAll`; web scopes are a Phase 4 deliverable. Note `detent-modules::modules()` still registers only `hosts` — the other seven crates are empty until Phases 7–8.
