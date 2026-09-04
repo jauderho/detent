@@ -1,0 +1,99 @@
+# packaging/systemd/detent.service
+#
+# detent monitor unit, "root-confined" privilege mode (PLAN §2.4, ADR-001,
+# default). The monitor keeps uid 0 but drops its capability bounding set,
+# installs Landlock + seccomp, and forks the unprivileged worker (uid
+# detent) that owns TLS/HTTP. For the hardened "capability-user" mode
+# (Phase 12), install packaging/systemd/detent.service.d/capability-user.conf
+# alongside this unit — see that file's header for what it changes.
+#
+# Measured with `systemd-analyze security --offline=true` per docs/spikes/02-sandbox.md
+# and PLAN §2.4; target is <= 2.5 in this (root-confined) mode. `PrivateUsers=self`
+# and `IPAddressDeny=any` are deliberately NOT set here even though they would lower
+# the score further: PrivateUsers=self breaks writing root-owned files under /etc,
+# and IPAddressDeny=any breaks the daemon reaching the LAN — both are required by
+# what detent is.
+#
+# Installed by packaging/install.sh; do not hand-edit a deployed copy — re-run
+# install.sh instead.
+
+[Unit]
+Description=detent configuration management daemon
+Documentation=https://github.com/jauderho/detent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/detent serve
+Environment=RUST_LOG=info
+
+# User=root: root-confined mode (ADR-001 default). The capability-user
+# drop-in overrides this to User=detent for Phase 12's hardened mode.
+User=root
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER CAP_SETUID CAP_SETGID CAP_KILL
+NoNewPrivileges=yes
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+# PrivateDevices=yes denies all device nodes. acme-attest (TPM 2.0
+# device-attest-01) needs the TPM resource manager, so a build with that
+# feature enabled must instead set PrivateDevices=no and
+# DeviceAllow=/dev/tpmrm0 rw. detent itself never needs /dev/pps*, /dev/gps*,
+# etc. — those are opened by chronyd, not detent.
+PrivateDevices=yes
+
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+# @system-service minus @resources (nice/setrlimit/sched_*/mbind/...): detent
+# never needs to adjust its own resource limits or CPU/NUMA scheduling. A
+# negated set must be its own SystemCallFilter= line — systemd does not
+# recognize a "~"-prefixed token mixed into an otherwise positive list, it
+# silently ignores it. The @privileged subset is NOT excluded even though
+# systemd-analyze scores it: @privileged contains the chown() family (needed
+# to preserve file ownership in the atomic write protocol, §2.4) and
+# setuid/setreuid/setresuid/setgroups (needed by the monitor to drop the
+# forked worker to uid detent) — removing it would break the daemon.
+SystemCallFilter=@system-service
+SystemCallFilter=~@resources
+SystemCallArchitectures=native
+UMask=0077
+
+# ReadWritePaths: tier-1 module targets (PLAN Phase 7/8 tables) plus the
+# hosts module (Phase 1) and detent's own state directory. "-" prefixed
+# entries are optional backends that do not exist on every distro; systemd
+# ignores a ReadWritePaths entry that is missing at start instead of failing.
+# `detent install --systemd` (Phase 3) will regenerate this list from the
+# modules actually enabled in /etc/detent/detent.toml; this file ships the
+# superset for every tier-1 module so a manual install.sh works out of the box.
+ReadWritePaths=/etc/hosts /etc/resolv.conf /etc/fstab /etc/exports /etc/samba \
+  -/etc/exports.d \
+  -/etc/systemd/resolved.conf.d -/etc/unbound \
+  /etc/chrony.conf -/etc/chrony \
+  -/etc/systemd/network -/etc/NetworkManager/system-connections -/etc/network -/etc/netplan \
+  -/etc/dnsmasq.conf -/etc/dnsmasq.d -/etc/kea \
+  /var/lib/detent
+
+StateDirectory=detent
+StateDirectoryMode=0700
+ConfigurationDirectory=detent
+
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

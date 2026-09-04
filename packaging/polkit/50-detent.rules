@@ -1,0 +1,49 @@
+// packaging/polkit/50-detent.rules
+//
+// Used only in Phase 12 "capability-user" privilege mode (PLAN §2.4). In
+// that mode the monitor runs as the unprivileged `detent` user instead of
+// root, so it cannot call systemd's manage-units D-Bus method directly the
+// way the root-confined monitor can. This rule grants the `detent` user
+// exactly enough polkit authority to start/stop/restart/reload the units
+// that tier-1 modules bind services to (PLAN Phase 7/8 tables) — nothing
+// else. It has no effect in root-confined mode (root already bypasses
+// polkit) and is harmless to install even if capability-user mode is never
+// enabled.
+//
+// Installed to /etc/polkit-1/rules.d/50-detent.rules by install.sh.
+
+polkit.addRule(function (action, subject) {
+  if (action.id != "org.freedesktop.systemd1.manage-units") {
+    return polkit.Result.NOT_HANDLED;
+  }
+  if (subject.user != "detent") {
+    return polkit.Result.NOT_HANDLED;
+  }
+
+  // Unit alternatives per PLAN Phase 7/8 tables (resolver, chrony, mounts,
+  // nfs, samba, network, dhcp) plus their init-system alternatives.
+  var ALLOWED_UNITS = [
+    "chronyd.service",
+    "chrony.service",
+    "smb.service",
+    "smbd.service",
+    "nmb.service",
+    "nfs-server.service",
+    "dnsmasq.service",
+    "kea-dhcp4-server.service",
+    "systemd-networkd.service",
+    "systemd-resolved.service",
+    "unbound.service",
+    "NetworkManager.service",
+  ];
+  var ALLOWED_VERBS = ["start", "stop", "restart", "reload"];
+
+  var unit = action.lookup("unit");
+  var verb = action.lookup("verb");
+
+  if (ALLOWED_UNITS.indexOf(unit) !== -1 && ALLOWED_VERBS.indexOf(verb) !== -1) {
+    return polkit.Result.YES;
+  }
+
+  return polkit.Result.NOT_HANDLED;
+});
