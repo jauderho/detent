@@ -195,10 +195,8 @@ short:x
     }
 
     #[test]
-    fn lookups_read_the_files_they_are_given() {
-        let Ok(dir) = tempfile::tempdir() else {
-            unreachable!("a temp dir must be creatable")
-        };
+    fn lookups_read_the_files_they_are_given() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
         let passwd = dir.path().join("passwd");
         let group = dir.path().join("group");
         assert!(std::fs::write(&passwd, PASSWD).is_ok());
@@ -240,13 +238,12 @@ short:x
             .to_string()
             .is_empty()
         );
+        Ok(())
     }
 
     #[test]
-    fn non_utf8_bytes_do_not_break_the_parse() {
-        let Ok(dir) = tempfile::tempdir() else {
-            unreachable!("a temp dir must be creatable")
-        };
+    fn non_utf8_bytes_do_not_break_the_parse() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
         let passwd = dir.path().join("passwd");
         let mut bytes = b"detent:x:998:997:".to_vec();
         bytes.extend_from_slice(&[0xff, 0xfe]);
@@ -256,6 +253,7 @@ short:x
             lookup_user_in(&passwd, "detent").ok(),
             Some(UserIds { uid: 998, gid: 997 })
         );
+        Ok(())
     }
 
     #[test]

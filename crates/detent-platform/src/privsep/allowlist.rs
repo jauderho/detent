@@ -526,16 +526,13 @@ mod tests {
         actions: &[],
     };
 
-    fn build(root: &Path) -> Allowlist {
-        match Allowlist::from_modules(&[&HOSTS, &CHRONY], &Config::with_state_root(root)) {
-            Ok(list) => list,
-            Err(_) => unreachable!("the test descriptors are valid"),
-        }
+    fn build(root: &Path) -> Result<Allowlist, AllowlistError> {
+        Allowlist::from_modules(&[&HOSTS, &CHRONY], &Config::with_state_root(root))
     }
 
     #[test]
-    fn ids_are_dense_indices_in_declaration_order() {
-        let list = build(Path::new("/tmp/detent-test"));
+    fn ids_are_dense_indices_in_declaration_order() -> Result<(), Box<dyn std::error::Error>> {
+        let list = build(Path::new("/tmp/detent-test"))?;
         assert_eq!(list.target_count(), 3);
         assert_eq!(list.check_count(), 1);
         assert_eq!(list.binding_count(), 1);
@@ -564,11 +561,12 @@ mod tests {
             Some(ModuleId(1))
         );
         assert_eq!(list.module(ModuleId(1)).map(|m| m.id), Some("chrony"));
+        Ok(())
     }
 
     #[test]
-    fn ids_outside_the_tables_resolve_to_nothing() {
-        let list = build(Path::new("/tmp/detent-test"));
+    fn ids_outside_the_tables_resolve_to_nothing() -> Result<(), Box<dyn std::error::Error>> {
+        let list = build(Path::new("/tmp/detent-test"))?;
         // Every id one past the end, and a few wildly out of range values,
         // must resolve to `None` rather than to a neighbouring entry.
         for id in [3_u16, 4, 100, u16::MAX] {
@@ -582,20 +580,20 @@ mod tests {
             assert!(list.module(ModuleId(id)).is_none(), "module {id}");
         }
         // And an empty allow-list resolves nothing at all.
-        let Ok(empty) = Allowlist::from_modules(&[], &Config::default()) else {
-            unreachable!("an empty module set is valid")
-        };
+        let empty = Allowlist::from_modules(&[], &Config::default())?;
         assert!(empty.target(TargetId(0)).is_none());
         assert!(empty.check(CheckId(0)).is_none());
         assert!(empty.binding(BindingId(0)).is_none());
         assert!(empty.module(ModuleId(0)).is_none());
         assert!(empty.hello_ack().targets.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn backup_directories_are_per_target_under_the_module() {
+    fn backup_directories_are_per_target_under_the_module() -> Result<(), Box<dyn std::error::Error>>
+    {
         let root = Path::new("/tmp/detent-test");
-        let list = build(root);
+        let list = build(root)?;
         assert_eq!(list.state_root(), root);
         assert_eq!(list.keep_backups(), 20);
         assert_eq!(list.check_tmp_dir(), root.join(CHECK_TMP_DIR));
@@ -614,11 +612,12 @@ mod tests {
         let chrony_targets: Vec<_> = list.targets_of(ModuleId(1)).map(|t| t.id).collect();
         assert_eq!(chrony_targets, vec![TargetId(1), TargetId(2)]);
         assert_eq!(list.targets_of(ModuleId(9)).count(), 0);
+        Ok(())
     }
 
     #[test]
-    fn the_handshake_describes_every_table() {
-        let list = build(Path::new("/tmp/detent-test"));
+    fn the_handshake_describes_every_table() -> Result<(), Box<dyn std::error::Error>> {
+        let list = build(Path::new("/tmp/detent-test"))?;
         let ack = list.hello_ack();
         assert_eq!(ack.proto, crate::privsep::proto::PROTO_VERSION);
         assert_eq!(ack.modules.len(), 2);
@@ -644,10 +643,11 @@ mod tests {
             ack.bindings.first().map(|b| b.actions.clone()),
             Some(vec![ServiceAction::Restart, ServiceAction::Reload])
         );
+        Ok(())
     }
 
     #[test]
-    fn the_advertised_unit_follows_the_init_flavor() {
+    fn the_advertised_unit_follows_the_init_flavor() -> Result<(), Box<dyn std::error::Error>> {
         let root = Path::new("/tmp/detent-test");
         for (init, expected) in [
             (InitFlavor::Systemd, "chronyd.service"),
@@ -659,9 +659,7 @@ mod tests {
                 init,
                 ..Config::with_state_root(root)
             };
-            let Ok(list) = Allowlist::from_modules(&[&CHRONY], &config) else {
-                unreachable!("the descriptor is valid")
-            };
+            let list = Allowlist::from_modules(&[&CHRONY], &config)?;
             assert_eq!(
                 list.hello_ack().bindings.first().map(|b| b.unit.clone()),
                 Some(expected.to_owned())
@@ -670,6 +668,7 @@ mod tests {
         }
         assert_eq!(InitFlavor::default(), InitFlavor::Systemd);
         assert_eq!(preferred_unit(&EMPTY_NAMES, InitFlavor::Systemd), "");
+        Ok(())
     }
 
     #[test]

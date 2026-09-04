@@ -397,10 +397,10 @@ mod tests {
     /// enough to exercise `Client`'s "the monitor answered the wrong thing"
     /// paths (`unexpected`/`variant_name`) without teaching a fake peer the
     /// whole protocol.
-    fn client_with_scripted_reply(wrong: Response) -> (Client, thread::JoinHandle<()>) {
-        let Ok((mut monitor_end, worker_end)) = Channel::pair() else {
-            unreachable!("socketpair must succeed")
-        };
+    fn client_with_scripted_reply(
+        wrong: Response,
+    ) -> Result<(Client, thread::JoinHandle<()>), Box<dyn std::error::Error>> {
+        let (mut monitor_end, worker_end) = Channel::pair()?;
         let handle = thread::spawn(move || {
             if monitor_end.recv::<Request>().is_err() {
                 return;
@@ -418,17 +418,13 @@ mod tests {
             }
         });
         let mut client = Client::new(worker_end);
-        let Ok(_ack) = client.hello() else {
-            unreachable!("the scripted peer always answers Hello correctly here")
-        };
-        (client, handle)
+        client.hello()?;
+        Ok((client, handle))
     }
 
     #[test]
-    fn methods_reject_use_before_hello() {
-        let Ok((_monitor_end, worker_end)) = Channel::pair() else {
-            unreachable!("socketpair must succeed")
-        };
+    fn methods_reject_use_before_hello() -> Result<(), Box<dyn std::error::Error>> {
+        let (_monitor_end, worker_end) = Channel::pair()?;
         let mut client = Client::new(worker_end);
         assert!(client.targets().is_err());
         assert!(client.bindings().is_err());
@@ -440,51 +436,52 @@ mod tests {
         assert_eq!(client.target_id("fake", "/etc/hosts", PathKind::File), None);
         assert_eq!(client.binding_id("fake"), None);
         assert_eq!(client.check_id("fake"), None);
+        Ok(())
     }
 
     #[test]
-    fn a_dead_channel_surfaces_as_a_client_channel_error() {
-        let Ok((monitor_end, worker_end)) = Channel::pair() else {
-            unreachable!("socketpair must succeed")
-        };
+    fn a_dead_channel_surfaces_as_a_client_channel_error() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (monitor_end, worker_end) = Channel::pair()?;
         // No peer left to answer: `Client::call`'s `channel.send(request)?`
         // (or the `recv` right after it) must propagate a `ChannelError`
         // through `From<ChannelError> for ClientError`.
         drop(monitor_end);
         let mut client = Client::new(worker_end);
         assert!(matches!(client.hello(), Err(ClientError::Channel(_))));
+        Ok(())
     }
 
     #[test]
-    fn targets_and_bindings_read_through_the_cached_tables() {
-        let Ok((mut monitor_end, worker_end)) = Channel::pair() else {
-            unreachable!("socketpair must succeed")
-        };
+    fn targets_and_bindings_read_through_the_cached_tables()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut monitor_end, worker_end) = Channel::pair()?;
         let handle = thread::spawn(move || {
             let Ok(_hello) = monitor_end.recv::<Request>() else {
-                unreachable!("the client always sends Hello first")
+                return;
             };
             let _ = monitor_end.send(&Response::HelloAck(hello_ack()));
         });
         let mut client = Client::new(worker_end);
-        let Ok(_ack) = client.hello() else {
-            unreachable!("the scripted peer always answers Hello correctly here")
-        };
+        client.hello()?;
         assert_eq!(client.targets().ok(), Some([].as_slice()));
         assert_eq!(client.bindings().ok(), Some([].as_slice()));
-        let Ok(()) = handle.join() else {
-            unreachable!("the scripted peer thread must not panic")
-        };
+        // The scripted peer thread panicking (rather than returning early)
+        // would be a bug in the test double; a plain `join` assertion
+        // surfaces that without requiring `Box<dyn Any + Send>` (the thread
+        // panic payload type) to implement `std::error::Error`, which it
+        // does not.
+        assert!(handle.join().is_ok());
+        Ok(())
     }
 
     #[test]
-    fn hello_reports_a_remote_error_when_the_monitor_sends_one() {
-        let Ok((mut monitor_end, worker_end)) = Channel::pair() else {
-            unreachable!("socketpair must succeed")
-        };
+    fn hello_reports_a_remote_error_when_the_monitor_sends_one()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut monitor_end, worker_end) = Channel::pair()?;
         let handle = thread::spawn(move || {
             let Ok(_hello) = monitor_end.recv::<Request>() else {
-                unreachable!("the client always sends Hello first")
+                return;
             };
             let _ = monitor_end.send(&Response::Error(ProtoError::Unavailable(
                 "not ready".to_owned(),
@@ -496,19 +493,17 @@ mod tests {
             err,
             Some(ClientError::Remote(ProtoError::Unavailable(_)))
         ));
-        let Ok(()) = handle.join() else {
-            unreachable!("the scripted peer thread must not panic")
-        };
+        assert!(handle.join().is_ok());
+        Ok(())
     }
 
     #[test]
-    fn hello_reports_unexpected_for_a_wrong_response_type() {
-        let Ok((mut monitor_end, worker_end)) = Channel::pair() else {
-            unreachable!("socketpair must succeed")
-        };
+    fn hello_reports_unexpected_for_a_wrong_response_type() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (mut monitor_end, worker_end) = Channel::pair()?;
         let handle = thread::spawn(move || {
             let Ok(_hello) = monitor_end.recv::<Request>() else {
-                unreachable!("the client always sends Hello first")
+                return;
             };
             let _ = monitor_end.send(&Response::ShuttingDown);
         });
@@ -521,9 +516,8 @@ mod tests {
                 got: "ShuttingDown"
             })
         ));
-        let Ok(()) = handle.join() else {
-            unreachable!("the scripted peer thread must not panic")
-        };
+        assert!(handle.join().is_ok());
+        Ok(())
     }
 
     // Every non-`hello` method's "the monitor answered something else" arm,
@@ -532,8 +526,9 @@ mod tests {
     // test per method to stay under `clippy::too_many_lines`.
 
     #[test]
-    fn read_target_reports_unexpected_for_a_wrong_response() {
-        let (mut client, handle) = client_with_scripted_reply(Response::HelloAck(hello_ack()));
+    fn read_target_reports_unexpected_for_a_wrong_response()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut client, handle) = client_with_scripted_reply(Response::HelloAck(hello_ack()))?;
         assert!(matches!(
             client.read_target(TargetId(0)),
             Err(ClientError::Unexpected {
@@ -543,15 +538,17 @@ mod tests {
         ));
         drop(client);
         let _ = handle.join();
+        Ok(())
     }
 
     #[test]
-    fn write_target_reports_unexpected_for_a_wrong_response() {
+    fn write_target_reports_unexpected_for_a_wrong_response()
+    -> Result<(), Box<dyn std::error::Error>> {
         let (mut client, handle) = client_with_scripted_reply(Response::Target(TargetContents {
             target: TargetId(0),
             bytes: Vec::new(),
             digest: Sha256Digest::of(b"x"),
-        }));
+        }))?;
         assert!(matches!(
             client.write_target(TargetId(0), None, Vec::new()),
             Err(ClientError::Unexpected {
@@ -561,10 +558,12 @@ mod tests {
         ));
         drop(client);
         let _ = handle.join();
+        Ok(())
     }
 
     #[test]
-    fn run_check_reports_unexpected_for_a_wrong_response() {
+    fn run_check_reports_unexpected_for_a_wrong_response() -> Result<(), Box<dyn std::error::Error>>
+    {
         let (mut client, handle) = client_with_scripted_reply(Response::Written(WriteReceipt {
             target: TargetId(0),
             prev_digest: None,
@@ -572,7 +571,7 @@ mod tests {
             created: false,
             backed_up: false,
             owner_preserved: true,
-        }));
+        }))?;
         assert!(matches!(
             client.run_check(CheckId(0), Vec::new()),
             Err(ClientError::Unexpected {
@@ -582,16 +581,17 @@ mod tests {
         ));
         drop(client);
         let _ = handle.join();
+        Ok(())
     }
 
     #[test]
-    fn service_reports_unexpected_for_a_wrong_response() {
+    fn service_reports_unexpected_for_a_wrong_response() -> Result<(), Box<dyn std::error::Error>> {
         let (mut client, handle) = client_with_scripted_reply(Response::Checked(CheckOutcome {
             check: CheckId(0),
             passed: true,
             exit_code: Some(0),
             detail: String::new(),
-        }));
+        }))?;
         assert!(matches!(
             client.service(BindingId(0), ServiceAction::Restart),
             Err(ClientError::Unexpected {
@@ -601,15 +601,18 @@ mod tests {
         ));
         drop(client);
         let _ = handle.join();
+        Ok(())
     }
 
     #[test]
-    fn list_backups_reports_unexpected_for_a_wrong_response() {
-        let (mut client, handle) = client_with_scripted_reply(Response::Serviced(ServiceOutcome {
-            binding: BindingId(0),
-            active: true,
-            detail: String::new(),
-        }));
+    fn list_backups_reports_unexpected_for_a_wrong_response()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut client, handle) =
+            client_with_scripted_reply(Response::Serviced(ServiceOutcome {
+                binding: BindingId(0),
+                active: true,
+                detail: String::new(),
+            }))?;
         assert!(matches!(
             client.list_backups(ModuleId(0)),
             Err(ClientError::Unexpected {
@@ -619,11 +622,12 @@ mod tests {
         ));
         drop(client);
         let _ = handle.join();
+        Ok(())
     }
 
     #[test]
-    fn restore_reports_unexpected_for_a_wrong_response() {
-        let (mut client, handle) = client_with_scripted_reply(Response::Backups(Vec::new()));
+    fn restore_reports_unexpected_for_a_wrong_response() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut client, handle) = client_with_scripted_reply(Response::Backups(Vec::new()))?;
         assert!(matches!(
             client.restore(ModuleId(0), BackupId(0)),
             Err(ClientError::Unexpected {
@@ -633,14 +637,16 @@ mod tests {
         ));
         drop(client);
         let _ = handle.join();
+        Ok(())
     }
 
     #[test]
-    fn start_confirm_timer_reports_unexpected_for_a_wrong_response() {
+    fn start_confirm_timer_reports_unexpected_for_a_wrong_response()
+    -> Result<(), Box<dyn std::error::Error>> {
         let (mut client, handle) = client_with_scripted_reply(Response::Restored {
             target: TargetId(0),
             new_digest: Sha256Digest::of(b"x"),
-        });
+        })?;
         assert!(matches!(
             client.start_confirm_timer(CommitId(0), 1),
             Err(ClientError::Unexpected {
@@ -650,15 +656,17 @@ mod tests {
         ));
         drop(client);
         let _ = handle.join();
+        Ok(())
     }
 
     #[test]
-    fn confirm_commit_reports_unexpected_for_a_wrong_response() {
+    fn confirm_commit_reports_unexpected_for_a_wrong_response()
+    -> Result<(), Box<dyn std::error::Error>> {
         let (mut client, handle) = client_with_scripted_reply(Response::ConfirmTimerStarted {
             commit: CommitId(0),
             timeout_s: 1,
             rollback_targets: 0,
-        });
+        })?;
         assert!(matches!(
             client.confirm_commit(CommitId(0)),
             Err(ClientError::Unexpected {
@@ -668,13 +676,15 @@ mod tests {
         ));
         drop(client);
         let _ = handle.join();
+        Ok(())
     }
 
     #[test]
-    fn shutdown_reports_unexpected_for_a_wrong_response() {
+    fn shutdown_reports_unexpected_for_a_wrong_response() -> Result<(), Box<dyn std::error::Error>>
+    {
         let (mut client, handle) = client_with_scripted_reply(Response::Committed {
             commit: CommitId(0),
-        });
+        })?;
         assert!(matches!(
             client.shutdown(),
             Err(ClientError::Unexpected {
@@ -684,5 +694,6 @@ mod tests {
         ));
         drop(client);
         let _ = handle.join();
+        Ok(())
     }
 }

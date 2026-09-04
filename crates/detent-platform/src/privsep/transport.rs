@@ -308,10 +308,8 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn messages_round_trip_over_a_socket_pair() {
-        let Ok((mut a, mut b)) = Channel::pair() else {
-            unreachable!("socketpair must succeed")
-        };
+    fn messages_round_trip_over_a_socket_pair() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut a, mut b) = Channel::pair()?;
         assert_eq!(a.read_timeout(), DEFAULT_TIMEOUT);
         assert!(a.socket().peer_addr().is_ok());
         assert!(
@@ -328,13 +326,12 @@ mod tests {
         );
         assert!(b.send(&Response::ShuttingDown).is_ok());
         assert_eq!(a.recv::<Response>().ok(), Some(Response::ShuttingDown));
+        Ok(())
     }
 
     #[test]
-    fn a_large_but_legal_frame_survives() {
-        let Ok((mut a, mut b)) = Channel::pair() else {
-            unreachable!("socketpair must succeed")
-        };
+    fn a_large_but_legal_frame_survives() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut a, mut b) = Channel::pair()?;
         let bytes = vec![0x41_u8; 512 * 1024];
         let request = Request::WriteTarget {
             target: TargetId(0),
@@ -346,56 +343,50 @@ mod tests {
         let reader = std::thread::spawn(move || b.recv::<Request>().ok());
         assert!(a.send(&request).is_ok());
         assert_eq!(reader.join().ok().flatten(), Some(request));
+        Ok(())
     }
 
     #[test]
-    fn an_oversize_length_header_is_rejected_before_allocation() {
-        let Ok((mut left, right)) = UnixStream::pair() else {
-            unreachable!("socketpair must succeed")
-        };
+    fn an_oversize_length_header_is_rejected_before_allocation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut left, right) = UnixStream::pair()?;
         let header = u32::try_from(MAX_FRAME + 1).unwrap_or(u32::MAX);
         assert!(left.write_all(&header.to_be_bytes()).is_ok());
-        let Ok(mut channel) = Channel::new(right) else {
-            unreachable!("channel must wrap the socket")
-        };
+        let mut channel = Channel::new(right)?;
         let err = channel.poll_recv::<Request>().err();
         assert!(matches!(
             err,
             Some(ChannelError::Oversize { len }) if len == MAX_FRAME + 1
         ));
         assert!(ChannelError::Oversize { len: MAX_FRAME + 1 }.is_protocol_violation());
+        Ok(())
     }
 
     #[test]
-    fn a_frame_that_is_not_a_message_is_a_protocol_violation() {
-        let Ok((mut left, right)) = UnixStream::pair() else {
-            unreachable!("socketpair must succeed")
-        };
+    fn a_frame_that_is_not_a_message_is_a_protocol_violation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut left, right) = UnixStream::pair()?;
         // Length 4, body = an out-of-range discriminant.
         assert!(left.write_all(&4_u32.to_be_bytes()).is_ok());
         assert!(left.write_all(&[250, 0, 0, 0]).is_ok());
-        let Ok(mut channel) = Channel::new(right) else {
-            unreachable!("channel must wrap the socket")
-        };
+        let mut channel = Channel::new(right)?;
         let err = channel.poll_recv::<Request>().err();
         assert!(matches!(err, Some(ChannelError::Decode(_))));
         assert!(err.is_some_and(|e| e.is_protocol_violation()));
+        Ok(())
     }
 
     #[test]
-    fn a_truncated_frame_reports_closure_not_a_bad_message() {
-        let Ok((mut left, right)) = UnixStream::pair() else {
-            unreachable!("socketpair must succeed")
-        };
+    fn a_truncated_frame_reports_closure_not_a_bad_message()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut left, right) = UnixStream::pair()?;
         // `Channel::new` sets a write timeout on `right`, which fails with
         // `EINVAL` on macOS once its peer has already been dropped
         // (verified: `UnixStream::pair()`, `drop(left)`, then
         // `right.set_write_timeout(...)` -> `Err(InvalidInput)`). The channel
         // must therefore be constructed while `left` is still alive; only the
         // write that follows should happen after the drop.
-        let Ok(mut channel) = Channel::new(right) else {
-            unreachable!("channel must wrap the socket")
-        };
+        let mut channel = Channel::new(right)?;
         assert!(left.write_all(&16_u32.to_be_bytes()).is_ok());
         assert!(left.write_all(&[0, 1, 2]).is_ok());
         drop(left);
@@ -403,18 +394,15 @@ mod tests {
             channel.poll_recv::<Request>().err(),
             Some(ChannelError::Closed)
         ));
+        Ok(())
     }
 
     #[test]
-    fn a_truncated_header_reports_closure() {
-        let Ok((mut left, right)) = UnixStream::pair() else {
-            unreachable!("socketpair must succeed")
-        };
+    fn a_truncated_header_reports_closure() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut left, right) = UnixStream::pair()?;
         // See the comment in `a_truncated_frame_reports_closure_not_a_bad_message`:
         // the channel must wrap `right` before `left` is dropped.
-        let Ok(mut channel) = Channel::new(right) else {
-            unreachable!("channel must wrap the socket")
-        };
+        let mut channel = Channel::new(right)?;
         assert!(left.write_all(&[0, 0]).is_ok());
         drop(left);
         assert!(matches!(
@@ -422,18 +410,15 @@ mod tests {
             Some(ChannelError::Closed)
         ));
         assert_eq!(HEADER_LEN, 4);
+        Ok(())
     }
 
     #[test]
-    fn an_idle_channel_polls_to_none_and_recv_times_out() {
-        let Ok((_keep, right)) = UnixStream::pair() else {
-            unreachable!("socketpair must succeed")
-        };
-        let Ok(mut channel) =
-            Channel::with_timeouts(right, Duration::from_millis(30), Duration::from_millis(30))
-        else {
-            unreachable!("channel must wrap the socket")
-        };
+    fn an_idle_channel_polls_to_none_and_recv_times_out() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (_keep, right) = UnixStream::pair()?;
+        let mut channel =
+            Channel::with_timeouts(right, Duration::from_millis(30), Duration::from_millis(30))?;
         assert!(matches!(channel.poll_recv::<Request>(), Ok(None)));
         assert!(matches!(
             channel.recv::<Request>().err(),
@@ -442,31 +427,27 @@ mod tests {
         assert!(channel.set_read_timeout(Duration::from_millis(5)).is_ok());
         assert_eq!(channel.read_timeout(), Duration::from_millis(5));
         assert!(matches!(channel.poll_recv::<Request>(), Ok(None)));
+        Ok(())
     }
 
     #[test]
-    fn a_body_that_stops_arriving_is_a_fatal_timeout() {
-        let Ok((mut left, right)) = UnixStream::pair() else {
-            unreachable!("socketpair must succeed")
-        };
+    fn a_body_that_stops_arriving_is_a_fatal_timeout() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut left, right) = UnixStream::pair()?;
         assert!(left.write_all(&8_u32.to_be_bytes()).is_ok());
-        let Ok(mut channel) =
-            Channel::with_timeouts(right, Duration::from_millis(30), Duration::from_millis(30))
-        else {
-            unreachable!("channel must wrap the socket")
-        };
+        let mut channel =
+            Channel::with_timeouts(right, Duration::from_millis(30), Duration::from_millis(30))?;
         assert!(matches!(
             channel.poll_recv::<Request>().err(),
             Some(ChannelError::Timeout)
         ));
         drop(left);
+        Ok(())
     }
 
     #[test]
-    fn sending_an_oversize_message_fails_without_touching_the_socket() {
-        let Ok((mut a, mut b)) = Channel::pair() else {
-            unreachable!("socketpair must succeed")
-        };
+    fn sending_an_oversize_message_fails_without_touching_the_socket()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut a, mut b) = Channel::pair()?;
         let err = a.send(&Request::WriteTarget {
             target: TargetId(0),
             expected_prev: None,
@@ -477,13 +458,12 @@ mod tests {
         // desynchronized.
         assert!(b.set_read_timeout(Duration::from_millis(20)).is_ok());
         assert!(matches!(b.poll_recv::<Request>(), Ok(None)));
+        Ok(())
     }
 
     #[test]
-    fn writing_to_a_closed_peer_reports_closure() {
-        let Ok((mut a, b)) = Channel::pair() else {
-            unreachable!("socketpair must succeed")
-        };
+    fn writing_to_a_closed_peer_reports_closure() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut a, b) = Channel::pair()?;
         assert!(b.shutdown_write().is_ok());
         drop(b);
         // The first write may land in the socket buffer; the second cannot.
@@ -493,18 +473,18 @@ mod tests {
             outcome,
             Err(ChannelError::Closed | ChannelError::Io(_))
         ));
+        Ok(())
     }
 
     #[test]
-    fn reading_from_a_closed_peer_reports_closure() {
-        let Ok((a, mut b)) = Channel::pair() else {
-            unreachable!("socketpair must succeed")
-        };
+    fn reading_from_a_closed_peer_reports_closure() -> Result<(), Box<dyn std::error::Error>> {
+        let (a, mut b) = Channel::pair()?;
         drop(a);
         assert!(matches!(
             b.recv::<Request>().err(),
             Some(ChannelError::Closed)
         ));
+        Ok(())
     }
 
     /// A `Serialize` impl that always fails, so `Channel::send`'s
@@ -519,26 +499,22 @@ mod tests {
     }
 
     #[test]
-    fn sending_a_value_that_fails_to_encode_reports_decode_error() {
-        let Ok((mut a, _b)) = Channel::pair() else {
-            unreachable!("socketpair must succeed")
-        };
+    fn sending_a_value_that_fails_to_encode_reports_decode_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut a, _b) = Channel::pair()?;
         assert!(matches!(
             a.send(&Unserializable),
             Err(ChannelError::Decode(_))
         ));
+        Ok(())
     }
 
     #[test]
-    fn a_body_that_arrives_partially_then_stalls_is_a_fatal_timeout() {
-        let Ok((mut left, right)) = UnixStream::pair() else {
-            unreachable!("socketpair must succeed")
-        };
-        let Ok(mut channel) =
-            Channel::with_timeouts(right, Duration::from_millis(30), Duration::from_millis(30))
-        else {
-            unreachable!("channel must wrap the socket")
-        };
+    fn a_body_that_arrives_partially_then_stalls_is_a_fatal_timeout()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut left, right) = UnixStream::pair()?;
+        let mut channel =
+            Channel::with_timeouts(right, Duration::from_millis(30), Duration::from_millis(30))?;
         // Advertise an 8-byte body but only ever send 3: the header fills
         // (`Filled::Full`), then the body read times out with `filled != 0`,
         // which is the fatal (not idle) timeout branch.
@@ -549,6 +525,7 @@ mod tests {
             Some(ChannelError::Timeout)
         ));
         drop(left);
+        Ok(())
     }
 
     #[test]
