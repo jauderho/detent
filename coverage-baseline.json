@@ -2,8 +2,10 @@
   "lines_min_pct": 0,
   "per_path": {
     "crates/detent-core/": 100,
-    "crates/modules/": 100,
-    "crates/detent-platform/": 92
+    "crates/detent-i18n/": 100,
+    "crates/detent-ops/": 100,
+    "crates/detent-platform/": 92,
+    "crates/modules/": 100
   },
   "ratchet_note": "detent-core and crates/modules are gated at 100% (PLAN \u00a76.2). detent-platform is gated at 92, the floor that holds on Linux, which is where CI measures: macOS reads 97.5% but Linux reads 92.55% (5031/5436) because most of the crate's privileged code runs in a forked child. A child terminates with _exit(2), which skips the atexit handler LLVM installs to flush counters, so its lines read as uncovered even though they ran. privsep::sys::exit_immediately now calls __llvm_profile_write_file() first under cfg(coverage) (cargo-llvm-cov compiles with --cfg=coverage; production builds contain neither the declaration nor the call), which recovered privsep/sys.rs 30->46% and privsep/spawn.rs 75->82%. The remainder is irreducible with this approach: sandbox/linux.rs sits at ~55% because those children exit *after* confinement, and writing a profile needs openat/write, which the installed seccomp filter denies \u2014 flushing there would kill the child instead of measuring it. Those paths are verified by kernel-observable effects instead (EACCES on Landlock-denied writes, EPERM/SIGSYS from seccomp, the CapBnd bitmask in /proc/self/status), and they exit via exit_immediately_unflushed, which is documented as the only safe choice once a filter is installed. If this floor ever needs raising, the option not taken was __llvm_profile_set_file_object() with a descriptor opened before confinement plus a write allowance in the seccomp table \u2014 rejected for now as added complexity in security-critical code for a measurement-only benefit."
 }

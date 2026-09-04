@@ -23,3 +23,25 @@ hosts-localhost-not-loopback = `localhost` points at `{$ip}`, which is not a loo
 hosts-missing-localhost = there is no `localhost` entry.
 hosts-missing-ipv6-localhost = there is no ipv6 `localhost` entry.
 hosts-too-many-entries = this file has {$count} entries; consider dns instead.
+
+## detent-core — parse, model, and edit errors
+## These are the failures a module's own document model can raise, so they are
+## prefixed `core-` rather than with a module id.
+core-parse-malformed = this file does not match the format `{$module}` expects: {$reason}
+core-model-shape = the supplied configuration does not have the expected shape: {$reason}
+core-model-unrepresentable = this file contains something the editor cannot represent: {$reason}
+core-edit-line-break = a value may not contain a line break or a null byte; `{$value}` does.
+core-edit-index-out-of-range = internal error: line {$index} is outside a file of {$len} lines.
+core-edit-unsupported = this edit cannot be expressed in the file's format: {$reason}
+
+## operations layer — errors surfaced by detent-ops
+ops-unknown-module = there is no module named `{$module}` in this build.
+ops-invalid-model = the configuration for `{$module}` is not valid: {$reason}
+ops-hash-conflict = `{$path}` changed on disk since it was read; re-read it and try again.
+ops-privsep-failed = the privileged helper refused or could not complete the request: {$reason}
+ops-service-failed = the service action did not complete: {$reason}
+ops-no-target = `{$module}` manages no file on this host.
+ops-no-service = `{$module}` controls no service on this host, so it cannot be restarted.
+ops-audit-failed = the audit log could not be read: {$reason}
+ops-unsupported = {$what} is not supported in this build.
+ops-denied = you are not permitted to do that.

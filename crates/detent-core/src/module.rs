@@ -448,4 +448,49 @@ mod tests {
         assert!(!schemars::schema_for!(EditReport).to_value().is_null());
         assert!(format!("{report:?}").contains("changed_lines"));
     }
+
+    /// Every error id this module can raise must exist in the shipped
+    /// catalogue, or a user sees a bare `[core-...]` placeholder instead of a
+    /// sentence. `detent-i18n`'s parity test compares locales to each other and
+    /// cannot see ids that exist only in Rust, so the check lives here, next to
+    /// the errors themselves.
+    #[test]
+    fn every_error_id_has_a_catalogue_entry() {
+        let catalogue = include_str!("../../../locales/en-US/core.ftl");
+        let ids = [
+            ParseError::Malformed {
+                message: "m".to_owned(),
+                span: None,
+            }
+            .message_id(),
+            ModelError::Shape {
+                message: "m".to_owned(),
+            }
+            .message_id(),
+            ModelError::Unrepresentable {
+                message: "m".to_owned(),
+                span: None,
+            }
+            .message_id(),
+            EditError::LineBreakInValue {
+                value: "v".to_owned(),
+            }
+            .message_id(),
+            EditError::IndexOutOfRange { index: 0, len: 0 }.message_id(),
+            EditError::Unsupported {
+                message: "m".to_owned(),
+            }
+            .message_id(),
+        ];
+        for id in ids {
+            // `id.as_str()` is hoisted rather than written inline in the
+            // failure message: `assert!` only evaluates that argument when the
+            // assertion fails, which leaves the line permanently uncovered.
+            let id = id.as_str();
+            let present = catalogue
+                .lines()
+                .any(|line| line.split('=').next().is_some_and(|k| k.trim() == id));
+            assert!(present, "`{id}` has no entry in locales/en-US/core.ftl");
+        }
+    }
 }
