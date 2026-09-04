@@ -57,3 +57,8 @@ default = []
 ## targets can build structured `Request`/`Response` values. Mirrors
 ## `detent-core`'s and `detent-module-hosts`'s `fuzzing` feature.
 fuzzing = ["dep:arbitrary"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+caps = { workspace = true }
+landlock = { workspace = true }
+seccompiler = { workspace = true }
