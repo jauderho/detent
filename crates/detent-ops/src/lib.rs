@@ -28,9 +28,12 @@
 //! * **Apply refuses invalid input.** Any `Severity::Error` diagnostic stops
 //!   the operation before the file is opened, and a stale `expected_hash` is a
 //!   typed conflict rather than a lost update.
-//! * **Rollback belongs to the monitor.** The engine starts and confirms
-//!   commit-confirm windows; the timer, the `pending-commit.json` marker and
-//!   the restore itself live in `detent-platform` (ADR-012).
+//! * **Rollback belongs to the monitor.** The engine starts, confirms, and can
+//!   trigger an immediate rollback of a commit-confirm window, but the timer,
+//!   the `pending-commit.json` marker and the restore itself all live in
+//!   `detent-platform` (ADR-012); an unconfirmed commit still rolls back on
+//!   its own deadline even if nothing ever calls
+//!   [`Operation::RollbackCommit`].
 
 pub mod audit;
 pub mod authz;

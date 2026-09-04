@@ -1131,18 +1131,83 @@ fn an_explicit_confirm_window_opts_a_plain_module_in() -> TestResult {
 }
 
 #[test]
-fn rollback_commit_is_reported_as_unsupported_and_still_audited() -> TestResult {
+fn rollback_commit_restores_the_file_and_is_audited() -> TestResult {
+    let mut fx = harness(
+        b"v1\n",
+        Setup {
+            shape: Shape {
+                commit_confirm: true,
+                ..Shape::default()
+            },
+            ..Setup::default()
+        },
+    )?;
+    let outcome = fx.run(Operation::Apply {
+        id: MODULE.to_owned(),
+        model: json!({"text": "v2\n"}),
+        expected_hash: None,
+        service_action: None,
+        confirm: Some(CONFIRM_WINDOW),
+    })?;
+    let OpOutcome::Applied(report) = outcome else {
+        return Err("Apply must answer with an apply report".into());
+    };
+    let commit = report.commit.ok_or("a commit-confirm window was armed")?;
+    assert_eq!(fx.contents()?, "v2\n");
+
+    let rolled_back = fx.run(Operation::RollbackCommit {
+        commit_id: commit.commit_id,
+    })?;
+    assert!(matches!(
+        rolled_back,
+        OpOutcome::RolledBack { commit_id, restored }
+            if commit_id == commit.commit_id && restored == 1
+    ));
+    assert_eq!(fx.contents()?, "v1\n");
+
+    // A second rollback for the same id finds nothing pending.
+    assert!(matches!(
+        fx.run(Operation::RollbackCommit {
+            commit_id: commit.commit_id,
+        }),
+        Err(OpsError::Privsep(ClientError::Remote(
+            ProtoError::UnknownId { .. }
+        )))
+    ));
+
+    // Apply, the successful rollback, and the failed repeat are all
+    // mutating, so all three were audited.
+    let records = fx.records();
+    assert_eq!(records.len(), 3);
+    assert_eq!(records.get(1).map(|r| r.op), Some(OpKind::RollbackCommit));
+    assert_eq!(records.get(1).map(|r| r.result), Some(AuditResult::Ok));
+    assert_eq!(records.get(2).map(|r| r.op), Some(OpKind::RollbackCommit));
+    assert_eq!(records.get(2).map(|r| r.result), Some(AuditResult::Error));
+    assert_eq!(
+        records.get(2).and_then(|r| r.error_id.clone()),
+        Some("ops-privsep-failed".to_owned())
+    );
+    fx.finish()
+}
+
+#[test]
+fn rollback_commit_rejects_an_id_that_was_never_armed() -> TestResult {
     let mut fx = harness(b"v1\n", Setup::default())?;
     let err = fx.run(Operation::RollbackCommit {
         commit_id: CommitId(1),
     });
-    assert!(matches!(err, Err(OpsError::Unsupported { .. })));
+    assert!(matches!(
+        err,
+        Err(OpsError::Privsep(ClientError::Remote(
+            ProtoError::UnknownId { .. }
+        )))
+    ));
     let records = fx.records();
     assert_eq!(records.len(), 1);
     assert_eq!(records.first().map(|r| r.op), Some(OpKind::RollbackCommit));
     assert_eq!(
         records.first().and_then(|r| r.error_id.clone()),
-        Some("ops-unsupported".to_owned())
+        Some("ops-privsep-failed".to_owned())
     );
     fx.finish()
 }

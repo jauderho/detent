@@ -32,6 +32,31 @@ use detent_core::descriptor::{ServiceAction as CoreServiceAction, TargetKind};
 
 /// Version of this protocol. Both peers must agree exactly; there is no
 /// negotiation, because both sides ship in the same binary.
+///
+/// # Appending a variant to a closed enum
+///
+/// [`Request::RollbackCommit`] and [`Response::RolledBack`] were added at the
+/// end of their enums (see each variant's doc comment) rather than grouped
+/// next to [`Request::ConfirmCommit`]/[`Response::Committed`], so every
+/// existing discriminant keeps its numeric value. That is a backward-
+/// incompatible change in exactly one direction: an *old* binary decoding a
+/// frame a *new* binary sent would meet an out-of-range discriminant and
+/// correctly terminate the connection per this module's closed-enum
+/// invariant (see the module docs) — it would not misinterpret the message
+/// as something else. The reverse direction is unaffected, because an old
+/// peer never emits a discriminant a new peer does not know.
+///
+/// This build does **not** bump `PROTO_VERSION` for the addition, because
+/// that failure mode cannot occur in practice yet: `spawn_pair` forks the
+/// worker from the monitor's own already-running image, so the two ends of
+/// one connection are always the same binary, and the one feature that could
+/// introduce a mismatched pair — replacing the running binary underneath a
+/// live monitor — is `Request::ReplaceBinary`, which this build still
+/// answers `ProtoError::Unsupported`. When binary replacement lands, that
+/// change is the right place to decide whether an in-flight connection needs
+/// draining before the swap and whether a version bump is warranted then;
+/// bumping it now would not protect anything, because there is no path to
+/// pairing two different binaries yet.
 pub const PROTO_VERSION: u16 = 1;
 
 /// Largest encoded message accepted in either direction, in bytes.
@@ -268,6 +293,23 @@ pub enum Request {
     },
     /// Ask the monitor to stop serving and exit.
     Shutdown,
+    /// Roll a pending commit back immediately, instead of waiting for its
+    /// deadline. Semantics mirror [`Request::ConfirmCommit`], inverted: a
+    /// pending commit whose id matches is taken, every recorded write is
+    /// restored, and the answer is [`Response::RolledBack`]. If nothing is
+    /// pending, or the id does not match — including a second call for a
+    /// commit this request already rolled back, or a call after the deadline
+    /// already rolled it back on its own — the answer is
+    /// [`ProtoError::UnknownId`], identical to [`Request::ConfirmCommit`]'s
+    /// miss.
+    ///
+    /// Appended after [`Request::Shutdown`] rather than grouped with
+    /// [`Request::ConfirmCommit`] so every existing discriminant keeps its
+    /// value; see [`PROTO_VERSION`]'s doc comment.
+    RollbackCommit {
+        /// The id passed to [`Request::StartConfirmTimer`].
+        commit: CommitId,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -463,6 +505,17 @@ pub enum Response {
     /// Any request may fail this way. Exactly one response is sent per
     /// request, so an error never desynchronizes the channel.
     Error(ProtoError),
+    /// Answer to [`Request::RollbackCommit`].
+    ///
+    /// Appended after [`Response::Error`] for the same discriminant-
+    /// stability reason as [`Request::RollbackCommit`]; see
+    /// [`PROTO_VERSION`]'s doc comment.
+    RolledBack {
+        /// The commit that was rolled back.
+        commit: CommitId,
+        /// How many targets were actually restored.
+        restored: u16,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -705,6 +758,9 @@ mod tests {
                 sha256: digest(),
             },
             Request::Shutdown,
+            Request::RollbackCommit {
+                commit: CommitId(11),
+            },
         ]
     }
 
@@ -803,6 +859,10 @@ mod tests {
             Response::Error(ProtoError::Unsupported("mount".to_owned())),
             Response::Error(ProtoError::Unavailable("no service manager".to_owned())),
             Response::Error(ProtoError::Io("openat failed".to_owned())),
+            Response::RolledBack {
+                commit: CommitId(1),
+                restored: 2,
+            },
         ]
     }
 
@@ -918,6 +978,48 @@ mod tests {
                 .to_string()
                 .contains('x')
         );
+    }
+
+    #[test]
+    fn rollback_commit_and_rolled_back_are_the_new_terminal_discriminants() {
+        // `Request::RollbackCommit` and `Response::RolledBack` were appended
+        // after every previously-existing variant precisely so no existing
+        // discriminant moved; assert the byte postcard actually assigned
+        // them (12 and 11 respectively — zero-based, after 12 and 11 prior
+        // variants) so a future reordering that silently renumbers them
+        // fails here instead of only on the wire.
+        let request = Request::RollbackCommit {
+            commit: CommitId(42),
+        };
+        let request_bytes = encode(&request).unwrap_or_default();
+        assert_eq!(request_bytes.first(), Some(&12));
+        assert_eq!(decode::<Request>(&request_bytes).ok(), Some(request));
+
+        let response = Response::RolledBack {
+            commit: CommitId(42),
+            restored: 3,
+        };
+        let response_bytes = encode(&response).unwrap_or_default();
+        assert_eq!(response_bytes.first(), Some(&11));
+        assert_eq!(decode::<Response>(&response_bytes).ok(), Some(response));
+
+        // No other `Request` variant's encoding decodes as `RollbackCommit`,
+        // and vice versa: every prior request either fails to decode as
+        // `RollbackCommit` or, if it happens to be `RollbackCommit` itself
+        // with different contents, is simply unequal.
+        let rollback_for_other_commit = Request::RollbackCommit {
+            commit: CommitId(1),
+        };
+        for other in every_request() {
+            if other == rollback_for_other_commit {
+                continue;
+            }
+            let bytes = encode(&other).unwrap_or_default();
+            assert_ne!(
+                decode::<Request>(&bytes).ok(),
+                Some(rollback_for_other_commit.clone())
+            );
+        }
     }
 
     #[test]
