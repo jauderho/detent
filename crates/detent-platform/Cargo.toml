@@ -29,13 +29,31 @@ arithmetic_side_effects = "warn"
 multiple_crate_versions = "allow"
 
 [dependencies]
-rustix = { workspace = true }
+arbitrary = { workspace = true, optional = true }
+detent-core = { path = "../detent-core" }
+postcard = { workspace = true }
+# Adds the `thread` feature on top of the workspace default (`fs`, `process`,
+# `std`): `spawn::harden` calls `rustix::thread::set_no_new_privs` on Linux,
+# which that module gates behind `cfg(feature = "thread")`. Additive per
+# Cargo's workspace-dependency feature unification; the base feature list
+# stays defined once, in the root `Cargo.toml`.
+rustix = { workspace = true, features = ["thread"] }
 serde = { workspace = true }
+serde_json = { workspace = true }
 sha2 = { workspace = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
+tracing = { workspace = true }
 xattr = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+
+[features]
+default = []
+## Enables `arbitrary::Arbitrary` for the privsep wire types so `cargo-fuzz`
+## targets can build structured `Request`/`Response` values. Mirrors
+## `detent-core`'s and `detent-module-hosts`'s `fuzzing` feature.
+fuzzing = ["dep:arbitrary"]

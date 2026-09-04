@@ -86,7 +86,7 @@ pub struct Upstream {
 ///
 /// Distributions disagree (`chronyd.service` on Fedora, `chrony.service` on Debian),
 /// so each backend gets a list of alternatives rather than a single name.
-#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct UnitNames {
     /// systemd unit names.
     pub systemd: &'static [&'static str],
@@ -111,7 +111,7 @@ pub enum ServiceAction {
 }
 
 /// A service a module's files configure.
-#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct ServiceBinding {
     /// Names of the service per init system.
     pub units: UnitNames,
