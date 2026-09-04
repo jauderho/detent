@@ -523,7 +523,9 @@ impl<'a> Monitor<'a> {
 
     fn list_backups(&self, module: ModuleId) -> Response {
         match self.collect_backups(module) {
-            Ok(entries) => Response::Backups(entries.into_iter().map(|(info, _)| info).collect()),
+            Ok(entries) => {
+                Response::Backups(entries.into_iter().map(|(info, _, _)| info).collect())
+            }
             Err(response) => response,
         }
     }
@@ -533,14 +535,12 @@ impl<'a> Monitor<'a> {
             Ok(entries) => entries,
             Err(response) => return response,
         };
-        let Some((info, source)) = listing.get(usize::try_from(backup.get()).unwrap_or(usize::MAX))
+        let Some((info, source, target_path)) =
+            listing.get(usize::try_from(backup.get()).unwrap_or(usize::MAX))
         else {
             return unknown(IdKind::Backup, backup.get());
         };
-        let Some(entry) = self.allow.target(info.target) else {
-            return unknown(IdKind::Target, u32::from(info.target.get()));
-        };
-        match restore_backup(source, &entry.path) {
+        match restore_backup(source, target_path) {
             Ok(outcome) => Response::Restored {
                 target: info.target,
                 new_digest: outcome.new_digest,
@@ -550,29 +550,40 @@ impl<'a> Monitor<'a> {
     }
 
     /// The module's backups across all its targets, newest first, paired with
-    /// the on-disk path the worker never sees.
-    fn collect_backups(&self, module: ModuleId) -> Result<Vec<(BackupInfo, PathBuf)>, Response> {
+    /// the on-disk backup path and the live target path the worker never
+    /// sees. The target path travels with each row (captured while iterating
+    /// `self.allow.targets_of`) instead of being re-resolved by id later, so
+    /// [`restore`](Self::restore) can never observe an id that the allowlist
+    /// does not recognise.
+    fn collect_backups(
+        &self,
+        module: ModuleId,
+    ) -> Result<Vec<(BackupInfo, PathBuf, PathBuf)>, Response> {
         if self.allow.module(module).is_none() {
             return Err(unknown(IdKind::Module, u32::from(module.get())));
         }
-        let mut rows: Vec<(TargetId, BackupEntry)> = Vec::new();
+        let mut rows: Vec<(TargetId, PathBuf, BackupEntry)> = Vec::new();
         for target in self.allow.targets_of(module) {
             match list_backups(&target.backup_dir) {
-                Ok(entries) => rows.extend(entries.into_iter().map(|entry| (target.id, entry))),
+                Ok(entries) => rows.extend(
+                    entries
+                        .into_iter()
+                        .map(|entry| (target.id, target.path.clone(), entry)),
+                ),
                 Err(err) => return Err(Response::Error(atomic_to_proto(&err))),
             }
         }
         rows.sort_by(|left, right| {
             right
-                .1
+                .2
                 .created_utc
-                .cmp(&left.1.created_utc)
-                .then_with(|| left.1.path.cmp(&right.1.path))
+                .cmp(&left.2.created_utc)
+                .then_with(|| left.2.path.cmp(&right.2.path))
         });
         Ok(rows
             .into_iter()
             .enumerate()
-            .map(|(index, (target, entry))| {
+            .map(|(index, (target, target_path, entry))| {
                 let info = BackupInfo {
                     id: BackupId(u32::try_from(index).unwrap_or(u32::MAX)),
                     target,
@@ -589,7 +600,7 @@ impl<'a> Monitor<'a> {
                     digest: entry.digest,
                     len: entry.original_len,
                 };
-                (info, entry.path)
+                (info, entry.path, target_path)
             })
             .collect())
     }
@@ -649,14 +660,15 @@ impl<'a> Monitor<'a> {
 
     /// Roll back if the pending commit's deadline has passed.
     fn enforce_deadline(&mut self) -> Result<(), MonitorError> {
-        let expired = self
+        // `take_if` folds the "is anything pending" and "has it expired"
+        // checks into one atomic read-and-clear: there is no window between
+        // deciding a commit expired and taking it, so the "expired but
+        // nothing to take" state below is unrepresentable rather than merely
+        // unreached.
+        let Some(pending) = self
             .pending
-            .as_ref()
-            .is_some_and(|pending| Instant::now() >= pending.deadline);
-        if !expired {
-            return Ok(());
-        }
-        let Some(pending) = self.pending.take() else {
+            .take_if(|pending| Instant::now() >= pending.deadline)
+        else {
             return Ok(());
         };
         let restored = roll_back(&pending.entries);
@@ -844,7 +856,8 @@ mod tests {
         CheckRunner, ExitReason, HookError, Hooks, MAX_CONFIRM_TIMEOUT_S, Monitor,
         PENDING_COMMIT_MARKER, ServiceControl, finish_send_error,
     };
-    use crate::privsep::allowlist::{Allowlist, Config};
+    use crate::fs::atomic::AtomicError;
+    use crate::privsep::allowlist::{Allowlist, AllowlistError, Config};
     use crate::privsep::proto::{
         BackupId, BindingId, CheckId, CheckOutcome, CommitId, ModuleId, PROTO_VERSION, ProtoError,
         Request, Response, ServiceAction, ServiceOutcome, TargetId,
@@ -962,30 +975,23 @@ mod tests {
     }
 
     impl Fixture {
-        fn allow(&self) -> Allowlist {
+        fn allow(&self) -> Result<Allowlist, AllowlistError> {
             let module = descriptor(&self.target);
-            let Ok(allow) =
-                Allowlist::from_modules(&[module], &Config::with_state_root(&self.state_root))
-            else {
-                unreachable!("the fixture descriptor is valid")
-            };
-            allow
+            Allowlist::from_modules(&[module], &Config::with_state_root(&self.state_root))
         }
     }
 
-    fn fixture() -> Fixture {
-        let Ok(dir) = TempDir::new() else {
-            unreachable!("a temp dir must be creatable")
-        };
+    fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
+        let dir = TempDir::new()?;
         let root = dir.path().to_path_buf();
         let target = root.join("target.conf");
         assert!(std::fs::write(&target, b"v1").is_ok());
-        Fixture {
+        Ok(Fixture {
             state_root: root.join("state"),
             root,
             _dir: dir,
             target,
-        }
+        })
     }
 
     /// A monitor that has already completed the handshake, so `dispatch` can
@@ -1054,284 +1060,279 @@ mod tests {
     // -- getters and formatting ----------------------------------------------
 
     #[test]
-    fn getters_expose_the_allowlist_and_pending_state() {
-        let fx = fixture();
-        let monitor = greeted(fx.allow(), Hooks::default());
+    fn getters_expose_the_allowlist_and_pending_state() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let monitor = greeted(fx.allow()?, Hooks::default());
         assert_eq!(monitor.allowlist().module_id("fake"), Some(ModuleId(0)));
         assert!(!monitor.has_pending_commit());
+        Ok(())
     }
 
     #[test]
-    fn debug_format_of_the_monitor_does_not_panic() {
-        let fx = fixture();
-        let monitor = greeted(fx.allow(), Hooks::default());
+    fn debug_format_of_the_monitor_does_not_panic() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let monitor = greeted(fx.allow()?, Hooks::default());
         assert!(format!("{monitor:?}").contains("Hooks"));
+        Ok(())
     }
 
     // -- run_check ------------------------------------------------------------
 
     #[test]
-    fn run_check_reports_success_through_a_working_check_runner() {
-        let fx = fixture();
+    fn run_check_reports_success_through_a_working_check_runner()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
         let hooks = Hooks {
             checks: &OkChecks,
             services: &super::NoServices,
         };
-        let mut monitor = greeted(fx.allow(), hooks);
-        let Ok(response) = monitor.dispatch(Request::RunCheck {
+        let mut monitor = greeted(fx.allow()?, hooks);
+        let response = monitor.dispatch(Request::RunCheck {
             check: CheckId(0),
             bytes: b"candidate".to_vec(),
-        }) else {
-            unreachable!("dispatch never returns an error for a request failure")
-        };
+        })?;
         assert!(matches!(response, Response::Checked(outcome) if outcome.passed));
+        Ok(())
     }
 
     #[test]
-    fn run_check_maps_a_failed_hook_to_an_io_error() {
-        let fx = fixture();
+    fn run_check_maps_a_failed_hook_to_an_io_error() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
         let hooks = Hooks {
             checks: &FailingChecks,
             services: &super::NoServices,
         };
-        let mut monitor = greeted(fx.allow(), hooks);
-        let Ok(response) = monitor.dispatch(Request::RunCheck {
+        let mut monitor = greeted(fx.allow()?, hooks);
+        let response = monitor.dispatch(Request::RunCheck {
             check: CheckId(0),
             bytes: Vec::new(),
-        }) else {
-            unreachable!("dispatch never returns an error for a request failure")
-        };
+        })?;
         assert!(matches!(response, Response::Error(ProtoError::Io(_))));
+        Ok(())
     }
 
     #[test]
-    fn run_check_rejects_an_unknown_check_id() {
-        let fx = fixture();
-        let mut monitor = greeted(fx.allow(), Hooks::default());
-        let Ok(response) = monitor.dispatch(Request::RunCheck {
+    fn run_check_rejects_an_unknown_check_id() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        let response = monitor.dispatch(Request::RunCheck {
             check: CheckId(99),
             bytes: Vec::new(),
-        }) else {
-            unreachable!("dispatch never returns an error for a request failure")
-        };
+        })?;
         assert!(matches!(
             response,
             Response::Error(ProtoError::UnknownId { .. })
         ));
+        Ok(())
     }
 
     #[test]
-    fn run_check_reports_io_error_when_the_candidate_directory_cannot_be_created() {
-        let fx = fixture();
+    fn run_check_reports_io_error_when_the_candidate_directory_cannot_be_created()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
         // Plant a plain file where the candidate directory needs to go, so
         // `create_dir_all` fails with `ENOTDIR` instead of succeeding.
         assert!(std::fs::create_dir_all(&fx.state_root).is_ok());
         assert!(std::fs::write(fx.state_root.join("tmp"), b"not a directory").is_ok());
-        let mut monitor = greeted(fx.allow(), Hooks::default());
-        let Ok(response) = monitor.dispatch(Request::RunCheck {
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        let response = monitor.dispatch(Request::RunCheck {
             check: CheckId(0),
             bytes: Vec::new(),
-        }) else {
-            unreachable!("dispatch never returns an error for a request failure")
-        };
+        })?;
         assert!(matches!(response, Response::Error(ProtoError::Io(_))));
+        Ok(())
     }
 
     #[test]
-    fn run_check_reports_io_error_when_the_candidate_directory_is_not_writable() {
+    fn run_check_reports_io_error_when_the_candidate_directory_is_not_writable()
+    -> Result<(), Box<dyn std::error::Error>> {
         if rustix::process::geteuid().is_root() {
             // root ignores DAC, so the failure cannot be provoked this way.
-            return;
+            return Ok(());
         }
-        let fx = fixture();
+        let fx = fixture()?;
         let tmp_dir = fx.state_root.join("tmp");
         assert!(std::fs::create_dir_all(&tmp_dir).is_ok());
         assert!(std::fs::set_permissions(&tmp_dir, std::fs::Permissions::from_mode(0o500)).is_ok());
-        let mut monitor = greeted(fx.allow(), Hooks::default());
-        let Ok(response) = monitor.dispatch(Request::RunCheck {
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        let response = monitor.dispatch(Request::RunCheck {
             check: CheckId(0),
             bytes: Vec::new(),
-        }) else {
-            unreachable!("dispatch never returns an error for a request failure")
-        };
+        })?;
         assert!(std::fs::set_permissions(&tmp_dir, std::fs::Permissions::from_mode(0o700)).is_ok());
         assert!(matches!(response, Response::Error(ProtoError::Io(_))));
+        Ok(())
     }
 
     // -- service ----------------------------------------------------------------
 
     #[test]
-    fn service_reports_success_through_a_working_service_control() {
-        let fx = fixture();
+    fn service_reports_success_through_a_working_service_control()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
         let hooks = Hooks {
             checks: &super::NoChecks,
             services: &OkServices,
         };
-        let mut monitor = greeted(fx.allow(), hooks);
-        let Ok(response) = monitor.dispatch(Request::Service {
+        let mut monitor = greeted(fx.allow()?, hooks);
+        let response = monitor.dispatch(Request::Service {
             binding: BindingId(0),
             action: ServiceAction::Restart,
-        }) else {
-            unreachable!("dispatch never returns an error for a request failure")
-        };
+        })?;
         assert!(matches!(response, Response::Serviced(outcome) if outcome.active));
+        Ok(())
     }
 
     #[test]
-    fn service_maps_a_failed_hook_to_an_io_error() {
-        let fx = fixture();
+    fn service_maps_a_failed_hook_to_an_io_error() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
         let hooks = Hooks {
             checks: &super::NoChecks,
             services: &FailingServices,
         };
-        let mut monitor = greeted(fx.allow(), hooks);
-        let Ok(response) = monitor.dispatch(Request::Service {
+        let mut monitor = greeted(fx.allow()?, hooks);
+        let response = monitor.dispatch(Request::Service {
             binding: BindingId(0),
             action: ServiceAction::Restart,
-        }) else {
-            unreachable!("dispatch never returns an error for a request failure")
-        };
+        })?;
         assert!(matches!(response, Response::Error(ProtoError::Io(_))));
+        Ok(())
     }
 
     #[test]
-    fn service_rejects_an_unknown_binding_id() {
-        let fx = fixture();
-        let mut monitor = greeted(fx.allow(), Hooks::default());
-        let Ok(response) = monitor.dispatch(Request::Service {
+    fn service_rejects_an_unknown_binding_id() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        let response = monitor.dispatch(Request::Service {
             binding: BindingId(99),
             action: ServiceAction::Restart,
-        }) else {
-            unreachable!("dispatch never returns an error for a request failure")
-        };
+        })?;
         assert!(matches!(
             response,
             Response::Error(ProtoError::UnknownId { .. })
         ));
+        Ok(())
     }
 
     #[test]
-    fn service_status_is_not_implemented_yet() {
-        let fx = fixture();
-        let mut monitor = greeted(fx.allow(), Hooks::default());
-        let Ok(response) = monitor.dispatch(Request::Service {
+    fn service_status_is_not_implemented_yet() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        let response = monitor.dispatch(Request::Service {
             binding: BindingId(0),
             action: ServiceAction::Status,
-        }) else {
-            unreachable!("dispatch never returns an error for a request failure")
-        };
+        })?;
         assert!(matches!(
             response,
             Response::Error(ProtoError::Unsupported(_))
         ));
+        Ok(())
     }
 
     #[test]
-    fn service_rejects_an_action_the_binding_did_not_declare() {
-        let fx = fixture();
-        let mut monitor = greeted(fx.allow(), Hooks::default());
+    fn service_rejects_an_action_the_binding_did_not_declare()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
         // The fixture's binding only declares `Restart`.
-        let Ok(response) = monitor.dispatch(Request::Service {
+        let response = monitor.dispatch(Request::Service {
             binding: BindingId(0),
             action: ServiceAction::Stop,
-        }) else {
-            unreachable!("dispatch never returns an error for a request failure")
-        };
+        })?;
         assert!(matches!(
             response,
             Response::Error(ProtoError::ActionNotAllowed)
         ));
+        Ok(())
     }
 
     // -- read/write targets -----------------------------------------------------
 
     #[test]
-    fn read_target_reports_io_error_when_the_file_is_gone() {
-        let fx = fixture();
-        let mut monitor = greeted(fx.allow(), Hooks::default());
+    fn read_target_reports_io_error_when_the_file_is_gone() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
         assert!(std::fs::remove_file(&fx.target).is_ok());
-        let Ok(response) = monitor.dispatch(Request::ReadTarget {
+        let response = monitor.dispatch(Request::ReadTarget {
             target: TargetId(0),
-        }) else {
-            unreachable!("dispatch never returns an error for a request failure")
-        };
+        })?;
         assert!(matches!(response, Response::Error(ProtoError::Io(_))));
+        Ok(())
     }
 
     #[test]
-    fn write_target_rejects_an_unknown_target_id() {
-        let fx = fixture();
-        let mut monitor = greeted(fx.allow(), Hooks::default());
-        let Ok(response) = monitor.dispatch(Request::WriteTarget {
+    fn write_target_rejects_an_unknown_target_id() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        let response = monitor.dispatch(Request::WriteTarget {
             target: TargetId(99),
             expected_prev: None,
             bytes: b"x".to_vec(),
-        }) else {
-            unreachable!("dispatch never returns an error for a request failure")
-        };
+        })?;
         assert!(matches!(
             response,
             Response::Error(ProtoError::UnknownId { .. })
         ));
+        Ok(())
     }
 
     // -- backups and restore ------------------------------------------------
 
     #[test]
-    fn list_backups_rejects_an_unknown_module() {
-        let fx = fixture();
-        let mut monitor = greeted(fx.allow(), Hooks::default());
-        let Ok(response) = monitor.dispatch(Request::ListBackups {
+    fn list_backups_rejects_an_unknown_module() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        let response = monitor.dispatch(Request::ListBackups {
             module: ModuleId(99),
-        }) else {
-            unreachable!("dispatch never returns an error for a request failure")
-        };
+        })?;
         assert!(matches!(
             response,
             Response::Error(ProtoError::UnknownId { .. })
         ));
+        Ok(())
     }
 
     #[test]
-    fn restore_rejects_an_unknown_module() {
-        let fx = fixture();
-        let mut monitor = greeted(fx.allow(), Hooks::default());
-        let Ok(response) = monitor.dispatch(Request::Restore {
+    fn restore_rejects_an_unknown_module() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        let response = monitor.dispatch(Request::Restore {
             module: ModuleId(99),
             backup: BackupId(0),
-        }) else {
-            unreachable!("dispatch never returns an error for a request failure")
-        };
+        })?;
         assert!(matches!(
             response,
             Response::Error(ProtoError::UnknownId { .. })
         ));
+        Ok(())
     }
 
     #[test]
-    fn list_backups_reports_io_error_when_a_backup_is_unreadable() {
+    fn list_backups_reports_io_error_when_a_backup_is_unreadable()
+    -> Result<(), Box<dyn std::error::Error>> {
         if rustix::process::geteuid().is_root() {
-            return;
+            return Ok(());
         }
-        let fx = fixture();
-        let mut monitor = greeted(fx.allow(), Hooks::default());
-        let Ok(Response::Written(_)) = monitor.dispatch(Request::WriteTarget {
-            target: TargetId(0),
-            expected_prev: None,
-            bytes: b"v2".to_vec(),
-        }) else {
-            unreachable!("the fixture's target is writable")
-        };
-        let Some(entry) = monitor.allowlist().target(TargetId(0)) else {
-            unreachable!("the target this test just wrote to must resolve")
-        };
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        assert!(matches!(
+            monitor.dispatch(Request::WriteTarget {
+                target: TargetId(0),
+                expected_prev: None,
+                bytes: b"v2".to_vec(),
+            })?,
+            Response::Written(_)
+        ));
+        let entry = monitor
+            .allowlist()
+            .target(TargetId(0))
+            .ok_or("the target this test just wrote to must resolve")?;
         let backup_dir = entry.backup_dir.clone();
-        let Ok(mut entries) = std::fs::read_dir(&backup_dir) else {
-            unreachable!("the write above just created this directory")
-        };
-        let Some(Ok(backup_file)) = entries.next() else {
-            unreachable!("the write above just created exactly one backup file")
-        };
+        let mut entries = std::fs::read_dir(&backup_dir)?;
+        let backup_file = entries
+            .next()
+            .ok_or("the write above just created exactly one backup file")??;
         assert!(
             std::fs::set_permissions(backup_file.path(), std::fs::Permissions::from_mode(0o000))
                 .is_ok()
@@ -1343,64 +1344,66 @@ mod tests {
             std::fs::set_permissions(backup_file.path(), std::fs::Permissions::from_mode(0o600))
                 .is_ok()
         );
-        let Ok(response) = response else {
-            unreachable!("dispatch never returns an error for a request failure")
-        };
+        let response = response?;
         assert!(matches!(response, Response::Error(ProtoError::Io(_))));
+        Ok(())
     }
 
     #[test]
-    fn restore_reports_io_error_when_the_target_directory_is_not_writable() {
+    fn restore_reports_io_error_when_the_target_directory_is_not_writable()
+    -> Result<(), Box<dyn std::error::Error>> {
         if rustix::process::geteuid().is_root() {
-            return;
+            return Ok(());
         }
-        let fx = fixture();
-        let mut monitor = greeted(fx.allow(), Hooks::default());
-        let Ok(Response::Written(_)) = monitor.dispatch(Request::WriteTarget {
-            target: TargetId(0),
-            expected_prev: None,
-            bytes: b"v2".to_vec(),
-        }) else {
-            unreachable!("the fixture's target is writable")
-        };
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        assert!(matches!(
+            monitor.dispatch(Request::WriteTarget {
+                target: TargetId(0),
+                expected_prev: None,
+                bytes: b"v2".to_vec(),
+            })?,
+            Response::Written(_)
+        ));
         assert!(std::fs::set_permissions(&fx.root, std::fs::Permissions::from_mode(0o500)).is_ok());
         let response = monitor.dispatch(Request::Restore {
             module: ModuleId(0),
             backup: BackupId(0),
         });
         assert!(std::fs::set_permissions(&fx.root, std::fs::Permissions::from_mode(0o700)).is_ok());
-        let Ok(response) = response else {
-            unreachable!("dispatch never returns an error for a request failure")
-        };
+        let response = response?;
         assert!(matches!(response, Response::Error(ProtoError::Io(_))));
+        Ok(())
     }
 
     // -- commit-confirm -------------------------------------------------------
 
     #[test]
-    fn enforce_deadline_logs_and_counts_a_failed_rollback() {
+    fn enforce_deadline_logs_and_counts_a_failed_rollback() -> Result<(), Box<dyn std::error::Error>>
+    {
         install_tracing();
-        let fx = fixture();
-        let mut monitor = greeted(fx.allow(), Hooks::default());
-        let Ok(Response::Written(_)) = monitor.dispatch(Request::WriteTarget {
-            target: TargetId(0),
-            expected_prev: None,
-            bytes: b"v2".to_vec(),
-        }) else {
-            unreachable!("the fixture's target is writable")
-        };
-        let Some(entry) = monitor.allowlist().target(TargetId(0)) else {
-            unreachable!("the target this test just wrote to must resolve")
-        };
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        assert!(matches!(
+            monitor.dispatch(Request::WriteTarget {
+                target: TargetId(0),
+                expected_prev: None,
+                bytes: b"v2".to_vec(),
+            })?,
+            Response::Written(_)
+        ));
+        let entry = monitor
+            .allowlist()
+            .target(TargetId(0))
+            .ok_or("the target this test just wrote to must resolve")?;
         let backup_dir = entry.backup_dir.clone();
-        let Ok(Response::ConfirmTimerStarted { .. }) =
+        assert!(matches!(
             monitor.dispatch(Request::StartConfirmTimer {
                 commit: CommitId(1),
                 timeout_s: 1,
-            })
-        else {
-            unreachable!("no commit is pending yet")
-        };
+            })?,
+            Response::ConfirmTimerStarted { .. }
+        ));
         assert!(monitor.has_pending_commit());
         // Delete the backup the rollback needs, so it fails and is counted
         // rather than crashing the loop.
@@ -1408,47 +1411,49 @@ mod tests {
         std::thread::sleep(Duration::from_millis(1300));
         assert!(monitor.enforce_deadline().is_ok());
         assert!(!monitor.has_pending_commit());
+        Ok(())
     }
 
     #[test]
-    fn confirm_commit_and_start_confirm_timer_log_through_tracing() {
+    fn confirm_commit_and_start_confirm_timer_log_through_tracing()
+    -> Result<(), Box<dyn std::error::Error>> {
         install_tracing();
-        let fx = fixture();
-        let mut monitor = greeted(fx.allow(), Hooks::default());
-        let Ok(Response::Written(_)) = monitor.dispatch(Request::WriteTarget {
-            target: TargetId(0),
-            expected_prev: None,
-            bytes: b"v2".to_vec(),
-        }) else {
-            unreachable!("the fixture's target is writable")
-        };
-        let Ok(response) = monitor.dispatch(Request::StartConfirmTimer {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        assert!(matches!(
+            monitor.dispatch(Request::WriteTarget {
+                target: TargetId(0),
+                expected_prev: None,
+                bytes: b"v2".to_vec(),
+            })?,
+            Response::Written(_)
+        ));
+        let response = monitor.dispatch(Request::StartConfirmTimer {
             commit: CommitId(1),
             timeout_s: 1,
-        }) else {
-            unreachable!("no commit is pending yet")
-        };
+        })?;
         assert!(matches!(response, Response::ConfirmTimerStarted { .. }));
-        let Ok(response) = monitor.dispatch(Request::ConfirmCommit {
+        let response = monitor.dispatch(Request::ConfirmCommit {
             commit: CommitId(1),
-        }) else {
-            unreachable!("the commit just armed above is pending")
-        };
+        })?;
         assert!(matches!(response, Response::Committed { .. }));
         assert_eq!(MAX_CONFIRM_TIMEOUT_S, 3600);
+        Ok(())
     }
 
     #[test]
-    fn write_marker_reports_io_error_when_the_state_root_cannot_be_created() {
-        let fx = fixture();
-        let mut monitor = greeted(fx.allow(), Hooks::default());
-        let Ok(Response::Written(_)) = monitor.dispatch(Request::WriteTarget {
-            target: TargetId(0),
-            expected_prev: None,
-            bytes: b"v2".to_vec(),
-        }) else {
-            unreachable!("the fixture's target is writable")
-        };
+    fn write_marker_reports_io_error_when_the_state_root_cannot_be_created()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        assert!(matches!(
+            monitor.dispatch(Request::WriteTarget {
+                target: TargetId(0),
+                expected_prev: None,
+                bytes: b"v2".to_vec(),
+            })?,
+            Response::Written(_)
+        ));
         // Now that the backup exists, replace the state root with a plain
         // file, so `write_marker`'s `create_dir_all` fails with `ENOTDIR`
         // when `StartConfirmTimer` tries to record the pending commit.
@@ -1459,22 +1464,25 @@ mod tests {
             timeout_s: 1,
         });
         assert!(response.is_err());
+        Ok(())
     }
 
     #[test]
-    fn write_marker_reports_io_error_when_the_state_root_is_not_writable() {
+    fn write_marker_reports_io_error_when_the_state_root_is_not_writable()
+    -> Result<(), Box<dyn std::error::Error>> {
         if rustix::process::geteuid().is_root() {
-            return;
+            return Ok(());
         }
-        let fx = fixture();
-        let mut monitor = greeted(fx.allow(), Hooks::default());
-        let Ok(Response::Written(_)) = monitor.dispatch(Request::WriteTarget {
-            target: TargetId(0),
-            expected_prev: None,
-            bytes: b"v2".to_vec(),
-        }) else {
-            unreachable!("the fixture's target is writable")
-        };
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        assert!(matches!(
+            monitor.dispatch(Request::WriteTarget {
+                target: TargetId(0),
+                expected_prev: None,
+                bytes: b"v2".to_vec(),
+            })?,
+            Response::Written(_)
+        ));
         // `create_dir_all` on an already-existing directory is a no-op
         // success; making it read-only instead fails the marker *file*'s
         // own creation a step later, inside `write_private`.
@@ -1491,29 +1499,33 @@ mod tests {
                 .is_ok()
         );
         assert!(response.is_err());
+        Ok(())
     }
 
     // -- recover_pending ------------------------------------------------------
 
     #[test]
-    fn recover_pending_reports_none_when_no_marker_exists() {
-        let fx = fixture();
+    fn recover_pending_reports_none_when_no_marker_exists() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let fx = fixture()?;
         assert!(std::fs::create_dir_all(&fx.state_root).is_ok());
         assert_eq!(Monitor::recover_pending(&fx.state_root).ok(), Some(None));
+        Ok(())
     }
 
     #[test]
-    fn recover_pending_reports_a_corrupt_marker() {
-        let fx = fixture();
+    fn recover_pending_reports_a_corrupt_marker() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
         assert!(std::fs::create_dir_all(&fx.state_root).is_ok());
         let marker_path = fx.state_root.join(PENDING_COMMIT_MARKER);
         assert!(std::fs::write(&marker_path, b"not json").is_ok());
         assert!(Monitor::recover_pending(&fx.state_root).is_err());
+        Ok(())
     }
 
     #[test]
-    fn recover_pending_counts_a_failed_restore() {
-        let fx = fixture();
+    fn recover_pending_counts_a_failed_restore() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
         assert!(std::fs::create_dir_all(&fx.state_root).is_ok());
         let marker_path = fx.state_root.join(PENDING_COMMIT_MARKER);
         // A marker whose backup file does not exist: recovery must still
@@ -1527,17 +1539,15 @@ mod tests {
                 "backup": fx.root.join("no-such-backup"),
             }],
         });
-        let Ok(bytes) = serde_json::to_vec(&marker) else {
-            unreachable!("the marker above is valid JSON")
-        };
+        let bytes = serde_json::to_vec(&marker)?;
         assert!(std::fs::write(&marker_path, bytes).is_ok());
-        let Ok(Some(recovered)) = Monitor::recover_pending(&fx.state_root) else {
-            unreachable!("the marker written above must be found and parsed")
-        };
+        let recovered =
+            Monitor::recover_pending(&fx.state_root)?.ok_or("expected a recovered commit")?;
         assert_eq!(recovered.commit, CommitId(5));
         assert_eq!(recovered.restored, 0);
         assert_eq!(recovered.failures.len(), 1);
         assert!(!marker_path.is_file());
+        Ok(())
     }
 
     // -- finish_send_error ------------------------------------------------------
@@ -1566,178 +1576,177 @@ mod tests {
     // -- handshake gating -------------------------------------------------------
 
     #[test]
-    fn dispatch_requires_the_handshake_before_anything_else() {
-        let fx = fixture();
-        let mut monitor = Monitor::new(fx.allow(), Hooks::default());
-        let Ok(response) = monitor.dispatch(Request::ReadTarget {
+    fn dispatch_requires_the_handshake_before_anything_else()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = Monitor::new(fx.allow()?, Hooks::default());
+        let response = monitor.dispatch(Request::ReadTarget {
             target: TargetId(0),
-        }) else {
-            unreachable!("dispatch never returns an error for a request failure")
-        };
+        })?;
         assert!(matches!(
             response,
             Response::Error(ProtoError::HandshakeRequired)
         ));
+        Ok(())
     }
 
     #[test]
-    fn a_second_hello_is_a_handshake_error() {
-        let fx = fixture();
-        let mut monitor = greeted(fx.allow(), Hooks::default());
-        let Ok(response) = monitor.dispatch(Request::Hello {
+    fn a_second_hello_is_a_handshake_error() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        let response = monitor.dispatch(Request::Hello {
             proto: PROTO_VERSION,
-        }) else {
-            unreachable!("dispatch never returns an error for a request failure")
-        };
+        })?;
         assert!(matches!(
             response,
             Response::Error(ProtoError::HandshakeRequired)
         ));
+        Ok(())
     }
 
     // -- serve() ------------------------------------------------------------
 
     #[test]
-    fn serve_reports_peer_closed_when_the_worker_disconnects() {
-        let fx = fixture();
-        let mut monitor = Monitor::new(fx.allow(), Hooks::default());
-        let Ok((mut channel, worker_end)) = Channel::pair() else {
-            unreachable!("socketpair must succeed")
-        };
+    fn serve_reports_peer_closed_when_the_worker_disconnects()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = Monitor::new(fx.allow()?, Hooks::default());
+        let (mut channel, worker_end) = Channel::pair()?;
         drop(worker_end);
         assert_eq!(
             monitor.serve(&mut channel).ok(),
             Some(ExitReason::PeerClosed)
         );
+        Ok(())
     }
 
     #[test]
-    fn serve_surfaces_a_non_protocol_channel_error() {
-        let fx = fixture();
-        let mut monitor = Monitor::new(fx.allow(), Hooks::default());
-        let Ok((mut left, right)) = std::os::unix::net::UnixStream::pair() else {
-            unreachable!("socketpair must succeed")
-        };
-        let Ok(mut channel) =
-            Channel::with_timeouts(right, Duration::from_millis(30), Duration::from_millis(30))
-        else {
-            unreachable!("channel must wrap the socket")
-        };
+    fn serve_surfaces_a_non_protocol_channel_error() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = Monitor::new(fx.allow()?, Hooks::default());
+        let (mut left, right) = std::os::unix::net::UnixStream::pair()?;
+        let mut channel =
+            Channel::with_timeouts(right, Duration::from_millis(30), Duration::from_millis(30))?;
         // A 4-byte length header advertising a body that never arrives is a
         // mid-frame timeout: fatal, but neither a clean disconnect nor a
         // protocol violation, so `serve` must surface it as an `Err`.
         assert!(std::io::Write::write_all(&mut left, &8_u32.to_be_bytes()).is_ok());
         assert!(monitor.serve(&mut channel).is_err());
         drop(left);
+        Ok(())
     }
 
     // -- backup ordering ------------------------------------------------------
 
     #[test]
-    fn list_backups_orders_multiple_entries_newest_first() {
-        let fx = fixture();
-        let mut monitor = greeted(fx.allow(), Hooks::default());
-        let Ok(Response::Written(_)) = monitor.dispatch(Request::WriteTarget {
-            target: TargetId(0),
-            expected_prev: None,
-            bytes: b"v2".to_vec(),
-        }) else {
-            unreachable!("the fixture's target is writable")
-        };
-        let Ok(Response::Written(_)) = monitor.dispatch(Request::WriteTarget {
-            target: TargetId(0),
-            expected_prev: None,
-            bytes: b"v3".to_vec(),
-        }) else {
-            unreachable!("the fixture's target is writable")
-        };
-        let Ok(response) = monitor.dispatch(Request::ListBackups {
+    fn list_backups_orders_multiple_entries_newest_first() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        assert!(matches!(
+            monitor.dispatch(Request::WriteTarget {
+                target: TargetId(0),
+                expected_prev: None,
+                bytes: b"v2".to_vec(),
+            })?,
+            Response::Written(_)
+        ));
+        assert!(matches!(
+            monitor.dispatch(Request::WriteTarget {
+                target: TargetId(0),
+                expected_prev: None,
+                bytes: b"v3".to_vec(),
+            })?,
+            Response::Written(_)
+        ));
+        let response = monitor.dispatch(Request::ListBackups {
             module: ModuleId(0),
-        }) else {
-            unreachable!("dispatch never returns an error for a request failure")
-        };
+        })?;
         let Response::Backups(entries) = response else {
             unreachable!("ListBackups always answers with Response::Backups")
         };
         assert_eq!(entries.len(), 2);
+        Ok(())
     }
 
     // -- enforce_deadline / markers -------------------------------------------
 
     #[test]
-    fn enforce_deadline_is_a_no_op_before_the_deadline() {
-        let fx = fixture();
-        let mut monitor = greeted(fx.allow(), Hooks::default());
-        let Ok(Response::Written(_)) = monitor.dispatch(Request::WriteTarget {
-            target: TargetId(0),
-            expected_prev: None,
-            bytes: b"v2".to_vec(),
-        }) else {
-            unreachable!("the fixture's target is writable")
-        };
-        let Ok(Response::ConfirmTimerStarted { .. }) =
+    fn enforce_deadline_is_a_no_op_before_the_deadline() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        assert!(matches!(
+            monitor.dispatch(Request::WriteTarget {
+                target: TargetId(0),
+                expected_prev: None,
+                bytes: b"v2".to_vec(),
+            })?,
+            Response::Written(_)
+        ));
+        assert!(matches!(
             monitor.dispatch(Request::StartConfirmTimer {
                 commit: CommitId(1),
                 timeout_s: MAX_CONFIRM_TIMEOUT_S,
-            })
-        else {
-            unreachable!("no commit is pending yet")
-        };
+            })?,
+            Response::ConfirmTimerStarted { .. }
+        ));
         assert!(monitor.enforce_deadline().is_ok());
         assert!(monitor.has_pending_commit());
+        Ok(())
     }
 
     #[test]
-    fn confirm_commit_tolerates_a_marker_removed_out_of_band() {
-        let fx = fixture();
-        let mut monitor = greeted(fx.allow(), Hooks::default());
-        let Ok(Response::Written(_)) = monitor.dispatch(Request::WriteTarget {
-            target: TargetId(0),
-            expected_prev: None,
-            bytes: b"v2".to_vec(),
-        }) else {
-            unreachable!("the fixture's target is writable")
-        };
-        let Ok(Response::ConfirmTimerStarted { .. }) =
+    fn confirm_commit_tolerates_a_marker_removed_out_of_band()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        assert!(matches!(
+            monitor.dispatch(Request::WriteTarget {
+                target: TargetId(0),
+                expected_prev: None,
+                bytes: b"v2".to_vec(),
+            })?,
+            Response::Written(_)
+        ));
+        assert!(matches!(
             monitor.dispatch(Request::StartConfirmTimer {
                 commit: CommitId(1),
                 timeout_s: 1,
-            })
-        else {
-            unreachable!("no commit is pending yet")
-        };
+            })?,
+            Response::ConfirmTimerStarted { .. }
+        ));
         // `clear_marker` must tolerate the marker already being gone.
         assert!(std::fs::remove_file(fx.state_root.join(PENDING_COMMIT_MARKER)).is_ok());
-        let Ok(response) = monitor.dispatch(Request::ConfirmCommit {
+        let response = monitor.dispatch(Request::ConfirmCommit {
             commit: CommitId(1),
-        }) else {
-            unreachable!("dispatch never returns an error for a request failure")
-        };
+        })?;
         assert!(matches!(response, Response::Committed { .. }));
+        Ok(())
     }
 
     #[test]
-    fn confirm_commit_reports_io_error_when_the_marker_cannot_be_removed() {
+    fn confirm_commit_reports_io_error_when_the_marker_cannot_be_removed()
+    -> Result<(), Box<dyn std::error::Error>> {
         if rustix::process::geteuid().is_root() {
-            return;
+            return Ok(());
         }
-        let fx = fixture();
-        let mut monitor = greeted(fx.allow(), Hooks::default());
-        let Ok(Response::Written(_)) = monitor.dispatch(Request::WriteTarget {
-            target: TargetId(0),
-            expected_prev: None,
-            bytes: b"v2".to_vec(),
-        }) else {
-            unreachable!("the fixture's target is writable")
-        };
-        let Ok(Response::ConfirmTimerStarted { .. }) =
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        assert!(matches!(
+            monitor.dispatch(Request::WriteTarget {
+                target: TargetId(0),
+                expected_prev: None,
+                bytes: b"v2".to_vec(),
+            })?,
+            Response::Written(_)
+        ));
+        assert!(matches!(
             monitor.dispatch(Request::StartConfirmTimer {
                 commit: CommitId(1),
                 timeout_s: 1,
-            })
-        else {
-            unreachable!("no commit is pending yet")
-        };
+            })?,
+            Response::ConfirmTimerStarted { .. }
+        ));
         assert!(
             std::fs::set_permissions(&fx.state_root, std::fs::Permissions::from_mode(0o500))
                 .is_ok()
@@ -1750,14 +1759,16 @@ mod tests {
                 .is_ok()
         );
         assert!(response.is_err());
+        Ok(())
     }
 
     #[test]
-    fn recover_pending_reports_io_error_when_the_marker_is_unreadable() {
+    fn recover_pending_reports_io_error_when_the_marker_is_unreadable()
+    -> Result<(), Box<dyn std::error::Error>> {
         if rustix::process::geteuid().is_root() {
-            return;
+            return Ok(());
         }
-        let fx = fixture();
+        let fx = fixture()?;
         assert!(std::fs::create_dir_all(&fx.state_root).is_ok());
         let marker_path = fx.state_root.join(PENDING_COMMIT_MARKER);
         assert!(std::fs::write(&marker_path, b"{}").is_ok());
@@ -1769,14 +1780,16 @@ mod tests {
             std::fs::set_permissions(&marker_path, std::fs::Permissions::from_mode(0o600)).is_ok()
         );
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn recover_pending_reports_io_error_when_the_marker_cannot_be_removed() {
+    fn recover_pending_reports_io_error_when_the_marker_cannot_be_removed()
+    -> Result<(), Box<dyn std::error::Error>> {
         if rustix::process::geteuid().is_root() {
-            return;
+            return Ok(());
         }
-        let fx = fixture();
+        let fx = fixture()?;
         assert!(std::fs::create_dir_all(&fx.state_root).is_ok());
         let marker_path = fx.state_root.join(PENDING_COMMIT_MARKER);
         let marker = serde_json::json!({
@@ -1784,9 +1797,7 @@ mod tests {
             "deadline_unix_ms": 0,
             "entries": [],
         });
-        let Ok(bytes) = serde_json::to_vec(&marker) else {
-            unreachable!("the marker above is valid JSON")
-        };
+        let bytes = serde_json::to_vec(&marker)?;
         assert!(std::fs::write(&marker_path, bytes).is_ok());
         assert!(
             std::fs::set_permissions(&fx.state_root, std::fs::Permissions::from_mode(0o500))
@@ -1798,45 +1809,78 @@ mod tests {
                 .is_ok()
         );
         assert!(result.is_err());
+        Ok(())
     }
 
     // -- atomic_to_proto ------------------------------------------------------
+    //
+    // `RelativePath`, `BadDigest`, and `Clock` cannot flow out of any
+    // `crate::fs::atomic` call the monitor actually makes (target and backup
+    // paths are validated absolute at allowlist construction; digests never
+    // travel through `AtomicError` on the monitor's paths; the system clock
+    // is never adversarially controlled in these tests). `atomic_to_proto`
+    // is still a total function over every `AtomicError` variant, so it is
+    // exercised directly here rather than left dead.
 
     #[test]
-    fn read_target_maps_a_symlink_target_to_an_io_error() {
-        let fx = fixture();
+    fn atomic_to_proto_maps_relative_path_to_an_io_error() {
+        let err = AtomicError::RelativePath {
+            path: PathBuf::from("relative"),
+        };
+        assert!(matches!(super::atomic_to_proto(&err), ProtoError::Io(_)));
+    }
+
+    #[test]
+    fn atomic_to_proto_maps_bad_digest_to_an_io_error() {
+        assert!(matches!(
+            super::atomic_to_proto(&AtomicError::BadDigest),
+            ProtoError::Io(_)
+        ));
+    }
+
+    #[test]
+    fn atomic_to_proto_maps_clock_to_an_io_error() {
+        assert!(matches!(
+            super::atomic_to_proto(&AtomicError::Clock),
+            ProtoError::Io(_)
+        ));
+    }
+
+    #[test]
+    fn read_target_maps_a_symlink_target_to_an_io_error() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let fx = fixture()?;
         assert!(std::fs::remove_file(&fx.target).is_ok());
         let elsewhere = fx.root.join("elsewhere");
         assert!(std::fs::write(&elsewhere, b"x").is_ok());
         #[cfg(unix)]
         assert!(std::os::unix::fs::symlink(&elsewhere, &fx.target).is_ok());
-        let mut monitor = greeted(fx.allow(), Hooks::default());
-        let Ok(response) = monitor.dispatch(Request::ReadTarget {
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        let response = monitor.dispatch(Request::ReadTarget {
             target: TargetId(0),
-        }) else {
-            unreachable!("dispatch never returns an error for a request failure")
-        };
+        })?;
         assert!(matches!(response, Response::Error(ProtoError::Io(_))));
+        Ok(())
     }
 
     #[test]
-    fn read_target_maps_a_directory_target_to_an_io_error() {
-        let fx = fixture();
+    fn read_target_maps_a_directory_target_to_an_io_error() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let fx = fixture()?;
         assert!(std::fs::remove_file(&fx.target).is_ok());
         assert!(std::fs::create_dir_all(&fx.target).is_ok());
-        let mut monitor = greeted(fx.allow(), Hooks::default());
-        let Ok(response) = monitor.dispatch(Request::ReadTarget {
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        let response = monitor.dispatch(Request::ReadTarget {
             target: TargetId(0),
-        }) else {
-            unreachable!("dispatch never returns an error for a request failure")
-        };
+        })?;
         assert!(matches!(response, Response::Error(ProtoError::Io(_))));
+        Ok(())
     }
 
     // -- truncate ---------------------------------------------------------------
 
     #[test]
-    fn run_check_truncates_an_overlong_detail() {
+    fn run_check_truncates_an_overlong_detail() -> Result<(), Box<dyn std::error::Error>> {
         struct Verbose(String);
         impl CheckRunner for Verbose {
             fn run_check(
@@ -1852,7 +1896,7 @@ mod tests {
                 })
             }
         }
-        let fx = fixture();
+        let fx = fixture()?;
         // A 3-byte-per-character string so the 512-byte cut point lands
         // mid-character (512 is not a multiple of 3), exercising the
         // char-boundary backoff loop, not just the byte-length cap.
@@ -1862,19 +1906,18 @@ mod tests {
             checks: &verbose,
             services: &super::NoServices,
         };
-        let mut monitor = greeted(fx.allow(), hooks);
-        let Ok(response) = monitor.dispatch(Request::RunCheck {
+        let mut monitor = greeted(fx.allow()?, hooks);
+        let response = monitor.dispatch(Request::RunCheck {
             check: CheckId(0),
             bytes: Vec::new(),
-        }) else {
-            unreachable!("dispatch never returns an error for a request failure")
-        };
+        })?;
         let Response::Checked(outcome) = response else {
             unreachable!("RunCheck always answers with Response::Checked here")
         };
         assert!(outcome.detail.len() <= 512);
         assert!(outcome.detail.len() > 512 - 3);
         assert!(outcome.detail.is_char_boundary(outcome.detail.len()));
+        Ok(())
     }
 
     // -- misc ---------------------------------------------------------------

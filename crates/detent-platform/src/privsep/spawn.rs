@@ -323,10 +323,9 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn wait_reports_an_invalid_pid_without_calling_waitpid() {
-        let Ok((channel, _peer)) = Channel::pair() else {
-            unreachable!("socketpair must succeed")
-        };
+    fn wait_reports_an_invalid_pid_without_calling_waitpid()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (channel, _peer) = Channel::pair()?;
         // `Pid::from_raw` rejects 0 and negative values; no real fork ever
         // produces one, but `MonitorHandle`'s fields are public, so a
         // malformed handle is directly constructible for this edge case.
@@ -338,6 +337,7 @@ mod tests {
             handle.wait().err().map(|err| err.kind()),
             Some(std::io::ErrorKind::InvalidInput)
         );
+        Ok(())
     }
 
     struct Refuses;
@@ -410,7 +410,7 @@ mod tests {
     /// The real thing: fork, speak the protocol across the process boundary,
     /// and reap the child.
     #[test]
-    fn spawn_pair_forks_a_working_pair() {
+    fn spawn_pair_forks_a_working_pair() -> Result<(), Box<dyn std::error::Error>> {
         let uid_before = rustix::process::geteuid().as_raw();
         let config = SpawnConfig {
             // Never drop privileges in the test suite, even when it runs as
@@ -419,9 +419,7 @@ mod tests {
             read_timeout: Duration::from_secs(10),
             write_timeout: Duration::from_secs(10),
         };
-        let Ok(spawned) = spawn_pair(&config, &NoSandbox) else {
-            unreachable!("spawn_pair must succeed")
-        };
+        let spawned = spawn_pair(&config, &NoSandbox)?;
         assert!(!spawned.dropped_privileges);
 
         match spawned.role {
@@ -436,9 +434,7 @@ mod tests {
             }
             Role::Monitor(handle) => {
                 let mut handle = handle;
-                let Ok(allow) = Allowlist::from_modules(&[], &Config::default()) else {
-                    unreachable!("an empty allow-list is valid")
-                };
+                let allow = Allowlist::from_modules(&[], &Config::default())?;
                 let mut monitor = Monitor::new(allow, Hooks::default());
                 let reason = monitor.serve(&mut handle.channel);
                 assert_eq!(reason.ok(), Some(ExitReason::Shutdown));
@@ -446,5 +442,58 @@ mod tests {
                 assert!(handle.child_pid > 0);
             }
         }
+        Ok(())
+    }
+
+    /// The privileged path: `spawn_pair_forks_a_working_pair` above always
+    /// passes `worker_user: None`, so `sys::drop_to`, the root branch of
+    /// `resolve_worker_account`, and `become_worker`'s `Some(credentials)`
+    /// branch are never exercised there — those lines only run when the
+    /// monitor actually starts as root with a worker account configured.
+    /// Skips cleanly (not a failure) when not root, which is the normal case
+    /// on a developer machine and in most CI jobs; the privileged CI job runs
+    /// this in a container as root with the `detent` system account
+    /// provisioned (see PLAN §6.1 `privileged-tests.yml`), which is also how
+    /// to reproduce it locally: `docker run --rm -v "$PWD:/src" -w /src
+    /// rust:1-bookworm bash -c "useradd -r detent && cargo test -p
+    /// detent-platform --all-features"`.
+    #[test]
+    fn spawn_pair_drops_to_the_worker_account_when_root() -> Result<(), Box<dyn std::error::Error>>
+    {
+        if !is_root() {
+            return Ok(());
+        }
+        let config = SpawnConfig {
+            // The documented default account (PLAN §2.10); the privileged CI
+            // job and the reproduction command above both provision it.
+            worker_user: Some(DEFAULT_WORKER_USER.to_owned()),
+            read_timeout: Duration::from_secs(10),
+            write_timeout: Duration::from_secs(10),
+        };
+        let spawned = spawn_pair(&config, &NoSandbox)?;
+        assert!(spawned.dropped_privileges);
+
+        match spawned.role {
+            Role::Worker(mut client) => {
+                // Child, now running as the unprivileged `detent` account.
+                // Anything that goes wrong here must not run the test
+                // harness's exit handlers, or the parent sees a duplicated
+                // test report.
+                let ok = !rustix::process::geteuid().is_root()
+                    && client.hello().is_ok()
+                    && client.shutdown().is_ok();
+                super::abort_child(i32::from(!ok));
+            }
+            Role::Monitor(handle) => {
+                let mut handle = handle;
+                let allow = Allowlist::from_modules(&[], &Config::default())?;
+                let mut monitor = Monitor::new(allow, Hooks::default());
+                let reason = monitor.serve(&mut handle.channel);
+                assert_eq!(reason.ok(), Some(ExitReason::Shutdown));
+                assert_eq!(handle.wait().ok(), Some(Some(0)));
+                assert!(handle.child_pid > 0);
+            }
+        }
+        Ok(())
     }
 }
