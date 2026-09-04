@@ -13,6 +13,7 @@ publish = false
 # permits `#[allow(unsafe_code)]` on individual items backed by a `// SAFETY:`
 # comment. All other lints mirror [workspace.lints] exactly.
 [lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
 unsafe_code = "deny"
 missing_docs = "warn"
 unused_must_use = "deny"

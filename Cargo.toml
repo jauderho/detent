@@ -33,6 +33,7 @@ license = "BSD-3-Clause"
 repository = "https://github.com/jauderho/detent"
 
 [workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
 unsafe_code = "forbid"
 missing_docs = "warn"
 unused_must_use = "deny"

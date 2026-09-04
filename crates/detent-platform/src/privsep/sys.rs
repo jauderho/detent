@@ -38,6 +38,18 @@ unsafe extern "C" {
     fn _exit(status: c_int) -> !;
 }
 
+// Under `cargo llvm-cov` only (it compiles with `--cfg=coverage`). LLVM's
+// instrumentation flushes a process's counters from an `atexit` handler, which
+// `_exit` deliberately skips — so without this, every line a forked child runs
+// reads as uncovered even though it demonstrably executed. Calling the
+// runtime's own writer just before `_exit` records what actually ran. This is
+// measurement only: production builds have no `coverage` cfg, so neither the
+// declaration nor the call exists in them.
+#[cfg(coverage)]
+unsafe extern "C" {
+    fn __llvm_profile_write_file() -> c_int;
+}
+
 /// Which side of a [`fork_process`] this is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
@@ -111,9 +123,34 @@ pub fn drop_to(uid: u32, gid: u32) -> std::io::Result<()> {
 /// `atexit` handlers.
 ///
 /// This is what a forked child must use when it decides not to continue: the
-/// handlers registered in the parent belong to the parent's state.
-pub fn exit_immediately(status: c_int) -> ! {
+/// handlers registered in the parent belong to the parent's state. This
+/// variant writes nothing at all, so it is the only safe choice once a
+/// seccomp filter is installed.
+pub fn exit_immediately_unflushed(status: c_int) -> ! {
     // SAFETY: `_exit` is async-signal-safe by definition and never returns.
     // It takes a scalar and dereferences nothing.
     unsafe { _exit(status) }
+}
+
+/// `_exit(2)` for a child that is *not* confined, flushing the coverage
+/// profile first under `cfg(coverage)`.
+///
+/// Prefer this in a forked child unless a sandbox is already installed. A
+/// confined child must use [`exit_immediately_unflushed`]: writing the profile
+/// needs `openat`/`write`, which the seccomp filter denies, so the flush would
+/// kill the child before it could report its own exit status.
+pub fn exit_immediately(status: c_int) -> ! {
+    // Coverage-only, and deliberately before `_exit`: see the declaration
+    // above. The production path below is unchanged and stays
+    // async-signal-safe, because this call does not exist without `--cfg
+    // coverage`.
+    #[cfg(coverage)]
+    // SAFETY: `__llvm_profile_write_file` is the profiling runtime's own
+    // writer, linked in whenever `-C instrument-coverage` is active, which is
+    // exactly when `cfg(coverage)` is set. It takes no arguments and
+    // dereferences nothing this code owns.
+    unsafe {
+        __llvm_profile_write_file();
+    }
+    exit_immediately_unflushed(status)
 }
