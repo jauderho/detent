@@ -71,6 +71,7 @@ static CATALOGUE: &[LocaleSource] = &[LocaleSource {
     files: &[
         include_str!("../../../locales/en-US/core.ftl"),
         include_str!("../../../locales/en-US/web.ftl"),
+        include_str!("../../../locales/en-US/cli.ftl"),
     ],
 }];
 
