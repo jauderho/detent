@@ -463,6 +463,12 @@ mod tests {
         if !is_root() {
             return Ok(());
         }
+        // Root alone is not enough: the account must also exist. A CI runner or
+        // a bare container is often root without a `detent` user, and this test
+        // must skip there rather than fail on the environment.
+        if crate::privsep::users::lookup_user(DEFAULT_WORKER_USER).is_err() {
+            return Ok(());
+        }
         let config = SpawnConfig {
             // The documented default account (PLAN §2.10); the privileged CI
             // job and the reproduction command above both provision it.
