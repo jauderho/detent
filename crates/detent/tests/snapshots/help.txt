@@ -1,0 +1,33 @@
+detent: the busybox of config files
+
+Usage: detent [OPTIONS] <COMMAND>
+
+Commands:
+  serve        Start the privileged monitor and the unprivileged worker
+  config       Read, check, preview and write one module's configuration
+  commit       Confirm or roll back a pending commit-confirm window
+  service      Query or drive the service a module owns
+  backup       List and restore the backups the monitor retains
+  audit        Read the audit log back
+  host         Report the detected host profile and facts
+  doctor       Check this host for common misconfigurations
+  completions  Print a shell completion script
+
+Options:
+      --dryrun             Print what would happen without making changes
+  -v, --verbose            Emit step-level progress and key variable state on stderr
+      --json               Emit machine-readable JSON on stdout instead of human text
+      --config <PATH>      Path to detent.toml (default: /etc/detent/detent.toml)
+      --locale <TAG>       BCP-47 locale tag for messages (default: from the locale environment)
+      --state-root <PATH>  Root of detent's mutable state (default: /var/lib/detent)
+  -h, --help               Print help
+  -V, --version            Print version
+
+Exit codes:
+  0  success
+  1  the operation failed
+  2  usage error (bad arguments, malformed JSON on stdin)
+  3  permission or privilege problem
+
+Every command reads its model from stdin as JSON where one is needed, and
+writes JSON to stdout under --json.
