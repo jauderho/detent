@@ -135,8 +135,11 @@ pub enum ArgTemplate {
 pub enum CheckExpectation {
     /// The program must exit 0.
     ExitZero,
-    /// The program's output must match this regular expression. Compiled and applied
-    /// by the platform layer; the core carries the pattern only.
+    /// The program's output must contain this literal substring. Matching is a
+    /// plain substring search, not a regular expression: the core deliberately
+    /// carries no regex engine (PLAN §2.3), and the platform layer applies the
+    /// pattern as-is. Do not write anchors or metacharacters here — `^Loaded`
+    /// looks for a literal caret.
     StdoutPattern(&'static str),
 }
 
@@ -443,7 +446,7 @@ mod tests {
         ExternalCheck {
             program: PathSpec::new("/usr/bin/testparm"),
             args: &[ArgTemplate::Literal("-s")],
-            expects: CheckExpectation::StdoutPattern("^Loaded services"),
+            expects: CheckExpectation::StdoutPattern("Loaded services"),
         },
     ];
 
@@ -526,7 +529,7 @@ mod tests {
         assert_eq!(
             json.pointer("/checks/1/expects/stdout_pattern")
                 .and_then(|v| v.as_str()),
-            Some("^Loaded services")
+            Some("Loaded services")
         );
         assert_eq!(
             json.pointer("/upstream/tracked_version")
