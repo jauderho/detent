@@ -11,3 +11,14 @@ publish = false
 workspace = true
 
 [dependencies]
+detent-core = { path = "../detent-core" }
+detent-platform = { path = "../detent-platform" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }
