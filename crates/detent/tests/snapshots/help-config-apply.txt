@@ -1,0 +1,43 @@
+Write a model read from stdin
+
+Usage: detent config <MODULE> apply [OPTIONS]
+
+Options:
+      --dryrun
+          Print what would happen without making changes
+
+      --service <ACTION>
+          What to do to the module's service afterwards
+
+          Possible values:
+          - restart: Full restart
+          - reload:  Reload configuration in place
+          - start:   Start a stopped unit
+          - stop:    Stop a running unit
+          - none:    Leave the service alone
+          
+          [default: none]
+
+      --confirm <DURATION>
+          Arm commit-confirm for this long, e.g. `90s` or `2m`
+
+  -v, --verbose
+          Emit step-level progress and key variable state on stderr
+
+      --expect-hash <HEX>
+          Refuse to write unless the file still hashes to this (64 hex chars)
+
+      --json
+          Emit machine-readable JSON on stdout instead of human text
+
+      --config <PATH>
+          Path to detent.toml (default: /etc/detent/detent.toml)
+
+      --locale <TAG>
+          BCP-47 locale tag for messages (default: from the locale environment)
+
+      --state-root <PATH>
+          Root of detent's mutable state (default: /var/lib/detent)
+
+  -h, --help
+          Print help (see a summary with '-h')

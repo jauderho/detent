@@ -1,66 +1,208 @@
-//! detent binary: clap CLI, wiring, feature gates.
+//! `detent`: the command-line front end (PLAN §2.6, Phase 3 task 3).
+//!
+//! ```text
+//! argv ──▶ cli (clap)  ──▶ run  ──▶ Operation ──▶ OpsEngine ──▶ monitor
+//!                           │                         │
+//!                           └──▶ output ◀─── OpOutcome ┘
+//! ```
+//!
+//! * [`cli`] is the command tree and nothing else;
+//! * [`run`] turns one parsed command into one [`detent_ops::Operation`], starts
+//!   the privsep monitor it needs, and executes it;
+//! * [`output`] renders the result, as pretty JSON under `--json` or as
+//!   localized text otherwise;
+//! * [`doctor`], [`serve`] and [`completions`] are the three commands that do
+//!   not go through the operations layer, each for a documented reason.
+//!
+//! # Every user-facing string is a Fluent id
+//!
+//! PLAN §4.3 admits no hardcoded English in an output path, and
+//! `no_bare_english_in_output` (in this module) fails the build if one appears
+//! in a `println!`/`eprintln!`/`write!` in this crate. The single documented
+//! exception is clap's own `--help`/`--version` text, which is fixed at type
+//! definition time, long before a locale exists; see [`cli`].
+//!
+//! # Exit codes
+//!
+//! `0` success, `1` the operation failed, `2` usage error, `3` permission or
+//! privilege problem. Also in `detent --help` and in [`output::Exit`].
+//!
+//! # Out of scope for this task
+//!
+//! PLAN §2.6 also lists `setup`, `install`, `cert`, `update`, `user` and
+//! `token`. `setup` writes the first administrator's credentials, which belong
+//! with Phase 4's auth work; `install` would duplicate `packaging/install.sh`;
+//! the rest front operations (`CertStatus`, `UpdateCheck`, auth admin) that
+//! `detent-ops` deliberately does not define yet (`detent_ops::op`).
 
 // Both crypto features may be enabled (so `--all-features` builds); when both
 // are present `crypto-aws-lc` takes precedence, mirroring rustls' own policy.
 #[cfg(not(any(feature = "crypto-aws-lc", feature = "crypto-ring")))]
 compile_error!("one of crypto-aws-lc or crypto-ring must be enabled");
 
-use clap::{Parser, Subcommand};
+mod cli;
+mod completions;
+mod doctor;
+mod i18n;
+mod output;
+mod run;
+mod serve;
+#[cfg(test)]
+mod tests_support;
+
+use std::io::Write as _;
+use std::process::ExitCode;
+
+use clap::Parser as _;
+
+use crate::cli::Cli;
+use crate::run::Streams;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// detent: the busybox of config files.
-#[derive(Parser)]
-#[command(
-    name = "detent",
-    version,
-    about = "detent: the busybox of config files"
-)]
-struct Cli {
-    /// Print what would happen without making changes.
-    #[arg(long, global = true)]
-    dryrun: bool,
+fn main() -> ExitCode {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            // clap owns this text (see `cli`): `--help` and `--version` are a
+            // successful run, anything else is a usage error.
+            let _ = error.print();
+            return ExitCode::from(if error.use_stderr() {
+                output::Exit::Usage.code()
+            } else {
+                output::Exit::Ok.code()
+            });
+        }
+    };
 
-    /// Emit step-level progress and key variable state.
-    #[arg(short = 'v', long, global = true)]
-    verbose: bool,
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    let mut input = stdin.lock();
+    let mut out = stdout.lock();
+    let mut notes = stderr.lock();
 
-    #[command(subcommand)]
-    command: Command,
-}
-
-/// Top-level subcommands.
-#[derive(Subcommand)]
-enum Command {
-    /// Check the host environment for common misconfigurations.
-    Doctor,
-}
-
-fn main() {
-    let cli = Cli::parse();
-
-    // --dryrun and --verbose are accepted but not yet wired to behavior.
-    if cli.verbose {
-        eprintln!("detent: verbose logging is not implemented yet");
-    }
-    if cli.dryrun {
-        eprintln!("detent: --dryrun has no effect yet (no mutating operations exist)");
-    }
-
-    match cli.command {
-        Command::Doctor => println!("detent doctor: not implemented"),
-    }
+    let exit = run::run(
+        &cli,
+        &mut Streams {
+            input: &mut input,
+            out: &mut out,
+            notes: &mut notes,
+        },
+    );
+    let _ = out.flush();
+    let _ = notes.flush();
+    ExitCode::from(exit.code())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command};
-    use clap::Parser;
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
 
+    type R = Result<(), Box<dyn std::error::Error>>;
+
+    /// Every `.rs` file in this crate's `src/`.
+    fn sources() -> Result<Vec<(PathBuf, String)>, std::io::Error> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(root)? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|ext| ext == "rs") {
+                let text = std::fs::read_to_string(&path)?;
+                out.push((path, text));
+            }
+        }
+        assert!(out.len() >= 8, "the source walk found almost nothing");
+        Ok(out)
+    }
+
+    /// The part of a line before `//`, so a comment never trips the scanners.
+    fn code_of(line: &str) -> &str {
+        line.split("//").next().unwrap_or("")
+    }
+
+    /// The id prefix, assembled so this file's own scanner cannot match the
+    /// literal that describes it.
+    const PREFIX: &str = concat!("cli", "-");
+
+    /// PLAN §4.3: no hardcoded user-facing English. A printing macro may only
+    /// interpolate an already-localized value, never carry prose of its own, so
+    /// its format string must contain no ASCII letters outside `{…}`.
+    ///
+    /// `completions.rs` is exempt and named here rather than silently skipped:
+    /// it emits bash/zsh/fish syntax, which is a program for another program,
+    /// not a sentence for a person.
     #[test]
-    fn parses_doctor_subcommand() {
-        let cli = Cli::parse_from(["detent", "doctor"]);
-        assert!(matches!(cli.command, Command::Doctor));
+    fn no_bare_english_in_output() -> R {
+        for (path, text) in sources()? {
+            if path.ends_with("completions.rs") {
+                continue;
+            }
+            // Test modules build their own fixtures and assert on literals.
+            let code = text.split("#[cfg(test)]").next().unwrap_or("");
+            for (number, line) in code.lines().enumerate() {
+                let Some(rest) = [
+                    "println!(",
+                    "eprintln!(",
+                    "print!(",
+                    "eprint!(",
+                    "write!(",
+                    "writeln!(",
+                ]
+                .into_iter()
+                .find_map(|name| code_of(line).split_once(name))
+                .map(|(_, rest)| rest) else {
+                    continue;
+                };
+                let Some(literal) = rest.split('"').nth(1) else {
+                    continue;
+                };
+                let prose: String = literal
+                    .split('{')
+                    .filter_map(|chunk| chunk.split('}').next_back())
+                    .collect();
+                assert!(
+                    !prose.chars().any(|c| c.is_ascii_alphabetic()),
+                    "{}:{} prints hardcoded text: {literal:?}",
+                    path.display(),
+                    number.saturating_add(1),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Every CLI id the crate uses is defined in `locales/en-US/cli.ftl`, and
+    /// every id defined there is used. A missing id renders as itself at a user;
+    /// an unused one is a translation somebody wrote for nothing.
+    #[test]
+    fn cli_message_ids_and_the_catalogue_agree() -> R {
+        let needle = format!("MessageId::new({}", '"');
+        let mut used: BTreeSet<String> = BTreeSet::new();
+        for (_, text) in sources()? {
+            for (index, _) in text.match_indices(&needle) {
+                let rest = text
+                    .get(index.saturating_add(needle.len())..)
+                    .unwrap_or_default();
+                if let Some(id) = rest.split('"').next().filter(|id| id.starts_with(PREFIX)) {
+                    used.insert(id.to_owned());
+                }
+            }
+        }
+        let defined: BTreeSet<String> = crate::i18n::CLI_FTL
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .map(|(key, _)| key.trim().to_owned())
+            .filter(|key| key.starts_with(PREFIX))
+            .collect();
+
+        assert!(!used.is_empty() && !defined.is_empty());
+        let missing: Vec<&String> = used.difference(&defined).collect();
+        let unused: Vec<&String> = defined.difference(&used).collect();
+        assert!(missing.is_empty(), "undefined in cli.ftl: {missing:?}");
+        assert!(unused.is_empty(), "defined but never used: {unused:?}");
+        Ok(())
     }
 }

@@ -17,12 +17,24 @@ workspace = true
 [dependencies]
 mimalloc = { workspace = true }
 clap = { workspace = true }
+fluent-bundle = { workspace = true }
+rustix = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+unic-langid = { workspace = true }
 
+detent-core = { path = "../detent-core" }
+detent-i18n = { path = "../detent-i18n" }
 detent-modules = { path = "../detent-modules" }
+detent-ops = { path = "../detent-ops" }
+detent-platform = { path = "../detent-platform" }
 detent-web = { path = "../detent-web", optional = true }
 detent-acme = { path = "../detent-acme", optional = true }
 detent-update = { path = "../detent-update", optional = true }
 detent-mcp = { path = "../detent-mcp", optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [features]
 # Every module is reached through the `detent-modules` registry facade (PLAN

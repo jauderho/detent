@@ -219,11 +219,21 @@ version = "0.0.1"
 dependencies = [
  "clap",
  "detent-acme",
+ "detent-core",
+ "detent-i18n",
  "detent-mcp",
  "detent-modules",
+ "detent-ops",
+ "detent-platform",
  "detent-update",
  "detent-web",
+ "fluent-bundle",
  "mimalloc",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "unic-langid",
 ]
 
 [[package]]
