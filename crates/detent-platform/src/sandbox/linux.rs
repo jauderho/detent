@@ -214,64 +214,14 @@ mod tests {
     use detent_core::diag::MessageId;
     use std::path::Path;
 
-    /// A private `fork`/`_exit` pair, scoped to this test module.
-    ///
-    /// `privsep::sys::fork_process`/`exit_immediately` do exactly this and
-    /// are the crate's normal place for it — but that module is `mod sys`
-    /// (private to `privsep`, not `pub(crate)`), so it is not reachable from
-    /// `sandbox`, and this task's allowed diff does not include
-    /// `privsep/mod.rs`. This duplicates the same two `extern "C"`
-    /// declarations with the same `// SAFETY:` reasoning and the same
-    /// isolation discipline (one small module, every `unsafe` commented)
-    /// rather than inventing a different one.
-    #[allow(unsafe_code)]
-    mod fork {
-        use std::ffi::c_int;
-
-        unsafe extern "C" {
-            fn fork() -> c_int;
-            fn _exit(status: c_int) -> !;
-        }
-
-        /// Which side of a [`fork_process`] this is.
-        pub enum Side {
-            /// The original process; carries the child's pid.
-            Parent(i32),
-            /// The new process.
-            Child,
-        }
-
-        /// `fork(2)`.
-        ///
-        /// # Safety
-        ///
-        /// As `privsep::sys::fork_process`: call before any thread pool or
-        /// runtime starts, and treat the child as async-signal-safe
-        /// territory only.
-        pub unsafe fn fork_process() -> std::io::Result<Side> {
-            // SAFETY: `fork` takes no arguments and touches no memory this
-            // process owns; the only hazard is what the caller does
-            // afterward in the child, which is this function's own `unsafe`
-            // contract.
-            let pid = unsafe { fork() };
-            if pid < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(if pid == 0 {
-                Side::Child
-            } else {
-                Side::Parent(pid)
-            })
-        }
-
-        /// `_exit(2)`: terminate immediately, without unwinding, flushing,
-        /// or running `atexit`/test-harness teardown.
-        pub fn exit_immediately(status: c_int) -> ! {
-            // SAFETY: `_exit` is async-signal-safe by definition, never
-            // returns, and dereferences nothing.
-            unsafe { _exit(status) }
-        }
-    }
+    // Forking helpers come from `privsep::sys`, the crate's single home for
+    // `unsafe` POSIX calls. These children exit via
+    // `exit_immediately_unflushed`, never `exit_immediately`: by the time they
+    // exit they are confined, and writing a coverage profile needs `openat`
+    // and `write`, which the installed seccomp filter denies. That is also why
+    // the lines a confined child executes cannot be recorded — see
+    // `coverage-baseline.json`.
+    use crate::privsep::sys as fork;
 
     const fn always(_: &HostProfile) -> bool {
         true
@@ -292,7 +242,7 @@ mod tests {
     /// [`confine`] runs it here instead of in the test-harness thread
     /// directly — the same reason `privsep::spawn`'s own tests fork
     /// (`spawn_pair_forks_a_working_pair`). `f` reports success as `bool`;
-    /// `exit_immediately` is used instead of a normal return so the child
+    /// `exit_immediately_unflushed` is used instead of a normal return so the child
     /// never runs the parent's `atexit`/test harness teardown.
     fn in_forked_child(f: impl FnOnce() -> bool) -> Result<(), Box<dyn std::error::Error>> {
         // SAFETY: forking before starting any thread pool or runtime, and
@@ -302,7 +252,7 @@ mod tests {
         match side {
             fork::Side::Child => {
                 let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or(false);
-                fork::exit_immediately(i32::from(!ok));
+                fork::exit_immediately_unflushed(i32::from(!ok));
             }
             fork::Side::Parent(pid) => {
                 let Some(pid) = rustix::process::Pid::from_raw(pid) else {
@@ -524,17 +474,17 @@ mod tests {
                     .join(format!("detent-sandbox-kill-{}", std::process::id()));
                 let _ = std::fs::create_dir_all(&dir);
                 let allow = fixture_allowlist(&dir).unwrap_or_else(|_| {
-                    fork::exit_immediately(2);
+                    fork::exit_immediately_unflushed(2);
                 });
                 if confine(Role::Monitor, &Policy::monitor(&allow)).is_err() {
-                    fork::exit_immediately(3);
+                    fork::exit_immediately_unflushed(3);
                 }
                 // Not on the monitor's allow-list; the monitor's default
                 // action is `SCMP_ACT_KILL_PROCESS`, so this must never
                 // return.
                 #[allow(unsafe_code)]
                 let _ = unsafe { libc_ptrace_traceme() };
-                fork::exit_immediately(4);
+                fork::exit_immediately_unflushed(4);
             }
             fork::Side::Parent(pid) => {
                 let Some(pid) = rustix::process::Pid::from_raw(pid) else {
@@ -578,7 +528,7 @@ mod tests {
                         .send(&Request::Shutdown)
                         .and_then(|()| channel.recv::<Response>())
                         .is_ok_and(|r| matches!(r, Response::ShuttingDown));
-                fork::exit_immediately(i32::from(!ok));
+                fork::exit_immediately_unflushed(i32::from(!ok));
             }
             fork::Side::Parent(pid) => {
                 drop(worker_end);

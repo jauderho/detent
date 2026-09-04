@@ -15,4 +15,4 @@ pub mod transport;
 pub mod users;
 pub mod worker;
 
-mod sys;
+pub(crate) mod sys;
