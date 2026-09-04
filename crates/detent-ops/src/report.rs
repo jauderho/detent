@@ -225,6 +225,16 @@ pub enum OpOutcome {
         /// The commit that is now final.
         commit_id: CommitId,
     },
+    /// Answer to `RollbackCommit`. A sibling of [`OpOutcome::CommitConfirmed`]
+    /// rather than a reuse of it: a rollback also reports how many targets
+    /// were restored, which a confirmation — nothing was written back — has
+    /// no counterpart for.
+    RolledBack {
+        /// The commit that was rolled back.
+        commit_id: CommitId,
+        /// How many targets were actually restored.
+        restored: u16,
+    },
     /// Answer to `ListBackups`.
     Backups(Vec<BackupInfo>),
     /// Answer to `Restore`.
@@ -351,6 +361,23 @@ mod tests {
         );
         assert!(format!("{outcome:?}").contains("CommitConfirmed"));
         assert!(format!("{:?}", outcome.clone()).contains('4'));
+
+        let rolled_back = OpOutcome::RolledBack {
+            commit_id: CommitId(5),
+            restored: 2,
+        };
+        let json = serde_json::to_value(&rolled_back)?;
+        assert_eq!(
+            json.pointer("/rolled_back/commit_id")
+                .and_then(serde_json::Value::as_u64),
+            Some(5)
+        );
+        assert_eq!(
+            json.pointer("/rolled_back/restored")
+                .and_then(serde_json::Value::as_u64),
+            Some(2)
+        );
+        assert!(format!("{rolled_back:?}").contains("RolledBack"));
         Ok(())
     }
 

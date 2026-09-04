@@ -133,9 +133,14 @@ pub enum Operation {
         /// The id [`Operation::Apply`] returned.
         commit_id: CommitId,
     },
-    /// Roll a pending commit back immediately. See
-    /// [`OpsError::Unsupported`](crate::OpsError::Unsupported): the privsep
-    /// protocol has no such request yet.
+    /// Roll a pending commit back immediately, restoring every write made
+    /// since it was armed and clearing the monitor's pending-commit marker,
+    /// instead of waiting for the deadline. A second call for the same
+    /// commit, or one that arrives after the deadline already rolled it back
+    /// on its own, fails the same way
+    /// [`Operation::ConfirmCommit`] does once nothing is pending:
+    /// [`OpsError::Privsep`](crate::OpsError::Privsep) wrapping a
+    /// `ProtoError::UnknownId`.
     RollbackCommit {
         /// The id [`Operation::Apply`] returned.
         commit_id: CommitId,

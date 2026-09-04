@@ -459,6 +459,86 @@ fn confirm_commit_within_the_window_keeps_the_change() -> TestResult {
 }
 
 #[test]
+fn rollback_commit_restores_the_backup_and_clears_the_marker() -> TestResult {
+    let fx = fixture(b"v1")?;
+    let allow = fx.allow()?;
+    let state_root = allow.state_root().to_path_buf();
+    let (mut client, handle) = spawn_client(allow)?;
+    let target = target_id(&client, &fx);
+    let v1_digest = read_with_digest(&fx.target)?.1;
+
+    client.write_target(target, Some(v1_digest), b"v2".to_vec())?;
+    assert_eq!(std::fs::read(&fx.target)?, b"v2");
+    client.start_confirm_timer(CommitId(9), CONFIRM_TIMEOUT_S)?;
+    assert!(state_root.join(PENDING_COMMIT_MARKER).is_file());
+
+    let (commit, restored) = client.rollback_commit(CommitId(9))?;
+    assert_eq!(commit, CommitId(9));
+    assert_eq!(restored, 1);
+    assert_eq!(std::fs::read(&fx.target)?, b"v1");
+    assert!(!state_root.join(PENDING_COMMIT_MARKER).is_file());
+
+    // A second rollback for the same id finds nothing pending: it must not
+    // restore again, and must not resurrect the marker.
+    let repeat = client.rollback_commit(CommitId(9));
+    assert!(matches!(
+        repeat,
+        Err(ClientError::Remote(ProtoError::UnknownId { .. }))
+    ));
+    assert!(!state_root.join(PENDING_COMMIT_MARKER).is_file());
+
+    // Even past the original window, nothing further happens: the manual
+    // rollback already discharged the pending commit.
+    std::thread::sleep(PAST_CONFIRM_DEADLINE);
+    assert_eq!(std::fs::read(&fx.target)?, b"v1");
+
+    client.shutdown()?;
+    join_shutdown(handle);
+    Ok(())
+}
+
+#[test]
+fn rollback_commit_rejects_an_id_that_was_never_armed() -> TestResult {
+    let fx = fixture(b"v1")?;
+    let (mut client, handle) = spawn_client(fx.allow()?)?;
+
+    let response = client.rollback_commit(CommitId(42));
+    assert!(matches!(
+        response,
+        Err(ClientError::Remote(ProtoError::UnknownId { .. }))
+    ));
+
+    client.shutdown()?;
+    join_shutdown(handle);
+    Ok(())
+}
+
+#[test]
+fn rollback_commit_after_the_deadline_already_fired_finds_nothing_pending() -> TestResult {
+    let fx = fixture(b"v1")?;
+    let (mut client, handle) = spawn_client(fx.allow()?)?;
+    let target = target_id(&client, &fx);
+    let v1_digest = read_with_digest(&fx.target)?.1;
+
+    client.write_target(target, Some(v1_digest), b"v2".to_vec())?;
+    client.start_confirm_timer(CommitId(2), CONFIRM_TIMEOUT_S)?;
+
+    // Let the timer itself take the pending state and roll back first.
+    std::thread::sleep(PAST_CONFIRM_DEADLINE);
+    assert_eq!(std::fs::read(&fx.target)?, b"v1");
+
+    let response = client.rollback_commit(CommitId(2));
+    assert!(matches!(
+        response,
+        Err(ClientError::Remote(ProtoError::UnknownId { .. }))
+    ));
+
+    client.shutdown()?;
+    join_shutdown(handle);
+    Ok(())
+}
+
+#[test]
 fn recover_pending_restores_after_a_simulated_crash() -> TestResult {
     let fx = fixture(b"v1")?;
     let allow = fx.allow()?;

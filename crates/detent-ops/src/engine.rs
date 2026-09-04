@@ -11,19 +11,21 @@
 //!   module's backend target and to validate against the installed versions;
 //! * an **[`AuditSink`]** and an **[`Authz`]** policy.
 //!
-//! # Two deliberate deviations, both documented at their call sites
+//! # One deliberate deviation, documented at its call site
 //!
 //! * [`Operation::ServiceStatus`] does **not** go through the monitor. The
 //!   privsep protocol answers `ProtoError::Unsupported` for
 //!   `ServiceAction::Status` (`privsep::monitor`), and querying a unit's state
 //!   needs no privilege, so the engine asks a [`ServiceManager`] directly.
 //!   Every *mutating* service action still goes through the monitor.
-//! * [`Operation::RollbackCommit`] reports
-//!   [`OpsError::Unsupported`]. The protocol has `StartConfirmTimer` and
-//!   `ConfirmCommit` but no "roll back now" request, and PLAN §2.5 is explicit
-//!   that the monitor owns rollback — reimplementing it here out of the backup
-//!   listing would duplicate the state machine that keeps a headless box
-//!   recoverable. An unconfirmed commit still rolls back on its own deadline.
+//!
+//! [`Operation::RollbackCommit`] is not a deviation: it forwards to the
+//! monitor's `Request::RollbackCommit` exactly as [`Operation::ConfirmCommit`]
+//! forwards to `Request::ConfirmCommit`. PLAN §2.5 is explicit that the
+//! monitor owns rollback, so the engine never reimplements the restore out of
+//! the backup listing here — it only relays the request. An unconfirmed
+//! commit still rolls back on its own deadline whether or not anything ever
+//! calls [`Operation::RollbackCommit`].
 
 use std::time::Duration;
 
@@ -216,10 +218,14 @@ impl OpsEngine {
                 let commit = self.client.confirm_commit(commit_id).map_err(map_client)?;
                 Ok(OpOutcome::CommitConfirmed { commit_id: commit })
             }
-            Operation::RollbackCommit { .. } => Err(OpsError::Unsupported {
-                what: "rollback_commit: the privsep protocol has no immediate-rollback request; \
-                       an unconfirmed commit rolls back at its deadline",
-            }),
+            Operation::RollbackCommit { commit_id } => {
+                let (commit, restored) =
+                    self.client.rollback_commit(commit_id).map_err(map_client)?;
+                Ok(OpOutcome::RolledBack {
+                    commit_id: commit,
+                    restored,
+                })
+            }
             Operation::ListBackups { id } => {
                 let module = module_id(&self.client, find_module(&self.modules, &id)?)?;
                 let backups = self.client.list_backups(module).map_err(map_client)?;

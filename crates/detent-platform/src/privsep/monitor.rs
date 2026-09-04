@@ -393,6 +393,7 @@ impl<'a> Monitor<'a> {
                 self.start_confirm_timer(commit, timeout_s)?
             }
             Request::ConfirmCommit { commit } => self.confirm_commit(commit)?,
+            Request::RollbackCommit { commit } => self.rollback_commit(commit)?,
             Request::Mount { .. } => Response::Error(ProtoError::Unsupported(
                 "mount requires the module-mounts feature".to_owned(),
             )),
@@ -658,6 +659,32 @@ impl<'a> Monitor<'a> {
         }
     }
 
+    /// Roll a pending commit back immediately, on request rather than at its
+    /// deadline. Mirrors [`Self::confirm_commit`], inverted: a hit restores
+    /// every recorded write instead of discarding the rollback.
+    ///
+    /// `take_if` gives the same atomic read-and-clear [`Self::enforce_deadline`]
+    /// relies on, so a second `RollbackCommit` for the same id — or one that
+    /// arrives after the deadline already took and rolled back the pending
+    /// state — finds nothing pending and answers `unknown`, never restoring
+    /// twice.
+    fn rollback_commit(&mut self, commit: CommitId) -> Result<Response, MonitorError> {
+        let Some(pending) = self.pending.take_if(|pending| pending.commit == commit) else {
+            return Ok(unknown(IdKind::Commit, commit.get()));
+        };
+        let restored = roll_back(&pending.entries);
+        self.clear_marker()?;
+        tracing::warn!(
+            commit = commit.get(),
+            restored,
+            "commit rolled back on request"
+        );
+        Ok(Response::RolledBack {
+            commit,
+            restored: u16::try_from(restored).unwrap_or(u16::MAX),
+        })
+    }
+
     /// Roll back if the pending commit's deadline has passed.
     fn enforce_deadline(&mut self) -> Result<(), MonitorError> {
         // `take_if` folds the "is anything pending" and "has it expired"
@@ -859,8 +886,8 @@ mod tests {
     use crate::fs::atomic::AtomicError;
     use crate::privsep::allowlist::{Allowlist, AllowlistError, Config};
     use crate::privsep::proto::{
-        BackupId, BindingId, CheckId, CheckOutcome, CommitId, ModuleId, PROTO_VERSION, ProtoError,
-        Request, Response, ServiceAction, ServiceOutcome, TargetId,
+        BackupId, BindingId, CheckId, CheckOutcome, CommitId, IdKind, ModuleId, PROTO_VERSION,
+        ProtoError, Request, Response, ServiceAction, ServiceOutcome, TargetId,
     };
     use crate::privsep::transport::{Channel, ChannelError};
     use detent_core::descriptor::{
@@ -1438,6 +1465,138 @@ mod tests {
         })?;
         assert!(matches!(response, Response::Committed { .. }));
         assert_eq!(MAX_CONFIRM_TIMEOUT_S, 3600);
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_commit_restores_the_target_and_clears_the_marker()
+    -> Result<(), Box<dyn std::error::Error>> {
+        install_tracing();
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        assert!(matches!(
+            monitor.dispatch(Request::WriteTarget {
+                target: TargetId(0),
+                expected_prev: None,
+                bytes: b"v2".to_vec(),
+            })?,
+            Response::Written(_)
+        ));
+        assert!(matches!(
+            monitor.dispatch(Request::StartConfirmTimer {
+                commit: CommitId(1),
+                timeout_s: MAX_CONFIRM_TIMEOUT_S,
+            })?,
+            Response::ConfirmTimerStarted { .. }
+        ));
+        assert!(fx.state_root.join(PENDING_COMMIT_MARKER).is_file());
+
+        let response = monitor.dispatch(Request::RollbackCommit {
+            commit: CommitId(1),
+        })?;
+        assert!(matches!(
+            response,
+            Response::RolledBack { commit, restored } if commit == CommitId(1) && restored == 1
+        ));
+        assert!(!monitor.has_pending_commit());
+        assert_eq!(std::fs::read(&fx.target)?, b"v1");
+        assert!(!fx.state_root.join(PENDING_COMMIT_MARKER).is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_commit_is_idempotent() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        assert!(matches!(
+            monitor.dispatch(Request::WriteTarget {
+                target: TargetId(0),
+                expected_prev: None,
+                bytes: b"v2".to_vec(),
+            })?,
+            Response::Written(_)
+        ));
+        assert!(matches!(
+            monitor.dispatch(Request::StartConfirmTimer {
+                commit: CommitId(1),
+                timeout_s: MAX_CONFIRM_TIMEOUT_S,
+            })?,
+            Response::ConfirmTimerStarted { .. }
+        ));
+        assert!(matches!(
+            monitor.dispatch(Request::RollbackCommit {
+                commit: CommitId(1),
+            })?,
+            Response::RolledBack { .. }
+        ));
+        // The same request a second time finds nothing pending: it must not
+        // restore again.
+        let repeat = monitor.dispatch(Request::RollbackCommit {
+            commit: CommitId(1),
+        })?;
+        assert!(matches!(
+            repeat,
+            Response::Error(ProtoError::UnknownId {
+                kind: IdKind::Commit,
+                ..
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_commit_rejects_an_id_that_was_never_armed() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        let response = monitor.dispatch(Request::RollbackCommit {
+            commit: CommitId(1),
+        })?;
+        assert!(matches!(
+            response,
+            Response::Error(ProtoError::UnknownId {
+                kind: IdKind::Commit,
+                ..
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_commit_after_the_deadline_already_fired_answers_unknown()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        assert!(matches!(
+            monitor.dispatch(Request::WriteTarget {
+                target: TargetId(0),
+                expected_prev: None,
+                bytes: b"v2".to_vec(),
+            })?,
+            Response::Written(_)
+        ));
+        assert!(matches!(
+            monitor.dispatch(Request::StartConfirmTimer {
+                commit: CommitId(1),
+                timeout_s: 1,
+            })?,
+            Response::ConfirmTimerStarted { .. }
+        ));
+        std::thread::sleep(Duration::from_millis(1300));
+        assert!(monitor.enforce_deadline().is_ok());
+        assert!(!monitor.has_pending_commit());
+        assert_eq!(std::fs::read(&fx.target)?, b"v1");
+
+        let response = monitor.dispatch(Request::RollbackCommit {
+            commit: CommitId(1),
+        })?;
+        assert!(matches!(
+            response,
+            Response::Error(ProtoError::UnknownId {
+                kind: IdKind::Commit,
+                ..
+            })
+        ));
         Ok(())
     }
 

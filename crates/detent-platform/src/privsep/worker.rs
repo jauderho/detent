@@ -307,6 +307,22 @@ impl Client {
         }
     }
 
+    /// Roll a pending commit back immediately, instead of waiting for its
+    /// deadline. Returns the commit and how many targets were restored.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::read_target`]; [`ProtoError::UnknownId`] when nothing is
+    /// armed under that id — the same answer a second call for the same
+    /// commit gets, or a call after the deadline already rolled it back on
+    /// its own.
+    pub fn rollback_commit(&mut self, commit: CommitId) -> Result<(CommitId, u16), ClientError> {
+        match self.checked_call(&Request::RollbackCommit { commit })? {
+            Response::RolledBack { commit, restored } => Ok((commit, restored)),
+            other => Err(unexpected("RolledBack", &other)),
+        }
+    }
+
     /// Ask the monitor to exit.
     ///
     /// # Errors
@@ -367,6 +383,7 @@ const fn variant_name(response: &Response) -> &'static str {
         Response::Committed { .. } => "Committed",
         Response::ShuttingDown => "ShuttingDown",
         Response::Error(_) => "Error",
+        Response::RolledBack { .. } => "RolledBack",
     }
 }
 
@@ -682,13 +699,32 @@ mod tests {
     #[test]
     fn shutdown_reports_unexpected_for_a_wrong_response() -> Result<(), Box<dyn std::error::Error>>
     {
-        let (mut client, handle) = client_with_scripted_reply(Response::Committed {
+        let (mut client, handle) = client_with_scripted_reply(Response::RolledBack {
             commit: CommitId(0),
+            restored: 0,
         })?;
         assert!(matches!(
             client.shutdown(),
             Err(ClientError::Unexpected {
                 want: "ShuttingDown",
+                got: "RolledBack"
+            })
+        ));
+        drop(client);
+        let _ = handle.join();
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_commit_reports_unexpected_for_a_wrong_response()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut client, handle) = client_with_scripted_reply(Response::Committed {
+            commit: CommitId(0),
+        })?;
+        assert!(matches!(
+            client.rollback_commit(CommitId(0)),
+            Err(ClientError::Unexpected {
+                want: "RolledBack",
                 got: "Committed"
             })
         ));
