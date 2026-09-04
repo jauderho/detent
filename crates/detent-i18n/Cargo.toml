@@ -11,3 +11,6 @@ publish = false
 workspace = true
 
 [dependencies]
+detent-core = { path = "../detent-core" }
+fluent-bundle = { workspace = true }
+unic-langid = { workspace = true }
