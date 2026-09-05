@@ -72,6 +72,44 @@ tempfile = "3.27.0"
 tracing = "0.1.44"
 unic-langid = "0.9.6"
 
+# Web front (PLAN §2.6, §2.7). Every entry here is pinned to the newest release
+# that clears the 7-day cooldown of §6.4; do not bump one without re-checking
+# its publication date.
+axum = "0.8.9"
+getrandom = "0.4.3"
+hyper = { version = "1.11.1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1.20", features = [
+    "server-auto",
+    "server-graceful",
+    "service",
+    "tokio",
+] }
+# `default-features = false`: rcgen's defaults link `ring` even in an aws-lc
+# build (PLAN §4.2), and CI asserts `cargo tree -i ring` is empty by default.
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto"] }
+# No `tls12`: TLS 1.2 is not compiled into the shipped binary at all (§2.7).
+rustls = { version = "0.23.43", default-features = false, features = [
+    "logging",
+    "std",
+] }
+tokio = { version = "1.53.1", features = [
+    "rt-multi-thread",
+    "net",
+    "time",
+    "sync",
+    "macros",
+    "io-util",
+    "signal",
+] }
+tokio-rustls = { version = "0.26.4", default-features = false }
+toml = { version = "1.1.4", default-features = false, features = [
+    "parse",
+    "serde",
+    "std",
+] }
+tower = "0.5.3"
+tower-http = { version = "0.7.0", features = ["timeout"] }
+
 [profile.release]
 opt-level = "z"
 lto = "fat"

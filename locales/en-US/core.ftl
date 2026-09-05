@@ -45,3 +45,18 @@ ops-no-service = `{$module}` controls no service on this host, so it cannot be r
 ops-audit-failed = the audit log could not be read: {$reason}
 ops-unsupported = {$what} is not supported in this build.
 ops-denied = you are not permitted to do that.
+
+## detent-web — configuration, TLS, the operations bridge, and the listener
+web-config-unreadable = `{$path}` could not be read: {$reason}
+web-config-malformed = `{$path}` is not a valid detent configuration: {$reason}
+web-config-zero-value = `{$field}` must be greater than zero.
+web-config-weak-argon2 = `auth.argon2.m_kib` is {$m}, below the minimum of {$min} kib.
+web-tls-generate-failed = the bootstrap certificate could not be generated: {$reason}
+web-tls-key-rejected = the certificate and its private key were rejected: {$reason}
+web-tls-no-provider = this build has no usable tls crypto provider.
+web-tls-store-unreadable = `{$path}` could not be read: {$reason}
+web-tls-store-unwritable = `{$path}` could not be prepared for writing: {$reason}
+web-tls-store-write-failed = `{$path}` could not be written: {$reason}
+web-engine-stopped = the operations engine is no longer running; retry once the service is back.
+web-server-bind-failed = `{$addr}` could not be listened on: {$reason}
+web-server-address-unknown = the listening address could not be read back: {$reason}
