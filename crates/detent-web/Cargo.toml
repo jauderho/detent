@@ -11,3 +11,39 @@ publish = false
 workspace = true
 
 [dependencies]
+detent-core = { path = "../detent-core" }
+detent-ops = { path = "../detent-ops" }
+detent-platform = { path = "../detent-platform" }
+
+axum = { workspace = true }
+getrandom = { workspace = true }
+hyper-util = { workspace = true }
+rcgen = { workspace = true }
+rustls = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+toml = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# `tls12` is switched on for **test builds only**. Cargo unifies features per
+# package across dependency kinds, so the library under `cargo test` gains TLS
+# 1.2 support while `cargo build` still cannot speak it. That is exactly what
+# makes `a_tls12_only_client_is_refused` meaningful: the client is capable of
+# TLS 1.2 and the server still refuses it, rather than the handshake failing
+# because the code was never compiled in.
+rustls = { workspace = true, features = ["tls12"] }
+tempfile = { workspace = true }
+tower = { workspace = true }
+
+[features]
+default = ["crypto-aws-lc"]
+# rustls provider selection (PLAN §2.2). At least one is required; when both
+# are on, aws-lc-rs wins at run time so `--all-features` still builds.
+crypto-aws-lc = ["rustls/aws_lc_rs", "tokio-rustls/aws_lc_rs", "rcgen/aws_lc_rs"]
+crypto-ring = ["rustls/ring", "tokio-rustls/ring", "rcgen/ring"]
