@@ -101,6 +101,9 @@ hyper-util = { version = "0.1.20", features = [
 # `default-features = false`: rcgen's defaults link `ring` even in an aws-lc
 # build (PLAN §4.2), and CI asserts `cargo tree -i ring` is empty by default.
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto"] }
+# Embeds `web/dist` behind detent-web's `ui` feature (PLAN §2.6, §4.2), off
+# by default until Phase 5 gives that directory something to embed.
+rust-embed = { version = "8.12.0", features = ["include-exclude"] }
 # No `tls12`: TLS 1.2 is not compiled into the shipped binary at all (§2.7).
 rustls = { version = "0.23.43", default-features = false, features = [
     "logging",
