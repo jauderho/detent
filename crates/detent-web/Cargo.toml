@@ -21,6 +21,8 @@ getrandom = { workspace = true }
 hmac = { workspace = true }
 hyper-util = { workspace = true }
 rcgen = { workspace = true }
+# Only pulled in by the `ui` feature (PLAN §4.2); see `src/spa.rs`.
+rust-embed = { workspace = true, optional = true }
 rustls = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -66,3 +68,6 @@ default = ["crypto-aws-lc"]
 # are on, aws-lc-rs wins at run time so `--all-features` still builds.
 crypto-aws-lc = ["rustls/aws_lc_rs", "tokio-rustls/aws_lc_rs", "rcgen/aws_lc_rs"]
 crypto-ring = ["rustls/ring", "tokio-rustls/ring", "rcgen/ring"]
+# Embeds `web/dist` into the binary (PLAN §2.6, §4.2). Off by default: that
+# directory does not exist until Phase 5 builds it. See `src/spa.rs`.
+ui = ["dep:rust-embed"]

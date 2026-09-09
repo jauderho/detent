@@ -3,7 +3,8 @@
 /target
 **/target
 node_modules
-web/dist
+web/dist/*
+!web/dist/.gitkeep
 web/coverage
 *.profraw
 lcov.info

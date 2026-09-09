@@ -4,7 +4,8 @@
 //! This crate is the web front end's *foundation*: configuration, a TLS 1.3
 //! listener with a reloadable certificate, the §2.7 security headers, and the
 //! bridge from async handlers to the synchronous operations engine.
-//! Authentication, sessions, CSRF and the `/api/v1` surface build on top of it.
+//! Authentication, sessions, CSRF, the `/api/v1` surface and the embedded SPA
+//! build on top of it.
 //!
 //! ```text
 //!   detent.toml ──▶ Config ─┬─▶ tls::load_or_bootstrap ──▶ CertStore ──┐
@@ -32,6 +33,9 @@
 //!   privsep socket, so no runtime worker ever blocks on it. See [`engine`].
 //! * **`/healthz` reveals nothing.** Unauthenticated, constant body, no
 //!   version string. See [`server::healthz`].
+//! * **The SPA never serves a path outside its embedded set**, because no
+//!   path is ever joined to a directory — there is nothing to traverse out
+//!   of. See [`spa`].
 //!
 //! # Crypto provider
 //!
@@ -55,13 +59,15 @@ pub mod engine;
 pub mod error;
 pub mod headers;
 pub mod server;
+pub mod spa;
 pub mod state;
 pub mod tls;
 
 use axum::Router;
 
 /// Assemble the whole HTTP surface: `/healthz`, `/api/v1/auth/*` and the rest
-/// of `/api/v1/*`, behind the CSRF guard.
+/// of `/api/v1/*` behind the CSRF guard, and the embedded SPA behind
+/// everything else.
 ///
 /// Deliberately **not** wrapped in [`server::harden`]: [`server::Server::bind`]
 /// applies that layer itself, once, around whatever router it is given.
@@ -70,16 +76,25 @@ use axum::Router;
 /// `tower::ServiceExt::oneshot` — rather than through `Server::bind` — should
 /// apply [`server::harden`] itself, exactly as the fixtures in
 /// [`auth::routes`] and [`csrf`] do.
+///
+/// [`spa::routes`] is merged last: it is the only piece here with a
+/// [`axum::Router::fallback`], and it must sit after `/healthz` and
+/// `/api/**` in matching order so a reader can see, by the order they are
+/// merged, that either of those wins over the app shell for any path they
+/// register — even though axum matches an exact route over a fallback
+/// regardless of merge order.
 pub fn router(state: state::AppState) -> Router {
-    server::healthz().merge(
-        auth::routes::routes()
-            .merge(api::routes())
-            .layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                csrf::csrf_guard,
-            ))
-            .with_state(state),
-    )
+    server::healthz()
+        .merge(
+            auth::routes::routes()
+                .merge(api::routes())
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    csrf::csrf_guard,
+                ))
+                .with_state(state),
+        )
+        .merge(spa::routes())
 }
 
 pub use config::{
@@ -95,3 +110,54 @@ pub use tls::{
     CertStore, CertifiedKeyPair, TlsError, bootstrap_self_signed, fingerprint,
     install_crypto_provider, load_or_bootstrap, server_config, server_config_from_store,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::router;
+    use crate::state::test_state;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt as _;
+
+    type R = Result<(), Box<dyn std::error::Error>>;
+
+    /// `/healthz` and the SPA fallback coexist in the assembled router, and
+    /// an unregistered `/api/**` path is refused rather than handed the app
+    /// shell — [`spa::routes`](crate::spa) is merged in after both.
+    ///
+    /// Written to hold regardless of the `ui` feature: it asks for an
+    /// asset-shaped path no real build would ever emit, rather than assuming
+    /// the embedded set is empty (true without the feature) or nonempty
+    /// (true with it, once Phase 5 has built `web/dist`).
+    #[tokio::test]
+    async fn healthz_and_the_spa_coexist_in_the_assembled_router() -> R {
+        let fixture = test_state()?;
+        let app = router(fixture.state.clone());
+
+        let health = app
+            .clone()
+            .oneshot(Request::builder().uri("/healthz").body(Body::empty())?)
+            .await?;
+        assert_eq!(health.status(), StatusCode::OK);
+
+        let unmatched = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/definitely-not-a-real-asset-name.js")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(unmatched.status(), StatusCode::NOT_FOUND);
+
+        let unknown_api = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/does-not-exist")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(unknown_api.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+}
