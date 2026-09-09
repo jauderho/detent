@@ -46,19 +46,26 @@ compile_error!(
     "detent-web needs a rustls crypto provider: enable `crypto-aws-lc` (default) or `crypto-ring`"
 );
 
+pub mod auth;
+pub mod authz;
 pub mod config;
+pub mod csrf;
 pub mod engine;
+pub mod error;
 pub mod headers;
 pub mod server;
+pub mod state;
 pub mod tls;
 
 pub use config::{
     Argon2Params, AuthConfig, Bootstrap, Config, ConfigError, ListenConfig, ModulesConfig,
     TlsConfig, UiConfig, UpdateConfig,
 };
+pub use csrf::{CSRF_HEADER, Origin, SAME_ORIGIN, SEC_FETCH_SITE, csrf_guard};
 pub use engine::{EngineError, EngineHandle, EngineThread, spawn as spawn_engine};
 pub use headers::{THEME_SCRIPT_SHA256, security_headers};
 pub use server::{Server, ServerError, harden, healthz};
+pub use state::{AppState, AuthState};
 pub use tls::{
     CertStore, CertifiedKeyPair, TlsError, bootstrap_self_signed, fingerprint,
     install_crypto_provider, load_or_bootstrap, server_config, server_config_from_store,

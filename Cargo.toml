@@ -75,7 +75,21 @@ unic-langid = "0.9.6"
 # Web front (PLAN §2.6, §2.7). Every entry here is pinned to the newest release
 # that clears the 7-day cooldown of §6.4; do not bump one without re-checking
 # its publication date.
+# `argon2` 0.6 has no `std` feature; `alloc` + `password-hash` is the whole of
+# the PHC-string API, `getrandom` supplies the per-hash salt without pulling a
+# `rand` stack, and `zeroize` wipes the hashing memory blocks after use.
+argon2 = { version = "0.6.0", default-features = false, features = [
+    "alloc",
+    "getrandom",
+    "password-hash",
+    "zeroize",
+] }
 axum = "0.8.9"
+# TOTP only (RFC 6238), and only together with `sha1`. `hmac` 0.13 and `sha1`
+# 0.11 are on `digest` 0.11 while the rest of the workspace hashes with `sha2`
+# 0.10 (`digest` 0.10); the duplication is deliberate and tolerated by
+# `multiple_crate_versions = "allow"`.
+hmac = "0.13.0"
 getrandom = "0.4.3"
 hyper = { version = "1.11.1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1.20", features = [
@@ -92,6 +106,10 @@ rustls = { version = "0.23.43", default-features = false, features = [
     "logging",
     "std",
 ] }
+# SHA-1 is here for one reason: RFC 6238 and every authenticator application
+# speak HMAC-SHA1. Nothing else in this workspace may use it.
+sha1 = "0.11.0"
+subtle = "2.6.1"
 tokio = { version = "1.53.1", features = [
     "rt-multi-thread",
     "net",
@@ -109,6 +127,7 @@ toml = { version = "1.1.4", default-features = false, features = [
 ] }
 tower = "0.5.3"
 tower-http = { version = "0.7.0", features = ["timeout"] }
+zeroize = "1.9.0"
 
 [profile.release]
 opt-level = "z"

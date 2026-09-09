@@ -60,3 +60,28 @@ web-tls-store-write-failed = `{$path}` could not be written: {$reason}
 web-engine-stopped = the operations engine is no longer running; retry once the service is back.
 web-server-bind-failed = `{$addr}` could not be listened on: {$reason}
 web-server-address-unknown = the listening address could not be read back: {$reason}
+
+## detent-web — auth: passwords, sessions, api tokens, totp, csrf
+web-auth-entropy-unavailable = the system random number generator failed, so no credential could be issued.
+web-auth-argon2-params = the configured argon2 parameters are not usable: {$reason}
+web-auth-hash-failed = the password could not be hashed.
+web-auth-user-name-invalid = `{$name}` is not a usable user name; use 1 to 32 of `a-z`, `0-9`, `.`, `_` or `-`, starting with a letter or a digit.
+web-auth-user-exists = a user named `{$name}` already exists.
+web-auth-user-unknown = there is no user named `{$name}`.
+web-auth-invalid-credentials = the user name, password or code was not correct.
+web-auth-rate-limited = too many attempts; wait {$seconds} seconds and try again.
+web-auth-session-limit = too many sessions are open; wait for one to expire and sign in again.
+web-auth-unauthenticated = sign in to do that.
+web-auth-ambiguous-credentials = send either a session cookie or a bearer token, not both.
+web-auth-csrf-rejected = this request did not pass its cross-site checks.
+web-auth-token-unknown = that api token does not exist, is revoked, or has expired.
+web-auth-token-limit = this host already holds the maximum number of api tokens.
+web-auth-totp-secret-invalid = that authenticator secret is not valid base32.
+web-auth-store-unreadable = `{$path}` could not be read: {$reason}
+web-auth-store-unwritable = `{$path}` could not be prepared for writing: {$reason}
+web-auth-store-write-failed = `{$path}` could not be written: {$reason}
+web-auth-store-malformed = `{$path}` is not a valid detent credential file: {$reason}
+web-denied-scope = this credential does not carry the `{$scope}` scope.
+
+## detent-web — the api surface
+web-request-malformed = the request body is not the shape this endpoint expects.
