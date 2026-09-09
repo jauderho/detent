@@ -38,9 +38,14 @@ toml = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
+utoipa = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+# Contract fuzz test (PLAN Phase 4 task 4): generate arbitrary/malformed
+# bodies for each endpoint that takes one and assert 4xx, never 5xx.
+arbitrary = { workspace = true }
+proptest = { workspace = true }
 # `tls12` is switched on for **test builds only**. Cargo unifies features per
 # package across dependency kinds, so the library under `cargo test` gains TLS
 # 1.2 support while `cargo build` still cannot speak it. That is exactly what

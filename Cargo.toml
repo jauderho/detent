@@ -127,6 +127,11 @@ toml = { version = "1.1.4", default-features = false, features = [
 ] }
 tower = "0.5.3"
 tower-http = { version = "0.7.0", features = ["timeout"] }
+# OpenAPI document for `/api/v1` (PLAN §2.6). `axum_extras` gives
+# `#[utoipa::path]` `Path`/`Query` parameter extraction from axum's own
+# types, which is all this crate needs; `utoipa-axum` is deliberately not
+# pulled in on top of it (routes are still registered by hand).
+utoipa = { version = "5.5.0", features = ["axum_extras"] }
 zeroize = "1.9.0"
 
 [profile.release]

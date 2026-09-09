@@ -85,3 +85,5 @@ web-denied-scope = this credential does not carry the `{$scope}` scope.
 
 ## detent-web — the api surface
 web-request-malformed = the request body is not the shape this endpoint expects.
+web-request-too-deep = the request body is nested too deeply.
+web-api-unexpected-outcome = the operation completed but its result could not be rendered.

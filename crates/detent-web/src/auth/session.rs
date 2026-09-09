@@ -86,7 +86,7 @@ impl fmt::Debug for Session {
 /// The session **id** is deliberately absent: the browser already holds it in
 /// a `HttpOnly` cookie, and a copy of it in a readable response body would
 /// undo that.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, utoipa::ToSchema)]
 pub struct SessionView {
     /// The user this session belongs to.
     pub subject: String,
