@@ -94,6 +94,22 @@ impl EngineHandle {
         Self { jobs }
     }
 
+    /// A handle with no engine behind it: every
+    /// [`execute`](Self::execute) answers [`EngineError::Stopped`].
+    ///
+    /// The layers above the engine — state, extractors, the auth routes — do
+    /// no privileged work, so their tests want an [`AppState`] without the
+    /// thread, the privsep socket and the temporary state root a real engine
+    /// needs.
+    ///
+    /// [`AppState`]: crate::state::AppState
+    #[cfg(test)]
+    pub(crate) fn detached() -> Self {
+        let (jobs, inbox) = mpsc::channel();
+        drop(inbox);
+        Self::from_sender(jobs)
+    }
+
     /// Run `op` on behalf of `who`, waiting for the engine thread.
     ///
     /// # Errors

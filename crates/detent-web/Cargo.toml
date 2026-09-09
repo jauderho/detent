@@ -15,20 +15,30 @@ detent-core = { path = "../detent-core" }
 detent-ops = { path = "../detent-ops" }
 detent-platform = { path = "../detent-platform" }
 
+argon2 = { workspace = true }
 axum = { workspace = true }
 getrandom = { workspace = true }
+hmac = { workspace = true }
 hyper-util = { workspace = true }
 rcgen = { workspace = true }
 rustls = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
+sha1 = { workspace = true }
 sha2 = { workspace = true }
+subtle = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 toml = { workspace = true }
+# `tower::Service` is implemented by hand in `server.rs` so that each
+# connection can hand its peer address to the handlers (the login rate
+# limiter is per-IP, PLAN §2.7). Nothing else here needs tower at run time.
+tower = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 # `tls12` is switched on for **test builds only**. Cargo unifies features per
@@ -39,6 +49,10 @@ tracing = { workspace = true }
 # because the code was never compiled in.
 rustls = { workspace = true, features = ["tls12"] }
 tempfile = { workspace = true }
+# `test-util` is a **test-only** feature for the same reason `tls12` is: it
+# gives the session sweeper's test a paused clock, and never reaches the
+# shipped binary, which does not build dev-dependencies.
+tokio = { workspace = true, features = ["test-util"] }
 tower = { workspace = true }
 
 [features]
