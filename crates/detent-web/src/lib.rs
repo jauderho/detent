@@ -46,6 +46,7 @@ compile_error!(
     "detent-web needs a rustls crypto provider: enable `crypto-aws-lc` (default) or `crypto-ring`"
 );
 
+pub mod api;
 pub mod auth;
 pub mod authz;
 pub mod config;
@@ -56,6 +57,30 @@ pub mod headers;
 pub mod server;
 pub mod state;
 pub mod tls;
+
+use axum::Router;
+
+/// Assemble the whole HTTP surface: `/healthz`, `/api/v1/auth/*` and the rest
+/// of `/api/v1/*`, behind the CSRF guard.
+///
+/// Deliberately **not** wrapped in [`server::harden`]: [`server::Server::bind`]
+/// applies that layer itself, once, around whatever router it is given.
+/// Wrapping here too would double the request-id, security-header, timeout
+/// and body-limit layers. A test that drives this router directly with
+/// `tower::ServiceExt::oneshot` — rather than through `Server::bind` — should
+/// apply [`server::harden`] itself, exactly as the fixtures in
+/// [`auth::routes`] and [`csrf`] do.
+pub fn router(state: state::AppState) -> Router {
+    server::healthz().merge(
+        auth::routes::routes()
+            .merge(api::routes())
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                csrf::csrf_guard,
+            ))
+            .with_state(state),
+    )
+}
 
 pub use config::{
     Argon2Params, AuthConfig, Bootstrap, Config, ConfigError, ListenConfig, ModulesConfig,

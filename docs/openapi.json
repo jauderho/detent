@@ -1,0 +1,1015 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "detent API",
+    "description": "PLAN §2.6/§2.7: the detent-web `/api/v1` surface.",
+    "license": {
+      "name": "BSD-3-Clause",
+      "identifier": "BSD-3-Clause"
+    },
+    "version": "0.0.1"
+  },
+  "paths": {
+    "/api/v1/audit": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "`GET /api/v1/audit`.",
+        "description": "Response body mirrors `Vec<detent_ops::audit::AuditRecord>`.",
+        "operationId": "audit",
+        "parameters": [
+          {
+            "name": "module",
+            "in": "query",
+            "description": "Only records about this module. At most [`MAX_FILTER_LEN`] bytes.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "who",
+            "in": "query",
+            "description": "Only records from this subject. At most [`MAX_FILTER_LEN`] bytes.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "At most this many records, newest first, capped at\n[`MAX_AUDIT_LIMIT`].",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matching audit records, newest first",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/login": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`POST /api/v1/auth/login`. The real handler is `crate::auth::routes::login`.",
+        "operationId": "login_doc",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Signed in; the session cookie is set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The credentials were refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many attempts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`POST /api/v1/auth/logout`. The real handler is `crate::auth::routes::logout`.",
+        "operationId": "logout_doc",
+        "responses": {
+          "204": {
+            "description": "Session ended; the cookie is cleared"
+          },
+          "401": {
+            "description": "No session to end",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/session": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`GET /api/v1/auth/session`. The real handler is `crate::auth::routes::session`.",
+        "operationId": "session_doc",
+        "responses": {
+          "200": {
+            "description": "The current session's CSRF token, scopes and expiry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/commits/{id}/confirm": {
+      "post": {
+        "tags": [
+          "commits"
+        ],
+        "summary": "`POST /api/v1/commits/{id}/confirm`.",
+        "operationId": "confirm",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Commit id `Apply` returned",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The commit is now final",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitConfirmedView"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No such commit is pending",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/commits/{id}/rollback": {
+      "post": {
+        "tags": [
+          "commits"
+        ],
+        "summary": "`POST /api/v1/commits/{id}/rollback`.",
+        "operationId": "rollback",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Commit id `Apply` returned",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Every write since the commit was armed is undone",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RolledBackView"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No such commit is pending",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/modules": {
+      "get": {
+        "tags": [
+          "modules"
+        ],
+        "summary": "`GET /api/v1/modules`.",
+        "description": "Response body mirrors `Vec<&'static detent_core::descriptor::ModuleDescriptor>`.",
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "Every module compiled into this build",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/modules/{id}": {
+      "get": {
+        "tags": [
+          "modules"
+        ],
+        "summary": "`GET /api/v1/modules/{id}`.",
+        "description": "Response body mirrors `detent_ops::report::ModuleView`.",
+        "operationId": "get_one",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Module id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The module's descriptor, schema, current model and diagnostics",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "No such module",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/modules/{id}/apply": {
+      "post": {
+        "tags": [
+          "modules"
+        ],
+        "summary": "`POST /api/v1/modules/{id}/apply`.",
+        "description": "Response body mirrors `detent_ops::report::ApplyReport`.",
+        "operationId": "apply",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Module id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApplyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "What was written, and any service action or commit-confirm window",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "No such module",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The target changed since `expected_hash` was read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The candidate has at least one error diagnostic",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/modules/{id}/backups": {
+      "get": {
+        "tags": [
+          "backups"
+        ],
+        "summary": "`GET /api/v1/modules/{id}/backups`.",
+        "description": "Response body mirrors `Vec<detent_platform::privsep::proto::BackupInfo>`.",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Module id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The module's retained backups, newest first",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "No such module",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/modules/{id}/backups/{backup_id}/restore": {
+      "post": {
+        "tags": [
+          "backups"
+        ],
+        "summary": "`POST /api/v1/modules/{id}/backups/{backup_id}/restore`.",
+        "operationId": "restore",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Module id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "backup_id",
+            "in": "path",
+            "description": "Index into `GET .../backups`",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The backup was put back",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoredView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such module",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/modules/{id}/plan": {
+      "post": {
+        "tags": [
+          "modules"
+        ],
+        "summary": "`POST /api/v1/modules/{id}/plan`.",
+        "description": "Response body mirrors `detent_ops::report::PlanReport`.",
+        "operationId": "plan",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Module id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Diff and validator results; nothing is written",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "No such module",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/modules/{id}/validate": {
+      "post": {
+        "tags": [
+          "modules"
+        ],
+        "summary": "`POST /api/v1/modules/{id}/validate`.",
+        "description": "Response body mirrors `detent_core::diag::Diagnostics`.",
+        "operationId": "validate",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Module id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Validation findings for the candidate model",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "No such module",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/openapi.json": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "`GET /api/v1/openapi.json`.",
+        "operationId": "serve",
+        "responses": {
+          "200": {
+            "description": "This document"
+          }
+        }
+      }
+    },
+    "/api/v1/services/{id}": {
+      "get": {
+        "tags": [
+          "services"
+        ],
+        "summary": "`GET /api/v1/services/{id}`.",
+        "description": "Response body mirrors `detent_platform::service::ServiceStatus`.",
+        "operationId": "status",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Module id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The service's run state",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "No such module",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The module declares no service",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "services"
+        ],
+        "summary": "`POST /api/v1/services/{id}`.",
+        "description": "Response body mirrors `detent_ops::report::ServiceReport`.",
+        "operationId": "action",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Module id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServiceActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "What happened to the service",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "No such module",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The module declares no service",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/system/profile": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "`GET /api/v1/system/profile`.",
+        "description": "Response body mirrors `detent_ops::report::HostReport`.",
+        "operationId": "profile",
+        "responses": {
+          "200": {
+            "description": "What was detected about this host",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "`GET /healthz`. The real handler is `crate::server::healthz`.",
+        "operationId": "healthz_doc",
+        "responses": {
+          "200": {
+            "description": "The process is serving",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApiServiceCommand": {
+        "type": "string",
+        "description": "A [`ServiceCommand`](detent_ops::ServiceCommand), as a request body may\nname it.\n\n[`detent_ops::ServiceCommand`] cannot derive [`utoipa::ToSchema`] without\ngiving `detent-ops` a dependency on `utoipa`, which PLAN §2.1 forbids: the\noperations layer stays front-end agnostic. This is the thin mirror that\nlets a request body have a precise, documented schema anyway; it converts\nstraight to the real type and carries no behaviour of its own.",
+        "enum": [
+          "restart",
+          "reload",
+          "start",
+          "stop"
+        ]
+      },
+      "ApplyRequest": {
+        "type": "object",
+        "description": "The body of `POST /api/v1/modules/{id}/apply`.",
+        "required": [
+          "model"
+        ],
+        "properties": {
+          "confirm_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Commit-confirm window, in seconds. Omitted uses the module's default;\nthe monitor clamps whatever is armed either way.",
+            "minimum": 0
+          },
+          "expected_hash": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Digest the caller last read, as 64 lowercase hex characters. A\nmismatch is refused (409) rather than silently overwriting somebody\nelse's edit.",
+            "maxLength": 64
+          },
+          "model": {
+            "type": "object",
+            "description": "The candidate model."
+          },
+          "service_action": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ApiServiceCommand",
+                "description": "What to do to the module's service afterwards."
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "CommitConfirmedView": {
+        "type": "object",
+        "description": "Answer to `ConfirmCommit`.",
+        "required": [
+          "commit_id"
+        ],
+        "properties": {
+          "commit_id": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The commit that is now final.",
+            "minimum": 0
+          }
+        }
+      },
+      "ErrorBody": {
+        "type": "object",
+        "description": "The JSON body of every API failure.",
+        "required": [
+          "code",
+          "message_id"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "A stable machine-readable class, derived from the status."
+          },
+          "diagnostics": {
+            "type": "object",
+            "description": "Validation findings, only present for a rejected [`Operation::Apply`]\n(PLAN §2.5: any `Severity::Error` diagnostic stops an apply before\nanything is written). Mirrors `detent_core::diag::Diagnostics`, which\ncannot derive `ToSchema` without giving `detent-core` a dependency on\n`utoipa`.\n\n[`Operation::Apply`]: detent_ops::Operation::Apply"
+          },
+          "message_id": {
+            "type": "string",
+            "description": "The Fluent id a front end renders."
+          }
+        }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "description": "The body of `POST /api/v1/auth/login`.",
+        "required": [
+          "username",
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string",
+            "description": "The password, in the clear over TLS 1.3 and nowhere else."
+          },
+          "totp_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The six-digit TOTP code, when the account has a second factor enrolled\nor `auth.totp_required` is set."
+          },
+          "username": {
+            "type": "string",
+            "description": "The account name."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModelRequest": {
+        "type": "object",
+        "description": "The body of `POST /api/v1/modules/{id}/validate` and `.../plan`.",
+        "required": [
+          "model"
+        ],
+        "properties": {
+          "model": {
+            "type": "object",
+            "description": "The candidate model, exactly as the shape `GET /modules/{id}`'s\n`schema` field describes."
+          }
+        },
+        "additionalProperties": false
+      },
+      "RestoredView": {
+        "type": "object",
+        "description": "Answer to `Restore`.",
+        "required": [
+          "target",
+          "new_hash"
+        ],
+        "properties": {
+          "new_hash": {
+            "type": "string",
+            "description": "Digest now on disk, 64 lowercase hex characters."
+          },
+          "target": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The target that was put back, as the monitor's index for it.",
+            "minimum": 0
+          }
+        }
+      },
+      "RolledBackView": {
+        "type": "object",
+        "description": "Answer to `RollbackCommit`.",
+        "required": [
+          "commit_id",
+          "restored"
+        ],
+        "properties": {
+          "commit_id": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The commit that was rolled back.",
+            "minimum": 0
+          },
+          "restored": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many targets were actually restored.",
+            "minimum": 0
+          }
+        }
+      },
+      "ServiceActionRequest": {
+        "type": "object",
+        "description": "The body of `POST /api/v1/services/{id}`.",
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/ApiServiceCommand",
+            "description": "What to do."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SessionView": {
+        "type": "object",
+        "description": "What `GET /api/v1/auth/session` answers.\n\nThe session **id** is deliberately absent: the browser already holds it in\na `HttpOnly` cookie, and a copy of it in a readable response body would\nundo that.",
+        "required": [
+          "subject",
+          "scopes",
+          "csrf_token",
+          "expires_in_secs",
+          "totp_satisfied"
+        ],
+        "properties": {
+          "csrf_token": {
+            "type": "string",
+            "description": "The token to echo in `X-Detent-CSRF`."
+          },
+          "expires_in_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds until the session expires, idle and absolute limits combined.",
+            "minimum": 0
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Scope names, `[\"read\"]` or `[\"read\", \"write\"]`."
+          },
+          "subject": {
+            "type": "string",
+            "description": "The user this session belongs to."
+          },
+          "totp_satisfied": {
+            "type": "boolean",
+            "description": "Whether a second factor was presented."
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearer_token": {
+        "type": "http",
+        "scheme": "bearer"
+      },
+      "session_cookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Host-detent_session"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "auth",
+      "description": "Sign in, sign out, describe the session"
+    },
+    {
+      "name": "modules",
+      "description": "List, read, validate, plan and apply module configuration"
+    },
+    {
+      "name": "commits",
+      "description": "Confirm or roll back a commit-confirm window"
+    },
+    {
+      "name": "backups",
+      "description": "List and restore a module's retained backups"
+    },
+    {
+      "name": "services",
+      "description": "Read or act on a module's service"
+    },
+    {
+      "name": "system",
+      "description": "Host profile, audit log, and liveness"
+    }
+  ]
+}
