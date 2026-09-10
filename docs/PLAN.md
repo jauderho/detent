@@ -567,7 +567,7 @@ box safely with backup, validation, and audit.
 
 ---
 
-### Phase 4 — Web server, auth, API `[ ]` ← next
+### Phase 4 — Web server, auth, API `[x]`
 
 **Goal:** the API is live over TLS 1.3 with a bootstrap cert, all §2.7 controls in
 place, fully covered by tests.
@@ -592,7 +592,7 @@ place, fully covered by tests.
 
 ---
 
-### Phase 5 — Web UI (Milestone M2) `[ ]`
+### Phase 5 — Web UI (Milestone M2) `[ ]` ← next
 
 **Goal:** a beautiful, simple admin page per `AESTHETIC_CONTRACT.md` + §4.4, fully
 localized, with schema-driven module forms.
@@ -916,6 +916,7 @@ TLS 1.3 → session or Bearer → (cookie path) `Sec-Fetch-Site` + `Origin` + `X
 
 | Date | Change | By |
 |---|---|---|
+| 2026‑09‑10 | Phase 4 closed: TLS 1.3 listener, Argon2id auth, sessions, API tokens, TOTP, rate limiting, CSRF, scoped authz, API v1 + OpenAPI, SPA serving, `serve` wired to the real server, credential CLI. Seccomp now **fails closed** (`Policy::require_seccomp`) after a filter that failed to compile left the worker unconfined while `confine` reported success. `rt_sigreturn` was missing from both sandbox tables since Phase 2. CSRF accepted a repeated `Sec-Fetch-Site`. `docs/SECURITY_HARDENING.md` added; its evidence pass found that **no CI job could ever have run** (`dtolnay/rust-toolchain` needs a `toolchain` input; `fuzz.yml` pinned a nonexistent SHA) — both fixed. Size baselines measured: 4.86/4.73/1.63 MiB against 12/6/3. | orchestrator (Opus) |
 | 2026‑09‑03 | Initial draft for approval. | orchestrator (Fable) |
 | 2026‑09‑04 | Phase 3 closed; **Milestone M1 reached** (see `docs/spikes/m1-e2e.md`). Added `RollbackCommit` to the privsep protocol. Added an error-catalogue gate that caught every `detent-core` error id missing from the shipped Fluent file. CLI messages resolve through the shared catalogue. | orchestrator (Opus) |
 | 2026‑09‑04 | Phase 2 closed: privsep, sandbox, service managers, host detection, packaging. `decode` trailing-byte hole fixed; `CheckExpectation::StdoutPattern` documented as substring (its example used a regex anchor that could never match); root-drop test now skips when the account is absent; platform coverage floor set to 92 with the `_exit`/`atexit` limitation documented and partly recovered. | orchestrator (Opus) |
@@ -925,7 +926,18 @@ TLS 1.3 → session or Bearer → (cookie path) `Sec-Fetch-Site` + `Origin` + `X
 
 ## 10. Checkpoint for the next session (read this first if resuming cold)
 
-**State on 2026‑09‑04 (later), branch `phase-0-foundations` (from `main`):** Phases 0–3 complete, **Milestone M1 reached**; Phase 4 not started. 631 workspace tests pass; `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo fmt --all --check` and `cargo deny check` are clean.
+**State on 2026‑09‑10, branch `phase-0-foundations` (from `main`):** Phases 0–4 complete; Phase 5 (web UI, Milestone M2) not started. **944 workspace tests pass.** `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo fmt --all --check` and `cargo deny check` are clean on macOS and in a Linux container. Coverage gate PASSES: core/i18n/ops/modules 100 %, platform 97.7 (floor 92), web 97.4 (floor 97), detent 95.2 (floor 95), global 97.4 %.
+
+Phase 4 delivered (all committed, `78cee86`…`4eab643`):
+- `detent-web`: `config` (TOML, `Argon2Params::for_host`), `tls` (TLS 1.3 only — rustls is compiled **without** `tls12`, so the shipped binary cannot speak it; `CertStore` is the ACME reload seam), `engine` (the sync `OpsEngine` on its own thread behind an async handle), `headers`, `server`, `auth/*` (Argon2id with a dummy-hash miss branch, in-memory sessions, SHA-256 API tokens, RFC 6238 TOTP with replay refusal, in-tree base32, bounded rate limiter), `csrf`, `authz` (`ScopedAuthz`, matched variant by variant), `api/*` (13 endpoints + utoipa; `docs/openapi.json` checked in and diffed by a test), `spa` (negotiated br/gzip, immutable hashed assets, ETag/304, behind an off-by-default `ui` feature until Phase 5 builds `web/dist`).
+- `detent serve` runs it for real: engine, auth stores, TLS bootstrap with the fingerprint logged, graceful SIGTERM/SIGINT. Verified as root in a container serving HTTPS `/healthz` with seccomp confirmed installed for both halves via `strace`.
+- `detent setup|user|token`, `detent.toml` parsed at last, `Zeroizing` passwords, fuzz targets `fuzz_api_json`/`fuzz_session_cookie`, `docs/SECURITY_HARDENING.md`, `scripts/tls-check.sh`, three real size baselines.
+
+**Defects found and fixed during Phase 4 review** (each has a test now): seccomp failed open — a filter that did not install left the process unconfined while `confine` returned `Ok` (`Policy::require_seccomp`, default **on** for monitor and worker); `rt_sigreturn` missing from both tables since Phase 2, so a real `SIGTERM` fault-looped; CSRF read only the first `Sec-Fetch-Site`, so a repeated header smuggled a cross-site request past it; the CSP pinned the hash of `theme-init.js` while `index.html` inlined a re-indented copy that hashes differently; OpenAPI described auth with hand-copied mirror structs that had already drifted; `/api/v1/openapi.json` was undocumented by the document it serves; three fuzz assertions restated their implementations and could not fail; `main.rs` demanded a rustls provider even with `web` off.
+
+**Known-broken CI, now fixed, never yet run:** every `dtolnay/rust-toolchain` step omitted the *required* `toolchain` input, so all five `ci.yml` jobs would have died at their first step, and `fuzz.yml` pinned a SHA that does not exist in that repository (the `nightly` branch is force-pushed daily). A `Toolchain pin matches rust-toolchain.toml` step now guards against drift. **The first PR is still what proves CI works.**
+
+Carried into Phase 5+: `detent-web` is 97.4 %, not the 100 % Phase 4 set as its own acceptance bar (`auth/token.rs` 93.6, `auth/users.rs` 94.6 are the weakest); `docs/SECURITY_HARDENING.md`'s Gaps section lists 9 further untested controls; `scripts/tls-check.sh` is not wired into CI (needs root); Phase 2's privileged Docker job and multi-slice LCOV merge (§6.1) are still not wired.
 
 Phase 1 delivered (all committed): `detent-core` (lossless `Document`, diagnostics, descriptor types incl. `x-detent` hints, `ConfigModule` with provided `schema()`, `DynModule`, `module_conformance!` with a non-vacuous check), `crates/modules/hosts` (62+ tests, 3 fuzz targets, fixtures, `locales/en-US/core.ftl`), `crates/modules/_template` (excluded from the workspace; README recipe validated by a fresh-copy dry run), `detent-modules` registry (`modules()`, all eight `module-*` features forwarded from the binary), `docs/MODULE_GUIDE.md`, coverage gate at 100 % for core and modules (computed from lcov `DA` records — see `scripts/coverage-merge.sh` comment on why not `LF/LH`).
 
@@ -967,4 +979,4 @@ Known gaps carried into later phases: coverage gate must be raised to 100 % for 
 
 **Scope note:** §1.6 supersedes every earlier mention of BSD/armv7/riscv64 as active work.
 
-**Next action:** start Phase 4 (web server, auth, API). Order: TLS 1.3 listener with a bootstrap self-signed cert → session/auth store (Argon2id, `HostProfile.ram_mib` picks the parameters) → CSRF and security-header middleware → API v1 over `detent-ops` (the engine is front-end agnostic, so handlers should be thin) → embedded SPA serving. A TOML parser must be added for `/etc/detent/detent.toml` (`--config` is currently resolved but not parsed). `Authz` currently has only `AllowAll`; web scopes are a Phase 4 deliverable. Note `detent-modules::modules()` still registers only `hosts` — the other seven crates are empty until Phases 7–8.
+**Next action:** start Phase 5 (web UI, Milestone M2). `web/` already has the Vite + React 19 + Tailwind v4 + shadcn + Fluent scaffold from Phase 0 and the catfu tokens from `docs/DESIGN_SEED.md`; `AESTHETIC_CONTRACT.md` is binding. Two things wait on it specifically: turn on `detent-web`'s `ui` feature once `web/dist` is a real build (the serving logic is done and tested against fixtures), and make `index.html`'s inline theme script *byte-identical* to `web/src/theme-init.js` at build time rather than a hand-edited copy — `headers.rs` pins its SHA-256 in the CSP and a test fails if they diverge. The API the UI talks to is `docs/openapi.json`; `docs/API.md` explains auth, scopes, CSRF and the commit-confirm flow. `detent-modules::modules()` still registers only `hosts`, so the UI has one module to drive until Phases 7–8.
