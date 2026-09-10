@@ -1,1 +1,17 @@
-{"detent-default": {"bytes": 0, "tolerance_pct": 3}}
+{
+  "full-default-aarch64-musl": {
+    "bytes": 5101488,
+    "tolerance_pct": 3,
+    "comment": "PLAN \u00a74.1 row 1: full default features (module-hosts,module-resolver,module-chrony,module-mounts,module-nfs,module-samba,module-dhcp,module-network,web,acme-dns01,update,init-systemd,crypto-aws-lc), aarch64-unknown-linux-musl, release, stripped. Budget <= 12 MiB (12582912 bytes). Measured via `cargo zigbuild --release -p detent --target aarch64-unknown-linux-musl` on 2026-09-10."
+  },
+  "resolver-web-aarch64-musl": {
+    "bytes": 4963056,
+    "tolerance_pct": 3,
+    "comment": "PLAN \u00a74.1 row 2: --no-default-features --features module-resolver,web,crypto-aws-lc,init-systemd, aarch64-unknown-linux-musl, release, stripped. Budget <= 6 MiB (6291456 bytes). Measured via `cargo zigbuild --release -p detent --target aarch64-unknown-linux-musl --no-default-features --features module-resolver,web,crypto-aws-lc,init-systemd` on 2026-09-10."
+  },
+  "cli-aarch64-musl": {
+    "bytes": 1704952,
+    "tolerance_pct": 3,
+    "comment": "PLAN \u00a74.1 row 3: CLI only, no web/acme/update. --no-default-features --features module-hosts,module-resolver,module-chrony,module-mounts,module-nfs,module-samba,module-dhcp,module-network,init-systemd, aarch64-unknown-linux-musl, release, stripped. Budget <= 3 MiB (3145728 bytes). Measured via `cargo zigbuild --release -p detent --target aarch64-unknown-linux-musl --no-default-features --features module-hosts,module-resolver,module-chrony,module-mounts,module-nfs,module-samba,module-dhcp,module-network,init-systemd` on 2026-09-10. This row first had to name crypto-ring as well, because main.rs demanded a rustls provider even with `web` off; that compile_error is now gated on `web`, and the binary is byte-identical either way (1704952), which is what showed the feature was a no-op here."
+  }
+}
