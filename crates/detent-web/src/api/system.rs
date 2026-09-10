@@ -56,9 +56,10 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// The query string of `GET /api/v1/audit`.
-#[derive(Debug, Clone, Default, Deserialize, utoipa::IntoParams)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(utoipa::IntoParams))]
 #[serde(default, deny_unknown_fields)]
-#[into_params(parameter_in = Query)]
+#[cfg_attr(test, into_params(parameter_in = Query))]
 pub struct AuditQueryParams {
     /// Only records about this module. At most [`MAX_FILTER_LEN`] bytes.
     pub module: Option<String>,
@@ -91,12 +92,12 @@ impl From<AuditQueryParams> for AuditQuery {
 }
 
 /// `GET /api/v1/system/profile`.
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     get,
     path = PROFILE_PATH,
     tag = "system",
     responses((status = 200, description = "What was detected about this host", body = HostReport)),
-)]
+))]
 pub(super) async fn profile(
     State(state): State<AppState>,
     caller: Caller,
@@ -117,13 +118,13 @@ fn render_host(outcome: OpOutcome) -> Result<Json<Box<HostReport>>, ApiError> {
 }
 
 /// `GET /api/v1/audit`.
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     get,
     path = AUDIT_PATH,
     tag = "system",
     params(AuditQueryParams),
     responses((status = 200, description = "Matching audit records, newest first", body = Vec<AuditRecord>)),
-)]
+))]
 pub(super) async fn audit(
     State(state): State<AppState>,
     caller: Caller,

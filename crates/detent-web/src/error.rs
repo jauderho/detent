@@ -35,7 +35,8 @@ use crate::auth::AuthError;
 use crate::engine::EngineError;
 
 /// The JSON body of every API failure.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(utoipa::ToSchema))]
 pub struct ErrorBody {
     /// A stable machine-readable class, derived from the status.
     pub code: &'static str,
@@ -49,7 +50,7 @@ pub struct ErrorBody {
     ///
     /// [`Operation::Apply`]: detent_ops::Operation::Apply
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Object)]
+    #[cfg_attr(test, schema(value_type = Object))]
     pub diagnostics: Option<Diagnostics>,
 }
 

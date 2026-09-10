@@ -104,27 +104,29 @@ pub fn routes() -> Router<AppState> {
 // ---------------------------------------------------------------------------
 
 /// The body of `POST /api/v1/modules/{id}/validate` and `.../plan`.
-#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ModelRequest {
     /// The candidate model, exactly as the shape `GET /modules/{id}`'s
     /// `schema` field describes.
-    #[schema(value_type = Object)]
+    #[cfg_attr(test, schema(value_type = Object))]
     pub model: Value,
 }
 
 /// The body of `POST /api/v1/modules/{id}/apply`.
-#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ApplyRequest {
     /// The candidate model.
-    #[schema(value_type = Object)]
+    #[cfg_attr(test, schema(value_type = Object))]
     pub model: Value,
     /// Digest the caller last read, as 64 lowercase hex characters. A
     /// mismatch is refused (409) rather than silently overwriting somebody
     /// else's edit.
     #[serde(default)]
-    #[schema(max_length = 64)]
+    #[cfg_attr(test, schema(max_length = 64))]
     pub expected_hash: Option<String>,
     /// What to do to the module's service afterwards.
     #[serde(default)]
@@ -153,12 +155,12 @@ fn parse_hash(hex: &str) -> Result<detent_platform::fs::atomic::Sha256Digest, Ap
 // ---------------------------------------------------------------------------
 
 /// `GET /api/v1/modules`.
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     get,
     path = LIST_PATH,
     tag = "modules",
     responses((status = 200, description = "Every module compiled into this build", body = Vec<ModuleDescriptor>)),
-)]
+))]
 pub(super) async fn list(
     State(state): State<AppState>,
     caller: crate::auth::extract::Caller,
@@ -179,7 +181,7 @@ fn render_modules(outcome: OpOutcome) -> Result<Json<Vec<&'static ModuleDescript
 }
 
 /// `GET /api/v1/modules/{id}`.
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     get,
     path = GET_PATH,
     tag = "modules",
@@ -188,7 +190,7 @@ fn render_modules(outcome: OpOutcome) -> Result<Json<Vec<&'static ModuleDescript
         (status = 200, description = "The module's descriptor, schema, current model and diagnostics", body = ModuleView),
         (status = 404, description = "No such module", body = crate::error::ErrorBody),
     ),
-)]
+))]
 pub(super) async fn get_one(
     State(state): State<AppState>,
     caller: crate::auth::extract::Caller,
@@ -214,7 +216,7 @@ fn render_module(outcome: OpOutcome) -> Result<Json<Box<ModuleView>>, ApiError> 
 }
 
 /// `POST /api/v1/modules/{id}/validate`.
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     post,
     path = VALIDATE_PATH,
     tag = "modules",
@@ -224,7 +226,7 @@ fn render_module(outcome: OpOutcome) -> Result<Json<Box<ModuleView>>, ApiError> 
         (status = 200, description = "Validation findings for the candidate model", body = detent_core::diag::Diagnostics),
         (status = 404, description = "No such module", body = crate::error::ErrorBody),
     ),
-)]
+))]
 pub(super) async fn validate(
     State(state): State<AppState>,
     caller: crate::auth::extract::Caller,
@@ -256,7 +258,7 @@ fn render_validated(outcome: OpOutcome) -> Result<Json<detent_core::diag::Diagno
 }
 
 /// `POST /api/v1/modules/{id}/plan`.
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     post,
     path = PLAN_PATH,
     tag = "modules",
@@ -266,7 +268,7 @@ fn render_validated(outcome: OpOutcome) -> Result<Json<detent_core::diag::Diagno
         (status = 200, description = "Diff and validator results; nothing is written", body = PlanReport),
         (status = 404, description = "No such module", body = crate::error::ErrorBody),
     ),
-)]
+))]
 pub(super) async fn plan(
     State(state): State<AppState>,
     caller: crate::auth::extract::Caller,
@@ -298,7 +300,7 @@ fn render_planned(outcome: OpOutcome) -> Result<Json<Box<PlanReport>>, ApiError>
 }
 
 /// `POST /api/v1/modules/{id}/apply`.
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     post,
     path = APPLY_PATH,
     tag = "modules",
@@ -310,7 +312,7 @@ fn render_planned(outcome: OpOutcome) -> Result<Json<Box<PlanReport>>, ApiError>
         (status = 409, description = "The target changed since `expected_hash` was read", body = crate::error::ErrorBody),
         (status = 422, description = "The candidate has at least one error diagnostic", body = crate::error::ErrorBody),
     ),
-)]
+))]
 pub(super) async fn apply(
     State(state): State<AppState>,
     caller: crate::auth::extract::WriteCaller,
