@@ -114,7 +114,7 @@ export interface paths {
             cookie?: never;
         };
         /** `GET /api/v1/modules`. */
-        get: operations["list"];
+        get: operations["list_modules"];
         put?: never;
         post?: never;
         delete?: never;
@@ -165,7 +165,7 @@ export interface paths {
             cookie?: never;
         };
         /** `GET /api/v1/modules/{id}/backups`. */
-        get: operations["list"];
+        get: operations["list_backups"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1150,7 +1150,7 @@ export interface operations {
             };
         };
     };
-    list: {
+    list_modules: {
         parameters: {
             query?: never;
             header?: never;
@@ -1256,7 +1256,7 @@ export interface operations {
             };
         };
     };
-    list: {
+    list_backups: {
         parameters: {
             query?: never;
             header?: never;
