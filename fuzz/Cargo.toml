@@ -10,10 +10,13 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
+axum = "0.8"
 serde = "1"
+serde_json = "1"
 detent-core = { path = "../crates/detent-core", features = ["fuzzing"] }
 detent-module-hosts = { path = "../crates/modules/hosts", features = ["fuzzing"] }
 detent-platform = { path = "../crates/detent-platform", features = ["fuzzing"] }
+detent-web = { path = "../crates/detent-web" }
 
 [profile.release]
 debug = 1
@@ -42,6 +45,20 @@ bench = false
 [[bin]]
 name = "fuzz_privsep_decode"
 path = "fuzz_targets/fuzz_privsep_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_api_json"
+path = "fuzz_targets/fuzz_api_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_session_cookie"
+path = "fuzz_targets/fuzz_session_cookie.rs"
 test = false
 doc = false
 bench = false
