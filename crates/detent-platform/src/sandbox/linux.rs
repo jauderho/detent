@@ -35,6 +35,7 @@ pub fn confine(role: Role, policy: &Policy) -> Result<Confinement, SandboxError>
     // Seccomp last: every syscall the steps above need has already run, so
     // installing their allow-list first would risk `SIGSYS`-ing them.
     let seccomp = install_seccomp(role);
+    seccomp_verdict(policy.require_seccomp, &seccomp)?;
 
     Ok(Confinement {
         no_new_privs,
@@ -185,6 +186,21 @@ fn enforce_landlock(
     })
 }
 
+/// Fail closed on a filter that did not install.
+///
+/// A filter that does not install is not a degraded sandbox, it is *no*
+/// sandbox — and it is silent, because the process then works perfectly. Split
+/// out of [`confine`] so all four combinations are reachable from a test
+/// without having to make a real `seccomp(2)` call fail.
+fn seccomp_verdict(required: bool, outcome: &Outcome) -> Result<(), SandboxError> {
+    match *outcome {
+        Outcome::Unavailable { ref reason } if required => {
+            Err(SandboxError::SeccompRequired(reason.clone()))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn install_seccomp(role: Role) -> Outcome {
     match install_seccomp_inner(role) {
         Ok(()) => Outcome::Applied,
@@ -203,7 +219,8 @@ fn install_seccomp_inner(role: Role) -> Result<(), seccomp::SeccompError> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Hooks, Policy, Role, confine};
+    use super::super::{Hooks, Outcome, Policy, Role, SandboxError, confine};
+    use super::seccomp_verdict;
     use crate::privsep::allowlist::{Allowlist, Config};
     use crate::privsep::proto::{Request, Response};
     use crate::privsep::spawn::SandboxHooks;
@@ -213,6 +230,37 @@ mod tests {
     };
     use detent_core::diag::MessageId;
     use std::path::Path;
+
+    /// The production policies fail closed on seccomp, and every other
+    /// combination is permitted. This is the guard on a failure that is
+    /// otherwise completely silent: the filter does not install, `confine`
+    /// reports success, and the process runs unfiltered while working
+    /// perfectly — which is precisely what happened when `epoll_wait`, a
+    /// syscall `aarch64` does not have, was in the worker's table.
+    #[test]
+    fn a_filter_that_does_not_install_is_fatal_only_when_required() {
+        let unavailable = Outcome::Unavailable {
+            reason: "kernel said no".to_owned(),
+        };
+        // `assert!(matches!(..))` rather than a `match` with a `panic!` arm:
+        // `clippy::panic` is denied crate-wide, tests included.
+        let verdict = seccomp_verdict(true, &unavailable);
+        assert!(
+            matches!(verdict, Err(SandboxError::SeccompRequired(ref reason)) if reason == "kernel said no"),
+            "{verdict:?}"
+        );
+        assert!(seccomp_verdict(false, &unavailable).is_ok());
+        assert!(seccomp_verdict(true, &Outcome::Applied).is_ok());
+        assert!(
+            seccomp_verdict(
+                true,
+                &Outcome::Skipped {
+                    reason: "not attempted".to_owned(),
+                },
+            )
+            .is_ok()
+        );
+    }
 
     // Forking helpers come from `privsep::sys`, the crate's single home for
     // `unsafe` POSIX calls. These children exit via

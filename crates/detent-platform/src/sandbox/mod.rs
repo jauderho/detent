@@ -184,6 +184,22 @@ pub struct Policy {
     /// instead of degrading to [`LandlockOutcome::Unavailable`]. Default
     /// `false` (PLAN §2.4: warn and continue).
     pub require_landlock: bool,
+    /// When true, a seccomp filter that does not install makes [`confine`]
+    /// return `Err` instead of reporting [`Outcome::Unavailable`] and
+    /// running the process unfiltered.
+    ///
+    /// Unlike [`Policy::require_landlock`] this defaults to **true** for
+    /// [`Policy::monitor`] and [`Policy::worker`], because the two failures
+    /// are not alike. Landlock is genuinely missing on kernels before 5.13,
+    /// which is a real deployment a detent appliance has to survive. Seccomp
+    /// filtering has been present since 3.5 and is enabled on every
+    /// distribution kernel, so a failure here almost always means *our table
+    /// is wrong for this architecture* — which is exactly what happened once:
+    /// `epoll_wait` has no `aarch64` number, the filter failed to compile,
+    /// and the worker ran with no filter at all while `confine` reported
+    /// success. Nothing but an `strace` revealed it. Failing closed turns
+    /// that class of mistake into a refusal to start.
+    pub require_seccomp: bool,
 }
 
 impl Policy {
@@ -211,6 +227,7 @@ impl Policy {
                 Capability::Fowner,
             ],
             require_landlock: false,
+            require_seccomp: true,
         }
     }
 
@@ -222,6 +239,7 @@ impl Policy {
             writable_paths: vec![allowlist.state_root().to_path_buf()],
             retained_caps: Vec::new(),
             require_landlock: false,
+            require_seccomp: true,
         }
     }
 }
@@ -255,6 +273,9 @@ pub enum SandboxError {
     /// satisfy it.
     #[error("landlock is required by policy but unavailable: {0}")]
     LandlockRequired(String),
+    /// [`Policy::require_seccomp`] was set and the filter did not install.
+    #[error("seccomp is required by policy but the filter did not install: {0}")]
+    SeccompRequired(String),
 }
 
 /// Apply `policy` to the current process as `role`.
