@@ -111,11 +111,85 @@ pub enum Command {
     Host,
     /// Check this host for common misconfigurations.
     Doctor,
+    /// First-run bootstrap: create the initial administrator account.
+    #[cfg(feature = "web")]
+    Setup(SetupArgs),
+    /// Manage web ui / api accounts.
+    #[cfg(feature = "web")]
+    User {
+        /// What to do.
+        #[command(subcommand)]
+        action: UserAction,
+    },
+    /// Manage api tokens.
+    #[cfg(feature = "web")]
+    Token {
+        /// What to do.
+        #[command(subcommand)]
+        action: TokenAction,
+    },
     /// Print a shell completion script.
     Completions {
         /// Which shell to generate for.
         shell: Shell,
     },
+}
+
+/// `detent setup`.
+#[cfg(feature = "web")]
+#[derive(Debug, Args)]
+pub struct SetupArgs {
+    /// Login name of the initial administrator account.
+    #[arg(long, default_value = "admin", value_name = "NAME")]
+    pub name: String,
+    /// Overwrite the account if one by that name already exists.
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// `detent user …`.
+#[cfg(feature = "web")]
+#[derive(Debug, Subcommand)]
+pub enum UserAction {
+    /// Create a new account.
+    Add {
+        /// Login name.
+        name: String,
+    },
+    /// Change a user's password.
+    Passwd {
+        /// Login name.
+        name: String,
+    },
+    /// Remove a user.
+    Rm {
+        /// Login name.
+        name: String,
+    },
+}
+
+/// `detent token …`.
+#[cfg(feature = "web")]
+#[derive(Debug, Subcommand)]
+pub enum TokenAction {
+    /// Mint a new token. Printed once; only its digest is kept.
+    Create {
+        /// What the operator calls it.
+        label: String,
+        /// Grant write access in addition to read.
+        #[arg(long)]
+        write: bool,
+        /// Expire this many seconds from now, rather than never.
+        #[arg(long, value_name = "SECONDS")]
+        expires_secs: Option<i64>,
+    },
+    /// Revoke a token so it stops working immediately.
+    Revoke {
+        /// The id `token create` or `token list` reported.
+        id: String,
+    },
+    /// List every token, without its secret.
+    List,
 }
 
 /// `detent config <module> …`.
@@ -315,18 +389,27 @@ mod tests {
     /// `cargo run -p detent -- [config <m>] --help > <file>`.
     #[test]
     fn help_output_matches_its_snapshot() -> R {
-        for (argv, snapshot, file) in [
+        // `help.txt` was captured with the `web` feature on (the default): it
+        // lists `setup`/`user`/`token`, which only exist in that build. A
+        // `--no-default-features` build has no use for a second snapshot of
+        // its own, so it skips the one comparison that would depend on it.
+        for (argv, snapshot, file, needs_web) in [
             (
                 vec!["detent", "--help"],
                 include_str!("../tests/snapshots/help.txt"),
                 "help.txt",
+                true,
             ),
             (
                 vec!["detent", "config", "hosts", "apply", "--help"],
                 include_str!("../tests/snapshots/help-config-apply.txt"),
                 "help-config-apply.txt",
+                false,
             ),
         ] {
+            if needs_web && !cfg!(feature = "web") {
+                continue;
+            }
             let rendered = Cli::try_parse_from(argv)
                 .err()
                 .map(|error| error.to_string())

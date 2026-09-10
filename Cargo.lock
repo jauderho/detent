@@ -497,6 +497,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "unic-langid",
+ "zeroize",
 ]
 
 [[package]]

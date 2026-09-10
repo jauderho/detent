@@ -18,10 +18,17 @@ workspace = true
 mimalloc = { workspace = true }
 clap = { workspace = true }
 fluent-bundle = { workspace = true }
-rustix = { workspace = true }
+# `termios`: `detent setup`/`user add`/`user passwd` read a password from the
+# controlling terminal with echo disabled (PLAN §2.6: never on argv).
+rustix = { workspace = true, features = ["termios"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 unic-langid = { workspace = true }
+zeroize = { workspace = true }
+# Only ever built when `web` is: `serve` runs `detent-web`'s router on a
+# runtime built inside the worker (PLAN §2.6), never a process-wide one — a
+# one-shot command must not pay for a runtime it never starts.
+tokio = { workspace = true, optional = true }
 
 detent-core = { path = "../detent-core" }
 detent-i18n = { path = "../detent-i18n" }
@@ -49,7 +56,7 @@ module-samba = ["detent-modules/module-samba"]
 module-dhcp = ["detent-modules/module-dhcp"]
 module-network = ["detent-modules/module-network"]
 
-web = ["dep:detent-web"]
+web = ["dep:detent-web", "dep:tokio"]
 
 acme-dns01 = ["dep:detent-acme"]
 acme-attest = ["acme-dns01"]
