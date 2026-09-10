@@ -273,8 +273,7 @@ jobs:
       - name: shellcheck
         run: |
           set -euo pipefail
-          # checkWorkflows.sh and useCommitHash.sh predate this repo's shell standards (SC2155, 4-space indent); tracked separately.
-          mapfile -t files < <(find scripts packaging -name '*.sh' ! -name checkWorkflows.sh ! -name useCommitHash.sh 2>/dev/null | sort)
+          mapfile -t files < <(find scripts packaging -name '*.sh' 2>/dev/null | sort)
           if [[ "${#files[@]}" -eq 0 ]]; then
             echo "no shell scripts found"
             exit 0
@@ -284,8 +283,7 @@ jobs:
       - name: shfmt -d
         run: |
           set -euo pipefail
-          # checkWorkflows.sh and useCommitHash.sh predate this repo's shell standards (SC2155, 4-space indent); tracked separately.
-          mapfile -t files < <(find scripts packaging -name '*.sh' ! -name checkWorkflows.sh ! -name useCommitHash.sh 2>/dev/null | sort)
+          mapfile -t files < <(find scripts packaging -name '*.sh' 2>/dev/null | sort)
           if [[ "${#files[@]}" -eq 0 ]]; then
             echo "no shell scripts found"
             exit 0
