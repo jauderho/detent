@@ -28,6 +28,7 @@ cli-bad-json = the model on stdin is not valid json: {$reason}
 cli-bad-hash = `{$value}` is not a sha-256 digest of 64 hex characters.
 cli-start-failed = the privileged helper could not be started: {$reason}
 cli-monitor-stop = the privileged helper did not stop cleanly: {$reason}
+cli-config-load-failed = the configuration at {$path} could not be loaded: {$reason}
 
 ## config
 cli-module-line = {$id}  {$name}
@@ -74,6 +75,33 @@ cli-serve-monitor = the worker started as pid {$pid}; privileges dropped: {$drop
 cli-serve-worker = the worker is running; its http server arrives in phase 4. handshake: {$greeted}
 cli-serve-failed = the monitor and worker could not be started: {$reason}
 cli-serve-stopped = the pair stopped unexpectedly: {$reason} {$status}
+cli-serve-privileged-port = port {$port} needs cap_net_bind_service or a monitor-passed socket, neither of which this build supports; use a port of 1024 or higher, or put a reverse proxy in front.
+cli-serve-acme-unsupported = this build cannot bootstrap acme certificates yet; set tls.bootstrap to "self-signed" in {$path}.
+cli-serve-handshake-failed = the worker could not complete its handshake with the monitor.
+cli-serve-auth-failed = the account, token and session store could not be opened: {$reason}
+cli-serve-tls-failed = the tls certificate could not be prepared: {$reason}
+cli-serve-cert-fingerprint = tls bootstrap certificate fingerprint (sha-256): {$fingerprint}
+cli-serve-web-failed = the web server could not start: {$reason}
+cli-serve-listening = listening on {$addr}
+cli-serve-web-stopped = the web server did not stop cleanly: {$reason}
+
+## setup, user, token
+cli-setup-exists = a user named `{$name}` already exists on this host; pass --force to overwrite it.
+cli-setup-created = the administrator account `{$name}` was created.
+cli-user-created = the account `{$name}` was created.
+cli-user-passwd = the password for `{$name}` was changed.
+cli-user-removed = the account `{$name}` was removed.
+cli-token-created = token {$id} ({$label}) was created; it will not be shown again: {$token}
+cli-token-revoked = token {$id} was revoked.
+cli-token-no-tokens = no tokens have been issued.
+cli-token-line = {$id}  {$label}  {$scopes}  {$created}  {$expires}
+cli-credential-failed = the request could not be completed: {$reason}
+
+## password entry (setup, user add, user passwd)
+cli-password-prompt = password:
+cli-password-confirm = confirm password:
+cli-password-mismatch = the passwords did not match.
+cli-password-empty = a password may not be empty.
 
 ## doctor
 cli-status-ok = ok

@@ -11,6 +11,9 @@ Commands:
   audit        Read the audit log back
   host         Report the detected host profile and facts
   doctor       Check this host for common misconfigurations
+  setup        First-run bootstrap: create the initial administrator account
+  user         Manage web ui / api accounts
+  token        Manage api tokens
   completions  Print a shell completion script
 
 Options:

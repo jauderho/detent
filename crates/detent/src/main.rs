@@ -11,8 +11,12 @@
 //!   the privsep monitor it needs, and executes it;
 //! * [`output`] renders the result, as pretty JSON under `--json` or as
 //!   localized text otherwise;
-//! * [`doctor`], [`serve`] and [`completions`] are the three commands that do
-//!   not go through the operations layer, each for a documented reason.
+//! * [`doctor`], [`serve`] and [`completions`] are the commands that do not
+//!   go through the operations layer, each for a documented reason;
+//! * [`webadmin`] (feature `web`) is `setup`, `user` and `token`: thin
+//!   wrappers over `detent-web`'s own account and token stores, bypassing the
+//!   operations layer entirely, since neither is a privileged target any
+//!   module declares.
 //!
 //! # Every user-facing string is a Fluent id
 //!
@@ -29,11 +33,10 @@
 //!
 //! # Out of scope for this task
 //!
-//! PLAN §2.6 also lists `setup`, `install`, `cert`, `update`, `user` and
-//! `token`. `setup` writes the first administrator's credentials, which belong
-//! with Phase 4's auth work; `install` would duplicate `packaging/install.sh`;
-//! the rest front operations (`CertStatus`, `UpdateCheck`, auth admin) that
-//! `detent-ops` deliberately does not define yet (`detent_ops::op`).
+//! PLAN §2.6 also lists `install`, `cert` and `update`. `install` would
+//! duplicate `packaging/install.sh`; the rest front operations (`CertStatus`,
+//! `UpdateCheck`) that `detent-ops` deliberately does not define yet
+//! (`detent_ops::op`).
 
 // Both crypto features may be enabled (so `--all-features` builds); when both
 // are present `crypto-aws-lc` takes precedence, mirroring rustls' own policy.
@@ -49,6 +52,8 @@ mod run;
 mod serve;
 #[cfg(test)]
 mod tests_support;
+#[cfg(feature = "web")]
+mod webadmin;
 
 use std::io::Write as _;
 use std::process::ExitCode;

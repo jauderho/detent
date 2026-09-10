@@ -84,12 +84,13 @@ pub struct Settings {
     pub state_root: PathBuf,
     /// The configuration file this run would read.
     ///
-    /// **Not parsed yet.** PLAN §2.10 makes `detent.toml` the source of the
-    /// listen address, ACME settings and the enabled-module subset, none of
-    /// which a Phase 3 CLI acts on, and no TOML parser is available to this
-    /// crate (`[workspace.dependencies]` has none). `doctor` reports whether
-    /// the file exists and how it is permissioned; Phase 4, which needs the
-    /// listen address, brings the parser.
+    /// Parsed on demand by [`Settings::load_web_config`], not eagerly here:
+    /// `detent.toml`'s `[listen]`/`[tls]`/`[auth]` tables are consumed only by
+    /// `serve`, `setup`, `user` and `token` (PLAN §2.10), all of which exist
+    /// only when the `web` feature is compiled in. A one-shot command such as
+    /// `host` or `config <module> get` never reads this file, so a malformed
+    /// `detent.toml` does not stop it — and in a `--no-default-features`
+    /// build with no `web`, this path is carried but never opened at all.
     pub config_path: PathBuf,
 }
 
@@ -108,6 +109,52 @@ impl Settings {
                 .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH)),
         }
     }
+
+    /// Reads and validates [`config_path`](Self::config_path) as a
+    /// `detent-web` configuration.
+    ///
+    /// A missing file is [`detent_web::Config::default`] — the documented
+    /// defaults, not a failure. Only compiled when the `web` feature is,
+    /// since nothing else in this crate has a use for `[listen]`/`[tls]`/
+    /// `[auth]`.
+    ///
+    /// # Errors
+    ///
+    /// [`detent_web::ConfigError`] when the file exists but cannot be read,
+    /// is not valid TOML, carries an unknown key, or holds a value
+    /// [`detent_web::Config::validate`] refuses.
+    #[cfg(feature = "web")]
+    pub fn load_web_config(&self) -> Result<detent_web::Config, detent_web::ConfigError> {
+        detent_web::Config::load(&self.config_path)
+    }
+}
+
+/// Renders a [`detent_web::ConfigError`] as a startup failure.
+///
+/// Shared by `serve` ([`crate::serve`]) and the web-admin commands
+/// ([`crate::webadmin`]): each is the first thing in its run to touch
+/// `detent.toml`, and a malformed file is a clean, localized exit rather than
+/// a bare `Err` debug print.
+///
+/// # Errors
+///
+/// Whatever the streams report.
+#[cfg(feature = "web")]
+pub(crate) fn report_web_config_error(
+    err: &detent_web::ConfigError,
+    settings: &Settings,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Exit> {
+    renderer.line(
+        streams.notes,
+        MessageId::new("cli-config-load-failed"),
+        &[
+            ("path", &settings.config_path.display().to_string()),
+            ("reason", &err.to_string()),
+        ],
+    )?;
+    Ok(Exit::Failed)
 }
 
 /// Runs one parsed command to completion and reports the exit code.
@@ -154,6 +201,18 @@ fn dispatch(
         }
         Command::Doctor => crate::doctor::report(&settings, renderer, streams),
         Command::Serve => crate::serve::run(cli.dryrun, &settings, renderer, streams),
+        #[cfg(feature = "web")]
+        Command::Setup(ref args) => {
+            crate::webadmin::setup(args, cli.dryrun, &settings, renderer, streams)
+        }
+        #[cfg(feature = "web")]
+        Command::User { ref action } => {
+            crate::webadmin::user(action, cli.dryrun, &settings, renderer, streams)
+        }
+        #[cfg(feature = "web")]
+        Command::Token { ref action } => {
+            crate::webadmin::token(action, cli.dryrun, &settings, renderer, streams)
+        }
         Command::Config {
             ref module,
             action: ConfigAction::Defaults,
@@ -377,6 +436,10 @@ pub fn operation_for(cli: &Cli, input: &mut dyn Read) -> Result<Operation, Usage
         Command::Host => Ok(Operation::HostProfile),
         // `dispatch` routes these away before an operation is needed.
         Command::Serve | Command::Doctor | Command::Completions { .. } => {
+            Ok(Operation::ListModules)
+        }
+        #[cfg(feature = "web")]
+        Command::Setup(_) | Command::User { .. } | Command::Token { .. } => {
             Ok(Operation::ListModules)
         }
     }
@@ -1264,6 +1327,85 @@ mod tests {
         );
         assert_ne!(exit, Exit::Usage);
         assert!(!notes.is_empty());
+        Ok(())
+    }
+
+    /// `setup`, `user add` and `token create` each reach `dispatch`'s own
+    /// match arm (not just `webadmin`'s functions, which the module's own
+    /// tests call directly) through the one public entry point, `run`.
+    #[cfg(feature = "web")]
+    #[test]
+    fn setup_user_and_token_commands_are_wired_through_dispatch() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let state = dir.path().display().to_string();
+        let config = dir.path().join("absent.toml").display().to_string();
+
+        let cli = parse(&[
+            "detent",
+            "--state-root",
+            &state,
+            "--config",
+            &config,
+            "setup",
+        ])?;
+        let mut input = b"hunter22\nhunter22\n".as_slice();
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = run(
+            &cli,
+            &mut Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+        );
+        assert_eq!(exit, Exit::Ok, "{}", String::from_utf8_lossy(&notes));
+
+        let cli = parse(&[
+            "detent",
+            "--state-root",
+            &state,
+            "--config",
+            &config,
+            "user",
+            "add",
+            "bob",
+        ])?;
+        let mut input = b"hunter22\nhunter22\n".as_slice();
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = run(
+            &cli,
+            &mut Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+        );
+        assert_eq!(exit, Exit::Ok, "{}", String::from_utf8_lossy(&notes));
+
+        let cli = parse(&[
+            "detent",
+            "--state-root",
+            &state,
+            "--config",
+            &config,
+            "token",
+            "create",
+            "ci",
+        ])?;
+        let mut input = std::io::empty();
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = run(
+            &cli,
+            &mut Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+        );
+        assert_eq!(exit, Exit::Ok, "{}", String::from_utf8_lossy(&notes));
         Ok(())
     }
 }
