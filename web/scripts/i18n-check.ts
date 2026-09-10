@@ -18,6 +18,7 @@
 
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const WEB_ROOT = new URL('..', import.meta.url).pathname
 const SRC_DIR = join(WEB_ROOT, 'src')
@@ -40,8 +41,7 @@ function isTestFile(path: string): boolean {
   return /(__tests__\/|\.test\.[tj]sx?$|\/test\/)/.test(path)
 }
 
-function loadFtlIds(path: string): Set<string> {
-  const text = readFileSync(path, 'utf8')
+export function loadFtlIdsFrom(text: string): Set<string> {
   const ids = new Set<string>()
   for (const line of text.split('\n')) {
     const m = /^([a-zA-Z][a-zA-Z0-9_-]*)\s*=/.exec(line)
@@ -50,7 +50,7 @@ function loadFtlIds(path: string): Set<string> {
   return ids
 }
 
-function findReferencedIds(text: string): string[] {
+export function findReferencedIds(text: string): string[] {
   const ids: string[] = []
   const localizedRe = /<Localized\s+id=["']([^"']+)["']/g
   const getStringRe = /l10n\.getString\(\s*["']([^"']+)["']/g
@@ -70,24 +70,40 @@ function stripLocalizedBlocks(text: string): string {
   return text.replace(/<Localized\b[^>]*>[\s\S]*?<\/Localized>/g, '<Localized />')
 }
 
-function findHardcodedJsxText(text: string): string[] {
+/**
+ * Punctuation that says "this is code, not prose".
+ *
+ * The scan below is a regex over `>…<` runs, not a parser, so it cannot tell a
+ * JSX text node from a fragment of an expression that merely sits between a
+ * `>` and a `<` — `foo ?? bar()` inside a `{…}` container matched happily and
+ * reported itself as untranslated copy. A false failure here is worse than a
+ * missed one: it trains the reader to ignore the check, or worse, to reshape
+ * working code to appease it. So anything carrying these characters is treated
+ * as code and skipped, at the cost of missing a hardcoded string that contains
+ * one.
+ */
+const CODE_PUNCTUATION = /[(){};=?|&`$\\]|=>|\.\w/
+
+export function findHardcodedJsxText(text: string): string[] {
   const stripped = stripLocalizedBlocks(text)
   const violations: string[] = []
-  // JSX text nodes: content between `>` and `<` on the same logical run,
-  // ignoring script/style-free .tsx source. Skip pure whitespace/symbols.
-  const jsxTextRe = />([^<>{}\n]*[a-zA-Z][^<>{}]*)</g
+  // A JSX text node lives between `>` and `<` with no intervening angle
+  // bracket, brace or newline — real copy is written on one line.
+  const jsxTextRe = />([^<>{}\n]*[a-zA-Z][^<>{}\n]*)</g
   for (const m of stripped.matchAll(jsxTextRe)) {
     const raw = m[1]?.trim()
     if (!raw) continue
-    // Ignore stray closing-tag artifacts and JS expressions leaking through.
     if (raw.startsWith('//')) continue
+    if (CODE_PUNCTUATION.test(raw)) continue
+    // Prose has at least two adjacent letters; `x` or `a b` is an artifact.
+    if (!/[a-zA-Z]{2}/.test(raw)) continue
     violations.push(raw)
   }
   return violations
 }
 
 function main(): number {
-  const ftlIds = loadFtlIds(FTL_PATH)
+  const ftlIds = loadFtlIdsFrom(readFileSync(FTL_PATH, 'utf8'))
   const files = walk(SRC_DIR)
 
   let failed = false
@@ -139,4 +155,9 @@ function main(): number {
   return 0
 }
 
-process.exit(main())
+const entry = process.argv[1]
+if (entry !== undefined && import.meta.url.startsWith('file:')) {
+  if (fileURLToPath(import.meta.url) === entry) {
+    process.exit(main())
+  }
+}

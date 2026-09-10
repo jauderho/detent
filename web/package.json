@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && bun scripts/build-finish.ts",
     "preview": "vite preview",
     "lint": "biome ci .",
     "format": "biome format --write .",
@@ -14,7 +14,8 @@
     "contrast:check": "bun scripts/contrast-check.ts",
     "typecheck": "tsc -b --force",
     "api:generate": "openapi-typescript ../docs/openapi.json -o src/api/schema.d.ts",
-    "api:check": "bun scripts/api-check.ts"
+    "api:check": "bun scripts/api-check.ts",
+    "build:finish": "bun scripts/build-finish.ts"
   },
   "dependencies": {
     "@fluent/bundle": "0.19.1",
@@ -43,7 +44,9 @@
     "@vitejs/plugin-react": "6.1.0",
     "@vitest/coverage-v8": "4.1.11",
     "jsdom": "30.0.1",
+    "lightningcss": "1.33.0",
     "openapi-typescript": "7.13.0",
+    "terser": "5.51.2",
     "typescript": "6.0.3",
     "vite": "8.2.2",
     "vitest": "4.1.11"
