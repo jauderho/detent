@@ -135,7 +135,7 @@ detent/
 ├── rust-toolchain.toml        # pinned stable (e.g. "1.98.0"), profile = minimal + clippy, rustfmt, llvm-tools
 ├── .cargo/config.toml         # lints, target cfgs, [registry] global-min-publish-age (when stable)
 ├── deny.toml                  # cargo-deny: advisories, licenses, bans, sources = crates.io only
-├── bunfig.toml                # [install] minimumReleaseAge = 604800, exact = true
+├── web/bunfig.toml            # [install] minimumReleaseAge = 604800, exact = true — must sit next to package.json; bun does not read a parent's bunfig
 ├── crates/
 │   ├── detent-core/           # pure: doc model, schema types, diagnostics, planning. #![forbid(unsafe_code)], no I/O, no async
 │   ├── detent-modules/        # facade: registry of enabled modules (cfg(feature) per module)
@@ -791,7 +791,7 @@ Test data policy: fixtures are real upstream samples with version directories; a
 | Ecosystem | Mechanism |
 |---|---|
 | Cargo | `dependabot.yml` `cooldown.default-days: 7` (security updates bypass). `.cargo/config.toml` `[registry] global-min-publish-age = "7 days"` added the day Cargo stabilizes it (tracked: rust-lang/cargo#17335, expected 1.100); until then CI runs `cargo-cooldown --days 7 -- fetch` as a lockfile check. |
-| Bun/npm | `bunfig.toml` `[install] minimumReleaseAge = 604800`; Dependabot `bun` ecosystem with the same cooldown. |
+| Bun/npm | `web/bunfig.toml` `[install] minimumReleaseAge = 604800`, alongside `web/package.json` because bun reads `bunfig.toml` from the install directory only; `scripts/cooldown-check.sh` in CI asserts that placement for every manifest; Dependabot `bun` ecosystem with the same cooldown. |
 | GitHub Actions | already configured (`cooldown.default-days: 7`); SHA pins. |
 | Rust toolchain | `rust-toolchain.toml` bumped by a scheduled workflow only when the release is ≥ 7 days old (point releases for security exempt). |
 | Container images in CI | pinned by digest; bumped by Dependabot `docker` ecosystem with cooldown 7. |

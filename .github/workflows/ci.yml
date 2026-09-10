@@ -210,6 +210,13 @@ jobs:
       - name: Install bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
+      # Bun reads bunfig.toml from the install directory only, never from a
+      # parent, so the ADR-011 cooldown has to sit next to each package.json.
+      # This runs before `bun install` so a misplaced config fails the job
+      # rather than being papered over by an install that appears to work.
+      - name: Supply-chain cooldown is in force (ADR-011)
+        run: scripts/cooldown-check.sh --verbose
+
       - name: bun install
         working-directory: web
         run: bun install --frozen-lockfile
