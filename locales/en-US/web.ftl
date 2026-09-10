@@ -17,6 +17,16 @@ status-mode-label = mode
 theme-toggle-aria = toggle light and dark mode
 theme-toggle-title = toggle light / dark
 
+## catfu component layer
+## Chrome the shared components render themselves. Content strings (field
+## captions, table headers, banner copy) are supplied by the calling page.
+component-countdown-remaining = time remaining
+component-field-info = more information
+component-modal-close = close
+component-switch-off = off
+component-switch-on = on
+component-table-empty = no records
+
 ## hstats readout strip
 hstat-services-active-label = services active
 hstat-pending-commit-label = pending commit

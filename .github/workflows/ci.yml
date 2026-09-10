@@ -237,6 +237,10 @@ jobs:
         working-directory: web
         run: bun run i18n:check
 
+      - name: bun run contrast:check
+        working-directory: web
+        run: bun run contrast:check
+
       - name: bun run build
         working-directory: web
         run: bun run build
