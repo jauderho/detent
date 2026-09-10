@@ -91,13 +91,11 @@ impl From<AuditQueryParams> for AuditQuery {
 }
 
 /// `GET /api/v1/system/profile`.
-///
-/// Response body mirrors `detent_ops::report::HostReport`.
 #[utoipa::path(
     get,
     path = PROFILE_PATH,
     tag = "system",
-    responses((status = 200, description = "What was detected about this host", body = serde_json::Value)),
+    responses((status = 200, description = "What was detected about this host", body = HostReport)),
 )]
 pub(super) async fn profile(
     State(state): State<AppState>,
@@ -119,14 +117,12 @@ fn render_host(outcome: OpOutcome) -> Result<Json<Box<HostReport>>, ApiError> {
 }
 
 /// `GET /api/v1/audit`.
-///
-/// Response body mirrors `Vec<detent_ops::audit::AuditRecord>`.
 #[utoipa::path(
     get,
     path = AUDIT_PATH,
     tag = "system",
     params(AuditQueryParams),
-    responses((status = 200, description = "Matching audit records, newest first", body = serde_json::Value)),
+    responses((status = 200, description = "Matching audit records, newest first", body = Vec<AuditRecord>)),
 )]
 pub(super) async fn audit(
     State(state): State<AppState>,

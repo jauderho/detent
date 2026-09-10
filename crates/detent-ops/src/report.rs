@@ -25,13 +25,16 @@ use crate::op::ServiceCommand;
 /// One module, as [`Operation::GetModule`](crate::Operation::GetModule) sees
 /// it.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ModuleView {
     /// The module's static metadata.
     pub descriptor: &'static ModuleDescriptor,
     /// The JSON Schema of its model, with `x-detent` UI hints.
+    #[cfg_attr(feature = "openapi", schema(value_type = Object))]
     pub schema: Value,
     /// The model parsed from the file on disk, or `None` when the target
     /// could not be read (e.g. it does not exist yet).
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<Object>))]
     pub model: Option<Value>,
     /// Digest of the file the model came from.
     pub current_hash: Option<Sha256Digest>,
@@ -41,6 +44,7 @@ pub struct ModuleView {
 
 /// A service a change would affect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AffectedService {
     /// The unit name the monitor resolved for this host's init system.
     pub unit: String,
@@ -50,6 +54,7 @@ pub struct AffectedService {
 
 /// The result of running one of a module's upstream validators.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CheckReport {
     /// Absolute path of the validator, for display.
     pub program: String,
@@ -68,6 +73,7 @@ pub struct CheckReport {
 /// What [`Operation::Plan`](crate::Operation::Plan) found. Nothing was
 /// written.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PlanReport {
     /// The module.
     pub module: String,
@@ -94,6 +100,7 @@ pub struct PlanReport {
 
 /// A commit-confirm window that is now running in the monitor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PendingCommit {
     /// The id to pass to
     /// [`Operation::ConfirmCommit`](crate::Operation::ConfirmCommit).
@@ -108,6 +115,7 @@ pub struct PendingCommit {
 
 /// What happened to a service.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ServiceReport {
     /// The unit the monitor acted on.
     pub unit: String,
@@ -121,6 +129,7 @@ pub struct ServiceReport {
 
 /// What [`Operation::Apply`](crate::Operation::Apply) did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ApplyReport {
     /// The module.
     pub module: String,
@@ -148,6 +157,7 @@ pub struct ApplyReport {
 /// plain Rust types with no `Serialize`, and adding one there would mean
 /// editing `detent-platform`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct HostReport {
     /// The profile modules see.
     pub profile: HostProfile,

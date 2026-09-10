@@ -11,9 +11,14 @@ publish = false
 workspace = true
 
 [dependencies]
-detent-core = { path = "../detent-core" }
-detent-ops = { path = "../detent-ops" }
-detent-platform = { path = "../detent-platform" }
+# `openapi` switches on `utoipa::ToSchema` for the response types these crates
+# own, so `docs/openapi.json` can name them instead of falling back to an
+# untyped object. The feature is off by default in each of them; enabling it
+# here is what keeps those crates front-end agnostic (PLAN §2.1) while this
+# crate still gets a precise document.
+detent-core = { path = "../detent-core", features = ["openapi"] }
+detent-ops = { path = "../detent-ops", features = ["openapi"] }
+detent-platform = { path = "../detent-platform", features = ["openapi"] }
 
 argon2 = { workspace = true }
 axum = { workspace = true }

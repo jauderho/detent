@@ -109,8 +109,13 @@ the other.
   in the same breath as the API surface it describes, with no auth
   requirement, and a front end needs the document before it has a session to
   authenticate with. It reveals shapes and error ids, nothing secret.
-- Every ops-layer response type this document cannot describe precisely
-  without giving `detent-ops` a dependency on `utoipa` (PLAN §2.1 keeps that
-  crate front-end agnostic) is documented as a loose, untyped object in
-  `openapi.json`, with a comment on the handler naming the real Rust type it
-  mirrors. Request bodies are web-layer types and are always precise.
+- Every response body names a schema, so a typed client can be generated from
+  `openapi.json`. The types come from `detent-core`, `detent-ops` and
+  `detent-platform`, which PLAN §2.1 keeps front-end agnostic: each of those
+  crates carries an **optional, off-by-default `openapi` feature** that adds
+  `utoipa::ToSchema` to the types that reach a response body, and `detent-web`
+  — which depends on `utoipa` anyway — is what switches it on. A default build
+  of those crates has no `utoipa` in its dependency graph.
+- The one exception is `GET /api/v1/openapi.json`, described as a plain
+  object: it returns this document, and naming its schema would mean carrying
+  a copy of the OpenAPI meta-schema.

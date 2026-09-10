@@ -16,7 +16,6 @@
           "system"
         ],
         "summary": "`GET /api/v1/audit`.",
-        "description": "Response body mirrors `Vec<detent_ops::audit::AuditRecord>`.",
         "operationId": "audit",
         "parameters": [
           {
@@ -53,7 +52,12 @@
             "description": "Matching audit records, newest first",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AuditRecord"
+                  }
+                }
               }
             }
           }
@@ -260,14 +264,18 @@
           "modules"
         ],
         "summary": "`GET /api/v1/modules`.",
-        "description": "Response body mirrors `Vec<&'static detent_core::descriptor::ModuleDescriptor>`.",
         "operationId": "list",
         "responses": {
           "200": {
             "description": "Every module compiled into this build",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ModuleDescriptor"
+                  }
+                }
               }
             }
           }
@@ -280,7 +288,6 @@
           "modules"
         ],
         "summary": "`GET /api/v1/modules/{id}`.",
-        "description": "Response body mirrors `detent_ops::report::ModuleView`.",
         "operationId": "get_one",
         "parameters": [
           {
@@ -298,7 +305,9 @@
             "description": "The module's descriptor, schema, current model and diagnostics",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ModuleView"
+                }
               }
             }
           },
@@ -321,7 +330,6 @@
           "modules"
         ],
         "summary": "`POST /api/v1/modules/{id}/apply`.",
-        "description": "Response body mirrors `detent_ops::report::ApplyReport`.",
         "operationId": "apply",
         "parameters": [
           {
@@ -349,7 +357,9 @@
             "description": "What was written, and any service action or commit-confirm window",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ApplyReport"
+                }
               }
             }
           },
@@ -392,7 +402,6 @@
           "backups"
         ],
         "summary": "`GET /api/v1/modules/{id}/backups`.",
-        "description": "Response body mirrors `Vec<detent_platform::privsep::proto::BackupInfo>`.",
         "operationId": "list",
         "parameters": [
           {
@@ -410,7 +419,12 @@
             "description": "The module's retained backups, newest first",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BackupInfo"
+                  }
+                }
               }
             }
           },
@@ -486,7 +500,6 @@
           "modules"
         ],
         "summary": "`POST /api/v1/modules/{id}/plan`.",
-        "description": "Response body mirrors `detent_ops::report::PlanReport`.",
         "operationId": "plan",
         "parameters": [
           {
@@ -514,7 +527,9 @@
             "description": "Diff and validator results; nothing is written",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/PlanReport"
+                }
               }
             }
           },
@@ -537,7 +552,6 @@
           "modules"
         ],
         "summary": "`POST /api/v1/modules/{id}/validate`.",
-        "description": "Response body mirrors `detent_core::diag::Diagnostics`.",
         "operationId": "validate",
         "parameters": [
           {
@@ -565,7 +579,9 @@
             "description": "Validation findings for the candidate model",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/Diagnostics"
+                }
               }
             }
           },
@@ -588,10 +604,18 @@
           "system"
         ],
         "summary": "`GET /api/v1/openapi.json`.",
+        "description": "The one response body in this document that is not named by a schema: it\n*is* the document, and describing it would mean carrying a copy of the\n`OpenAPI` meta-schema.",
         "operationId": "serve",
         "responses": {
           "200": {
-            "description": "This document"
+            "description": "This document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
           }
         }
       }
@@ -602,7 +626,6 @@
           "services"
         ],
         "summary": "`GET /api/v1/services/{id}`.",
-        "description": "Response body mirrors `detent_platform::service::ServiceStatus`.",
         "operationId": "status",
         "parameters": [
           {
@@ -620,7 +643,9 @@
             "description": "The service's run state",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceStatus"
+                }
               }
             }
           },
@@ -651,7 +676,6 @@
           "services"
         ],
         "summary": "`POST /api/v1/services/{id}`.",
-        "description": "Response body mirrors `detent_ops::report::ServiceReport`.",
         "operationId": "action",
         "parameters": [
           {
@@ -679,7 +703,9 @@
             "description": "What happened to the service",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceReport"
+                }
               }
             }
           },
@@ -712,14 +738,15 @@
           "system"
         ],
         "summary": "`GET /api/v1/system/profile`.",
-        "description": "Response body mirrors `detent_ops::report::HostReport`.",
         "operationId": "profile",
         "responses": {
           "200": {
             "description": "What was detected about this host",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HostReport"
+                }
               }
             }
           }
@@ -750,6 +777,27 @@
   },
   "components": {
     "schemas": {
+      "AffectedService": {
+        "type": "object",
+        "description": "A service a change would affect.",
+        "required": [
+          "unit",
+          "actions"
+        ],
+        "properties": {
+          "actions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServiceCommand"
+            },
+            "description": "The actions the module declared, most preferred first."
+          },
+          "unit": {
+            "type": "string",
+            "description": "The unit name the monitor resolved for this host's init system."
+          }
+        }
+      },
       "ApiServiceCommand": {
         "type": "string",
         "description": "A [`ServiceCommand`](detent_ops::ServiceCommand), as a request body may\nname it.\n\n[`detent_ops::ServiceCommand`] cannot derive [`utoipa::ToSchema`] without\ngiving `detent-ops` a dependency on `utoipa`, which PLAN §2.1 forbids: the\noperations layer stays front-end agnostic. This is the thin mirror that\nlets a request body have a precise, documented schema anyway; it converts\nstraight to the real type and carries no behaviour of its own.",
@@ -759,6 +807,72 @@
           "start",
           "stop"
         ]
+      },
+      "ApplyReport": {
+        "type": "object",
+        "description": "What [`Operation::Apply`](crate::Operation::Apply) did.",
+        "required": [
+          "module",
+          "path",
+          "new_hash",
+          "created",
+          "backed_up"
+        ],
+        "properties": {
+          "backed_up": {
+            "type": "boolean",
+            "description": "Whether a backup was retained, and therefore whether commit-confirm\nhas something to roll back to."
+          },
+          "commit": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PendingCommit",
+                "description": "The armed commit-confirm window, for a module whose descriptor sets\n`commit_confirm`."
+              }
+            ]
+          },
+          "created": {
+            "type": "boolean",
+            "description": "Whether the target did not exist before."
+          },
+          "module": {
+            "type": "string",
+            "description": "The module."
+          },
+          "new_hash": {
+            "$ref": "#/components/schemas/Sha256Digest",
+            "description": "Digest now on disk."
+          },
+          "path": {
+            "type": "string",
+            "description": "The target that was written."
+          },
+          "prev_hash": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Sha256Digest",
+                "description": "Digest of the replaced contents; `None` when the file was created."
+              }
+            ]
+          },
+          "service": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ServiceReport",
+                "description": "The service action, when one was requested."
+              }
+            ]
+          }
+        }
       },
       "ApplyRequest": {
         "type": "object",
@@ -802,6 +916,210 @@
         },
         "additionalProperties": false
       },
+      "ArgTemplate": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A fixed argument.",
+            "required": [
+              "literal"
+            ],
+            "properties": {
+              "literal": {
+                "type": "string",
+                "description": "A fixed argument."
+              }
+            }
+          },
+          {
+            "type": "string",
+            "description": "Replaced by the path of the temporary file holding the candidate config.",
+            "enum": [
+              "temp_file"
+            ]
+          }
+        ],
+        "description": "One argument of an [`ExternalCheck`] command line."
+      },
+      "AuditRecord": {
+        "type": "object",
+        "description": "One line of the audit log.",
+        "required": [
+          "ts",
+          "who",
+          "kind",
+          "op",
+          "result"
+        ],
+        "properties": {
+          "error_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Fluent id of the failure, when it failed."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/IdentityKind",
+            "description": "How the caller was authenticated."
+          },
+          "module": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The module the operation was about, when it was about one."
+          },
+          "new_hash": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Digest of the target afterwards."
+          },
+          "op": {
+            "$ref": "#/components/schemas/OpKind",
+            "description": "Which operation, without its payload."
+          },
+          "prev_hash": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Digest of the target before the operation, as 64 hex characters."
+          },
+          "result": {
+            "$ref": "#/components/schemas/AuditResult",
+            "description": "How it ended."
+          },
+          "ts": {
+            "type": "string",
+            "description": "When, as RFC 3339 in UTC."
+          },
+          "who": {
+            "type": "string",
+            "description": "The caller's subject."
+          }
+        }
+      },
+      "AuditResult": {
+        "type": "string",
+        "description": "How an operation ended.",
+        "enum": [
+          "ok",
+          "denied",
+          "error"
+        ]
+      },
+      "BackupId": {
+        "type": "integer",
+        "format": "int32",
+        "description": "Index into the backup listing most recently produced for a module.",
+        "minimum": 0
+      },
+      "BackupInfo": {
+        "type": "object",
+        "description": "One retained backup.",
+        "required": [
+          "id",
+          "target",
+          "name",
+          "created_unix_s",
+          "digest",
+          "len"
+        ],
+        "properties": {
+          "created_unix_s": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Modification time, seconds since the Unix epoch.",
+            "minimum": 0
+          },
+          "digest": {
+            "$ref": "#/components/schemas/Sha256Digest",
+            "description": "Digest of the backed-up contents."
+          },
+          "id": {
+            "$ref": "#/components/schemas/BackupId",
+            "description": "Index into this listing, for [`Request::Restore`]."
+          },
+          "len": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Size in bytes.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "File name of the backup within the module's backup directory. The\ndirectory itself is never disclosed."
+          },
+          "target": {
+            "$ref": "#/components/schemas/TargetId",
+            "description": "Which target the backup came from."
+          }
+        }
+      },
+      "CheckExpectation": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "The program must exit 0.",
+            "enum": [
+              "exit_zero"
+            ]
+          },
+          {
+            "type": "object",
+            "description": "The program's output must contain this literal substring. Matching is a\nplain substring search, not a regular expression: the core deliberately\ncarries no regex engine (PLAN §2.3), and the platform layer applies the\npattern as-is. Do not write anchors or metacharacters here — `^Loaded`\nlooks for a literal caret.",
+            "required": [
+              "stdout_pattern"
+            ],
+            "properties": {
+              "stdout_pattern": {
+                "type": "string",
+                "description": "The program's output must contain this literal substring. Matching is a\nplain substring search, not a regular expression: the core deliberately\ncarries no regex engine (PLAN §2.3), and the platform layer applies the\npattern as-is. Do not write anchors or metacharacters here — `^Loaded`\nlooks for a literal caret."
+              }
+            }
+          }
+        ],
+        "description": "How the result of an [`ExternalCheck`] is judged."
+      },
+      "CheckReport": {
+        "type": "object",
+        "description": "The result of running one of a module's upstream validators.",
+        "required": [
+          "program",
+          "ran",
+          "passed",
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "A bounded excerpt of its output, or the reason it did not run."
+          },
+          "exit_code": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Exit status, when the program was executed."
+          },
+          "passed": {
+            "type": "boolean",
+            "description": "Whether the declared expectation was met."
+          },
+          "program": {
+            "type": "string",
+            "description": "Absolute path of the validator, for display."
+          },
+          "ran": {
+            "type": "boolean",
+            "description": "Whether the validator actually ran. `false` means the binary is not\ninstalled or the monitor has no check runner wired up — informative,\nnot a plan failure."
+          }
+        }
+      },
       "CommitConfirmedView": {
         "type": "object",
         "description": "Answer to `ConfirmCommit`.",
@@ -816,6 +1134,135 @@
             "minimum": 0
           }
         }
+      },
+      "CommitId": {
+        "type": "integer",
+        "format": "int32",
+        "description": "Identifier the caller chooses for one commit-confirm cycle.",
+        "minimum": 0
+      },
+      "Diagnostic": {
+        "type": "object",
+        "description": "One validation finding.\n\nBuilt with [`Diagnostic::new`] and refined with the `with_*` methods; every field\nbeyond severity and id is optional because not every finding maps to a field or a\nbyte range.",
+        "required": [
+          "severity",
+          "id",
+          "args"
+        ],
+        "properties": {
+          "args": {
+            "type": "object",
+            "description": "Named arguments for the Fluent message, sorted for deterministic output.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "field": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FieldPath",
+                "description": "The model field this finding is about, if any."
+              }
+            ]
+          },
+          "id": {
+            "$ref": "#/components/schemas/MessageId",
+            "description": "The Fluent id of the message."
+          },
+          "severity": {
+            "$ref": "#/components/schemas/Severity",
+            "description": "How much this finding matters."
+          },
+          "span": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Span",
+                "description": "The byte range in the source file this finding is about, if any."
+              }
+            ]
+          }
+        }
+      },
+      "Diagnostics": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/Diagnostic"
+        },
+        "description": "The findings from one call to `ConfigModule::validate`, in the order they were\nproduced."
+      },
+      "DiffLine": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Present in both texts.",
+            "required": [
+              "text",
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "context"
+                ]
+              },
+              "text": {
+                "type": "string",
+                "description": "Present in both texts."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Present only in the original.",
+            "required": [
+              "text",
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "delete"
+                ]
+              },
+              "text": {
+                "type": "string",
+                "description": "Present only in the original."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Present only in the candidate.",
+            "required": [
+              "text",
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "insert"
+                ]
+              },
+              "text": {
+                "type": "string",
+                "description": "Present only in the candidate."
+              }
+            }
+          }
+        ],
+        "description": "One line of a [`Hunk`], including its own line terminator when the source\nline had one."
       },
       "ErrorBody": {
         "type": "object",
@@ -838,6 +1285,181 @@
             "description": "The Fluent id a front end renders."
           }
         }
+      },
+      "ExternalCheck": {
+        "type": "object",
+        "description": "An upstream validator run against a candidate file before it is installed, e.g.\n`chronyd -p -f <tmp>` or `testparm -s <tmp>`.",
+        "required": [
+          "program",
+          "args",
+          "expects"
+        ],
+        "properties": {
+          "args": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArgTemplate"
+            },
+            "description": "Its argument list."
+          },
+          "expects": {
+            "$ref": "#/components/schemas/CheckExpectation",
+            "description": "The success condition."
+          },
+          "program": {
+            "$ref": "#/components/schemas/PathSpec",
+            "description": "Absolute path of the validator binary."
+          }
+        }
+      },
+      "FieldPath": {
+        "type": "string",
+        "description": "A path to a field inside a module's model, in the style of a JSON pointer without\nthe leading slash: `\"entries/3/hostnames/0\"`.\n\nThe UI uses it to attach a diagnostic to the control that produced it."
+      },
+      "HostProfile": {
+        "type": "object",
+        "description": "What is known about the host a module is producing configuration for.\n\nPopulated by `detent-platform`; the core only reads it. Modules use it to pick a\nbackend, to size defaults, and to hide options newer than the installed service.",
+        "required": [
+          "os",
+          "init",
+          "hostname",
+          "service_versions",
+          "ram_mib"
+        ],
+        "properties": {
+          "hostname": {
+            "type": "string",
+            "description": "The host's own name, used by defaults such as the `/etc/hosts` entry for it."
+          },
+          "init": {
+            "$ref": "#/components/schemas/InitSystem",
+            "description": "Init system."
+          },
+          "os": {
+            "$ref": "#/components/schemas/Os",
+            "description": "Operating system family."
+          },
+          "ram_mib": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Physical memory in MiB, used to size caches and worker counts.",
+            "minimum": 0
+          },
+          "service_versions": {
+            "type": "object",
+            "description": "Installed version per service name, e.g. `{\"chronyd\": \"4.5\"}`.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "HostReport": {
+        "type": "object",
+        "description": "What was detected about this host.\n\nA projection rather than [`Detected`] itself: `HostFacts` and its enums are\nplain Rust types with no `Serialize`, and adding one there would mean\nediting `detent-platform`.",
+        "required": [
+          "profile",
+          "network_backend",
+          "resolver_backend",
+          "notes"
+        ],
+        "properties": {
+          "distro_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`ID=` from `/etc/os-release`, when the host has one."
+          },
+          "distro_version_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`VERSION_ID=` from `/etc/os-release`."
+          },
+          "network_backend": {
+            "type": "string",
+            "description": "The detected network backend."
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Caveats detection surfaced."
+          },
+          "profile": {
+            "$ref": "#/components/schemas/HostProfile",
+            "description": "The profile modules see."
+          },
+          "resolver_backend": {
+            "type": "string",
+            "description": "The detected resolver backend."
+          }
+        }
+      },
+      "Hunk": {
+        "type": "object",
+        "description": "One contiguous run of changes plus its surrounding context, addressed the\nway a unified diff addresses it: 1-based line numbers, and a start of `0`\nwhen the side contributes no lines at all.",
+        "required": [
+          "old_start",
+          "old_lines",
+          "new_start",
+          "new_lines",
+          "lines"
+        ],
+        "properties": {
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DiffLine"
+            },
+            "description": "The hunk body, in order."
+          },
+          "new_lines": {
+            "type": "integer",
+            "description": "How many candidate lines this hunk covers.",
+            "minimum": 0
+          },
+          "new_start": {
+            "type": "integer",
+            "description": "First candidate line covered, 1-based; `0` when `new_lines` is `0`.",
+            "minimum": 0
+          },
+          "old_lines": {
+            "type": "integer",
+            "description": "How many original lines this hunk covers.",
+            "minimum": 0
+          },
+          "old_start": {
+            "type": "integer",
+            "description": "First original line covered, 1-based; `0` when `old_lines` is `0`.",
+            "minimum": 0
+          }
+        }
+      },
+      "IdentityKind": {
+        "type": "string",
+        "description": "How a caller was authenticated.",
+        "enum": [
+          "local_user",
+          "session",
+          "token"
+        ]
+      },
+      "InitSystem": {
+        "type": "string",
+        "description": "The init system of the host being configured.",
+        "enum": [
+          "systemd",
+          "open_rc",
+          "launchd",
+          "none"
+        ]
       },
       "LoginRequest": {
         "type": "object",
@@ -865,6 +1487,10 @@
         },
         "additionalProperties": false
       },
+      "MessageId": {
+        "type": "string",
+        "description": "The id of a Fluent message in `locales/<lang>/core.ftl`.\n\nAlways a compile-time constant, so a module cannot accidentally emit a message\nthat has no translation entry."
+      },
       "ModelRequest": {
         "type": "object",
         "description": "The body of `POST /api/v1/modules/{id}/validate` and `.../plan`.",
@@ -878,6 +1504,263 @@
           }
         },
         "additionalProperties": false
+      },
+      "ModuleDescriptor": {
+        "type": "object",
+        "description": "Everything a module declares about itself.",
+        "required": [
+          "id",
+          "display_name_id",
+          "targets",
+          "upstream",
+          "services",
+          "checks",
+          "commit_confirm",
+          "security_notes"
+        ],
+        "properties": {
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExternalCheck"
+            },
+            "description": "Upstream validators run before installing a candidate file."
+          },
+          "commit_confirm": {
+            "type": "boolean",
+            "description": "Whether a change to this module needs commit-confirm (it can lock an admin\nout, e.g. network configuration)."
+          },
+          "display_name_id": {
+            "$ref": "#/components/schemas/MessageId",
+            "description": "Fluent id of the module's display name."
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable module id, e.g. `hosts`. Used in URLs, the CLI, the audit log and\nfeature names."
+          },
+          "security_notes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MessageId"
+            },
+            "description": "Fluent ids of security notes shown alongside this module."
+          },
+          "services": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServiceBinding"
+            },
+            "description": "Services affected by a change."
+          },
+          "targets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Target"
+            },
+            "description": "Files and directories this module owns."
+          },
+          "upstream": {
+            "$ref": "#/components/schemas/Upstream",
+            "description": "The upstream project tracked."
+          }
+        }
+      },
+      "ModuleView": {
+        "type": "object",
+        "description": "One module, as [`Operation::GetModule`](crate::Operation::GetModule) sees\nit.",
+        "required": [
+          "descriptor",
+          "schema",
+          "diagnostics"
+        ],
+        "properties": {
+          "current_hash": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Sha256Digest",
+                "description": "Digest of the file the model came from."
+              }
+            ]
+          },
+          "descriptor": {
+            "$ref": "#/components/schemas/ModuleDescriptor",
+            "description": "The module's static metadata."
+          },
+          "diagnostics": {
+            "$ref": "#/components/schemas/Diagnostics",
+            "description": "Validation findings for that model."
+          },
+          "model": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The model parsed from the file on disk, or `None` when the target\ncould not be read (e.g. it does not exist yet)."
+          },
+          "schema": {
+            "type": "object",
+            "description": "The JSON Schema of its model, with `x-detent` UI hints."
+          }
+        }
+      },
+      "OpKind": {
+        "type": "string",
+        "description": "The kind of an [`Operation`], with none of its payload.\n\nThis is what the audit log stores: an operation's arguments include the\ncandidate configuration, and PLAN §2.5 forbids the audit log from carrying\nfile bodies.",
+        "enum": [
+          "list_modules",
+          "get_module",
+          "validate",
+          "plan",
+          "apply",
+          "confirm_commit",
+          "rollback_commit",
+          "list_backups",
+          "restore",
+          "service_status",
+          "service_action",
+          "host_profile",
+          "audit_query"
+        ]
+      },
+      "Os": {
+        "type": "string",
+        "description": "The operating system family of the host being configured.",
+        "enum": [
+          "linux",
+          "mac_os",
+          "other"
+        ]
+      },
+      "Owner": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "`root`, the usual case for `/etc`.",
+            "enum": [
+              "root"
+            ]
+          },
+          {
+            "type": "object",
+            "description": "A named service account, e.g. `unbound`.",
+            "required": [
+              "named"
+            ],
+            "properties": {
+              "named": {
+                "type": "string",
+                "description": "A named service account, e.g. `unbound`."
+              }
+            }
+          }
+        ],
+        "description": "The account a [`Target`] must belong to after a write."
+      },
+      "PathSpec": {
+        "type": "string",
+        "description": "A filesystem path owned by a module. Always a compile-time constant."
+      },
+      "PendingCommit": {
+        "type": "object",
+        "description": "A commit-confirm window that is now running in the monitor.",
+        "required": [
+          "commit_id",
+          "timeout_s",
+          "deadline",
+          "rollback_targets"
+        ],
+        "properties": {
+          "commit_id": {
+            "$ref": "#/components/schemas/CommitId",
+            "description": "The id to pass to\n[`Operation::ConfirmCommit`](crate::Operation::ConfirmCommit)."
+          },
+          "deadline": {
+            "type": "string",
+            "description": "When the window closes, RFC 3339 UTC."
+          },
+          "rollback_targets": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many targets the monitor will roll back if it expires.",
+            "minimum": 0
+          },
+          "timeout_s": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Seconds until automatic rollback, as the monitor clamped them.",
+            "minimum": 0
+          }
+        }
+      },
+      "PlanReport": {
+        "type": "object",
+        "description": "What [`Operation::Plan`](crate::Operation::Plan) found. Nothing was\nwritten.",
+        "required": [
+          "module",
+          "path",
+          "diff",
+          "rendered",
+          "unified_diff",
+          "affected_services",
+          "checks",
+          "diagnostics",
+          "current_hash",
+          "would_change"
+        ],
+        "properties": {
+          "affected_services": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AffectedService"
+            },
+            "description": "Services a subsequent apply could act on."
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckReport"
+            },
+            "description": "Results of the module's upstream validators, run against the candidate."
+          },
+          "current_hash": {
+            "$ref": "#/components/schemas/Sha256Digest",
+            "description": "Digest of the file as it is now, to pass back as `expected_hash`."
+          },
+          "diagnostics": {
+            "$ref": "#/components/schemas/Diagnostics",
+            "description": "Validation findings for the candidate model."
+          },
+          "diff": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Hunk"
+            },
+            "description": "The change, as unified-diff hunks."
+          },
+          "module": {
+            "type": "string",
+            "description": "The module."
+          },
+          "path": {
+            "type": "string",
+            "description": "The target this plan is about."
+          },
+          "rendered": {
+            "type": "string",
+            "description": "The candidate file, rendered in full."
+          },
+          "unified_diff": {
+            "type": "string",
+            "description": "`diff` as unified-diff text, so a front end and the CLI show the same\nbytes without each re-implementing the rendering."
+          },
+          "would_change": {
+            "type": "boolean",
+            "description": "Whether applying would change anything at all."
+          }
+        }
       },
       "RestoredView": {
         "type": "object",
@@ -921,6 +1804,16 @@
           }
         }
       },
+      "ServiceAction": {
+        "type": "string",
+        "description": "What may be done to a service after a config change.",
+        "enum": [
+          "restart",
+          "reload",
+          "start",
+          "stop"
+        ]
+      },
       "ServiceActionRequest": {
         "type": "object",
         "description": "The body of `POST /api/v1/services/{id}`.",
@@ -934,6 +1827,101 @@
           }
         },
         "additionalProperties": false
+      },
+      "ServiceBinding": {
+        "type": "object",
+        "description": "A service a module's files configure.",
+        "required": [
+          "units",
+          "actions"
+        ],
+        "properties": {
+          "actions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServiceAction"
+            },
+            "description": "Actions this module may request, most preferred first."
+          },
+          "units": {
+            "$ref": "#/components/schemas/UnitNames",
+            "description": "Names of the service per init system."
+          }
+        }
+      },
+      "ServiceCommand": {
+        "type": "string",
+        "description": "What a caller may ask be done to a service.\n\nA closed mirror of [`CoreServiceAction`] that, unlike the core type, is\n`Deserialize` (so it can arrive over an API) and, unlike the wire type,\nhas no `Status` variant — status is [`Operation::ServiceStatus`], which\nmutates nothing and must not be confusable with an action that does.",
+        "enum": [
+          "restart",
+          "reload",
+          "start",
+          "stop"
+        ]
+      },
+      "ServiceReport": {
+        "type": "object",
+        "description": "What happened to a service.",
+        "required": [
+          "unit",
+          "action",
+          "active",
+          "detail"
+        ],
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/ServiceCommand",
+            "description": "The action that was requested."
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Whether the unit is running afterwards."
+          },
+          "detail": {
+            "type": "string",
+            "description": "A short human-readable detail string."
+          },
+          "unit": {
+            "type": "string",
+            "description": "The unit the monitor acted on."
+          }
+        }
+      },
+      "ServiceStatus": {
+        "type": "object",
+        "description": "The result of a [`ServiceManager::status`] call.",
+        "required": [
+          "unit",
+          "state"
+        ],
+        "properties": {
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the unit starts automatically at boot, when the backend can\ndetermine it."
+          },
+          "since": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SystemTimeView",
+                "description": "When the unit entered its current state, when the backend can\ndetermine it."
+              }
+            ]
+          },
+          "state": {
+            "$ref": "#/components/schemas/State",
+            "description": "Current run state."
+          },
+          "unit": {
+            "type": "string",
+            "description": "The unit name actually resolved and queried, i.e. the alternative\nfrom [`UnitNames`] that exists on this host."
+          }
+        }
       },
       "SessionView": {
         "type": "object",
@@ -970,6 +1958,191 @@
           "totp_satisfied": {
             "type": "boolean",
             "description": "Whether a second factor was presented."
+          }
+        }
+      },
+      "Severity": {
+        "type": "string",
+        "description": "How much a diagnostic matters.",
+        "enum": [
+          "error",
+          "warning",
+          "recommendation"
+        ]
+      },
+      "Sha256Digest": {
+        "type": "string",
+        "description": "A SHA-256 digest, as 64 lowercase hex characters.",
+        "maxLength": 64,
+        "minLength": 64,
+        "pattern": "^[0-9a-f]{64}$"
+      },
+      "Span": {
+        "type": "object",
+        "description": "A byte range within the text a [`Document`] was parsed from.\n\n`start` is inclusive, `end` is exclusive. Both are byte offsets, not character\noffsets, and always fall on UTF-8 boundaries.",
+        "required": [
+          "start",
+          "end"
+        ],
+        "properties": {
+          "end": {
+            "type": "integer",
+            "description": "Exclusive end byte offset.",
+            "minimum": 0
+          },
+          "start": {
+            "type": "integer",
+            "description": "Inclusive start byte offset.",
+            "minimum": 0
+          }
+        }
+      },
+      "State": {
+        "type": "string",
+        "description": "The run state of a service, as reported by [`ServiceManager::status`].",
+        "enum": [
+          "active",
+          "inactive",
+          "failed",
+          "activating",
+          "deactivating",
+          "unknown"
+        ]
+      },
+      "SystemTimeView": {
+        "type": "object",
+        "description": "How `serde` renders a [`SystemTime`]: two integers, not an RFC 3339\nstring.\n\nIt exists only so the `openapi` feature has something accurate to point\n[`ServiceStatus::since`] at — `utoipa` has no schema for [`SystemTime`],\nand describing it as a string would misdescribe the bytes clients receive.\nNothing constructs one.",
+        "required": [
+          "secs_since_epoch",
+          "nanos_since_epoch"
+        ],
+        "properties": {
+          "nanos_since_epoch": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Nanoseconds within that second.",
+            "minimum": 0
+          },
+          "secs_since_epoch": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Whole seconds since the Unix epoch.",
+            "minimum": 0
+          }
+        }
+      },
+      "Target": {
+        "type": "object",
+        "description": "One file or directory a module manages.",
+        "required": [
+          "path",
+          "kind",
+          "mode",
+          "owner"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/TargetKind",
+            "description": "File, drop-in directory, or directory."
+          },
+          "mode": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The mode the target must end up with, e.g. `0o644`.",
+            "minimum": 0
+          },
+          "owner": {
+            "$ref": "#/components/schemas/Owner",
+            "description": "The owner the target must end up with."
+          },
+          "path": {
+            "$ref": "#/components/schemas/PathSpec",
+            "description": "Where it lives."
+          }
+        }
+      },
+      "TargetId": {
+        "type": "integer",
+        "format": "int32",
+        "description": "Index into the monitor's target table.",
+        "minimum": 0
+      },
+      "TargetKind": {
+        "type": "string",
+        "description": "What kind of filesystem object a [`Target`] is.",
+        "enum": [
+          "file",
+          "drop_in_dir",
+          "directory"
+        ]
+      },
+      "UnitNames": {
+        "type": "object",
+        "description": "Per-init-system names for one service, most preferred first.\n\nDistributions disagree (`chronyd.service` on Fedora, `chrony.service` on Debian),\nso each backend gets a list of alternatives rather than a single name.",
+        "required": [
+          "systemd",
+          "openrc",
+          "bsdrc"
+        ],
+        "properties": {
+          "bsdrc": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "BSD `rc.d` script names. Kept for portability; BSD is a deferred tier."
+          },
+          "openrc": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "`OpenRC` service names."
+          },
+          "systemd": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "systemd unit names."
+          }
+        }
+      },
+      "Upstream": {
+        "type": "object",
+        "description": "The upstream project whose configuration format a module tracks.",
+        "required": [
+          "project",
+          "repo_url",
+          "tracked_version",
+          "docs"
+        ],
+        "properties": {
+          "docs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Documentation URLs shown in the UI."
+          },
+          "project": {
+            "type": "string",
+            "description": "Upstream project name, e.g. `chrony`."
+          },
+          "release_feed": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A release feed URL the upstream-watch workflow polls, when one exists."
+          },
+          "repo_url": {
+            "type": "string",
+            "description": "Canonical source repository URL."
+          },
+          "tracked_version": {
+            "type": "string",
+            "description": "The upstream release this module's option set was derived from."
           }
         }
       }

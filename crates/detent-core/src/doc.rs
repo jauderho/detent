@@ -26,6 +26,7 @@ use crate::module::{EditError, LosslessDoc};
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 #[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Span {
     /// Inclusive start byte offset.
     pub start: usize,

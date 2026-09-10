@@ -16,6 +16,7 @@ serde_json = { workspace = true }
 schemars = { workspace = true }
 thiserror = { workspace = true }
 arbitrary = { workspace = true, optional = true }
+utoipa = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
@@ -25,3 +26,8 @@ default = []
 ## Enables `arbitrary::Arbitrary` implementations for the document primitives so
 ## `cargo-fuzz` targets in module crates can build structured inputs.
 fuzzing = ["dep:arbitrary"]
+## Enables `utoipa::ToSchema` on the types that reach an API response body, so
+## `detent-web` can describe them in `docs/openapi.json`. Off by default: PLAN
+## §2.1 keeps this crate front-end agnostic, and a default build has no utoipa
+## in its dependency graph.
+openapi = ["dep:utoipa"]

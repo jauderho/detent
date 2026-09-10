@@ -122,6 +122,37 @@ impl Serialize for Sha256Digest {
     }
 }
 
+/// Hand-written rather than derived: [`Sha256Digest`] wraps `[u8; 32]` but
+/// serializes as the 64-character lowercase hex string above, and a derived
+/// schema would describe the array instead of what actually goes on the wire.
+#[cfg(feature = "openapi")]
+impl utoipa::PartialSchema for Sha256Digest {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::ObjectBuilder::new()
+            .schema_type(utoipa::openapi::schema::Type::String)
+            .description(Some("A SHA-256 digest, as 64 lowercase hex characters."))
+            .pattern(Some("^[0-9a-f]{64}$"))
+            .min_length(Some(64))
+            .max_length(Some(64))
+            .into()
+    }
+}
+
+#[cfg(feature = "openapi")]
+impl utoipa::ToSchema for Sha256Digest {
+    fn schemas(
+        schemas: &mut Vec<(
+            String,
+            utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>,
+        )>,
+    ) {
+        schemas.push((
+            Self::name().into(),
+            <Self as utoipa::PartialSchema>::schema(),
+        ));
+    }
+}
+
 impl<'de> Deserialize<'de> for Sha256Digest {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let text = String::deserialize(deserializer)?;

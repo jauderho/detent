@@ -514,6 +514,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "utoipa",
 ]
 
 [[package]]
@@ -601,6 +602,7 @@ dependencies = [
  "thiserror",
  "time",
  "tracing",
+ "utoipa",
 ]
 
 [[package]]
@@ -621,6 +623,7 @@ dependencies = [
  "thiserror",
  "time",
  "tracing",
+ "utoipa",
  "xattr",
 ]
 

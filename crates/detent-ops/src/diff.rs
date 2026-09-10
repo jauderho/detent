@@ -39,6 +39,7 @@ pub const MAX_EDIT_DISTANCE: usize = 512;
 /// line had one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "op", content = "text", rename_all = "snake_case")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub enum DiffLine {
     /// Present in both texts.
     Context(String),
@@ -72,6 +73,7 @@ impl DiffLine {
 /// way a unified diff addresses it: 1-based line numbers, and a start of `0`
 /// when the side contributes no lines at all.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Hunk {
     /// First original line covered, 1-based; `0` when `old_lines` is `0`.
     pub old_start: usize,
