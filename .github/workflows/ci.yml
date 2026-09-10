@@ -13,6 +13,13 @@ concurrency:
 
 permissions: read-all
 
+env:
+  # `dtolnay/rust-toolchain` declares `toolchain` as a *required* input and
+  # hard-fails when it is empty, so every job has to name a version. Kept here
+  # rather than in seven `with:` blocks, and checked against
+  # rust-toolchain.toml by the "toolchain pin matches" step in the `rust` job.
+  RUST_TOOLCHAIN: "1.98.0"
+
 jobs:
   rust:
     name: Rust (fmt, clippy, test, feature matrix)
@@ -28,6 +35,17 @@ jobs:
 
       - name: Install Rust toolchain (from rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Toolchain pin matches rust-toolchain.toml
+        run: |
+          pinned=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          if [[ "$pinned" != "${RUST_TOOLCHAIN}" ]]; then
+            echo "rust-toolchain.toml pins ${pinned} but the workflow installs ${RUST_TOOLCHAIN}" >&2
+            exit 1
+          fi
+          echo "both pin ${pinned}"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -71,6 +89,8 @@ jobs:
 
       - name: Install Rust toolchain (from rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -98,6 +118,8 @@ jobs:
 
       - name: Install Rust toolchain (from rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: cargo deny check
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
@@ -141,6 +163,8 @@ jobs:
 
       - name: Install Rust toolchain (from rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -263,17 +287,52 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install Rust toolchain (from rust-toolchain.toml)
+      # `toolchain` is a required input for this action (it has no
+      # rust-toolchain.toml auto-detection of its own — verified against the
+      # pinned commit's action.yml); pinned to match rust-toolchain.toml so
+      # the cross target is added to the same toolchain `cargo` actually uses.
+      - name: Install Rust toolchain (pinned to rust-toolchain.toml, + aarch64-musl target)
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-unknown-linux-musl
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      - name: cargo build --release
-        run: cargo build --release -p detent
+      # PLAN §4.1 budgets are aarch64-unknown-linux-musl, release, stripped.
+      # `cargo-zigbuild` + zig cross-compile that target from the x86_64 glibc
+      # runner (docs/spikes/00-cross-build.md is the reference for both tools).
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: "0.16.0"
 
-      - name: size-check
-        run: scripts/size-check.sh --verbose target/release/detent
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --version 0.23.2 --locked
+
+      # Three budget rows (PLAN §4.1), each built and checked against its own
+      # size-baseline.json key before the next build overwrites the binary.
+      - name: Build (full default features)
+        run: cargo zigbuild --release -p detent --target aarch64-unknown-linux-musl
+
+      - name: size-check (full default features)
+        run: scripts/size-check.sh --verbose --key full-default-aarch64-musl target/aarch64-unknown-linux-musl/release/detent
+
+      - name: Build (resolver + web)
+        run: cargo zigbuild --release -p detent --target aarch64-unknown-linux-musl --no-default-features --features module-resolver,web,crypto-aws-lc,init-systemd
+
+      - name: size-check (resolver + web)
+        run: scripts/size-check.sh --verbose --key resolver-web-aarch64-musl target/aarch64-unknown-linux-musl/release/detent
+
+      # No crypto feature: main.rs's provider requirement is gated on `web`,
+      # so the smallest build does not have to name a TLS backend it will
+      # never link. PLAN §4.1 row 3.
+      - name: Build (CLI only, no web/acme/update)
+        run: cargo zigbuild --release -p detent --target aarch64-unknown-linux-musl --no-default-features --features module-hosts,module-resolver,module-chrony,module-mounts,module-nfs,module-samba,module-dhcp,module-network,init-systemd
+
+      - name: size-check (CLI only)
+        run: scripts/size-check.sh --verbose --key cli-aarch64-musl target/aarch64-unknown-linux-musl/release/detent
 
   pins:
     name: Action pins (SHA + version comment)

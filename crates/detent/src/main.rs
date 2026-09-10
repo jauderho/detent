@@ -40,8 +40,16 @@
 
 // Both crypto features may be enabled (so `--all-features` builds); when both
 // are present `crypto-aws-lc` takes precedence, mirroring rustls' own policy.
-#[cfg(not(any(feature = "crypto-aws-lc", feature = "crypto-ring")))]
-compile_error!("one of crypto-aws-lc or crypto-ring must be enabled");
+//
+// Gated on `web`, because that is the only thing a rustls provider is for. A
+// CLI build with the TLS stack switched off — PLAN §4.1's third size row —
+// otherwise had to name a provider it would never link, which is a confusing
+// demand to make of somebody trying to build the smallest binary.
+#[cfg(all(
+    feature = "web",
+    not(any(feature = "crypto-aws-lc", feature = "crypto-ring"))
+))]
+compile_error!("the `web` feature needs one of crypto-aws-lc or crypto-ring");
 
 mod cli;
 mod completions;

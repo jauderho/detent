@@ -28,8 +28,13 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Same pinned action as ci.yml, with `nightly` asked for by input.
+      # The previous pin was a SHA that does not exist in this repository, so
+      # the step could never have resolved.
       - name: Install nightly Rust toolchain
-        uses: dtolnay/rust-toolchain@82fc405565b9cf90abfe700ba43b4751ce2fe422 # nightly
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: nightly
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
