@@ -31,6 +31,27 @@
 //! numbers for the exact distribution this crate is tested against, not a
 //! hand-typed table.
 //!
+//! **Phase 4 addendum (the worker's real `detent-web` server, PLAN §2.6):**
+//! the same two sources, plus a third this time — a full end-to-end `strace
+//! -f` of `detent serve` itself (not just its test suite) as root inside
+//! `rust:1-bookworm`, self-signed TLS, a real client request over HTTPS, and
+//! a real `SIGTERM`. That is what caught what reading the dependency tree
+//! could not have: `clone`/`clone3`/`rseq`/`set_robust_list`/
+//! `sched_getaffinity` for the thread `detent_web::spawn_engine` starts,
+//! `socketpair` (not `pipe2`) for `tokio::signal`'s self-pipe, and
+//! `rt_sigreturn` — missing from *both* roles since Phase 2, and invisible
+//! until something actually delivered a signal to a confined process, at
+//! which point it faulted in a `getrandom`/`rt_sigreturn` `EPERM` loop
+//! instead of returning from the handler. It also caught a masking bug one
+//! level up: an earlier draft of this table listed `epoll_wait`, which has
+//! no `aarch64` number, which made [`compile`] return `UnknownSyscall` for
+//! the worker on `aarch64` — and `sandbox::linux::install_seccomp` turns
+//! that into a silently degraded `Outcome::Unavailable` rather than failing
+//! startup, so the worker ran with **no seccomp filter installed at all**
+//! until the live trace showed no `seccomp(SECCOMP_SET_MODE_FILTER, …)`
+//! call for its pid. `epoll_pwait` (present on both architectures) replaced
+//! it.
+//!
 //! Only `x86_64` and `aarch64` are covered (PLAN §1.6 defers armv7 and riscv64);
 //! [`Arch::parse`] and [`Arch::host`] report anything else as
 //! [`SeccompError::UnsupportedArch`] rather than failing to compile, so a
@@ -159,6 +180,13 @@ const MONITOR: &[&str] = &[
     "rt_sigaction",
     "rt_sigprocmask",
     "sigaltstack",
+    // The kernel's own way back out of a signal handler (`sigreturn(2)`):
+    // without it, a process that has `rt_sigaction`-installed handlers and
+    // actually receives a signal cannot resume, and faults on return instead
+    // — found live for the worker (below) chasing a `SIGTERM` that never
+    // stopped the server; this pre-dated Phase 4 and applies equally to the
+    // monitor, which installs handlers via the same `rt_sigaction`.
+    "rt_sigreturn",
     "getpid",
     "gettid",
     "exit",
@@ -188,10 +216,16 @@ const MONITOR: &[&str] = &[
     "wait4",
 ];
 
-/// Syscalls the worker needs. Phase 2 gives the worker nothing but the
-/// privsep handshake (`Client::hello`/`shutdown`) — no filesystem, no
-/// network — because TLS/HTTP/ACME land in Phase 4. This table grows then;
-/// it is not guessed ahead of that work.
+/// Syscalls the worker needs. Phase 4 gives the worker a real `detent-web`
+/// HTTP/TLS server on a `tokio` runtime (`crates/detent/src/serve.rs`), so
+/// this is no longer just the Phase 2 privsep handshake. Every addition below
+/// was confirmed against a real, running worker: `strace -f` on
+/// `rust:1-bookworm` (aarch64, under `OrbStack` — see `docs/spikes/m1-e2e.md`
+/// for the same methodology) with the Phase 2 table installed, which killed
+/// the worker with `EPERM` on `clone` the moment `detent_web::spawn_engine`
+/// tried to start its background thread; each further syscall below was
+/// added and re-traced until a real client request completed and the worker
+/// shut down cleanly on `SIGTERM`.
 const WORKER: &[&str] = &[
     "read",
     "write",
@@ -217,10 +251,94 @@ const WORKER: &[&str] = &[
     "rt_sigaction",
     "rt_sigprocmask",
     "sigaltstack",
+    // The syscall a signal handler returns through (see the monitor's copy
+    // of this comment above). Without it `tokio::signal::unix::signal`'s
+    // handler for `SIGTERM`/`SIGINT` faults on return instead of resuming —
+    // confirmed live: a real `SIGTERM` sent to a confined worker produced a
+    // tight `getrandom`/`rt_sigreturn` `EPERM` loop under `strace` instead
+    // of a clean shutdown, until this was added.
+    "rt_sigreturn",
     "getpid",
     "gettid",
     "exit",
     "exit_group",
+    // `detent_web::spawn_engine`'s `std::thread::spawn`: the OpsEngine's own
+    // dedicated OS thread (`crates/detent-web/src/engine.rs`), started every
+    // time regardless of which tokio runtime flavour drives the server.
+    // `rseq` is glibc's own doing, not this codebase's: every new thread
+    // self-registers a restartable-sequence memory area right after `clone`
+    // returns in the child, and treats an `EPERM` there as fatal
+    // (`Fatal glibc error: rseq registration failed`, confirmed live —
+    // the worker's main thread never calls it post-`exec`, because that
+    // registration already happened before the seccomp filter installs, but
+    // every thread `spawn_engine` starts afterwards needs it).
+    "clone",
+    "clone3",
+    // glibc's own doing on every new thread, not this codebase's, and each
+    // treats an `EPERM` as fatal or near enough not to trust: `rseq`
+    // self-registers a restartable-sequence memory area right after `clone`
+    // returns in the child (`Fatal glibc error: rseq registration failed`,
+    // confirmed live — the worker's own main thread never calls it, because
+    // that registration already happened before the seccomp filter
+    // installs, but every thread `spawn_engine` starts afterwards needs
+    // it); `set_robust_list` registers the new thread's robust-futex list
+    // (glibc's `pthread_create`, unconditional); `sched_getaffinity` backs
+    // `std::thread::available_parallelism`, which `tokio`'s runtime builder
+    // consults even for `new_current_thread`.
+    "rseq",
+    "set_robust_list",
+    "sched_getaffinity",
+    // `tokio::runtime::Builder::new_current_thread()` (`prepare_worker`) and
+    // `tokio::signal::unix::signal` (`shutdown_signal`): mio's epoll-based
+    // reactor and its eventfd2 waker, and the `AF_UNIX`/`SOCK_STREAM`
+    // socket pair `tokio::signal` uses to move SIGTERM/SIGINT delivery out
+    // of the signal handler (`failed to create UnixStream`, confirmed live,
+    // is `tokio-1.53.1`'s own panic message for this exact `EPERM`).
+    // `epoll_pwait` only, not `epoll_wait`: `aarch64` has no `epoll_wait`
+    // syscall at all (like `poll`/`ppoll` below), and every table entry
+    // [`syscalls_for`] actually lists must resolve on both tier-1
+    // architectures or `numbers_for`/`compile` fails — confirmed live: an
+    // earlier version of this table listed `epoll_wait` too, which made
+    // `compile` return `UnknownSyscall` for the worker on `aarch64`, which
+    // `sandbox::linux::install_seccomp` silently downgrades to
+    // `Outcome::Unavailable` rather than failing the worker's startup — the
+    // worker still ran, completely unconfined by seccomp, and `strace`
+    // confirmed it: no `seccomp(SECCOMP_SET_MODE_FILTER, …)` call for the
+    // worker's pid, only for the monitor's.
+    "epoll_create1",
+    "epoll_ctl",
+    "epoll_pwait",
+    "eventfd2",
+    "socketpair",
+    // Listening: `detent_web::Server::bind` opens a TCP socket, binds it to
+    // `config.listen.addr`, and starts listening; `local_addr()` (logged by
+    // `run_worker` as `cli-serve-listening`) reads it back.
+    "socket",
+    "bind",
+    "listen",
+    "getsockname",
+    "setsockopt",
+    // Accepting and serving a connection: tokio's `TcpListener::accept`
+    // (`accept4`, non-blocking + close-on-exec in one call) and hyper's
+    // vectored writes of a response over the accepted stream.
+    "accept4",
+    "writev",
+    // `tls::load_or_bootstrap`, `AuthState::open` (users/tokens/sessions)
+    // and `FileAudit`: every file the worker's own state-root-confined
+    // Landlock rules allow it to touch — the bootstrap certificate and key
+    // under `tls.cert_dir`, `users.json`/`tokens.json` under
+    // `<state_root>/state`, and the audit log under `<state_root>/audit`.
+    "openat",
+    "pread64",
+    "pwrite64",
+    "renameat",
+    "fsync",
+    "unlinkat",
+    "mkdirat",
+    "fchmod",
+    "fchmodat",
+    "faccessat",
+    "getdents64",
 ];
 
 /// The syscall names allowed for `role`, by name (see the module docs for
@@ -270,6 +388,7 @@ const SYSCALL_NUMBERS: &[(&str, i64, i64)] = &[
     ("restart_syscall", 219, 128),
     ("getrandom", 318, 278),
     ("sigaltstack", 131, 132),
+    ("rt_sigreturn", 15, 139),
     ("gettid", 186, 178),
     ("exit", 60, 93),
     ("exit_group", 231, 94),
@@ -289,6 +408,22 @@ const SYSCALL_NUMBERS: &[(&str, i64, i64)] = &[
     ("faccessat", 269, 48),
     ("newfstatat", 262, 79),
     ("statx", 332, 291),
+    ("rseq", 334, 293),
+    ("set_robust_list", 273, 99),
+    ("sched_getaffinity", 204, 123),
+    ("socketpair", 53, 199),
+    ("clone", 56, 220),
+    ("clone3", 435, 435),
+    ("epoll_create1", 291, 20),
+    ("epoll_ctl", 233, 21),
+    ("epoll_pwait", 281, 22),
+    ("eventfd2", 290, 19),
+    ("socket", 41, 198),
+    ("bind", 49, 200),
+    ("listen", 50, 201),
+    ("getsockname", 51, 204),
+    ("accept4", 288, 242),
+    ("writev", 20, 66),
 ];
 
 /// `name`'s raw syscall number on `arch`, or `None` if it is not in
@@ -414,16 +549,34 @@ mod tests {
     }
 
     #[test]
-    fn the_monitor_table_is_a_strict_superset_of_the_worker_table_today() {
-        // Not a hard requirement of the design, but true of the current
-        // tables (Phase 2 gives the worker nothing the monitor does not also
-        // need) and worth pinning so a future edit that silently drops a
-        // monitor-only syscall from the worker's superset is caught, even
-        // though the worker table will grow independently once Phase 4 adds
-        // TLS/HTTP.
+    fn the_two_tables_share_every_ipc_and_runtime_housekeeping_syscall() {
+        // Phase 2's observation (`the worker table will grow independently
+        // once Phase 4 adds TLS/HTTP`, in the comment this test used to
+        // carry) came true: the worker now needs `clone`/`socket`/`epoll_*`
+        // for its `tokio`-driven HTTP server, none of which the
+        // single-threaded, network-free monitor touches, so a strict-subset
+        // relationship no longer holds. What still must hold is that neither
+        // table lost the privsep-channel and allocator/runtime syscalls both
+        // roles share — a regression there would be a much quieter break
+        // than the compile-time table-correctness checks above would catch.
         let monitor: std::collections::BTreeSet<_> = syscalls_for(Role::Monitor).iter().collect();
         let worker: std::collections::BTreeSet<_> = syscalls_for(Role::Worker).iter().collect();
-        assert!(worker.is_subset(&monitor));
+        for shared in [
+            "read",
+            "write",
+            "close",
+            "futex",
+            "mmap",
+            "munmap",
+            "clock_gettime",
+            "getrandom",
+            "rt_sigaction",
+            "getpid",
+            "exit_group",
+        ] {
+            assert!(monitor.contains(&shared), "monitor lost {shared}");
+            assert!(worker.contains(&shared), "worker lost {shared}");
+        }
     }
 
     #[test]
