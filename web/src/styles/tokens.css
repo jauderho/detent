@@ -22,7 +22,12 @@ html[data-theme="dark"] {
   --alu: #d4d4d4;
 
   /* ── blue system (sampled from the device) ──────────────────── */
-  --blue: #2e7dc4;
+  /* Lightened from the sampled #2e7dc4. The §6 primary-button pairing
+     (--cta-ink on --blue) measured 4.42:1 in this theme, under the §11 AA
+     floor — §11's table had never listed that pairing. #3282cc scores 4.75:1.
+     scripts/contrast-check.ts gates it; AESTHETIC_CONTRACT.md §3/§11 record
+     the decision. */
+  --blue: #3282cc;
   --blue-bright: #5fb0f0;
   --blue-core: #235594;
   --blue-deep: #15364f;

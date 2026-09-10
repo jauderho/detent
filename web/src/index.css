@@ -255,3 +255,499 @@ p {
     border-right: none;
   }
 }
+
+/* ── panel — the workhorse hairline-bordered zone ─────────────────
+   AESTHETIC_CONTRACT.md §5 (hairline zoning) / §6. Zero radius, no
+   elevation shadow: the 1px --line border is the only zone cue. */
+.panel {
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 30px;
+  padding: 6px 12px;
+  background: var(--chrome);
+  border-bottom: 1px solid var(--line);
+}
+.panel-head-slot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.panel-body {
+  padding: 12px;
+}
+
+/* ── hairline-zoned grid ──────────────────────────────────────────
+   AESTHETIC_CONTRACT.md §5 — 1px-separated cells, last column's
+   border-right and last row's border-bottom stripped, :hover shifts to
+   --panel and never to a new hue. Column count arrives as --cols so the
+   reflow media queries below can still win over it. */
+.hgrid {
+  display: grid;
+  grid-template-columns: repeat(var(--cols, 1), minmax(0, 1fr));
+  border: 1px solid var(--line);
+}
+.hgrid > .cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 96px;
+  padding: 12px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  transition: none;
+}
+.hgrid > .cell:hover {
+  background: var(--panel);
+}
+.hgrid > .cell.is-last-col {
+  border-right: none;
+}
+.hgrid > .cell.is-last-row {
+  border-bottom: none;
+}
+/* multi-column → 2-up. The JS-assigned is-last-* classes are restored first,
+   then re-derived from the two-column flow. */
+@media (max-width: 880px) {
+  .hgrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .hgrid > .cell.is-last-col {
+    border-right: 1px solid var(--line);
+  }
+  .hgrid > .cell.is-last-row {
+    border-bottom: 1px solid var(--line);
+  }
+  .hgrid > .cell:nth-child(2n) {
+    border-right: none;
+  }
+  .hgrid > .cell:nth-last-child(2):nth-child(odd) {
+    border-bottom: none;
+  }
+  .hgrid > .cell:last-child {
+    border-right: none;
+    border-bottom: none;
+  }
+}
+/* 2-up → 1-up */
+@media (max-width: 560px) {
+  .hgrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .hgrid > .cell,
+  .hgrid > .cell.is-last-col {
+    border-right: none;
+  }
+  .hgrid > .cell.is-last-row {
+    border-bottom: 1px solid var(--line);
+  }
+  .hgrid > .cell:last-child {
+    border-bottom: none;
+  }
+}
+
+/* ── button ───────────────────────────────────────────────────────
+   AESTHETIC_CONTRACT.md §6 `.btn` — --panel-2 fill, 1px --line-2,
+   radius 0, transition:none (a switch has no easing curve). */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 12px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink);
+  background: var(--panel-2);
+  border: 1px solid var(--line-2);
+  border-radius: 0;
+  transition: none;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.btn:hover:not(:disabled) {
+  background: var(--panel-3);
+}
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.btn:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+.btn:disabled {
+  color: var(--ink-faint);
+  border-color: var(--line);
+  cursor: not-allowed;
+}
+.btn.primary {
+  color: var(--cta-ink);
+  background: var(--blue);
+  border-color: var(--blue);
+}
+.btn.primary:hover:not(:disabled) {
+  background: var(--blue-bright);
+  border-color: var(--blue-bright);
+}
+.btn.primary:disabled {
+  color: var(--cta-ink);
+  background: var(--blue-dim);
+  border-color: var(--blue-dim);
+}
+
+/* ── tiny button ──────────────────────────────────────────────────
+   AESTHETIC_CONTRACT.md §6 `.tinybtn` — the 9px module control. */
+.tinybtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 18px;
+  padding: 3px 6px;
+  font-family: inherit;
+  font-size: 9px;
+  font-weight: 400;
+  line-height: 1;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  background: var(--panel-2);
+  border: 1px solid var(--line-2);
+  border-radius: 0;
+  transition: none;
+  cursor: pointer;
+  user-select: none;
+}
+.tinybtn:hover:not(:disabled) {
+  color: var(--ink);
+  background: var(--panel-3);
+}
+.tinybtn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.tinybtn:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+.tinybtn:disabled {
+  color: var(--ink-faint);
+  border-color: var(--line);
+  cursor: not-allowed;
+}
+.tinybtn.on {
+  color: var(--cta-ink);
+  background: var(--blue);
+  border-color: var(--blue);
+}
+
+/* grouped buttons share an edge — §6. Rendered as a <fieldset> for its
+   native role="group", so its UA border/padding/margin are reset here. */
+.btngroup {
+  display: inline-flex;
+  margin: 0;
+  padding: 0;
+  min-inline-size: 0;
+  border: none;
+}
+.btngroup > .btn + .btn,
+.btngroup > .tinybtn + .tinybtn {
+  border-left: none;
+}
+
+/* ── screen ───────────────────────────────────────────────────────
+   AESTHETIC_CONTRACT.md §4 — layout only. The §4 color constants are
+   applied as inline styles from src/styles/screen-constants.ts so that a
+   screen provably cannot be re-themed by a stylesheet or a data-theme flip. */
+.screen {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+}
+.readout {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+  font-size: 18px;
+  letter-spacing: 0.06em;
+  line-height: 1;
+}
+.readout-unit {
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+/* ── field primitives ─────────────────────────────────────────────
+   AESTHETIC_CONTRACT.md §1 / §6 — inputs are machined: radius 0,
+   --panel-2 fill, 1px --line-2, silk-screen caption above. */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.field-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.field-control {
+  width: 100%;
+  min-height: 28px;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--ink);
+  background: var(--panel-2);
+  border: 1px solid var(--line-2);
+  border-radius: 0;
+  appearance: none;
+  transition: none;
+}
+.field-control:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+.field-control:disabled {
+  color: var(--ink-faint);
+  cursor: not-allowed;
+}
+.field-control[aria-invalid="true"] {
+  border-color: var(--amber);
+}
+.field-control.num {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+}
+.field-desc {
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--ink-faint);
+}
+/* An error line is ink-colored text plus an amber LED: amber type on the
+   cream chassis would not clear the §11 4.5:1 floor, an amber LED glows in
+   both themes (§6 / §11). */
+.field-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--ink);
+}
+
+/* ── hardware toggle (the rocker idiom, §10) ──────────────────────
+   Not a rounded pill: a bordered --panel-2 track with a rectangular
+   sliding knob that snaps, no transition. */
+.switch {
+  position: relative;
+  display: inline-flex;
+  width: 46px;
+  height: 22px;
+  padding: 0;
+  background: var(--panel-2);
+  border: 1px solid var(--line-2);
+  border-radius: 0;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  transition: none;
+  cursor: pointer;
+}
+.switch:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+.switch:disabled {
+  cursor: not-allowed;
+}
+.switch-cell {
+  z-index: 2;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 8px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  user-select: none;
+}
+.switch-knob {
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  left: 1px;
+  z-index: 1;
+  width: 20px;
+  background: var(--line-2);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  transition: none;
+}
+.switch[aria-checked="true"] .switch-knob {
+  left: auto;
+  right: 1px;
+  background: var(--blue);
+}
+.switch[aria-checked="true"] .switch-cell.is-on,
+.switch[aria-checked="false"] .switch-cell.is-off {
+  color: var(--cta-ink);
+}
+
+/* ── data table ───────────────────────────────────────────────────
+   AESTHETIC_CONTRACT.md §5 / §6 — hairline-zoned rows, silk-screen
+   column headers, tabular-nums on numeric columns. */
+.dtable {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-collapse: collapse;
+}
+.dtable caption {
+  padding: 6px 12px;
+  text-align: left;
+  background: var(--chrome);
+  border-bottom: 1px solid var(--line);
+}
+.dtable th {
+  padding: 8px 12px;
+  font-size: 9px;
+  font-weight: 400;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  text-align: left;
+  color: var(--ink-dim);
+  background: var(--chrome);
+  border-bottom: 1px solid var(--line-2);
+  user-select: none;
+  white-space: nowrap;
+}
+.dtable td {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--ink);
+  border-bottom: 1px solid var(--line);
+}
+.dtable tbody tr:last-child > td {
+  border-bottom: none;
+}
+.dtable tbody tr:hover > td {
+  background: var(--panel);
+}
+.dtable .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+}
+.dtable .empty {
+  padding: 24px 12px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+.dtable tbody tr:hover > td.empty {
+  background: transparent;
+}
+
+/* ── modal ────────────────────────────────────────────────────────
+   AESTHETIC_CONTRACT.md §1 — hairline border, zero radius, no shadow.
+   The scrim is --blue-deep (fixed in both themes) so the chassis dims
+   rather than washes out on cream. */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: color-mix(in srgb, var(--blue-deep) 82%, transparent);
+}
+.modal {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 720px;
+  max-height: 84vh;
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: 0;
+  box-shadow: none;
+}
+.modal:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -3px;
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--chrome);
+  border-bottom: 1px solid var(--line);
+}
+.modal-title {
+  font-family: "Archivo Variable", "Archivo", sans-serif;
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: -0.01em;
+  text-transform: lowercase;
+  color: var(--ink);
+}
+.modal-body {
+  padding: 12px;
+  overflow: auto;
+}
+.modal-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--line);
+}
+
+/* ── banner ───────────────────────────────────────────────────────
+   AESTHETIC_CONTRACT.md §6 / §12 — a full-width hairline strip. Tone
+   carries meaning only: amber = needs attention, blue = informational.
+   The LED is the indicator; the copy stays --ink so it clears §11. */
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--chrome);
+  border: 1px solid var(--line);
+}
+.banner-msg {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--ink);
+}
+.banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.banner.amber {
+  border-left: 2px solid var(--amber);
+}
+.banner.blue {
+  border-left: 2px solid var(--blue);
+}
+@media (max-width: 560px) {
+  .banner {
+    flex-wrap: wrap;
+  }
+}
