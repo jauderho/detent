@@ -241,6 +241,13 @@ jobs:
         working-directory: web
         run: bun run contrast:check
 
+      # The Rust side already diffs docs/openapi.json against the running
+      # server. This closes the other half: the TypeScript the UI is typed
+      # against must be what that document generates.
+      - name: bun run api:check
+        working-directory: web
+        run: bun run api:check
+
       - name: bun run build
         working-directory: web
         run: bun run build
