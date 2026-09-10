@@ -1,13 +1,31 @@
 //! The `OpenAPI` document (PLAN §2.6) and where it is served.
 //!
 //! ```text
-//!   #[utoipa::path] on every api::* handler ──┐
-//!   doc-only shadow fns for /auth/* and /healthz ─┼─▶ #[derive(OpenApi)] ──▶ docs/openapi.json
-//!   (those two live in auth::routes / server,      │      (checked in, byte-for-byte tested)
-//!    which this crate does not modify)             │
-//!                                                   ▼
-//!                                          GET /api/v1/openapi.json (unauthenticated)
+//!   at TEST time only:
+//!     #[cfg_attr(test, utoipa::path)] on every api::* handler ──┐
+//!     doc-only shadow fns for /auth/* and /healthz ─────────────┼─▶ #[derive(OpenApi)]
+//!                                                               │        │
+//!                                                               │        ▼
+//!                                                               │  docs/openapi.json
+//!                                                               │  (checked in, and this
+//!                                                               │   module's test fails if
+//!                                                               │   it drifts by one byte)
+//!   at RUN time:                                                │
+//!     include_str!(docs/openapi.json) ──▶ DOCUMENT ─────────────┘
+//!                                             │
+//!                                             ▼
+//!                                GET /api/v1/openapi.json (unauthenticated)
 //! ```
+//!
+//! # Why the document is built by tests and served as a constant
+//!
+//! `utoipa` generates a runtime schema builder for every component — 54 of
+//! them — and calling `ApiDoc::openapi()` from the handler dragged all of that
+//! code into the shipped binary: about 280 KiB, measured. Since the checked-in
+//! document is already proven byte-identical to what this build generates, the
+//! handler can serve those bytes directly and the builders can stay in the
+//! test profile. `utoipa` is a dev-dependency for that reason, so this is
+//! structural rather than something the linker has to notice.
 //!
 //! # Why the auth and healthz routes get shadow functions
 //!
@@ -36,10 +54,11 @@
 //!   regenerates it and fails, naming the regeneration command, the moment
 //!   they differ.
 
-use axum::Json;
 use axum::Router;
 use axum::routing::get;
+#[cfg(test)]
 use utoipa::OpenApi;
+#[cfg(test)]
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
 
 use crate::auth::routes::Route;
@@ -64,22 +83,43 @@ pub fn routes() -> Router<AppState> {
     Router::new().route(PATH, get(serve))
 }
 
+/// The document as bytes, baked in at compile time.
+///
+/// Serving this rather than `ApiDoc::openapi()` is what keeps utoipa's
+/// runtime schema builders — 280 KiB of generated code across the 54
+/// component schemas, measured — out of the shipped binary. It is sound
+/// because
+/// [`tests::the_checked_in_document_matches_what_this_build_generates`]
+/// already fails the build if this file and the document this build would
+/// generate differ by a single byte, so the constant cannot go stale.
+const DOCUMENT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../docs/openapi.json"
+));
+
 /// `GET /api/v1/openapi.json`.
 ///
 /// The one response body in this document that is not named by a schema: it
 /// *is* the document, and describing it would mean carrying a copy of the
 /// `OpenAPI` meta-schema.
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     get,
     path = PATH,
     tag = "system",
     responses((status = 200, description = "This document", body = Object)),
-)]
-async fn serve() -> Json<utoipa::openapi::OpenApi> {
-    Json(ApiDoc::openapi())
+))]
+async fn serve() -> impl axum::response::IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )],
+        DOCUMENT,
+    )
 }
 
 /// `POST /api/v1/auth/login`. The real handler is `crate::auth::routes::login`.
+#[cfg(test)]
 #[utoipa::path(
     post,
     path = "/api/v1/auth/login",
@@ -95,6 +135,7 @@ async fn serve() -> Json<utoipa::openapi::OpenApi> {
 fn login_doc() {}
 
 /// `POST /api/v1/auth/logout`. The real handler is `crate::auth::routes::logout`.
+#[cfg(test)]
 #[utoipa::path(
     post,
     path = "/api/v1/auth/logout",
@@ -108,6 +149,7 @@ fn login_doc() {}
 fn logout_doc() {}
 
 /// `GET /api/v1/auth/session`. The real handler is `crate::auth::routes::session`.
+#[cfg(test)]
 #[utoipa::path(
     get,
     path = "/api/v1/auth/session",
@@ -121,6 +163,7 @@ fn logout_doc() {}
 fn session_doc() {}
 
 /// `GET /healthz`. The real handler is `crate::server::healthz`.
+#[cfg(test)]
 #[utoipa::path(
     get,
     path = "/healthz",
@@ -136,8 +179,10 @@ fn healthz_doc() {}
 
 /// Adds the two credential schemes PLAN §2.7 defines, so `security(...)`
 /// requirements elsewhere in the document resolve to something.
+#[cfg(test)]
 struct SecurityAddon;
 
+#[cfg(test)]
 impl utoipa::Modify for SecurityAddon {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         let components = openapi
@@ -159,6 +204,10 @@ impl utoipa::Modify for SecurityAddon {
 }
 
 /// Every path this build documents.
+///
+/// Test-only: the document it builds is compared against `docs/openapi.json`,
+/// which is what actually gets served.
+#[cfg(test)]
 #[derive(OpenApi)]
 #[openapi(
     info(
@@ -195,7 +244,7 @@ impl utoipa::Modify for SecurityAddon {
     ),
     modifiers(&SecurityAddon),
 )]
-struct ApiDoc;
+pub(super) struct ApiDoc;
 
 #[cfg(test)]
 mod tests {

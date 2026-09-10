@@ -59,14 +59,16 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// Answer to `ConfirmCommit`.
-#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(utoipa::ToSchema))]
 pub struct CommitConfirmedView {
     /// The commit that is now final.
     pub commit_id: u32,
 }
 
 /// Answer to `RollbackCommit`.
-#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(utoipa::ToSchema))]
 pub struct RolledBackView {
     /// The commit that was rolled back.
     pub commit_id: u32,
@@ -75,7 +77,7 @@ pub struct RolledBackView {
 }
 
 /// `POST /api/v1/commits/{id}/confirm`.
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     post,
     path = CONFIRM_PATH,
     tag = "commits",
@@ -84,7 +86,7 @@ pub struct RolledBackView {
         (status = 200, description = "The commit is now final", body = CommitConfirmedView),
         (status = 409, description = "No such commit is pending", body = crate::error::ErrorBody),
     ),
-)]
+))]
 pub(super) async fn confirm(
     State(state): State<AppState>,
     caller: WriteCaller,
@@ -116,7 +118,7 @@ fn render_confirmed(outcome: &OpOutcome) -> Result<Json<CommitConfirmedView>, Ap
 }
 
 /// `POST /api/v1/commits/{id}/rollback`.
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     post,
     path = ROLLBACK_PATH,
     tag = "commits",
@@ -125,7 +127,7 @@ fn render_confirmed(outcome: &OpOutcome) -> Result<Json<CommitConfirmedView>, Ap
         (status = 200, description = "Every write since the commit was armed is undone", body = RolledBackView),
         (status = 409, description = "No such commit is pending", body = crate::error::ErrorBody),
     ),
-)]
+))]
 pub(super) async fn rollback(
     State(state): State<AppState>,
     caller: WriteCaller,

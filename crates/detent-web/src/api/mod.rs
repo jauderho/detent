@@ -231,7 +231,8 @@ pub fn authorize(caller: &Caller, op: &Operation) -> Result<(), ApiError> {
 /// operations layer stays front-end agnostic. This is the thin mirror that
 /// lets a request body have a precise, documented schema anyway; it converts
 /// straight to the real type and carries no behaviour of its own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ApiServiceCommand {
     /// Full restart.

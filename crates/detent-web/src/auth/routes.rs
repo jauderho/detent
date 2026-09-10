@@ -152,7 +152,8 @@ pub fn routes() -> axum::Router<AppState> {
 // ---------------------------------------------------------------------------
 
 /// The body of `POST /api/v1/auth/login`.
-#[derive(Clone, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Deserialize)]
+#[cfg_attr(test, derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct LoginRequest {
     /// The account name.

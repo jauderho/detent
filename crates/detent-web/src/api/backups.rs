@@ -54,7 +54,8 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// Answer to `Restore`.
-#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(utoipa::ToSchema))]
 pub struct RestoredView {
     /// The target that was put back, as the monitor's index for it.
     pub target: u16,
@@ -63,7 +64,7 @@ pub struct RestoredView {
 }
 
 /// `GET /api/v1/modules/{id}/backups`.
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     get,
     path = LIST_PATH,
     tag = "backups",
@@ -72,7 +73,7 @@ pub struct RestoredView {
         (status = 200, description = "The module's retained backups, newest first", body = Vec<BackupInfo>),
         (status = 404, description = "No such module", body = crate::error::ErrorBody),
     ),
-)]
+))]
 pub(super) async fn list(
     State(state): State<AppState>,
     caller: Caller,
@@ -100,7 +101,7 @@ fn render_backups(outcome: OpOutcome) -> Result<Json<Vec<BackupInfo>>, ApiError>
 }
 
 /// `POST /api/v1/modules/{id}/backups/{backup_id}/restore`.
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     post,
     path = RESTORE_PATH,
     tag = "backups",
@@ -112,7 +113,7 @@ fn render_backups(outcome: OpOutcome) -> Result<Json<Vec<BackupInfo>>, ApiError>
         (status = 200, description = "The backup was put back", body = RestoredView),
         (status = 404, description = "No such module", body = crate::error::ErrorBody),
     ),
-)]
+))]
 pub(super) async fn restore(
     State(state): State<AppState>,
     caller: WriteCaller,

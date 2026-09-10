@@ -55,7 +55,8 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// The body of `POST /api/v1/services/{id}`.
-#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ServiceActionRequest {
     /// What to do.
@@ -63,7 +64,7 @@ pub struct ServiceActionRequest {
 }
 
 /// `GET /api/v1/services/{id}`.
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     get,
     path = PATH,
     tag = "services",
@@ -73,7 +74,7 @@ pub struct ServiceActionRequest {
         (status = 404, description = "No such module", body = crate::error::ErrorBody),
         (status = 409, description = "The module declares no service", body = crate::error::ErrorBody),
     ),
-)]
+))]
 pub(super) async fn status(
     State(state): State<AppState>,
     caller: Caller,
@@ -99,7 +100,7 @@ fn render_status(outcome: OpOutcome) -> Result<Json<ServiceStatus>, ApiError> {
 }
 
 /// `POST /api/v1/services/{id}`.
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     post,
     path = PATH,
     tag = "services",
@@ -110,7 +111,7 @@ fn render_status(outcome: OpOutcome) -> Result<Json<ServiceStatus>, ApiError> {
         (status = 404, description = "No such module", body = crate::error::ErrorBody),
         (status = 409, description = "The module declares no service", body = crate::error::ErrorBody),
     ),
-)]
+))]
 pub(super) async fn action(
     State(state): State<AppState>,
     caller: WriteCaller,

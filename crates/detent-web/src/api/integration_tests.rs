@@ -590,6 +590,20 @@ async fn openapi_document_is_unauthenticated() -> R {
         body.pointer("/paths/~1api~1v1~1modules").is_some(),
         "the modules path is missing"
     );
+
+    // The handler serves an `include_str!` constant rather than building the
+    // document, so this is the assertion that the bytes on the wire are the
+    // document this build describes — not merely well-formed JSON that
+    // happens to have the right shape.
+    let generated: serde_json::Value = {
+        use utoipa::OpenApi as _;
+        serde_json::to_value(super::openapi::ApiDoc::openapi())?
+    };
+    assert_eq!(
+        body, generated,
+        "the served document is not the one this build generates"
+    );
+
     live.shutdown();
     Ok(())
 }
