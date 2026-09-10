@@ -11,7 +11,8 @@
     "format": "biome format --write .",
     "test": "vitest run",
     "i18n:check": "bun scripts/i18n-check.ts",
-    "typecheck": "tsc --noEmit"
+    "contrast:check": "bun scripts/contrast-check.ts",
+    "typecheck": "tsc -b --force"
   },
   "dependencies": {
     "@fluent/bundle": "0.19.1",
