@@ -41,6 +41,7 @@ const AUDIT_FILE_MODE: u32 = 0o600;
 /// How an operation ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub enum AuditResult {
     /// It succeeded.
     Ok,
@@ -52,6 +53,7 @@ pub enum AuditResult {
 
 /// One line of the audit log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AuditRecord {
     /// When, as RFC 3339 in UTC.
     pub ts: String,

@@ -65,11 +65,15 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// `GET /api/v1/openapi.json`.
+///
+/// The one response body in this document that is not named by a schema: it
+/// *is* the document, and describing it would mean carrying a copy of the
+/// `OpenAPI` meta-schema.
 #[utoipa::path(
     get,
     path = PATH,
     tag = "system",
-    responses((status = 200, description = "This document")),
+    responses((status = 200, description = "This document", body = Object)),
 )]
 async fn serve() -> Json<utoipa::openapi::OpenApi> {
     Json(ApiDoc::openapi())
@@ -273,6 +277,72 @@ mod tests {
             "/healthz",
         ] {
             assert!(paths.contains_key(path), "{path} is missing from the doc");
+        }
+        Ok(())
+    }
+
+    /// A client is generated from this document, so an untyped `{}` body is
+    /// not a small imprecision — it erases the response type. Every JSON
+    /// answer must name a schema.
+    #[test]
+    fn no_json_response_body_is_an_untyped_object() -> R {
+        let json = serde_json::to_value(ApiDoc::openapi())?;
+        let paths = json
+            .get("paths")
+            .and_then(|p| p.as_object())
+            .ok_or("no paths object")?;
+        let empty = serde_json::Map::new();
+        for (path, item) in paths {
+            for (method, operation) in item.as_object().unwrap_or(&empty) {
+                let responses = operation
+                    .get("responses")
+                    .and_then(|r| r.as_object())
+                    .unwrap_or(&empty);
+                for (status, response) in responses {
+                    let Some(schema) = response.pointer("/content/application~1json/schema") else {
+                        continue;
+                    };
+                    assert_ne!(
+                        schema,
+                        &serde_json::json!({}),
+                        "{method} {path} answers {status} with an untyped JSON body"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Every `$ref` this document writes must resolve inside it, or a
+    /// generated client has a dangling type.
+    #[test]
+    fn every_schema_reference_resolves() -> R {
+        let json = serde_json::to_value(ApiDoc::openapi())?;
+        let schemas = json
+            .pointer("/components/schemas")
+            .and_then(|s| s.as_object())
+            .ok_or("no components/schemas object")?;
+        let mut stack = vec![&json];
+        while let Some(node) = stack.pop() {
+            match node {
+                serde_json::Value::Object(map) => {
+                    if let Some(reference) = map.get("$ref").and_then(|r| r.as_str()) {
+                        let name =
+                            reference
+                                .strip_prefix("#/components/schemas/")
+                                .ok_or_else(|| {
+                                    format!("{reference} is not a local schema reference")
+                                })?;
+                        assert!(
+                            schemas.contains_key(name),
+                            "{reference} resolves to nothing"
+                        );
+                    }
+                    stack.extend(map.values());
+                }
+                serde_json::Value::Array(items) => stack.extend(items),
+                _ => {}
+            }
         }
         Ok(())
     }

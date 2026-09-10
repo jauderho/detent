@@ -46,6 +46,7 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
 tracing = { workspace = true }
+utoipa = { workspace = true, optional = true }
 xattr = { workspace = true }
 
 [dev-dependencies]
@@ -58,6 +59,10 @@ default = []
 ## targets can build structured `Request`/`Response` values. Mirrors
 ## `detent-core`'s and `detent-module-hosts`'s `fuzzing` feature.
 fuzzing = ["dep:arbitrary"]
+## Enables `utoipa::ToSchema` on the types that reach an API response body, so
+## `detent-web` can describe them in `docs/openapi.json`. Off by default, for
+## the same reason as `detent-core`'s feature of the same name.
+openapi = ["dep:utoipa", "detent-core/openapi"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 caps = { workspace = true }

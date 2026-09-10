@@ -77,6 +77,7 @@ macro_rules! wire_id {
             Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
         )]
         #[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+        #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
         #[serde(transparent)]
         pub struct $name(pub $repr);
 
@@ -421,6 +422,7 @@ pub struct WriteReceipt {
 /// One retained backup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct BackupInfo {
     /// Index into this listing, for [`Request::Restore`].
     pub id: BackupId,

@@ -63,15 +63,13 @@ pub struct RestoredView {
 }
 
 /// `GET /api/v1/modules/{id}/backups`.
-///
-/// Response body mirrors `Vec<detent_platform::privsep::proto::BackupInfo>`.
 #[utoipa::path(
     get,
     path = LIST_PATH,
     tag = "backups",
     params(("id" = String, Path, description = "Module id")),
     responses(
-        (status = 200, description = "The module's retained backups, newest first", body = serde_json::Value),
+        (status = 200, description = "The module's retained backups, newest first", body = Vec<BackupInfo>),
         (status = 404, description = "No such module", body = crate::error::ErrorBody),
     ),
 )]

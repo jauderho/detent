@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 /// A filesystem path owned by a module. Always a compile-time constant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(transparent)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PathSpec(&'static str);
 
 impl PathSpec {
@@ -31,6 +32,7 @@ impl PathSpec {
 /// What kind of filesystem object a [`Target`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub enum TargetKind {
     /// A single configuration file.
     File,
@@ -43,6 +45,7 @@ pub enum TargetKind {
 /// The account a [`Target`] must belong to after a write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub enum Owner {
     /// `root`, the usual case for `/etc`.
     Root,
@@ -50,8 +53,18 @@ pub enum Owner {
     Named(&'static str),
 }
 
+/// Whether a [`Target`] is the right backend for a given host.
+///
+/// A named alias rather than the bare `fn` type written inline: `utoipa`'s
+/// `ToSchema` derive parses every field's type before it can honour
+/// `schema(ignore = true)`, and it cannot parse a bare function pointer. The
+/// alias gives it a plain path to look at; the field is still dropped from the
+/// schema, exactly as `serde(skip)` drops it from the JSON.
+pub type BackendDetect = fn(&HostProfile) -> bool;
+
 /// One file or directory a module manages.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Target {
     /// Where it lives.
     pub path: PathSpec,
@@ -64,11 +77,13 @@ pub struct Target {
     /// Whether this target is the right backend for a given host. Not serialized:
     /// it is behaviour, not metadata.
     #[serde(skip)]
-    pub backend_detect: fn(&HostProfile) -> bool,
+    #[cfg_attr(feature = "openapi", schema(ignore = true))]
+    pub backend_detect: BackendDetect,
 }
 
 /// The upstream project whose configuration format a module tracks.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Upstream {
     /// Upstream project name, e.g. `chrony`.
     pub project: &'static str,
@@ -87,6 +102,7 @@ pub struct Upstream {
 /// Distributions disagree (`chronyd.service` on Fedora, `chrony.service` on Debian),
 /// so each backend gets a list of alternatives rather than a single name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct UnitNames {
     /// systemd unit names.
     pub systemd: &'static [&'static str],
@@ -99,6 +115,7 @@ pub struct UnitNames {
 /// What may be done to a service after a config change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub enum ServiceAction {
     /// Full restart.
     Restart,
@@ -112,6 +129,7 @@ pub enum ServiceAction {
 
 /// A service a module's files configure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ServiceBinding {
     /// Names of the service per init system.
     pub units: UnitNames,
@@ -122,6 +140,7 @@ pub struct ServiceBinding {
 /// One argument of an [`ExternalCheck`] command line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub enum ArgTemplate {
     /// A fixed argument.
     Literal(&'static str),
@@ -132,6 +151,7 @@ pub enum ArgTemplate {
 /// How the result of an [`ExternalCheck`] is judged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub enum CheckExpectation {
     /// The program must exit 0.
     ExitZero,
@@ -146,6 +166,7 @@ pub enum CheckExpectation {
 /// An upstream validator run against a candidate file before it is installed, e.g.
 /// `chronyd -p -f <tmp>` or `testparm -s <tmp>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ExternalCheck {
     /// Absolute path of the validator binary.
     pub program: PathSpec,
@@ -157,6 +178,7 @@ pub struct ExternalCheck {
 
 /// Everything a module declares about itself.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ModuleDescriptor {
     /// Stable module id, e.g. `hosts`. Used in URLs, the CLI, the audit log and
     /// feature names.
@@ -191,6 +213,7 @@ pub struct ModuleDescriptor {
     schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub enum Os {
     /// Linux.
     Linux,
@@ -214,6 +237,7 @@ pub enum Os {
     schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub enum InitSystem {
     /// systemd.
     Systemd,
@@ -233,6 +257,7 @@ pub enum InitSystem {
 #[derive(
     Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct HostProfile {
     /// Operating system family.
     pub os: Os,

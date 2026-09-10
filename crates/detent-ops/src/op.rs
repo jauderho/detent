@@ -35,6 +35,7 @@ pub const DEFAULT_CONFIRM: Duration = Duration::from_secs(90);
 /// mutates nothing and must not be confusable with an action that does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub enum ServiceCommand {
     /// Full restart.
     Restart,
@@ -182,6 +183,7 @@ pub enum Operation {
 /// file bodies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub enum OpKind {
     /// [`Operation::ListModules`].
     ListModules,

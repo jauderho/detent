@@ -63,15 +63,13 @@ pub struct ServiceActionRequest {
 }
 
 /// `GET /api/v1/services/{id}`.
-///
-/// Response body mirrors `detent_platform::service::ServiceStatus`.
 #[utoipa::path(
     get,
     path = PATH,
     tag = "services",
     params(("id" = String, Path, description = "Module id")),
     responses(
-        (status = 200, description = "The service's run state", body = serde_json::Value),
+        (status = 200, description = "The service's run state", body = ServiceStatus),
         (status = 404, description = "No such module", body = crate::error::ErrorBody),
         (status = 409, description = "The module declares no service", body = crate::error::ErrorBody),
     ),
@@ -101,8 +99,6 @@ fn render_status(outcome: OpOutcome) -> Result<Json<ServiceStatus>, ApiError> {
 }
 
 /// `POST /api/v1/services/{id}`.
-///
-/// Response body mirrors `detent_ops::report::ServiceReport`.
 #[utoipa::path(
     post,
     path = PATH,
@@ -110,7 +106,7 @@ fn render_status(outcome: OpOutcome) -> Result<Json<ServiceStatus>, ApiError> {
     params(("id" = String, Path, description = "Module id")),
     request_body = ServiceActionRequest,
     responses(
-        (status = 200, description = "What happened to the service", body = serde_json::Value),
+        (status = 200, description = "What happened to the service", body = ServiceReport),
         (status = 404, description = "No such module", body = crate::error::ErrorBody),
         (status = 409, description = "The module declares no service", body = crate::error::ErrorBody),
     ),

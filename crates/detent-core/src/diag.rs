@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub enum Severity {
     /// The configuration is invalid and must not be applied.
     Error,
@@ -28,6 +29,7 @@ pub enum Severity {
 /// that has no translation entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MessageId(&'static str);
 
 impl MessageId {
@@ -52,6 +54,7 @@ impl MessageId {
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 #[serde(transparent)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct FieldPath(String);
 
 impl FieldPath {
@@ -74,6 +77,7 @@ impl FieldPath {
 /// beyond severity and id is optional because not every finding maps to a field or a
 /// byte range.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Diagnostic {
     /// How much this finding matters.
     pub severity: Severity,
@@ -126,6 +130,7 @@ impl Diagnostic {
 /// produced.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Diagnostics(Vec<Diagnostic>);
 
 impl Diagnostics {

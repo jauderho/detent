@@ -18,7 +18,16 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
 tracing = { workspace = true }
+utoipa = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }
+
+[features]
+default = []
+## Enables `utoipa::ToSchema` on the report types that reach an API response
+## body, so `detent-web` can describe them in `docs/openapi.json`. Off by
+## default: PLAN §2.1 keeps this crate front-end agnostic, and a default build
+## has no utoipa in its dependency graph.
+openapi = ["dep:utoipa", "detent-core/openapi", "detent-platform/openapi"]

@@ -153,13 +153,11 @@ fn parse_hash(hex: &str) -> Result<detent_platform::fs::atomic::Sha256Digest, Ap
 // ---------------------------------------------------------------------------
 
 /// `GET /api/v1/modules`.
-///
-/// Response body mirrors `Vec<&'static detent_core::descriptor::ModuleDescriptor>`.
 #[utoipa::path(
     get,
     path = LIST_PATH,
     tag = "modules",
-    responses((status = 200, description = "Every module compiled into this build", body = Value)),
+    responses((status = 200, description = "Every module compiled into this build", body = Vec<ModuleDescriptor>)),
 )]
 pub(super) async fn list(
     State(state): State<AppState>,
@@ -181,15 +179,13 @@ fn render_modules(outcome: OpOutcome) -> Result<Json<Vec<&'static ModuleDescript
 }
 
 /// `GET /api/v1/modules/{id}`.
-///
-/// Response body mirrors `detent_ops::report::ModuleView`.
 #[utoipa::path(
     get,
     path = GET_PATH,
     tag = "modules",
     params(("id" = String, Path, description = "Module id")),
     responses(
-        (status = 200, description = "The module's descriptor, schema, current model and diagnostics", body = Value),
+        (status = 200, description = "The module's descriptor, schema, current model and diagnostics", body = ModuleView),
         (status = 404, description = "No such module", body = crate::error::ErrorBody),
     ),
 )]
@@ -218,8 +214,6 @@ fn render_module(outcome: OpOutcome) -> Result<Json<Box<ModuleView>>, ApiError> 
 }
 
 /// `POST /api/v1/modules/{id}/validate`.
-///
-/// Response body mirrors `detent_core::diag::Diagnostics`.
 #[utoipa::path(
     post,
     path = VALIDATE_PATH,
@@ -227,7 +221,7 @@ fn render_module(outcome: OpOutcome) -> Result<Json<Box<ModuleView>>, ApiError> 
     params(("id" = String, Path, description = "Module id")),
     request_body = ModelRequest,
     responses(
-        (status = 200, description = "Validation findings for the candidate model", body = Value),
+        (status = 200, description = "Validation findings for the candidate model", body = detent_core::diag::Diagnostics),
         (status = 404, description = "No such module", body = crate::error::ErrorBody),
     ),
 )]
@@ -262,8 +256,6 @@ fn render_validated(outcome: OpOutcome) -> Result<Json<detent_core::diag::Diagno
 }
 
 /// `POST /api/v1/modules/{id}/plan`.
-///
-/// Response body mirrors `detent_ops::report::PlanReport`.
 #[utoipa::path(
     post,
     path = PLAN_PATH,
@@ -271,7 +263,7 @@ fn render_validated(outcome: OpOutcome) -> Result<Json<detent_core::diag::Diagno
     params(("id" = String, Path, description = "Module id")),
     request_body = ModelRequest,
     responses(
-        (status = 200, description = "Diff and validator results; nothing is written", body = Value),
+        (status = 200, description = "Diff and validator results; nothing is written", body = PlanReport),
         (status = 404, description = "No such module", body = crate::error::ErrorBody),
     ),
 )]
@@ -306,8 +298,6 @@ fn render_planned(outcome: OpOutcome) -> Result<Json<Box<PlanReport>>, ApiError>
 }
 
 /// `POST /api/v1/modules/{id}/apply`.
-///
-/// Response body mirrors `detent_ops::report::ApplyReport`.
 #[utoipa::path(
     post,
     path = APPLY_PATH,
@@ -315,7 +305,7 @@ fn render_planned(outcome: OpOutcome) -> Result<Json<Box<PlanReport>>, ApiError>
     params(("id" = String, Path, description = "Module id")),
     request_body = ApplyRequest,
     responses(
-        (status = 200, description = "What was written, and any service action or commit-confirm window", body = Value),
+        (status = 200, description = "What was written, and any service action or commit-confirm window", body = ApplyReport),
         (status = 404, description = "No such module", body = crate::error::ErrorBody),
         (status = 409, description = "The target changed since `expected_hash` was read", body = crate::error::ErrorBody),
         (status = 422, description = "The candidate has at least one error diagnostic", body = crate::error::ErrorBody),

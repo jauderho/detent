@@ -86,6 +86,7 @@ pub fn validate_unit_name(name: &str) -> Result<(), ServiceError> {
 
 /// The run state of a service, as reported by [`ServiceManager::status`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum State {
     /// Running.
@@ -102,8 +103,25 @@ pub enum State {
     Unknown,
 }
 
+/// How `serde` renders a [`SystemTime`]: two integers, not an RFC 3339
+/// string.
+///
+/// It exists only so the `openapi` feature has something accurate to point
+/// [`ServiceStatus::since`] at — `utoipa` has no schema for [`SystemTime`],
+/// and describing it as a string would misdescribe the bytes clients receive.
+/// Nothing constructs one.
+#[cfg(feature = "openapi")]
+#[derive(Debug, utoipa::ToSchema)]
+pub struct SystemTimeView {
+    /// Whole seconds since the Unix epoch.
+    pub secs_since_epoch: u64,
+    /// Nanoseconds within that second.
+    pub nanos_since_epoch: u32,
+}
+
 /// The result of a [`ServiceManager::status`] call.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ServiceStatus {
     /// The unit name actually resolved and queried, i.e. the alternative
     /// from [`UnitNames`] that exists on this host.
@@ -115,6 +133,7 @@ pub struct ServiceStatus {
     pub enabled: Option<bool>,
     /// When the unit entered its current state, when the backend can
     /// determine it.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<SystemTimeView>))]
     pub since: Option<SystemTime>,
 }
 
