@@ -1,0 +1,67 @@
+{
+  "$defs": {
+    "Entry": {
+      "additionalProperties": false,
+      "description": "One `/etc/hosts` entry: an address and the names that resolve to it.",
+      "properties": {
+        "comment": {
+          "description": "The text of the inline `#` comment, without the `#` and trimmed.",
+          "type": ["string", "null"],
+          "x-detent": {
+            "group": "advanced",
+            "requires_restart": false,
+            "security_impact": "none",
+            "tooltip": "hosts-tip-comment"
+          }
+        },
+        "hostnames": {
+          "description": "The names, canonical name first, then aliases.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-detent": {
+            "group": "basic",
+            "requires_restart": false,
+            "security_impact": "low",
+            "tooltip": "hosts-tip-hostnames"
+          }
+        },
+        "ip": {
+          "description": "The address the names map to.",
+          "format": "ip",
+          "type": "string",
+          "x-detent": {
+            "group": "basic",
+            "requires_restart": false,
+            "security_impact": "low",
+            "tooltip": "hosts-tip-ip"
+          }
+        }
+      },
+      "required": ["ip", "hostnames"],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The typed model of `/etc/hosts`: its entries, in file order.",
+  "properties": {
+    "entries": {
+      "description": "The entries, in the order they appear in the file.",
+      "items": {
+        "$ref": "#/$defs/Entry"
+      },
+      "type": "array",
+      "x-detent": {
+        "group": "basic",
+        "requires_restart": false,
+        "security_impact": "low",
+        "tooltip": "hosts-tip-entries"
+      }
+    }
+  },
+  "required": ["entries"],
+  "title": "Model",
+  "type": "object"
+}
