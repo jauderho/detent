@@ -68,6 +68,8 @@ pub struct RestoredView {
     get,
     path = LIST_PATH,
     tag = "backups",
+    // Explicit: see the note on `modules::list`.
+    operation_id = "list_backups",
     params(("id" = String, Path, description = "Module id")),
     responses(
         (status = 200, description = "The module's retained backups, newest first", body = Vec<BackupInfo>),

@@ -264,7 +264,7 @@
           "modules"
         ],
         "summary": "`GET /api/v1/modules`.",
-        "operationId": "list",
+        "operationId": "list_modules",
         "responses": {
           "200": {
             "description": "Every module compiled into this build",
@@ -402,7 +402,7 @@
           "backups"
         ],
         "summary": "`GET /api/v1/modules/{id}/backups`.",
-        "operationId": "list",
+        "operationId": "list_backups",
         "parameters": [
           {
             "name": "id",

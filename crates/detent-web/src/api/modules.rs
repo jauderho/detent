@@ -159,6 +159,11 @@ fn parse_hash(hex: &str) -> Result<detent_platform::fs::atomic::Sha256Digest, Ap
     get,
     path = LIST_PATH,
     tag = "modules",
+    // Explicit because utoipa derives the operationId from the function name,
+    // and `backups::list` is also called `list`. Two operations sharing an
+    // operationId is invalid OpenAPI, and a generated client collapses them
+    // into one mistyped call.
+    operation_id = "list_modules",
     responses((status = 200, description = "Every module compiled into this build", body = Vec<ModuleDescriptor>)),
 ))]
 pub(super) async fn list(

@@ -362,6 +362,45 @@ mod tests {
         Ok(())
     }
 
+    /// `operationId` must be unique across the whole document.
+    ///
+    /// utoipa derives it from the handler's function name, so two modules
+    /// that both call a handler `list` silently produce two operations with
+    /// the same id. That is invalid `OpenAPI`, and a `TypeScript` client
+    /// generated from it declares the member twice — the second operation
+    /// ends up typed as the first, so a call compiles and then sends the
+    /// wrong shape. `modules::list` and `backups::list` did exactly this.
+    #[test]
+    fn every_operation_id_is_unique() -> R {
+        let json = serde_json::to_value(ApiDoc::openapi())?;
+        let paths = json
+            .get("paths")
+            .and_then(|p| p.as_object())
+            .ok_or("no paths object")?;
+
+        let mut seen: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        let empty = serde_json::Map::new();
+        for (path, item) in paths {
+            for (method, operation) in item.as_object().unwrap_or(&empty) {
+                let Some(id) = operation.get("operationId").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                seen.entry(id.to_owned())
+                    .or_default()
+                    .push(format!("{} {path}", method.to_uppercase()));
+            }
+        }
+
+        let clashes: Vec<_> = seen.iter().filter(|(_, uses)| uses.len() > 1).collect();
+        assert!(
+            clashes.is_empty(),
+            "operationId is not unique: {clashes:?} — give the handlers an explicit \
+             `operation_id` in their `#[utoipa::path]`"
+        );
+        Ok(())
+    }
+
     /// Every `$ref` this document writes must resolve inside it, or a
     /// generated client has a dangling type.
     #[test]
