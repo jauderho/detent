@@ -26,7 +26,7 @@ use std::path::Path;
 use detent_core::diag::MessageId;
 use detent_ops::report::HostReport;
 use detent_platform::privsep::allowlist::{Allowlist, Config};
-use detent_platform::privsep::monitor::{ExitReason, Hooks, Monitor};
+use detent_platform::privsep::monitor::{ExitReason, Hooks, Monitor, MonitorError};
 use detent_platform::privsep::spawn::{NoSandbox, Role, SpawnConfig, abort_child, spawn_pair};
 use serde::Serialize;
 
@@ -211,6 +211,30 @@ const fn mode_status(mode: u32) -> Status {
     }
 }
 
+/// Turn what the monitor served and what the child exited with into a
+/// [`Check`].
+///
+/// Split out of [`privsep_check`] so the two failure arms are reachable from a
+/// test without forking a pair rigged to fail — the same reason
+/// `detent_platform::sandbox::seccomp_verdict` is its own function.
+fn privsep_verdict(
+    served: Result<ExitReason, MonitorError>,
+    waited: std::io::Result<Option<i32>>,
+    child_pid: i32,
+) -> Check {
+    match (served, waited) {
+        (Ok(ExitReason::Shutdown), Ok(Some(0))) => {
+            Check::new("privsep", Status::Ok, format!("pid {child_pid}"))
+        }
+        (Ok(reason), status) => Check::new(
+            "privsep",
+            Status::Fail,
+            format!("{reason:?} status={status:?}"),
+        ),
+        (Err(err), _) => Check::new("privsep", Status::Fail, err.to_string()),
+    }
+}
+
 /// Fork a real pair, shake hands, shut it down.
 fn privsep_check(state_root: &Path) -> Check {
     let allow = match Allowlist::from_modules(&[], &Config::with_state_root(state_root)) {
@@ -234,17 +258,7 @@ fn privsep_check(state_root: &Path) -> Check {
             let mut handle = handle;
             let served = Monitor::new(allow, Hooks::default()).serve(&mut handle.channel);
             let waited = handle.wait();
-            match (served, waited) {
-                (Ok(ExitReason::Shutdown), Ok(Some(0))) => {
-                    Check::new("privsep", Status::Ok, format!("pid {}", handle.child_pid))
-                }
-                (Ok(reason), status) => Check::new(
-                    "privsep",
-                    Status::Fail,
-                    format!("{reason:?} status={status:?}"),
-                ),
-                (Err(err), _) => Check::new("privsep", Status::Fail, err.to_string()),
-            }
+            privsep_verdict(served, waited, handle.child_pid)
         }
     }
 }
@@ -299,7 +313,10 @@ fn confinement_checks(
 
 #[cfg(test)]
 mod tests {
-    use super::{Check, Report, Status, config_check, directory_check, mode_status, report};
+    use super::{
+        Check, ExitReason, MonitorError, Report, Status, config_check, directory_check,
+        mode_status, privsep_verdict, report,
+    };
     use crate::i18n::Messages;
     use crate::output::{Exit, Renderer};
     use crate::run::{Settings, Streams};
@@ -455,5 +472,30 @@ mod tests {
             Some("warn")
         );
         Ok(())
+    }
+
+    /// The two failure arms of [`privsep_verdict`]: a pair that came up but
+    /// stopped for the wrong reason, and one that never served at all. Both
+    /// are reachable only by forking a deliberately broken pair, which is why
+    /// the verdict is a function.
+    #[test]
+    fn privsep_verdict_reports_a_wrong_exit_reason_and_a_serve_error() {
+        let ok = privsep_verdict(Ok(ExitReason::Shutdown), Ok(Some(0)), 42);
+        assert_eq!(ok.status, Status::Ok);
+        assert!(ok.detail.contains("42"), "{ok:?}");
+
+        let wrong_reason = privsep_verdict(Ok(ExitReason::PeerClosed), Ok(Some(0)), 42);
+        assert_eq!(wrong_reason.status, Status::Fail);
+        assert!(
+            wrong_reason.detail.contains("PeerClosed"),
+            "{wrong_reason:?}"
+        );
+
+        let bad_status = privsep_verdict(Ok(ExitReason::Shutdown), Ok(Some(1)), 42);
+        assert_eq!(bad_status.status, Status::Fail);
+
+        let never_served = privsep_verdict(Err(MonitorError::CorruptMarker), Ok(Some(0)), 42);
+        assert_eq!(never_served.status, Status::Fail);
+        assert!(never_served.detail.contains("marker"), "{never_served:?}");
     }
 }
