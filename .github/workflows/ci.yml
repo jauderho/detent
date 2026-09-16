@@ -72,12 +72,25 @@ jobs:
       # defaults link `ring` even in aws-lc builds. This assertion is a no-op
       # until a rustls dependency actually exists (Phase 4); once it does,
       # `cargo tree -i ring` must be empty for the default feature set.
+      # `cargo tree -i <pkg>` exits 0 whether or not the package is in the
+      # graph -- an absent package is a "nothing to print" warning, not an
+      # error -- so the verdict has to come from the output, not the status.
+      # The earlier `! cargo tree ... -i ring` spelling failed precisely when
+      # ring was correctly absent.
       - name: cargo tree -i ring (rustls builds must not pull in ring)
         run: |
           set -euo pipefail
-          if cargo tree -e normal -p detent -i rustls >/dev/null 2>&1; then
-            ! cargo tree -e normal -p detent -i ring >/dev/null 2>&1
+          if ! cargo tree -e normal -p detent -i rustls 2>/dev/null | grep -q '^rustls '; then
+            echo "rustls is not in this build's graph; nothing to assert"
+            exit 0
           fi
+          if cargo tree -e normal -p detent -i ring 2>/dev/null | grep -q '^ring '; then
+            echo "::error::ring is in the dependency graph; an aws-lc-rs build must not link a second crypto stack"
+            cargo tree -e normal -p detent -i ring
+            exit 1
+          fi
+          echo "rustls present, ring absent, as required"
+
 
   rust-macos:
     name: Rust (build, test, clippy) on macOS
