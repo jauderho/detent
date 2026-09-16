@@ -57,6 +57,8 @@ module-dhcp = ["detent-modules/module-dhcp"]
 module-network = ["detent-modules/module-network"]
 
 web = ["dep:detent-web", "dep:tokio"]
+## Embeds the built SPA from web/dist into the binary.
+ui = ["web", "detent-web/ui"]
 
 acme-dns01 = ["dep:detent-acme"]
 acme-attest = ["acme-dns01"]

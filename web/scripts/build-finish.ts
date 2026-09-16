@@ -19,9 +19,10 @@
  *      never applies. This step re-derives the digest from the built HTML and
  *      fails the build if it has moved.
  *
- * It also drops the legacy `woff` font fallback (see `dropLegacyWoff`) and
- * recreates `dist/.gitkeep`, which `vite build` deletes when it empties the
- * output directory and which the Rust `ui` feature needs to exist.
+ * It also trims the font payload — unused subsets (see `keepFontSubsets`) and
+ * the legacy `woff` fallback (see `dropLegacyWoff`) — and recreates
+ * `dist/.gitkeep`, which `vite build` deletes when it empties the output
+ * directory and which the Rust `ui` feature needs to exist.
  *
  * Usage:
  *   bun run build:finish                 compress dist/ and verify the CSP hash
@@ -138,6 +139,57 @@ export function dropLegacyWoff(css: string): { css: string; dropped: string[] } 
   return { css: stripped, dropped }
 }
 
+/**
+ * Font subsets kept in the bundle, in the order they must be matched (longest
+ * first, so `latin-ext` is not read as `latin`).
+ *
+ * Every subset is embedded in the binary whether or not a browser ever asks
+ * for it — `unicode-range` decides what gets *downloaded*, not what gets
+ * shipped — and detent targets SBCs and embedded systems. So the bundle
+ * carries what the shipped locale needs and nothing else. Adding a locale
+ * means adding its subset here, deliberately, in the same change.
+ */
+const KNOWN_SUBSETS = [
+  'cyrillic-ext',
+  'latin-ext',
+  'vietnamese',
+  'cyrillic',
+  'greek-ext',
+  'greek',
+  'latin',
+] as const
+
+/** Subsets en-US needs. See `KNOWN_SUBSETS` for why this is not "all of them". */
+const DEFAULT_SUBSETS = ['latin']
+
+function subsetOf(fileName: string): string | null {
+  return KNOWN_SUBSETS.find((subset) => fileName.includes(`-${subset}-`)) ?? null
+}
+
+/**
+ * Drops every `@font-face` whose file belongs to a subset outside `allowed`,
+ * and reports the files that become unreferenced.
+ *
+ * A face whose subset cannot be identified is kept: an unrecognised name is a
+ * reason to leave the bundle alone, not to silently delete a font.
+ */
+export function keepFontSubsets(
+  css: string,
+  allowed: readonly string[],
+): { css: string; dropped: string[] } {
+  const dropped: string[] = []
+  const kept = css.replace(/@font-face\{[^}]*\}/g, (block) => {
+    const url = /url\(([^)]+\.woff2)\)/.exec(block)?.[1]
+    if (url === undefined) return block
+    const fileName = url.replace(/^.*\//, '')
+    const subset = subsetOf(fileName)
+    if (subset === null || allowed.includes(subset)) return block
+    dropped.push(fileName)
+    return ''
+  })
+  return { css: kept, dropped }
+}
+
 type Report = { path: string; raw: number; br: number | null; gz: number | null }
 
 /**
@@ -199,6 +251,9 @@ function main(argv: readonly string[]): number {
         '                 browser; use this only behind a gzip-only proxy)',
         '  --keep-woff    keep the legacy woff font fallback (woff2 is enough',
         '                 for every browser this bundle runs on)',
+        `  --font-subsets=a,b   font subsets to embed (default: ${DEFAULT_SUBSETS.join(',')}).`,
+        '                 Every subset is embedded whether a browser asks for it',
+        '                 or not, so this is binary size, not download size.',
         '  --verbose, -v  per-file raw/brotli/gzip sizes',
         '  --help, -h     print this message',
       ].join('\n'),
@@ -252,31 +307,47 @@ function main(argv: readonly string[]): number {
   }
   console.log(`build-finish: CSP hash OK — inline theme script matches the pinned sha256.`)
 
-  // ── drop the legacy woff fallback ─────────────────────────────────────────
-  let woffFreed = 0
-  if (!argv.includes('--keep-woff')) {
-    const orphaned = new Set<string>()
-    for (const file of files.filter((f) => f.endsWith('.css'))) {
-      const { css, dropped } = dropLegacyWoff(readFileSync(file, 'utf8'))
-      for (const name of dropped) orphaned.add(name)
-      if (dropped.length > 0 && !dryrun) writeFileSync(file, css)
+  // ── trim the font payload ─────────────────────────────────────────────────
+  //
+  // Both passes only rewrite CSS. Deleting the files they orphan is left to a
+  // single sweep below: the subset pass removes whole `@font-face` blocks, and
+  // those blocks carry `woff` fallbacks the woff pass then never sees, so
+  // per-pass deletion missed them and left the files embedded but unreachable.
+  const subsetArg = argv.find((a) => a.startsWith('--font-subsets='))
+  const allowed = (subsetArg?.split('=')[1] ?? DEFAULT_SUBSETS.join(',')).split(',')
+  const stylesheets = files.filter((f) => f.endsWith('.css'))
+  for (const file of stylesheets) {
+    let css = readFileSync(file, 'utf8')
+    const before = css
+    css = keepFontSubsets(css, allowed).css
+    if (!argv.includes('--keep-woff')) css = dropLegacyWoff(css).css
+    if (css !== before && !dryrun) writeFileSync(file, css)
+  }
+
+  // Every font the stylesheets still reference, by file name.
+  const referenced = new Set<string>()
+  for (const file of stylesheets) {
+    const css = readFileSync(file, 'utf8')
+    for (const match of css.matchAll(/url\(([^)]+\.(?:woff2?|ttf|otf|eot))\)/g)) {
+      const url = match[1]
+      if (url !== undefined) referenced.add(url.replace(/^.*\//, ''))
     }
-    for (const name of orphaned) {
-      const path = join(distDir(), 'assets', name)
-      try {
-        woffFreed += statSync(path).size
-        if (!dryrun) rmSync(path)
-      } catch {
-        // Already gone, or emitted somewhere this build does not expect. The
-        // CSS reference is stripped either way, which is the part that matters.
-      }
-    }
-    if (orphaned.size > 0) {
-      console.log(
-        `build-finish: dropped ${orphaned.size.toString()} legacy .woff file(s), ` +
-          `${woffFreed} B — woff2 covers every browser this bundle targets.`,
-      )
-    }
+  }
+
+  let fontsFreed = 0
+  let fontsDropped = 0
+  for (const file of walk(distDir()).filter((f) => /\.(woff2?|ttf|otf|eot)$/.test(f))) {
+    const name = file.replace(/^.*\//, '')
+    if (referenced.has(name)) continue
+    fontsFreed += statSync(file).size
+    fontsDropped += 1
+    if (!dryrun) rmSync(file)
+  }
+  if (fontsDropped > 0) {
+    console.log(
+      `build-finish: font subsets [${allowed.join(', ')}]; dropped ` +
+        `${fontsDropped.toString()} unreferenced font file(s), ${fontsFreed} B.`,
+    )
   }
 
   // `dist/` is tracked only by this placeholder, and `vite build` empties the

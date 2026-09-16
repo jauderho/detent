@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { cspDigest, dropLegacyWoff, inlineScript, pinnedCspHash } from '../build-finish.ts'
+import {
+  cspDigest,
+  dropLegacyWoff,
+  inlineScript,
+  keepFontSubsets,
+  pinnedCspHash,
+} from '../build-finish.ts'
 
 describe('cspDigest', () => {
   it('produces the base64 sha256 a CSP source expression uses', () => {
@@ -72,5 +78,44 @@ describe('dropLegacyWoff', () => {
 
     expect(css).toContain('unicode-range:U+0-FF')
     expect(css).toContain('font-family:X')
+  })
+})
+
+describe('keepFontSubsets', () => {
+  const face = (subset: string) =>
+    `@font-face{font-family:X;src:url(/assets/ibm-plex-mono-${subset}-400-normal-abc.woff2)` +
+    `format("woff2");unicode-range:U+0-FF}`
+
+  it('keeps an allowed subset and drops the rest', () => {
+    const css = face('latin') + face('cyrillic') + face('vietnamese')
+    const { css: kept, dropped } = keepFontSubsets(css, ['latin'])
+
+    expect(kept).toContain('latin-400')
+    expect(kept).not.toContain('cyrillic')
+    expect(kept).not.toContain('vietnamese')
+    expect(dropped).toHaveLength(2)
+  })
+
+  // `latin-ext` must not be matched as `latin`, or asking for latin alone
+  // would silently keep a subset nobody asked for.
+  it('does not confuse latin-ext with latin', () => {
+    const { dropped } = keepFontSubsets(face('latin') + face('latin-ext'), ['latin'])
+
+    expect(dropped).toEqual(['ibm-plex-mono-latin-ext-400-normal-abc.woff2'])
+  })
+
+  it('keeps latin-ext when it is asked for', () => {
+    const { dropped } = keepFontSubsets(face('latin') + face('latin-ext'), ['latin', 'latin-ext'])
+
+    expect(dropped).toEqual([])
+  })
+
+  // Deleting a font because its name is unfamiliar is worse than shipping it.
+  it('keeps a face whose subset it cannot identify', () => {
+    const odd = '@font-face{font-family:X;src:url(/assets/mystery.woff2)format("woff2")}'
+    const { css, dropped } = keepFontSubsets(odd, ['latin'])
+
+    expect(css).toBe(odd)
+    expect(dropped).toEqual([])
   })
 })
