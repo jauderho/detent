@@ -327,7 +327,20 @@ jobs:
       - name: Install cargo-zigbuild
         run: cargo install cargo-zigbuild --version 0.23.2 --locked
 
-      # Three budget rows (PLAN §4.1), each built and checked against its own
+      # The `ui` row embeds web/dist, so the SPA has to exist before cargo
+      # runs. An empty web/dist still compiles — rust-embed just embeds
+      # nothing — which would silently turn that budget row into a
+      # measurement of the binary without the console.
+      - name: Install bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Build the SPA
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      # Four budget rows (PLAN §4.1), each built and checked against its own
       # size-baseline.json key before the next build overwrites the binary.
       - name: Build (full default features)
         run: cargo zigbuild --release -p detent --target aarch64-unknown-linux-musl
@@ -340,6 +353,12 @@ jobs:
 
       - name: size-check (resolver + web)
         run: scripts/size-check.sh --verbose --key resolver-web-aarch64-musl target/aarch64-unknown-linux-musl/release/detent
+
+      - name: Build (full default + embedded console)
+        run: cargo zigbuild --release -p detent --target aarch64-unknown-linux-musl --features ui
+
+      - name: size-check (full default + embedded console)
+        run: scripts/size-check.sh --verbose --key full-ui-aarch64-musl target/aarch64-unknown-linux-musl/release/detent
 
       # No crypto feature: main.rs's provider requirement is gated on `web`,
       # so the smallest build does not have to name a TLS backend it will

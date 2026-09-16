@@ -1,6 +1,6 @@
 {
   "full-default-aarch64-musl": {
-    "bytes": 4964016,
+    "bytes": 4971696,
     "tolerance_pct": 3,
     "comment": "PLAN \u00a74.1 row 1: full default features (module-hosts,module-resolver,module-chrony,module-mounts,module-nfs,module-samba,module-dhcp,module-network,web,acme-dns01,update,init-systemd,crypto-aws-lc), aarch64-unknown-linux-musl, release, stripped. Budget <= 12 MiB (12582912 bytes). Measured via `cargo zigbuild --release -p detent --target aarch64-unknown-linux-musl` on 2026-09-10. Re-cut on 2026-09-10 after two size reclaims: `/api/v1/openapi.json` now serves an `include_str!` of the checked-in document instead of building it at run time with utoipa, and utoipa plus the three crates' `openapi` features moved to [dev-dependencies], so the schema builders are never compiled into a release build rather than compiled and stripped. utoipa is no longer in the release dependency graph. Previous baseline 5101488, now 4964016 (-137472)."
   },
@@ -10,8 +10,13 @@
     "comment": "PLAN \u00a74.1 row 2: --no-default-features --features module-resolver,web,crypto-aws-lc,init-systemd, aarch64-unknown-linux-musl, release, stripped. Budget <= 6 MiB (6291456 bytes). Measured via `cargo zigbuild --release -p detent --target aarch64-unknown-linux-musl --no-default-features --features module-resolver,web,crypto-aws-lc,init-systemd` on 2026-09-10. Re-cut on 2026-09-10 after two size reclaims: `/api/v1/openapi.json` now serves an `include_str!` of the checked-in document instead of building it at run time with utoipa, and utoipa plus the three crates' `openapi` features moved to [dev-dependencies], so the schema builders are never compiled into a release build rather than compiled and stripped. utoipa is no longer in the release dependency graph. Previous baseline 4963056, now 4823920 (-139136)."
   },
   "cli-aarch64-musl": {
-    "bytes": 1705336,
+    "bytes": 1712952,
     "tolerance_pct": 3,
     "comment": "PLAN \u00a74.1 row 3: CLI only, no web/acme/update. --no-default-features --features module-hosts,module-resolver,module-chrony,module-mounts,module-nfs,module-samba,module-dhcp,module-network,init-systemd, aarch64-unknown-linux-musl, release, stripped. Budget <= 3 MiB (3145728 bytes). Measured via `cargo zigbuild --release -p detent --target aarch64-unknown-linux-musl --no-default-features --features module-hosts,module-resolver,module-chrony,module-mounts,module-nfs,module-samba,module-dhcp,module-network,init-systemd` on 2026-09-10. This row first had to name crypto-ring as well, because main.rs demanded a rustls provider even with `web` off; that compile_error is now gated on `web`, and the binary is byte-identical either way (1704952), which is what showed the feature was a no-op here. Re-cut on 2026-09-10 after two size reclaims: `/api/v1/openapi.json` now serves an `include_str!` of the checked-in document instead of building it at run time with utoipa, and utoipa plus the three crates' `openapi` features moved to [dev-dependencies], so the schema builders are never compiled into a release build rather than compiled and stripped. utoipa is no longer in the release dependency graph. Previous baseline 1704952, now 1705336 (+384)."
+  },
+  "full-ui-aarch64-musl": {
+    "bytes": 5659696,
+    "tolerance_pct": 3,
+    "comment": "Default features plus `ui`, so the built SPA in web/dist is embedded by rust-embed. aarch64-unknown-linux-musl, release, stripped. Requires `cd web && bun run build` first; an empty web/dist compiles but embeds nothing, which would make this row meaningless. Budget <= 12 MiB. Measured 2026-09-16. The SPA costs 688,000 bytes over the same build without `ui`; web/scripts/build-finish.ts keeps only the font subsets the shipped locale needs, because unicode-range decides what a browser downloads, not what the binary carries."
   }
 }
