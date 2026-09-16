@@ -161,19 +161,31 @@ quietly into the tables above.
    unprivileged user. A `require_caps` knob, defaulted on for the monitor,
    would close it; deferred because the worker's confinement order relative to
    its uid drop needs checking first.
-2. **`detent-web` coverage is 97%, not the 100% PLAN Phase 4 sets as its own
+2. **Landlock is unavailable on Raspberry Pi OS, detent's flagship target.**
+   Measured on a Pi running Debian 13, kernel `6.18.39+rpt-rpi-v8`:
+   `/sys/kernel/security/lsm` reports `capability` alone, and the kernel config
+   says `# CONFIG_SECURITY_LANDLOCK is not set`. It is not a matter of adding
+   `lsm=` to `cmdline.txt` — the LSM is not compiled in, so no boot parameter
+   can turn it on, and an operator would need a custom kernel. `detent doctor`
+   reports this correctly (`warn landlock: capability`) and `require_landlock`
+   defaults to `false`, so detent runs — but on the most common SBC it runs
+   with filesystem confinement absent, leaving seccomp and the capability drop.
+   Ubuntu 26.04 on x86_64 has it (`lockdown,capability,landlock,yama,apparmor,
+   ima,evm`). Worth stating in the operator documentation rather than leaving
+   to be discovered, given how much of PLAN §2.4 rests on Landlock.
+3. **`detent-web` coverage is 97%, not the 100% PLAN Phase 4 sets as its own
    acceptance criterion** (`coverage-baseline.json`). The file's own note says
    what's missing: error paths that need a failing syscall to reach
    (`getrandom` failing, `accept(2)` erroring, a handshake timing out, a
    graceful-shutdown grace window expiring), plus the access-log tracing call.
-3. ~~**`fuzz.yml`'s `dtolnay/rust-toolchain` pin for the nightly toolchain does
+4. ~~**`fuzz.yml`'s `dtolnay/rust-toolchain` pin for the nightly toolchain does
    not resolve.**~~ **Fixed.** `82fc405565b9cf90abfe700ba43b4751ce2fe422` is not
    a commit that exists in `dtolnay/rust-toolchain` (the GitHub API answers 422
    for it). The `nightly` branch there is force-pushed daily, so a SHA pinned
    against it goes unreachable once GC runs. `fuzz.yml` now uses the same
    pinned `v1` commit `ci.yml` does and asks for nightly by input, which is
    both reachable and stable.
-4. ~~**Every `dtolnay/rust-toolchain@…# v1` step in `ci.yml` omits the required
+5. ~~**Every `dtolnay/rust-toolchain@…# v1` step in `ci.yml` omits the required
    `toolchain` input.**~~ **Fixed.** The action declares `toolchain` as
    `required: true` and hard-fails when it is empty, so *every* job in `ci.yml`
    would have failed at its first step — which is consistent with the workflow
@@ -186,38 +198,38 @@ quietly into the tables above.
    covers, and both were found only because someone went looking for the
    evidence behind a checklist item. That is the argument for the document.
 
-5. **`PR_SET_DUMPABLE=0` has no dedicated test.** `harden_dumpable()`
+6. **`PR_SET_DUMPABLE=0` has no dedicated test.** `harden_dumpable()`
    (`crates/detent-platform/src/sandbox/linux.rs`) is called and its outcome
    folded into `confine()`'s result struct, but no test reads
    `/proc/self/status`'s `Dumpable:` field the way
    `no_new_privs_is_set_afterwards` does for `NoNewPrivs:`.
-6. **Landlock-absent degradation is only partly tested.** `confine()`'s
+7. **Landlock-absent degradation is only partly tested.** `confine()`'s
    behavior when Landlock is unavailable is tested
    (`confine_is_all_unavailable_and_never_errs_off_linux`), but the "warn
    once, mark degraded in `doctor`/UI" half of PLAN §2.4 is not cross-checked
    by a test that ties sandbox degradation to `doctor` output.
-7. **systemd unit hardening (`packaging/systemd/detent.service`,
+8. **systemd unit hardening (`packaging/systemd/detent.service`,
    `systemd-analyze security` ≤ 2.5 / ≤ 1.8) is spike evidence, not a
    regression test.** The unit file exists and cites `docs/spikes/02-sandbox.md`
    in its own header, but nothing in CI re-measures `systemd-analyze security`
    against it to catch a future regression.
-8. **"Only one pending commit at a time" has no explicit negative test.** The
+9. **"Only one pending commit at a time" has no explicit negative test.** The
    single-slot `Option<Pending>` design makes a second concurrent `Apply`
    structurally hard to reach in the current tests, but no test asserts that
    a second `Apply` while one commit is pending is refused (as opposed to
    silently replacing the first).
-9. **`Server` header removal, no directory listing, `/metrics` absent** are
+10. **`Server` header removal, no directory listing, `/metrics` absent** are
    true by construction (nothing registers them) but have no dedicated
    negative test asserting their absence.
-10. **Reproducible builds, SBOM, provenance, immutable releases, Sigstore
+11. **Reproducible builds, SBOM, provenance, immutable releases, Sigstore
    verification** — all Phase 9 (`detent-update`) work; none of it exists
    yet. `detent-acme` (short-lived certs, dns-01, device-attest-01) is
    likewise Phase 6 and does not exist yet beyond an empty crate.
-11. **`testssl.sh` is not invoked anywhere in this repository.** PLAN Phase 4
+12. **`testssl.sh` is not invoked anywhere in this repository.** PLAN Phase 4
     task 1 names it explicitly ("CI job, allow network"); no such job exists.
     `scripts/tls-check.sh` (added by this change) covers the
     `openssl s_client`/ALPN portion of task 1 but not the weak-cipher-suite
     sweep `testssl.sh` performs.
-12. **Output escaping in the admin UI (React) is not yet applicable** — `web/src`
+13. **Output escaping in the admin UI (React) is not yet applicable** — `web/src`
     has Phase 4's bootstrap only (`index.html`, the theme script, base CSS);
     no application/form code exists yet (Phase 5).
