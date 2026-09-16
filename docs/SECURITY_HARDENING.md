@@ -83,7 +83,7 @@ release (compromised token).
 | ≤ 1 MiB message cap, postcard-encoded, `deny_unknown_fields`-equivalent (unknown discriminant closes the connection) | a compromised worker flooding/crashing the monitor with oversized or malformed frames | `crates/detent-platform/src/privsep/proto.rs` | `oversize_frames_are_rejected_before_allocating`, `truncated_and_unknown_frames_are_rejected` (`proto.rs`) |
 | `PR_SET_NO_NEW_PRIVS` at startup | privilege escalation via setuid binaries after confinement | `crates/detent-platform/src/sandbox/linux.rs` | `no_new_privs_is_set_afterwards` (kernel-observable: reads `/proc/self/status`, `linux.rs`) |
 | `PR_SET_DUMPABLE=0` | a local user attaching a debugger / reading `/proc/<pid>/mem` to extract key material | `crates/detent-platform/src/sandbox/linux.rs` (`harden_dumpable`) | **not directly tested.** The outcome is folded into `confine()`'s returned struct (asserted only indirectly, e.g. by `debug_format_of_the_monitor_does_not_panic`-style tests elsewhere), but no test reads `/proc/self/status`'s `Dumpable:` field the way `no_new_privs_is_set_afterwards` does for `NoNewPrivs:`. See [Gaps](#gaps). |
-| Capability bounding set shrunk to the computed minimum | a compromised process using an unneeded capability (e.g. `CAP_SYS_ADMIN`) | `crates/detent-platform/src/sandbox/linux.rs` | `capability_bounding_set_shrinks_to_the_policy_set` (`linux.rs`) |
+| Capability bounding set shrunk to the computed minimum | a compromised process using an unneeded capability (e.g. `CAP_SYS_ADMIN`) | `crates/detent-platform/src/sandbox/linux.rs` | `capability_bounding_set_shrinks_to_the_policy_set` (`linux.rs`), which asserts the shrunk mask where `CAP_SETPCAP` is held and, where it is not, asserts only that the refusal is reported rather than mistaken for success. **Fails open, unlike seccomp:** shrinking the bounding set needs `CAP_SETPCAP`, and when the drop is refused `confine` records `Outcome::Unavailable` and start-up continues with the full bounding set. `require_seccomp` defaults on and `require_landlock` exists; there is no `require_caps`. The monitor starts as root and so normally has `CAP_SETPCAP`, but a deployment that does not (a restrictive container, a `CapBnd`-trimmed unit) loses this control silently. See [Gaps](#gaps). |
 | Landlock ruleset restricting writes to target dirs + backup dir (+ binary dir for `update`) | a compromised worker/monitor writing outside its declared file set | `crates/detent-platform/src/sandbox/linux.rs` | `landlock_reports_its_abi_and_denies_writes_outside_the_policy` (`linux.rs`) |
 | Landlock absence degrades loudly (warn, `doctor`/UI-visible, hard-fail only if `require_landlock=true`) rather than silently | silent loss of confinement on old kernels | `crates/detent-platform/src/sandbox/mod.rs` | `confine_is_all_unavailable_and_never_errs_off_linux`, `landlock_status_serializes_to_snake_case` (`mod.rs`) — the "warn once / mark degraded in doctor" UI-visible half of this is not yet exercised by a test (doctor output tested elsewhere, not cross-checked against sandbox degradation here); noted in [Gaps](#gaps). |
 | seccomp allow-list, per-architecture tables, `SCMP_ACT_LOG` before enforcing | a compromised process making an unexpected syscall (container/sandbox escape primitives) | `crates/detent-platform/src/sandbox/seccomp.rs`, `linux.rs` | `every_table_entry_resolves_on_both_tier_one_architectures`, `the_two_tables_share_every_ipc_and_runtime_housekeeping_syscall` (`seccomp.rs`); `log_mode_seccomp_lets_a_forbidden_syscall_through`, `enforce_mode_seccomp_refuses_ptrace`, `enforce_mode_seccomp_kills_the_monitor_on_a_forbidden_syscall` (`linux.rs`) |
@@ -149,19 +149,31 @@ Controls named in PLAN §3 with **no** test and no other evidence found during
 this pass, or found only partially covered. Listed here rather than folded
 quietly into the tables above.
 
-1. **`detent-web` coverage is 97%, not the 100% PLAN Phase 4 sets as its own
+1. **The capability bounding-set drop fails open.** Seccomp refuses to start
+   when its filter does not install (`require_seccomp`, default on) and
+   Landlock has `require_landlock`; the capability drop has no equivalent. If
+   `CAP_SETPCAP` is absent, `caps::drop` answers `EPERM`, `confine` records
+   `Outcome::Unavailable`, and the process continues with the **full** bounding
+   set. The monitor starts as root and normally holds `CAP_SETPCAP`, so this is
+   latent rather than active — but it is the same shape as the seccomp
+   fail-open fixed in Phase 4, and it is invisible at run time because
+   everything else works. Found when CI first ran the Linux-only test as an
+   unprivileged user. A `require_caps` knob, defaulted on for the monitor,
+   would close it; deferred because the worker's confinement order relative to
+   its uid drop needs checking first.
+2. **`detent-web` coverage is 97%, not the 100% PLAN Phase 4 sets as its own
    acceptance criterion** (`coverage-baseline.json`). The file's own note says
    what's missing: error paths that need a failing syscall to reach
    (`getrandom` failing, `accept(2)` erroring, a handshake timing out, a
    graceful-shutdown grace window expiring), plus the access-log tracing call.
-2. ~~**`fuzz.yml`'s `dtolnay/rust-toolchain` pin for the nightly toolchain does
+3. ~~**`fuzz.yml`'s `dtolnay/rust-toolchain` pin for the nightly toolchain does
    not resolve.**~~ **Fixed.** `82fc405565b9cf90abfe700ba43b4751ce2fe422` is not
    a commit that exists in `dtolnay/rust-toolchain` (the GitHub API answers 422
    for it). The `nightly` branch there is force-pushed daily, so a SHA pinned
    against it goes unreachable once GC runs. `fuzz.yml` now uses the same
    pinned `v1` commit `ci.yml` does and asks for nightly by input, which is
    both reachable and stable.
-3. ~~**Every `dtolnay/rust-toolchain@…# v1` step in `ci.yml` omits the required
+4. ~~**Every `dtolnay/rust-toolchain@…# v1` step in `ci.yml` omits the required
    `toolchain` input.**~~ **Fixed.** The action declares `toolchain` as
    `required: true` and hard-fails when it is empty, so *every* job in `ci.yml`
    would have failed at its first step — which is consistent with the workflow
@@ -174,38 +186,38 @@ quietly into the tables above.
    covers, and both were found only because someone went looking for the
    evidence behind a checklist item. That is the argument for the document.
 
-4. **`PR_SET_DUMPABLE=0` has no dedicated test.** `harden_dumpable()`
+5. **`PR_SET_DUMPABLE=0` has no dedicated test.** `harden_dumpable()`
    (`crates/detent-platform/src/sandbox/linux.rs`) is called and its outcome
    folded into `confine()`'s result struct, but no test reads
    `/proc/self/status`'s `Dumpable:` field the way
    `no_new_privs_is_set_afterwards` does for `NoNewPrivs:`.
-5. **Landlock-absent degradation is only partly tested.** `confine()`'s
+6. **Landlock-absent degradation is only partly tested.** `confine()`'s
    behavior when Landlock is unavailable is tested
    (`confine_is_all_unavailable_and_never_errs_off_linux`), but the "warn
    once, mark degraded in `doctor`/UI" half of PLAN §2.4 is not cross-checked
    by a test that ties sandbox degradation to `doctor` output.
-6. **systemd unit hardening (`packaging/systemd/detent.service`,
+7. **systemd unit hardening (`packaging/systemd/detent.service`,
    `systemd-analyze security` ≤ 2.5 / ≤ 1.8) is spike evidence, not a
    regression test.** The unit file exists and cites `docs/spikes/02-sandbox.md`
    in its own header, but nothing in CI re-measures `systemd-analyze security`
    against it to catch a future regression.
-7. **"Only one pending commit at a time" has no explicit negative test.** The
+8. **"Only one pending commit at a time" has no explicit negative test.** The
    single-slot `Option<Pending>` design makes a second concurrent `Apply`
    structurally hard to reach in the current tests, but no test asserts that
    a second `Apply` while one commit is pending is refused (as opposed to
    silently replacing the first).
-8. **`Server` header removal, no directory listing, `/metrics` absent** are
+9. **`Server` header removal, no directory listing, `/metrics` absent** are
    true by construction (nothing registers them) but have no dedicated
    negative test asserting their absence.
-9. **Reproducible builds, SBOM, provenance, immutable releases, Sigstore
+10. **Reproducible builds, SBOM, provenance, immutable releases, Sigstore
    verification** — all Phase 9 (`detent-update`) work; none of it exists
    yet. `detent-acme` (short-lived certs, dns-01, device-attest-01) is
    likewise Phase 6 and does not exist yet beyond an empty crate.
-10. **`testssl.sh` is not invoked anywhere in this repository.** PLAN Phase 4
+11. **`testssl.sh` is not invoked anywhere in this repository.** PLAN Phase 4
     task 1 names it explicitly ("CI job, allow network"); no such job exists.
     `scripts/tls-check.sh` (added by this change) covers the
     `openssl s_client`/ALPN portion of task 1 but not the weak-cipher-suite
     sweep `testssl.sh` performs.
-11. **Output escaping in the admin UI (React) is not yet applicable** — `web/src`
+12. **Output escaping in the admin UI (React) is not yet applicable** — `web/src`
     has Phase 4's bootstrap only (`index.html`, the theme script, base CSS);
     no application/form code exists yet (Phase 5).

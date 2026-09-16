@@ -369,10 +369,22 @@ mod tests {
         })
     }
 
+    /// Shrinking the bounding set needs `CAP_SETPCAP` in the *effective* set.
+    ///
+    /// The monitor has it, because it starts as root — but a CI runner does
+    /// not: an ordinary user has `CapEff: 0` with a full `CapBnd`, and
+    /// `caps::drop` answers `EPERM`. The test therefore asserts the behaviour
+    /// appropriate to the environment it is running in, rather than skipping,
+    /// so the unprivileged case still pins something: that a refused drop is
+    /// *reported* as refused and never mistaken for success.
     #[test]
     fn capability_bounding_set_shrinks_to_the_policy_set() -> Result<(), Box<dyn std::error::Error>>
     {
-        in_forked_child(|| {
+        let privileged =
+            caps::has_cap(None, caps::CapSet::Effective, caps::Capability::CAP_SETPCAP)
+                .unwrap_or(false);
+
+        in_forked_child(move || {
             let dir =
                 std::env::temp_dir().join(format!("detent-sandbox-caps-{}", std::process::id()));
             let _ = std::fs::create_dir_all(&dir);
@@ -382,6 +394,14 @@ mod tests {
             let Ok(confinement) = confine(Role::Monitor, &Policy::monitor(&allow)) else {
                 return false;
             };
+
+            if !privileged {
+                // No CAP_SETPCAP: the drop cannot succeed, and the one thing
+                // that must hold is that `confine` says so instead of
+                // claiming a confinement it did not get.
+                return matches!(confinement.caps, super::super::Outcome::Unavailable { .. });
+            }
+
             if !matches!(confinement.caps, super::super::Outcome::Applied) {
                 return false;
             }
