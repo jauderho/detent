@@ -109,7 +109,9 @@ at `/api/v1/openapi.json`.
   closed message protocol over a socketpair; the worker parses untrusted file
   content and can request writes but cannot perform them.
 - Landlock and seccomp confine both processes, and startup **fails closed** if
-  a filter does not install.
+  a seccomp filter does not install. Landlock is best-effort: Raspberry Pi OS
+  does not compile it in, so detent runs there without filesystem confinement
+  and says so — check `detent doctor`.
 - TLS 1.3 only — the binary is built without TLS 1.2 support, so it cannot
   negotiate it.
 - Argon2id password hashing, CSRF checked three ways on cookie-authenticated

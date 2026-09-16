@@ -617,7 +617,8 @@
               }
             }
           }
-        }
+        },
+        "security": []
       }
     },
     "/api/v1/services/{id}": {
@@ -771,7 +772,8 @@
               }
             }
           }
-        }
+        },
+        "security": []
       }
     }
   },
@@ -2159,6 +2161,14 @@
       }
     }
   },
+  "security": [
+    {
+      "session_cookie": []
+    },
+    {
+      "bearer_token": []
+    }
+  ],
   "tags": [
     {
       "name": "auth",

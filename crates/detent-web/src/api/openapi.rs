@@ -106,6 +106,8 @@ const DOCUMENT: &str = include_str!(concat!(
     get,
     path = PATH,
     tag = "system",
+    // Unauthenticated: a front end needs the document before it has a session.
+    security(),
     responses((status = 200, description = "This document", body = Object)),
 ))]
 async fn serve() -> impl axum::response::IntoResponse {
@@ -168,6 +170,8 @@ fn session_doc() {}
     get,
     path = "/healthz",
     tag = "system",
+    // Unauthenticated: a liveness probe has no credential to present.
+    security(),
     responses((status = 200, description = "The process is serving", body = String, content_type = "text/plain")),
 )]
 #[allow(dead_code)]
@@ -200,6 +204,23 @@ impl utoipa::Modify for SecurityAddon {
                     .build(),
             ),
         );
+
+        // State the default the prose in docs/API.md already describes: every
+        // endpoint needs one of the two credentials. Without this the document
+        // defines two schemes and then never requires either, so a reader --
+        // or a generated client -- cannot tell the API is authenticated at
+        // all. The two endpoints that are deliberately open override it with
+        // an empty requirement on their own operation.
+        openapi.security = Some(vec![
+            utoipa::openapi::security::SecurityRequirement::new::<_, [&str; 0], _>(
+                "session_cookie",
+                [],
+            ),
+            utoipa::openapi::security::SecurityRequirement::new::<_, [&str; 0], _>(
+                "bearer_token",
+                [],
+            ),
+        ]);
     }
 }
 
