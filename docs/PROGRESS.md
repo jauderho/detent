@@ -7,9 +7,10 @@ phase or a self-contained piece of work finishes.
 
 ---
 
-## Where things stand — 2026-09-16
+## Where things stand — 2026-09-17
 
-**Phases 0–4 complete. Phase 5 (web UI, Milestone M2) in progress.**
+**Phases 0–4 complete. Phase 5 (web UI, Milestone M2) — all acceptance
+criteria met except certificates (Phase 6) and settings (needs API).**
 
 Branch: `main`. Everything below is verified on this commit, not assumed.
 
@@ -18,11 +19,13 @@ Branch: `main`. Everything below is verified on this commit, not assumed.
 | Rust tests | `cargo test --workspace --all-features` | 952 pass, 5 ignored |
 | Clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean |
 | Format | `cargo fmt --all --check` | clean |
-| Web tests | `cd web && bun run test` | 419 pass, 52 files (`bun test`) |
-| Web coverage | `cd web && bun run test:coverage` | 72 in-scope files at 100% lines |
+| Web tests | `cd web && bun run test` | 424 pass, 52 files (`bun test`) |
+| Web coverage | `cd web && bun run coverage:check` | 72 in-scope files at 100% lines |
 | Browser e2e + axe | `cd web && bun run e2e` | 22 pass (Playwright, Chromium) |
 | Web lint | `cd web && bun run lint` | clean (biome) |
 | Web types | `cd web && bun run typecheck` | clean |
+| Web i18n | `cd web && bun run i18n:check` | 247 ids, all referenced, all resolved |
+| Responsive | throwaway `noOverflow` spec | 390/768/1280 pass (evidence in `docs/spikes/m2/`) |
 | CI | 8 jobs + Codespell, Lint Code Base, Dependency Review, Scorecard | all green |
 
 The five ignored Rust tests are deliberate: `write_openapi_json` regenerates a
@@ -40,10 +43,14 @@ rustls TLS 1.3 only, auth, CSRF, API, SPA serving), `detent` (clap CLI), plus
 `detent-acme`, `detent-update`, `detent-mcp` skeletons.
 
 **Web** (`web/`) — Vite + React 19 + Tailwind v4 + Fluent. Done: design tokens
-and theme rocker, status bar, hairline layout primitives, the typed API client
-generated from `docs/openapi.json`, `AuthProvider`/`ScopeGate`, router with
-`RequireAuth`, the login page, and the **schema-driven form engine**
-(`src/forms/`) with validation mirroring the backend.
+and theme rocker, status bar (with locale selector), hairline layout
+primitives, the typed API client generated from `docs/openapi.json`,
+`AuthProvider`/`ScopeGate`, router with `RequireAuth`, the login page, and
+the **schema-driven form engine** (`src/forms/`) with validation mirroring
+the backend. Pseudo-locale (`locales/qps-ploc/web.ftl`) generated at build
+time by `bun scripts/gen-pseudo.ts`; language switcher in the status bar,
+persisted in localStorage. Responsive: status bar fits 390px (tighter
+padding + online-label hidden below 560px).
 
 Routed sections: dashboard, modules, module detail, services, backups and
 audit are real pages, each in its own file under `src/routes/`.
@@ -56,8 +63,7 @@ axe-core over every section in both themes.
 **Not done in `web/`** — certificates and settings are still placeholders in
 `src/routes/pages.tsx`, deliberately: neither has an API to drive. Certificates
 waits on Phase 6 (ACME); settings needs user- and token-management endpoints
-that do not exist. Also missing: the i18n pseudo-locale and language switcher,
-and e2e against the real binary rather than a stub.
+that do not exist. Also missing: e2e against the real binary rather than a stub.
 
 ### Traps worth knowing before you touch anything
 
@@ -90,6 +96,11 @@ and e2e against the real binary rather than a stub.
   page can rely on — every one of them races `AuthProvider`'s session probe.
   Use `stubFetchByUrl`. Three separate tasks each hit this and each invented
   their own copy before it was shared.
+- **`locales/qps-ploc/web.ftl` is generated, not checked in.** Run
+  `cd web && bun run i18n:pseudo` (or it runs automatically before
+  `bun run test` and `bun run build`). The file is gitignored. If you see
+  "Cannot find module" errors from `src/i18n/index.tsx`, the pseudo FTL
+  hasn't been generated yet.
 
 ### Test hosts
 
