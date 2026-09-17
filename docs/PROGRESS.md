@@ -133,6 +133,19 @@ there and says so; seccomp and the capability drop are the confinement.
 ---
 ## Log
 
+### 2026-09-18 — DNS providers land (Cloudflare/acme-dns/deSEC + RFC 2136 message)
+
+`crates/detent-acme/src/providers.rs` (`1c829db`): four `DnsProvider` impls,
+sync + object-safe, same idempotency contract as `HookProvider`. HTTPS trio
+drives APIs through a stubbed transport seam with recorded fixtures (list →
+PUT-refresh/POST-create, delete tolerates gone, `wait_propagated` re-lists);
+`Debug` redacts every secret (log-capture test). RFC 2136 builds the full
+UPDATE wire message (zone SOA + class-ANY delete + TXT add, unit-tested byte
+lengths) but refuses to send unsigned — TSIG needs HMAC, a new dep awaiting
+ADR-011. No sleeps in lib, no new deps, `ring` absent. Commit `1c829db`.
+Gates: `detent-acme` 35 pass, 1 ignored; workspace clippy `-D warnings` clean;
+fmt clean.
+
 ### 2026-09-18 — Serving certificate status endpoint + dashboard readout
 
 Read-only `GET /api/v1/system/cert` serves `CertReport` (`fingerprint`,
