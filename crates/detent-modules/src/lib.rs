@@ -31,9 +31,23 @@ fn hosts() -> Vec<Box<dyn DynModule>> {
     Vec::new()
 }
 
-// `module-resolver`, `module-chrony`, `module-mounts`, `module-nfs`,
-// `module-samba`, `module-dhcp` and `module-network` are all wired as far as
-// the feature flag and the (currently empty) crate: see
+/// The `resolver` module, because `module-resolver` is enabled.
+#[cfg(feature = "module-resolver")]
+fn resolver() -> Vec<Box<dyn DynModule>> {
+    vec![Box::new(detent_core::module::Dyn::<
+        detent_module_resolver::ResolverModule,
+    >::new())]
+}
+
+/// Nothing, because `module-resolver` is disabled.
+#[cfg(not(feature = "module-resolver"))]
+fn resolver() -> Vec<Box<dyn DynModule>> {
+    Vec::new()
+}
+
+// `module-chrony`, `module-mounts`, `module-nfs`, `module-samba`,
+// `module-dhcp` and `module-network` are all wired as far as the feature
+// flag and the (currently empty) crate: see
 // `crates/detent-modules/Cargo.toml`. None has a constructor pair here yet
 // because none has a `ConfigModule` impl yet (PLAN §2.3 Appendix A) — add one
 // alongside its module crate, following the `hosts()` shape above.
@@ -41,7 +55,7 @@ fn hosts() -> Vec<Box<dyn DynModule>> {
 /// The modules this build was compiled with, in registry order.
 #[must_use]
 pub fn modules() -> Vec<Box<dyn DynModule>> {
-    [hosts()].into_iter().flatten().collect()
+    [hosts(), resolver()].into_iter().flatten().collect()
 }
 
 #[cfg(test)]
@@ -76,6 +90,29 @@ mod tests {
                 .and_then(|v| v.pointer("/entries/0/hostnames/0"))
                 .and_then(|v| v.as_str()),
             Some("localhost")
+        );
+    }
+
+    #[cfg(feature = "module-resolver")]
+    #[test]
+    fn resolver_is_registered_and_speaks_json() {
+        let registry = modules();
+        let found = registry.iter().find(|m| m.id() == "resolver");
+        assert!(
+            found.is_some(),
+            "module-resolver is enabled but `resolver` is not in the registry"
+        );
+        let Some(module) = found else { return };
+        assert_eq!(module.descriptor().id, "resolver");
+        assert!(!module.schema_json().is_null());
+        assert_eq!(
+            module
+                .parse_to_model_json("nameserver 192.0.2.1\n")
+                .ok()
+                .as_ref()
+                .and_then(|v| v.pointer("/resolv/0/nameserver/ip"))
+                .and_then(|v| v.as_str()),
+            Some("192.0.2.1")
         );
     }
 

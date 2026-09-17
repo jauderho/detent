@@ -15,6 +15,7 @@ serde = "1"
 serde_json = "1"
 detent-core = { path = "../crates/detent-core", features = ["fuzzing"] }
 detent-module-hosts = { path = "../crates/modules/hosts", features = ["fuzzing"] }
+detent-module-resolver = { path = "../crates/modules/resolver", features = ["fuzzing"] }
 detent-platform = { path = "../crates/detent-platform", features = ["fuzzing"] }
 detent-web = { path = "../crates/detent-web" }
 
@@ -59,6 +60,27 @@ bench = false
 [[bin]]
 name = "fuzz_session_cookie"
 path = "fuzz_targets/fuzz_session_cookie.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_resolver_parse"
+path = "fuzz_targets/fuzz_resolver_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_resolver_roundtrip"
+path = "fuzz_targets/fuzz_resolver_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_resolver_edit"
+path = "fuzz_targets/fuzz_resolver_edit.rs"
 test = false
 doc = false
 bench = false

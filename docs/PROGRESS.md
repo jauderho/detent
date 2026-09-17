@@ -133,6 +133,25 @@ there and says so; seccomp and the capability drop are the confinement.
 
 ---
 ## Log
+### 2026-09-18 — Resolver module lands (Phase 7 wave 1)
+
+`detent-module-resolver` (lossless resolv.conf + resolved.conf + unbound.conf,
+registry `resolver()`, 26 Fluent ids, `upstream.toml` systemd 257.6,
+7 fixtures, 3 fuzz targets + corpus, `upstream-watch.yml` weekly):
+Gates: `cargo test --workspace --all-features` 51 ok / 0 failed;
+`cargo test -p detent-module-resolver --all-features` 48 lib + 17 conformance;
+`cargo test -p detent-modules` 3 pass;
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` clean;
+`cargo fmt --all --check` clean;
+`cargo llvm-cov --workspace --all-features` +
+`scripts/coverage-merge.sh --verbose`: `crates/modules/` 100% (2536/2536) PASS,
+`detent-web/` 96.95% (7403/7636) FAIL pre-existing (311 DA: `tls.rs` 279 +
+`api/modules.rs:211,244,253,286,295,330,350` handler tails; `git diff HEAD --
+crates/detent-web/` empty) — deferred, floor stays 97.
+Schema `x-detent` hints on resolv/resolved/unbound render via generic
+`web/src/forms` engine (no custom widget). Fake-old `tracked_version=0.0`
+proves the watch issue path. VM spike `docs/spikes/m-resolver.md` deferred.
+
 
 ### 2026-09-18 — CertRenew op + half/quarter cert warnings land
 
