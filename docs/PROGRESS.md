@@ -26,7 +26,7 @@ Branch: `main`. Everything below is verified on this commit, not assumed.
 | Web types | `cd web && bun run typecheck` | clean |
 | Web i18n | `cd web && bun run i18n:check` | 247 ids, all referenced, all resolved |
 | Responsive | `cd web && bun run shots` (`web/e2e-shots/m2shots.e2e.ts`, stills to `/tmp/detent-shots`) | 3 pass (390/768/1280, no horizontal scroll) |
-| CI | 8 jobs + Codespell, Lint Code Base, Dependency Review, Scorecard | all green |
+| CI | 9 jobs (incl. acme-pebble) + Codespell, Lint Code Base, Dependency Review, Scorecard | all green |
 
 The six ignored Rust tests are deliberate: `write_openapi_json` regenerates a
 checked-in artefact, `crash_child_worker` is the child half of the
@@ -129,6 +129,10 @@ there and says so; seccomp and the capability drop are the confinement.
 
 ---
 ## Log
+### 2026-09-17 — Pebble dns-01 now gated in CI
+
+`d17b6c8` gates Phase 6 Task 1 in CI: `acme-pebble` job on `ubuntu-26.04` host (Harden Runner audit, `dtolnay/rust-toolchain` via `RUST_TOOLCHAIN`, `rust-cache`, `cargo build` + `clippy` on `detent-acme`), shared bridge `detent-pebble` so `pebble -dnsserver challtestsrv:8053` resolves challtestsrv by name (not `127.0.0.1`; flag gotchas in `docs/spikes/acme-le.md`), publish still via `127.0.0.1:8055/8053` from the runner, health loop + dns preflight (`curl /set-txt` → `dig @127.0.0.1 -p 8053` → `clear-txt`), then `cargo test -p detent-acme -- --ignored --nocapture`. Prior spike `51083b7`/`576a6a1` already verified 970 pass / 6 ignored workspace-wide (incl. `#[ignore]` live test) and `cargo tree -i ring` empty; this commit makes the same issuance replay on every push.
+
 ### 2026-09-17 — Pebble dns-01 spike, Phase 6 moving
 
 `order.rs` drives `instant-acme 0.8.5` (aws-lc only, `cargo tree -i ring` empty): `account_and_order` (0600 credential cache, pid-suffixed tmp+rename), `present_challenges` (HookProvider file is the contract, test-side bridge POSTs to challtestsrv, `dig` confirms propagation), caller-owned `wait_ready`/`finalize` retry loops, no sleeps in the lib. `tests/pebble_live.rs` (`#[ignore]`) got a real chain from Pebble (2 PEM blocks, serial `48B71D…`, SAN `le.wtf`); assertions stay std-only (PEM→DER, SEQUENCE tag, domain bytes in leaf DER) rather than a new X.509 dep. Transcript + gotchas (`-dnsserver` flag, no `DNSResolver` config key, scratch-built Pebble) in `docs/spikes/acme-le.md`. ARI deferred to the renewal scheduler, which will have a prior cert to `replaces`. Verified 970 pass / 6 ignored workspace-wide. Commits: `576a6a1` (atomic hook writes), `51083b7` (spike).
