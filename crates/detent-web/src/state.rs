@@ -5,7 +5,8 @@
 //!                            ├─ Arc<AuthState> → users, sessions, tokens,
 //!                            │                   hasher, rate limiter, audit
 //!                            ├─ Arc<Config>    → the parsed detent.toml
-//!                            └─ Arc<Origin>    → what CSRF compares against
+//!                            ├─ Arc<Origin>    → what CSRF compares against
+//!                            └─ Arc<CertStore> → the live TLS cert (renew swaps it)
 //! ```
 //!
 //! Phase 4c adds the `/api/v1` handlers on top of exactly this type, so it is
@@ -13,8 +14,7 @@
 //! every request, and everything expensive inside it is behind an [`Arc`].
 //!
 //! # Guarantees
-//!
-//! * **Cloning is three pointer bumps and a channel handle.** Nothing here
+//! * **Cloning is four pointer bumps and a channel handle.** Nothing here
 //!   copies a store, a hasher, or a configuration.
 //! * **One store, one truth.** The user, session and token stores are shared
 //!   rather than copied, so a token revoked by one request stops working for
@@ -35,6 +35,7 @@ use crate::auth::users::UserStore;
 use crate::config::{AuthConfig, Config};
 use crate::csrf::Origin;
 use crate::engine::EngineHandle;
+use crate::tls::CertStore;
 
 /// Everything authentication needs, assembled once at startup.
 #[derive(Debug)]
@@ -111,17 +112,26 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// The origin `Origin:` headers are compared against.
     pub origin: Arc<Origin>,
+    /// The resolver the listener answers from; `CertStore::replace` swaps it live.
+    pub cert_store: Arc<CertStore>,
 }
 
 impl AppState {
     /// Assemble the state.
     #[must_use]
-    pub fn new(engine: EngineHandle, auth: AuthState, config: Config, origin: Origin) -> Self {
+    pub fn new(
+        engine: EngineHandle,
+        auth: AuthState,
+        config: Config,
+        origin: Origin,
+        cert_store: Arc<CertStore>,
+    ) -> Self {
         Self {
             engine,
             auth: Arc::new(auth),
             config: Arc::new(config),
             origin: Arc::new(origin),
+            cert_store,
         }
     }
 }
@@ -187,8 +197,18 @@ pub(crate) fn test_state() -> Result<TestState, Box<dyn std::error::Error>> {
         )?,
         config.clone(),
         Origin::for_config(&config),
+        // ponytail: throwaway bootstrap cert; tests never handshake through it.
+        test_cert_store()?,
     );
     Ok(TestState { state, audit, dir })
+}
+
+/// A throwaway [`CertStore`] for tests that need an `AppState` but never
+/// handshake through it.
+#[cfg(test)]
+pub(crate) fn test_cert_store() -> Result<Arc<CertStore>, Box<dyn std::error::Error>> {
+    let pair = crate::tls::bootstrap_self_signed(&["box.example".to_owned()])?;
+    Ok(Arc::new(CertStore::new(&pair)?))
 }
 
 /// A capture sink shared between the state and the test that inspects it.
@@ -209,7 +229,7 @@ impl AuthAudit for SharedCapture {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, AuthState, test_state};
+    use super::{AppState, AuthState, test_cert_store, test_state};
     use crate::auth::audit::{AuthEvent, AuthRecord};
     use crate::authz::Scopes;
     use crate::config::{AuthConfig, Config};
@@ -305,6 +325,7 @@ mod tests {
             state,
             config.clone(),
             Origin::for_config(&config),
+            test_cert_store()?,
         );
         assert!(app.auth.tokens.list().is_empty());
         Ok(())

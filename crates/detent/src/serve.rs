@@ -468,7 +468,13 @@ async fn bind_web_server(
     };
 
     let origin = detent_web::Origin::for_config(&config);
-    let state = detent_web::AppState::new(engine_handle, auth_state, config, origin);
+    let state = detent_web::AppState::new(
+        engine_handle,
+        auth_state,
+        config,
+        origin,
+        std::sync::Arc::clone(&store),
+    );
     let bind_config = std::sync::Arc::clone(&state.config);
     let router = detent_web::router(state);
 

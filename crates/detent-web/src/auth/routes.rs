@@ -895,6 +895,7 @@ mod tests {
             )?,
             config.clone(),
             crate::csrf::Origin::for_config(&config),
+            std::sync::Arc::clone(&fixture.state.cert_store),
         );
         required
             .auth
