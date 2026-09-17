@@ -592,7 +592,7 @@ place, fully covered by tests.
 
 ---
 
-### Phase 5 — Web UI (Milestone M2) `[ ]` ← next
+### Phase 5 — Web UI (Milestone M2) `[x]` (2026-09-17)
 
 **Goal:** a beautiful, simple admin page per `AESTHETIC_CONTRACT.md` + §4.4, fully
 localized, with schema-driven module forms.
@@ -917,6 +917,7 @@ TLS 1.3 → session or Bearer → (cookie path) `Sec-Fetch-Site` + `Origin` + `X
 | Date | Change | By |
 |---|---|---|
 | 2026‑09‑10 | Phase 4 closed: TLS 1.3 listener, Argon2id auth, sessions, API tokens, TOTP, rate limiting, CSRF, scoped authz, API v1 + OpenAPI, SPA serving, `serve` wired to the real server, credential CLI. Seccomp now **fails closed** (`Policy::require_seccomp`) after a filter that failed to compile left the worker unconfined while `confine` reported success. `rt_sigreturn` was missing from both sandbox tables since Phase 2. CSRF accepted a repeated `Sec-Fetch-Site`. `docs/SECURITY_HARDENING.md` added; its evidence pass found that **no CI job could ever have run** (`dtolnay/rust-toolchain` needs a `toolchain` input; `fuzz.yml` pinned a nonexistent SHA) — both fixed. Size baselines measured: 4.86/4.73/1.63 MiB against 12/6/3. | orchestrator (Opus) |
+| 2026-09-17 | Phase 5 closed; **Milestone M2 reached** (see `docs/spikes/m2-ui.md`). Certificates + settings stay placeholders (Phase 6 / missing API). E2e against the real binary stays deferred per §5. |
 | 2026‑09‑03 | Initial draft for approval. | orchestrator (Fable) |
 | 2026‑09‑04 | Phase 3 closed; **Milestone M1 reached** (see `docs/spikes/m1-e2e.md`). Added `RollbackCommit` to the privsep protocol. Added an error-catalogue gate that caught every `detent-core` error id missing from the shipped Fluent file. CLI messages resolve through the shared catalogue. | orchestrator (Opus) |
 | 2026‑09‑04 | Phase 2 closed: privsep, sandbox, service managers, host detection, packaging. `decode` trailing-byte hole fixed; `CheckExpectation::StdoutPattern` documented as substring (its example used a regex anchor that could never match); root-drop test now skips when the account is absent; platform coverage floor set to 92 with the `_exit`/`atexit` limitation documented and partly recovered. | orchestrator (Opus) |

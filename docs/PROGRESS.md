@@ -129,6 +129,10 @@ there and says so; seccomp and the capability drop are the confinement.
 ---
 
 ## Log
+### 2026-09-17 — Milestone M2 reached, Phase 6 next
+
+Phase 5 closed in PLAN (`[x]`, change log entry). Verified on this commit before closing: `coverage:check` 72 files at 100% lines (note: gate reads `% Lines`, so the raw table's 80% `% Funcs` on `ensureResizeObserver.ts` is not a shortfall), `e2e` 22 pass (11 console + 11 axe-core), plus `bun test` 424, lint, typecheck, i18n:check 247 ids, contrast:check. Certificates + settings stay placeholders; real-binary e2e stays deferred per §5.
+
 
 ### 2026-09-16 — bun test, Playwright, axe, and a dark default
 
