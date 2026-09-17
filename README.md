@@ -138,8 +138,9 @@ cd web && bun run test && bun run lint
 ```
 
 [`AGENTS.md`](AGENTS.md) covers coding standards,
-[`AESTHETIC_CONTRACT.md`](AESTHETIC_CONTRACT.md) the UI design contract, and
-[`docs/PLAN.md`](docs/PLAN.md) the roadmap.
+[`AESTHETIC_CONTRACT.md`](AESTHETIC_CONTRACT.md) the UI design contract,
+[`docs/PLAN.md`](docs/PLAN.md) the roadmap and
+[`docs/PROGRESS.md`](docs/PROGRESS.md) the current state.
 
 ## License
 
