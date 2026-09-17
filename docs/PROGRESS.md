@@ -16,7 +16,7 @@ Branch: `main`. Everything below is verified on this commit, not assumed.
 
 | Check | Command | State |
 |---|---|---|
-| Rust tests | `cargo test --workspace --all-features` | 972 pass, 6 ignored |
+| Rust tests | `cargo test --workspace --all-features` | 973 pass, 6 ignored |
 | Clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean |
 | Format | `cargo fmt --all --check` | clean |
 | Web tests | `cd web && bun run test` | 424 pass, 52 files (`bun test`) |
@@ -129,6 +129,15 @@ there and says so; seccomp and the capability drop are the confinement.
 
 ---
 ## Log
+
+### 2026-09-17 — Cert hot reload proved live
+
+`crates/detent-web/tests/tls.rs` keeps the `Arc<CertStore>` the server
+answers from (`f588f34`): `a_swapped_certificate_serves_without_a_restart`
+handshakes TLS 1.3, calls `CertStore::replace`, and handshakes again with the
+renewed cert — Phase 6 Task 5, no restart. `cargo test --workspace
+--all-features`: 973 pass, 6 ignored; `cargo build -p detent-web` ok;
+`cargo tree -i ring` empty; fmt + clippy clean.
 
 ### 2026-09-17 — ACME PEM-to-serve bridge
 
