@@ -10,5 +10,17 @@ web/coverage
 lcov.info
 locales/qps-ploc/
 .DS_Store
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.avif
+*.bmp
+*.tif
+*.tiff
+*.mp4
+*.mov
+*.webm
 /spikes/artifacts
 /spikes/**/target
