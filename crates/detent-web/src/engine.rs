@@ -110,6 +110,21 @@ impl EngineHandle {
         Self::from_sender(jobs)
     }
 
+    /// A handle whose engine always answers `outcome`: handler success paths
+    /// without a real module, a monitor thread, or a filesystem write.
+    ///
+    /// The replier ends when the last handle is dropped.
+    #[cfg(test)]
+    pub(crate) fn stubbed(outcome: OpOutcome) -> Self {
+        let (jobs, inbox) = mpsc::channel::<Job>();
+        thread::spawn(move || {
+            while let Ok(job) = inbox.recv() {
+                let _ = job.reply.send(Ok(outcome.clone()));
+            }
+        });
+        Self::from_sender(jobs)
+    }
+
     /// Run `op` on behalf of `who`, waiting for the engine thread.
     ///
     /// # Errors

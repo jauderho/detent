@@ -51,6 +51,7 @@ jobs:
           for toml in crates/modules/*/upstream.toml; do
             id="$(dirname "${toml}" | xargs basename)"
             tracked="$(sed -n 's/^tracked_version = "\(.*\)"$/\1/p' "${toml}")"
+            repo="$(sed -n 's/^repo_url = "\(.*\)"$/\1/p' "${toml}")"
             feed="$(sed -n 's/^release_feed = "\(.*\)"$/\1/p' "${toml}")"
             if [[ -n "${FAKE_VERSION}" ]]; then
               tracked="${FAKE_VERSION}"
@@ -62,12 +63,24 @@ jobs:
                 | grep -oE '<title>[^<]+</title>' | head -2 | tail -1 \
                 | sed -e 's/<[^>]*>//g' -e 's/^[[:space:]]*//' || true)"
             fi
+            if [[ -z "${latest}" ]] && [[ -n "${repo}" ]]; then
+              # No atom feed (e.g. glibc): newest tag in `repo_url`.
+              latest="$(git ls-remote --tags --refs "${repo}" 2>/dev/null \
+                | sed -n 's|.*refs/tags/||p' | sed 's/\^{}$//' \
+                | sort -V | tail -1 || true)"
+            fi
             if [[ -z "${latest}" ]]; then
               echo "could not determine latest for ${id}; skipping"
               continue
             fi
             if [[ "${latest}" != *"${tracked}"* ]]; then
               echo "${id} drifted: tracked=${tracked} latest=${latest}"
+              existing="$(gh issue list --search "upstream ${id} moved" \
+                --state open --limit 1 --json title --jq length 2>/dev/null || echo 0)"
+              if [[ "${existing}" != "0" ]]; then
+                echo "issue already open for ${id}; skipping"
+                continue
+              fi
               gh issue create \
                 --title "upstream ${id} moved: tracked ${tracked}, latest ${latest}" \
                 --body "Diff docs, add/deprecate options in the schema, add fixtures, bump \`tracked_version\`, add \`since\`. (PLAN §2.3)" \
