@@ -28,8 +28,11 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
-use detent_core::descriptor::{HostProfile, InitSystem, Os};
-use detent_ops::{AllowAll, NullAudit, OpsEngine};
+use detent_core::descriptor::{HostProfile, InitSystem, ModuleDescriptor, Os, Upstream};
+use detent_core::diag::{Diagnostics, MessageId};
+use detent_ops::report::{ApplyReport, ModuleView, PlanReport};
+use detent_ops::{AllowAll, NullAudit, OpOutcome, OpsEngine};
+use detent_platform::fs::atomic::Sha256Digest;
 use detent_platform::host::{Detected, HostFacts};
 use detent_platform::privsep::allowlist::{Allowlist, Config as AllowlistConfig};
 use detent_platform::privsep::monitor::{Hooks, Monitor};
@@ -40,7 +43,7 @@ use tempfile::TempDir;
 use tower::ServiceExt as _;
 
 use crate::authz::Scope;
-use crate::engine::{EngineThread, spawn as spawn_engine};
+use crate::engine::{EngineHandle, EngineThread, spawn as spawn_engine};
 use crate::server::harden;
 use crate::state::{AppState, TestState, test_state};
 
@@ -342,8 +345,151 @@ async fn apply_module() -> R {
     )
     .await?;
     assert_eq!(unknown_field.status(), StatusCode::BAD_REQUEST);
+    live.shutdown();
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Module handler tails (PLAN §6.2: no LCOV_EXCL; tails get tests, not
+// exclusions). The `Live` engine registers no modules, so its module-scoped
+// answers are always 404 — that covers the unknown-id arms below. The
+// `render_*` success tails need an engine that answers success, which is
+// what `EngineHandle::stubbed` is for.
+// ---------------------------------------------------------------------------
+
+/// A malformed id answers 404 on every module POST route, not just GET.
+#[tokio::test]
+async fn malformed_module_id_is_404_on_every_post_route() -> R {
+    let live = Live::new()?;
+    let (read, write) = tokens(live.state())?;
+
+    // `apply` takes a `WriteCaller`: a read token is refused (403) before
+    // the id is ever looked at, so it drives the write token.
+    for (path, token) in [
+        ("/api/v1/modules/..%2f..%2fetc/validate", &read),
+        ("/api/v1/modules/..%2f..%2fetc/plan", &read),
+        ("/api/v1/modules/..%2f..%2fetc/apply", &write),
+    ] {
+        let response = post(live.state(), path, Some(token), r#"{"model":{}}"#).await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        let (code, id) = error_body(response).await?;
+        assert_eq!(code, "not_found");
+        assert_eq!(id, "ops-unknown-module");
+    }
 
     live.shutdown();
+    Ok(())
+}
+
+/// A state whose engine answers every operation with `outcome`.
+fn stub_state(outcome: OpOutcome) -> Result<TestState, Box<dyn std::error::Error>> {
+    let mut fixture = test_state()?;
+    fixture.state.engine = EngineHandle::stubbed(outcome);
+    Ok(fixture)
+}
+
+/// A minimal descriptor for stubbed success outcomes; never a real module.
+static STUB_DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
+    id: "stub",
+    display_name_id: MessageId::new("web-request-malformed"),
+    targets: &[],
+    upstream: Upstream {
+        project: "stub",
+        repo_url: "https://example.invalid",
+        tracked_version: "0",
+        release_feed: None,
+        docs: &[],
+    },
+    services: &[],
+    checks: &[],
+    commit_confirm: false,
+    security_notes: &[],
+};
+
+#[tokio::test]
+async fn get_module_renders_the_engine_answer() -> R {
+    let view = ModuleView {
+        descriptor: &STUB_DESCRIPTOR,
+        schema: serde_json::json!({}),
+        model: None,
+        current_hash: None,
+        diagnostics: Diagnostics::default(),
+    };
+    let fixture = stub_state(OpOutcome::Module(Box::new(view)))?;
+    let (read, _write) = tokens(&fixture.state)?;
+
+    let response = get(&fixture.state, "/api/v1/modules/stub", Some(&read)).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test]
+async fn validate_module_renders_the_engine_answer() -> R {
+    let fixture = stub_state(OpOutcome::Validated(Diagnostics::default()))?;
+    let (read, _write) = tokens(&fixture.state)?;
+
+    let response = post(
+        &fixture.state,
+        "/api/v1/modules/stub/validate",
+        Some(&read),
+        r#"{"model":{}}"#,
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test]
+async fn plan_module_renders_the_engine_answer() -> R {
+    let report = PlanReport {
+        module: "stub".to_owned(),
+        path: "/tmp/stub".to_owned(),
+        diff: Vec::new(),
+        rendered: String::new(),
+        unified_diff: String::new(),
+        affected_services: Vec::new(),
+        checks: Vec::new(),
+        diagnostics: Diagnostics::default(),
+        current_hash: Sha256Digest::of(b"x"),
+        would_change: false,
+    };
+    let fixture = stub_state(OpOutcome::Planned(Box::new(report)))?;
+    let (read, _write) = tokens(&fixture.state)?;
+
+    let response = post(
+        &fixture.state,
+        "/api/v1/modules/stub/plan",
+        Some(&read),
+        r#"{"model":{}}"#,
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test]
+async fn apply_module_renders_the_engine_answer() -> R {
+    let report = ApplyReport {
+        module: "stub".to_owned(),
+        path: "/tmp/stub".to_owned(),
+        prev_hash: None,
+        new_hash: Sha256Digest::of(b"x"),
+        created: true,
+        backed_up: false,
+        service: None,
+        commit: None,
+    };
+    let fixture = stub_state(OpOutcome::Applied(Box::new(report)))?;
+    let (_read, write) = tokens(&fixture.state)?;
+
+    let response = post(
+        &fixture.state,
+        "/api/v1/modules/stub/apply",
+        Some(&write),
+        r#"{"model":{}}"#,
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::OK);
     Ok(())
 }
 
