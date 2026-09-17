@@ -24,9 +24,6 @@ Contribution flow (`docs/PLAN.md` §4.3):
 7. Layout stays Weblate-compatible so translators can work outside a PR flow
    later.
 
-TODO(Phase 5): expand with a Weblate setup walkthrough and screenshots once
-the web app's `@fluent/react` integration lands.
-
 ## The Rust loader (`detent-i18n`)
 
 The CLI, the web layer, and diagnostics rendering all go through
@@ -53,14 +50,21 @@ contributor touching Rust code:
 
 ### Two `qps-ploc` fixtures, not one
 
-`docs/PLAN.md` §4.3 and step 6 above describe `locales/qps-ploc/`, a
-pseudo-locale generated for the **web app's** `bun run i18n:check` pipeline
-(Phase 5+, not yet built). Separately, `detent-i18n`'s own test suite has a
-**deliberately partial** `qps-ploc` fixture at
-`crates/detent-i18n/tests/fixtures/qps-ploc/core.ftl`, used only by
-`cargo test -p detent-i18n` to prove the id-parity check (item 4 above)
-actually catches a locale that is missing ids and one that adds ids `en-US`
-doesn't have. It is not compiled into `CATALOGUE`, is never selectable by
-`Localizer::new`/`Localizer::for_env`, and is not a real translation — do not
-extend it as if it were one, and do not confuse it with the future web-side
-`locales/qps-ploc/` when that lands.
+There are two pseudo-locale fixtures serving different purposes:
+
+1. **Web app** (`locales/qps-ploc/web.ftl`): generated at build time by
+   `bun scripts/gen-pseudo.ts` (or `bun run i18n:pseudo`) from
+   `locales/en-US/web.ftl`. Every simple message value is wrapped in `[...]`
+   markers; Fluent select blocks are left unwrapped. This catches untranslated
+   strings (they lack brackets) and layout overflow (brackets lengthen text).
+   The file is gitignored and regenerated before `bun run test` and
+   `bun run build`. The web UI includes a locale selector in the status bar
+   so operators can switch to `qps-ploc` and visually audit all text.
+
+2. **Rust test fixture** (`crates/detent-i18n/tests/fixtures/qps-ploc/core.ftl`):
+   deliberately partial — translates a handful of ids and adds one extra id
+   that `en-US` does not have. Used only by
+   `cargo test -p detent-i18n` to prove the id-parity check catches missing
+   and extra ids. It is not compiled into `CATALOGUE`, is never selectable by
+   `Localizer::new`/`Localizer::for_env`, and is not a real translation — do
+   not extend it as if it were one.

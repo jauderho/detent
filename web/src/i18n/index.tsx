@@ -1,17 +1,53 @@
 import { FluentBundle, FluentResource } from '@fluent/bundle'
 import { LocalizationProvider, ReactLocalization } from '@fluent/react'
-import type { ReactNode } from 'react'
+import { type ReactNode, useCallback, useEffect, useState } from 'react'
 // Vite `?raw` import: bundled as a string asset, never fetched over the
 // network. Path reaches the repo-root locales/ tree (outside web/), allowed
 // by `server.fs.allow` in vite.config.ts.
 import enUSSource from '../../../locales/en-US/web.ftl?raw'
+import qpsPlocSource from '../../../locales/qps-ploc/web.ftl?raw'
+import { getItem, setItem } from '../lib/storage'
 
-export const AVAILABLE_LOCALES = ['en-US'] as const
+export const AVAILABLE_LOCALES = ['en-US', 'qps-ploc'] as const
 export type AvailableLocale = (typeof AVAILABLE_LOCALES)[number]
 export const DEFAULT_LOCALE: AvailableLocale = 'en-US'
 
 const RESOURCES: Record<AvailableLocale, string> = {
   'en-US': enUSSource,
+  'qps-ploc': qpsPlocSource,
+}
+
+const STORAGE_KEY = 'detent-locale'
+
+function isLocale(value: string | null): value is AvailableLocale {
+  return (AVAILABLE_LOCALES as readonly string[]).includes(value ?? '')
+}
+
+/** Reads the persisted locale, defaulting to en-US. */
+export function readLocale(): AvailableLocale {
+  const stored = getItem(STORAGE_KEY)
+  return isLocale(stored) ? stored : DEFAULT_LOCALE
+}
+
+/**
+ * React hook for the active locale. Reads from localStorage on mount and
+ * persists changes. Mirrors `useTheme()` in `lib/theme.ts`.
+ */
+export function useLocale(): {
+  locale: AvailableLocale
+  setLocale: (locale: AvailableLocale) => void
+} {
+  const [locale, setLocaleState] = useState<AvailableLocale>(readLocale)
+
+  useEffect(() => {
+    setItem(STORAGE_KEY, locale)
+  }, [locale])
+
+  const setLocale = useCallback((next: AvailableLocale) => {
+    setLocaleState(next)
+  }, [])
+
+  return { locale, setLocale }
 }
 
 function buildBundle(locale: AvailableLocale): FluentBundle {
@@ -43,6 +79,7 @@ export function createLocalization(
 }
 
 export function AppLocalizationProvider({ children }: { children: ReactNode }) {
-  const l10n = createLocalization()
+  const { locale } = useLocale()
+  const l10n = createLocalization([locale, DEFAULT_LOCALE])
   return <LocalizationProvider l10n={l10n}>{children}</LocalizationProvider>
 }
