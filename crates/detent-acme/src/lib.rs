@@ -2,9 +2,11 @@
 //!
 //! This module is the dns-01 seam of the ACME stack (PLAN Phase 6): a
 //! [`DnsProvider`] publishes and withdraws `_acme-challenge` TXT records, and
-//! the caller — not the provider — drives retry timing. Everything is sync and
-//! std-only so the first provider can be tested without network access; the
-//! RFC2136/Cloudflare/acme-dns/deSEC backends implement the same trait later.
+//! the caller — not the provider — drives retry timing. The seam types are
+//! sync and std-only so the first provider can be tested without network
+//! access; the order flow in [`order`] is async (it drives `instant-acme`)
+//! and the RFC2136/Cloudflare/acme-dns/deSEC backends implement the same
+//! trait later.
 //!
 //! ```text
 //!   Challenge ──▶ DnsRecord ──▶ DnsProvider::present ──▶ (caller polls) ──▶ delete
