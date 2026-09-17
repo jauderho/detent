@@ -742,6 +742,27 @@
         }
       }
     },
+    "/api/v1/system/cert": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "`GET /api/v1/system/cert`.",
+        "operationId": "cert",
+        "responses": {
+          "200": {
+            "description": "Serving certificate status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CertReport"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/system/profile": {
       "get": {
         "tags": [
@@ -1067,6 +1088,36 @@
           "target": {
             "$ref": "#/components/schemas/TargetId",
             "description": "Which target the backup came from."
+          }
+        }
+      },
+      "CertReport": {
+        "type": "object",
+        "description": "What the serving TLS certificate looks like: its fingerprint, when it\nexpires, and how much of its lifetime is left.\n\n`not_after_unix` is `None` when the DER did not parse — reported as\n\"unknown\", never a failure: status must work even when the parse does not.",
+        "required": [
+          "fingerprint"
+        ],
+        "properties": {
+          "fingerprint": {
+            "type": "string",
+            "description": "Uppercase colon-separated SHA-256 of the DER, as printed at startup."
+          },
+          "lifetime_used_percent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Whole percent of `[not_before, not_after]` elapsed at read time, when\nboth endpoints parse. `None` means \"unknown\", not zero.",
+            "minimum": 0
+          },
+          "not_after_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Validity end, whole seconds since the Unix epoch, when parseable."
           }
         }
       },
@@ -2196,12 +2247,8 @@
       "description": "List and restore a module's retained backups"
     },
     {
-      "name": "services",
-      "description": "Read or act on a module's service"
-    },
-    {
       "name": "system",
-      "description": "Host profile, audit log, and liveness"
+      "description": "Host profile, certificate status, audit log, and liveness"
     }
   ]
 }

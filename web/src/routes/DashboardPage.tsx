@@ -1,26 +1,27 @@
 /**
- * The landing page: what detection found about this host, how many modules
- * this build carries, and the tail of the audit log.
+ * The landing page: what detection found about this host, the serving
+ * certificate, how many modules this build carries, and the tail of the audit
+ * log.
  *
- * Three independent panels, three independent queries — a host that cannot
+ * Four independent panels, four independent queries — a host that cannot
  * answer `audit` should not blank the module count next to it, so each panel
  * owns its own loading and error state rather than the page gating on all
- * three together.
+ * four together.
  */
 
 import { Localized, type ReactLocalization, useLocalization } from '@fluent/react'
 import { Link } from 'react-router'
 import { useModules } from '@/api/modules'
 import { useApiErrorMessage } from '@/api/query'
-import type { AuditRecord, HostReport } from '@/api/system'
-import { useAudit, useHostProfile } from '@/api/system'
+import type { AuditRecord, CertReport, HostReport } from '@/api/system'
+import { useAudit, useCert, useHostProfile } from '@/api/system'
 import { Banner } from '@/components/Banner'
 import { DataTable, type DataTableColumn } from '@/components/DataTable'
 import { GridCell, HairlineGrid } from '@/components/HairlineGrid'
 import { Label } from '@/components/Label'
 import { Panel } from '@/components/Panel'
 import { Readout, Screen } from '@/components/Screen'
-import { localeOf } from '@/lib/format'
+import { formatUnixSeconds, localeOf } from '@/lib/format'
 import { auditOpText, auditResultNode, auditRowKey, auditWhenText } from './AuditPage'
 import { ROUTES } from './paths'
 
@@ -136,7 +137,84 @@ function HostPanel() {
     </Panel>
   )
 }
+function CertPanel() {
+  const { l10n } = useLocalization()
+  const query = useCert()
+  const errorMessage = useApiErrorMessage()
 
+  return (
+    <Panel label={l10n.getString('dashboard-cert-panel')}>
+      {query.isPending ? (
+        <Localized id="state-loading">
+          <p>loading</p>
+        </Localized>
+      ) : query.isError ? (
+        <Banner tone="amber">{errorMessage(query.error)}</Banner>
+      ) : (
+        <CertGrid report={query.data} />
+      )}
+    </Panel>
+  )
+}
+
+/** Expiry tone: amber once inside 30 days or past expiry, blue otherwise. */
+function certTone(report: CertReport): 'blue' | 'amber' {
+  if (report.not_after_unix === null || report.not_after_unix === undefined) return 'blue'
+  const leftMs = report.not_after_unix * 1000 - Date.now()
+  return leftMs < 30 * 86_400 * 1000 ? 'amber' : 'blue'
+}
+
+function CertGrid({ report }: { report: CertReport }) {
+  const { l10n } = useLocalization()
+  const locale = localeOf(l10n)
+  const unknown = l10n.getString('state-unknown')
+  const expires =
+    report.not_after_unix === null || report.not_after_unix === undefined
+      ? unknown
+      : (formatUnixSeconds(locale, report.not_after_unix) ?? unknown)
+  const used =
+    report.lifetime_used_percent === null || report.lifetime_used_percent === undefined
+      ? unknown
+      : `${new Intl.NumberFormat(locale).format(report.lifetime_used_percent)}%`
+  const expired =
+    report.not_after_unix !== null &&
+    report.not_after_unix !== undefined &&
+    report.not_after_unix * 1000 < Date.now()
+  const expiringSoon = !expired && certTone(report) === 'amber'
+  const tone = certTone(report)
+  return (
+    <>
+      <HairlineGrid columns={3}>
+        <GridCell>
+          <Label>{l10n.getString('dashboard-cert-fingerprint')}</Label>
+          <Screen>
+            {/* Host text, never localized — verbatim so case survives. */}
+            <span className="verbatim" style={{ wordBreak: 'break-all' }}>
+              <Readout value={report.fingerprint} tone={tone} />
+            </span>
+          </Screen>
+        </GridCell>
+        <GridCell>
+          <Label>{l10n.getString('dashboard-cert-expires')}</Label>
+          <Screen>
+            <Readout value={expires} tone={tone} />
+          </Screen>
+        </GridCell>
+        <GridCell>
+          <Label>{l10n.getString('dashboard-cert-lifetime-used')}</Label>
+          <Screen>
+            <Readout value={used} tone={tone} />
+          </Screen>
+        </GridCell>
+      </HairlineGrid>
+      {expired ? (
+        <Banner tone="amber">{l10n.getString('dashboard-cert-expired')}</Banner>
+      ) : expiringSoon ? (
+        <Banner tone="amber">{l10n.getString('dashboard-cert-expiring-soon')}</Banner>
+      ) : null}
+    </>
+  )
+}
 function ModulesPanel() {
   const { l10n } = useLocalization()
   const query = useModules()
@@ -231,6 +309,7 @@ export function DashboardPage() {
       </h1>
       <div style={PANELS_STYLE}>
         <HostPanel />
+        <CertPanel />
         <ModulesPanel />
         <RecentAuditPanel />
       </div>

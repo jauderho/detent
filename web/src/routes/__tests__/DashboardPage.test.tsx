@@ -1,19 +1,19 @@
 /**
- * The dashboard: three panels, three independent queries. The central claim
+ * The dashboard: four panels, four independent queries. The central claim
  * under test is that they fail independently — a host profile the server
  * cannot answer must not blank the module count or the audit tail sitting
  * next to it.
  *
  * Like `AuditPage.test.tsx`, this page fires several queries at once
- * (host profile, modules, audit, plus `AuthProvider`'s session probe), so
- * responses are matched by URL rather than by call order.
+ * (host profile, certificate, modules, audit, plus `AuthProvider`'s session
+ * probe), so responses are matched by URL rather than by call order.
  */
 
 import { describe, expect, it } from 'bun:test'
 import { screen } from '@testing-library/react'
 import type { SessionView } from '@/api/auth'
 import type { ModuleDescriptor } from '@/api/modules'
-import type { AuditRecord, HostReport } from '@/api/system'
+import type { AuditRecord, CertReport, HostReport } from '@/api/system'
 import {
   errorResponse,
   jsonResponse,
@@ -44,6 +44,12 @@ const HOST_REPORT: HostReport = {
     service_versions: {},
   },
   resolver_backend: 'unbound',
+}
+
+const CERT_REPORT: CertReport = {
+  fingerprint: 'AA:BB:CC:DD',
+  lifetime_used_percent: 10,
+  not_after_unix: 2_000_000_000,
 }
 
 function moduleDescriptor(id: string): ModuleDescriptor {
@@ -78,11 +84,12 @@ function record(overrides: Partial<AuditRecord> = {}): AuditRecord {
 }
 
 function allHandlers(
-  overrides: Partial<Record<'profile' | 'modules' | 'audit', UrlRule[1]>> = {},
+  overrides: Partial<Record<'profile' | 'cert' | 'modules' | 'audit', UrlRule[1]>> = {},
 ): UrlRule[] {
   return [
     ['/auth/session', () => jsonResponse(SESSION)],
     ['/system/profile', overrides.profile ?? (() => jsonResponse(HOST_REPORT))],
+    ['/system/cert', overrides.cert ?? (() => jsonResponse(CERT_REPORT))],
     ['/modules', overrides.modules ?? (() => jsonResponse(MODULES))],
     ['/audit', overrides.audit ?? (() => jsonResponse([record()]))],
   ]
@@ -141,7 +148,7 @@ describe('DashboardPage — empty and populated', () => {
     ).toBeInTheDocument()
   })
 
-  it('renders the populated host panel, module count, and audit tail', async () => {
+  it('renders the populated host panel, certificate, module count, and audit tail', async () => {
     const stub = stubFetchByUrl(allHandlers())
     renderWithProviders(<DashboardPage />, { fetch: stub.fetch })
 
@@ -154,6 +161,10 @@ describe('DashboardPage — empty and populated', () => {
     expect(screen.getByText('networkd')).toBeInTheDocument()
     expect(screen.getByText('unbound')).toBeInTheDocument()
 
+    // Certificate: fingerprint verbatim, unknown-free expiry, percent used.
+    expect(screen.getByText('AA:BB:CC:DD')).toBeInTheDocument()
+    expect(screen.getByText('10%')).toBeInTheDocument()
+
     expect(screen.getByText(/modules are compiled into this build\.$/)).toHaveTextContent('2')
 
     expect(screen.getByText('operator')).toBeInTheDocument()
@@ -161,6 +172,20 @@ describe('DashboardPage — empty and populated', () => {
     expect(screen.getByText('ok')).toBeInTheDocument()
 
     expect(screen.getAllByRole('link', { name: 'view all' })).toHaveLength(2)
+  })
+
+  it('keeps the host panel working when the certificate fails', async () => {
+    const stub = stubFetchByUrl(
+      allHandlers({ cert: () => errorResponse(500, 'web-engine-stopped') }),
+    )
+    renderWithProviders(<DashboardPage />, { fetch: stub.fetch })
+
+    expect(await screen.findByText('nas-01')).toBeInTheDocument()
+    expect(screen.queryByText('AA:BB:CC:DD')).not.toBeInTheDocument()
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(
+      'the operations engine is no longer running; retry once the service is back.',
+    )
   })
 
   it('falls back to the shared unknown placeholder for a host with no distro', async () => {
