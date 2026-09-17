@@ -22,7 +22,9 @@ use std::time::Duration;
 
 use detent_web::config::Config;
 use detent_web::server::Server;
-use detent_web::tls::{ALPN_H2_HTTP11, CertifiedKeyPair, bootstrap_self_signed, server_config};
+use detent_web::tls::{
+    ALPN_H2_HTTP11, CertStore, CertifiedKeyPair, bootstrap_self_signed, server_config_from_store,
+};
 use detent_web::{healthz, install_crypto_provider};
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, ProtocolVersion, RootCertStore};
@@ -45,6 +47,9 @@ struct Running {
     addr: SocketAddr,
     /// The certificate the client must trust.
     cert: CertifiedKeyPair,
+    /// The resolver the server answers handshakes from; retained so a test
+    /// can swap the certificate without restarting the server.
+    store: Arc<CertStore>,
     /// Resolves to stop the accept loop.
     stop: oneshot::Sender<()>,
     /// Completes when `serve` has returned.
@@ -64,7 +69,8 @@ impl Running {
 async fn start(max_connections: u32) -> Result<Running, Box<dyn std::error::Error>> {
     install_crypto_provider();
     let cert = bootstrap_self_signed(&[HOST.to_owned()])?;
-    let tls = server_config(&cert, ALPN_H2_HTTP11)?;
+    let store = Arc::new(CertStore::new(&cert)?);
+    let tls = server_config_from_store(Arc::clone(&store), ALPN_H2_HTTP11)?;
 
     let mut config = Config::default();
     config.listen.addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
@@ -85,6 +91,7 @@ async fn start(max_connections: u32) -> Result<Running, Box<dyn std::error::Erro
     Ok(Running {
         addr,
         cert,
+        store,
         stop,
         task,
     })
@@ -260,6 +267,33 @@ async fn an_untrusting_client_is_refused_by_its_own_verifier() -> TestResult {
     let stranger = bootstrap_self_signed(&[HOST.to_owned()])?;
     let config = client_config(&stranger, &[&rustls::version::TLS13], ALPN_H2_HTTP11)?;
     assert!(connect(&running, config).await.is_err());
+
+    running.shutdown().await
+}
+
+#[tokio::test]
+async fn a_swapped_certificate_serves_without_a_restart() -> TestResult {
+    // Phase 6 Task 5, proved over real handshakes: `CertStore::replace`
+    // changes what the live resolver answers, and both sides of the swap
+    // complete TLS 1.3 with the certificate they were offered.
+    let running = start(8).await?;
+    let before = client_config(&running.cert, &[&rustls::version::TLS13], ALPN_H2_HTTP11)?;
+    let stream = connect(&running, before).await?;
+    assert_eq!(
+        stream.get_ref().1.protocol_version(),
+        Some(ProtocolVersion::TLSv1_3)
+    );
+    drop(stream);
+
+    let renewed = bootstrap_self_signed(&[HOST.to_owned()])?;
+    running.store.replace(&renewed)?;
+    let after = client_config(&renewed, &[&rustls::version::TLS13], ALPN_H2_HTTP11)?;
+    let stream = connect(&running, after).await?;
+    assert_eq!(
+        stream.get_ref().1.protocol_version(),
+        Some(ProtocolVersion::TLSv1_3)
+    );
+    drop(stream);
 
     running.shutdown().await
 }
