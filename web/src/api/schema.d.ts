@@ -237,6 +237,10 @@ export interface paths {
          * @description The one response body in this document that is not named by a schema: it
          *     *is* the document, and describing it would mean carrying a copy of the
          *     `OpenAPI` meta-schema.
+         *
+         *     The `Caller` is taken and dropped: it is not used, but taking it is what
+         *     makes this route authenticated — a handler that takes no `Caller` is open
+         *     by construction (see [`crate::auth::extract::Caller`]).
          */
         get: operations["serve"];
         put?: never;
@@ -1410,6 +1414,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": Record<string, never>;
+                };
+            };
+            /** @description No credential */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
         };

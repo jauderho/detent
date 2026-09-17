@@ -28,8 +28,9 @@ silently upgrade the other's authority:
   describe and nothing for `/api/v1/auth/logout` to end.
 
 `GET /api/v1/auth/session` returns the signed-in caller's scopes, remaining
-time, and the CSRF token described below. `/api/v1/openapi.json` and
-`/healthz` are the only endpoints that need no credential at all.
+time, and the CSRF token described below. Every route under `/api/v1` needs a
+credential; `POST /api/v1/auth/login` and `/healthz` are the only endpoints
+that do not.
 
 ## Scopes
 
@@ -105,10 +106,12 @@ the other.
 
 ## Design notes
 
-- `GET /api/v1/openapi.json` is served **unauthenticated**. PLAN §2.6 lists it
-  in the same breath as the API surface it describes, with no auth
-  requirement, and a front end needs the document before it has a session to
-  authenticate with. It reveals shapes and error ids, nothing secret.
+- `GET /api/v1/openapi.json` **needs a credential**, like everything else under
+  `/api/v1`. It is a map of the whole surface — every path, parameter and body
+  shape — and nothing needs it before sign-in: the console's typed client is
+  generated from the checked-in copy at build time, never fetched at runtime.
+  `/healthz` is the only route in the document that stays open, because a
+  liveness probe has no credential to present and its body is a constant.
 - Every response body names a schema, so a typed client can be generated from
   `openapi.json`. The types come from `detent-core`, `detent-ops` and
   `detent-platform`, which PLAN §2.1 keeps front-end agnostic: each of those

@@ -604,7 +604,7 @@
           "system"
         ],
         "summary": "`GET /api/v1/openapi.json`.",
-        "description": "The one response body in this document that is not named by a schema: it\n*is* the document, and describing it would mean carrying a copy of the\n`OpenAPI` meta-schema.",
+        "description": "The one response body in this document that is not named by a schema: it\n*is* the document, and describing it would mean carrying a copy of the\n`OpenAPI` meta-schema.\n\nThe `Caller` is taken and dropped: it is not used, but taking it is what\nmakes this route authenticated — a handler that takes no `Caller` is open\nby construction (see [`crate::auth::extract::Caller`]).",
         "operationId": "serve",
         "responses": {
           "200": {
@@ -616,9 +616,18 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "No credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
-        },
-        "security": []
+        }
       }
     },
     "/api/v1/services/{id}": {
