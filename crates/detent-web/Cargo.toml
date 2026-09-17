@@ -66,6 +66,9 @@ proptest = { workspace = true }
 # because the code was never compiled in.
 rustls = { workspace = true, features = ["tls12"] }
 tempfile = { workspace = true }
+# `pem` is test-only for the same reason: the ACME PEM-bridge fixtures need
+# `cert.pem()` / `serialize_pem()`, and the shipped binary never parses PEM.
+rcgen = { workspace = true, features = ["pem"] }
 # `test-util` is a **test-only** feature for the same reason `tls12` is: it
 # gives the session sweeper's test a paused clock, and never reaches the
 # shipped binary, which does not build dev-dependencies.

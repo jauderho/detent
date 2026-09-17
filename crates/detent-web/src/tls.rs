@@ -87,6 +87,11 @@ pub enum TlsError {
     /// a truncated file, or a key that does not match the certificate.
     #[error("the certificate and key were rejected: {0}")]
     Key(#[source] rustls::Error),
+    /// The certificate or its private key was not parseable PEM — wrong
+    /// armour, truncated body, or a section kind other than the one parsing
+    /// (`CERTIFICATE` for the chain, `PRIVATE KEY` for the key).
+    #[error("the ACME material was not PEM of the expected kind")]
+    Pem,
     /// No `CryptoProvider` is installed and none could be derived from the
     /// crate features. Unreachable in a build that compiles, because at least
     /// one of `crypto-aws-lc` / `crypto-ring` is required.
@@ -130,6 +135,7 @@ impl TlsError {
             Self::Read { .. } => MessageId::new("web-tls-store-unreadable"),
             Self::Prepare { .. } => MessageId::new("web-tls-store-unwritable"),
             Self::Persist { .. } => MessageId::new("web-tls-store-write-failed"),
+            Self::Pem => MessageId::new("web-tls-acme-pem-rejected"),
         }
     }
 }
@@ -205,6 +211,27 @@ impl CertifiedKeyPair {
             cert_der,
             key_pkcs8_der,
         }
+    }
+
+    /// Build a pair from what `instant-acme`'s `Order::finalize` returns: a
+    /// PEM certificate chain and a PEM PKCS#8 private key.
+    ///
+    /// Only the chain's leaf is kept — [`to_certified_key`](Self::to_certified_key)
+    /// serves a single end-entity certificate, and the intermediates travel
+    /// the API, not the handshake. The key must be `PRIVATE KEY` (PKCS#8, as
+    /// `finalize` generates); SEC1/EC `EC PRIVATE KEY` is refused rather
+    /// than converted.
+    ///
+    /// # Errors
+    ///
+    /// [`TlsError::Pem`] when either side is not PEM of the expected kind.
+    pub fn from_acme_pem(chain_pem: &str, key_pem: &str) -> Result<Self, TlsError> {
+        use rustls::pki_types::pem::PemObject as _;
+        let leaf =
+            CertificateDer::from_pem_slice(chain_pem.as_bytes()).map_err(|_| TlsError::Pem)?;
+        let key =
+            PrivatePkcs8KeyDer::from_pem_slice(key_pem.as_bytes()).map_err(|_| TlsError::Pem)?;
+        Ok(Self::new(leaf.to_vec(), key.secret_pkcs8_der().to_vec()))
     }
 
     /// The end-entity certificate, DER.
@@ -734,6 +761,54 @@ mod tests {
     }
 
     #[test]
+    fn acme_pem_round_trips_through_a_store_swap() -> R {
+        // Simulates the Phase 6 renewal path with fixtures, not the network:
+        // a PEM chain + PEM key become a pair that the live store accepts,
+        // replacing the bootstrap pair a handshake would have used.
+        use rcgen::generate_simple_self_signed;
+        let rendered = generate_simple_self_signed(["renewed.example".to_owned()])?;
+        let renewed = CertifiedKeyPair::from_acme_pem(
+            &rendered.cert.pem(),
+            &rendered.signing_key.serialize_pem(),
+        )?;
+        let store = CertStore::new(&pair()?)?;
+        store.replace(&renewed)?;
+        assert_eq!(
+            store.current().cert.first().map(|c| c.to_vec()),
+            Some(renewed.cert_der().to_vec())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn acme_pem_rejects_the_wrong_armour_with_a_catalogued_id() -> R {
+        use rcgen::generate_simple_self_signed;
+        let rendered = generate_simple_self_signed(["bad.example".to_owned()])?;
+        let chain_pem = rendered.cert.pem();
+        // A SEC1 `EC PRIVATE KEY` header where PKCS#8 `PRIVATE KEY` belongs:
+        // same body, wrong armour, refused rather than converted.
+        let sec1 =
+            rendered
+                .signing_key
+                .serialize_pem()
+                .replacen("PRIVATE KEY", "EC PRIVATE KEY", 2);
+        match CertifiedKeyPair::from_acme_pem(&chain_pem, &sec1) {
+            Err(err @ TlsError::Pem) => {
+                assert_eq!(err.message_id().as_str(), "web-tls-acme-pem-rejected");
+                assert!(catalogue_has("web-tls-acme-pem-rejected"));
+            }
+            other => return Err(format!("expected a PEM error, got {other:?}").into()),
+        }
+        match CertifiedKeyPair::from_acme_pem("not pem at all", &chain_pem) {
+            Err(err @ TlsError::Pem) => {
+                assert_eq!(err.message_id().as_str(), "web-tls-acme-pem-rejected");
+            }
+            other => return Err(format!("expected a PEM error, got {other:?}").into()),
+        }
+        Ok(())
+    }
+
+    #[test]
     fn a_server_config_advertises_the_requested_alpn() -> R {
         let config = server_config(&pair()?, ALPN_H2_HTTP11)?;
         assert_eq!(
@@ -888,6 +963,7 @@ mod tests {
         for id in [
             "web-tls-generate-failed",
             "web-tls-key-rejected",
+            "web-tls-acme-pem-rejected",
             "web-tls-no-provider",
             "web-tls-store-unreadable",
             "web-tls-store-unwritable",

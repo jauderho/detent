@@ -57,6 +57,7 @@ web-tls-no-provider = this build has no usable tls crypto provider.
 web-tls-store-unreadable = `{$path}` could not be read: {$reason}
 web-tls-store-unwritable = `{$path}` could not be prepared for writing: {$reason}
 web-tls-store-write-failed = `{$path}` could not be written: {$reason}
+web-tls-acme-pem-rejected = the issued certificate or key was not usable PEM.
 web-engine-stopped = the operations engine is no longer running; retry once the service is back.
 web-server-bind-failed = `{$addr}` could not be listened on: {$reason}
 web-server-address-unknown = the listening address could not be read back: {$reason}
