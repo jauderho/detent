@@ -133,6 +133,18 @@ there and says so; seccomp and the capability drop are the confinement.
 ---
 ## Log
 
+### 2026-09-18 — device-attest-01 attestor seam lands
+
+`crates/detent-acme/src/attest.rs` + `order::present_attest_challenges`
+(`18b2835`): `Attestor` trait (sync, object-safe, `attest(key_id,
+key_authorization) -> att_obj`) mirroring `DnsProvider`, with a deterministic
+`TestAttestor`; the driver walks pending authorizations, takes the
+`DeviceAttest01` challenge, and calls `send_device_attestation`. New
+`AcmeError::NoDeviceAttestChallenge`. Real TPM 2.0 (`tss-esapi`) stays behind
+the `acme-attest` feature — no new deps (ADR-011). Commit `18b2835`. Gates:
+`detent-acme` 42 pass, 1 ignored; workspace clippy `-D warnings` clean; fmt
+clean; `ring` absent.
+
 ### 2026-09-18 — Pure renewal-scheduling predicates land
 
 `crates/detent-acme/src/schedule.rs` (`4d1af85`): stdlib-only
