@@ -18,7 +18,9 @@ Branch: `main`. Everything below is verified on this commit, not assumed.
 | Rust tests | `cargo test --workspace --all-features` | 952 pass, 5 ignored |
 | Clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean |
 | Format | `cargo fmt --all --check` | clean |
-| Web tests | `cd web && bun run test` | 333 pass, 39 files |
+| Web tests | `cd web && bun run test` | 419 pass, 52 files (`bun test`) |
+| Web coverage | `cd web && bun run test:coverage` | 72 in-scope files at 100% lines |
+| Browser e2e + axe | `cd web && bun run e2e` | 22 pass (Playwright, Chromium) |
 | Web lint | `cd web && bun run lint` | clean (biome) |
 | Web types | `cd web && bun run typecheck` | clean |
 | CI | 8 jobs + Codespell, Lint Code Base, Dependency Review, Scorecard | all green |
@@ -46,11 +48,16 @@ generated from `docs/openapi.json`, `AuthProvider`/`ScopeGate`, router with
 Routed sections: dashboard, modules, module detail, services, backups and
 audit are real pages, each in its own file under `src/routes/`.
 
+Tests run on **`bun test`**, not vitest — see [`TOOLS.md`](TOOLS.md) for the
+preload that gives Bun a DOM, Vite's `?raw` imports and jest-dom's matchers.
+Playwright drives the built bundle against a stubbed API (`web/e2e/`), with
+axe-core over every section in both themes.
+
 **Not done in `web/`** — certificates and settings are still placeholders in
 `src/routes/pages.tsx`, deliberately: neither has an API to drive. Certificates
 waits on Phase 6 (ACME); settings needs user- and token-management endpoints
-that do not exist. Also missing: Playwright e2e, axe-core, the i18n
-pseudo-locale and language switcher, and vitest 100% on `src`.
+that do not exist. Also missing: the i18n pseudo-locale and language switcher,
+and e2e against the real binary rather than a stub.
 
 ### Traps worth knowing before you touch anything
 
@@ -100,8 +107,9 @@ there and says so; seccomp and the capability drop are the confinement.
 - `require_caps` does not exist: the capability bounding-set drop **fails
   open**, unlike seccomp which fails closed. Closing it needs the worker's
   confinement order relative to its uid drop checked first.
-- The modal does not set `inert`/`aria-hidden` on background content — deferred
-  to the axe-core pass.
+- The modal does not set `inert`/`aria-hidden` on background content. The
+  axe pass is clean, but that is not a refutation: axe has no rule for it, so
+  this needs a manual screen-reader check rather than another automated one.
 - `scripts/tls-check.sh` is not wired into CI (needs root; now feasible on
   a009).
 - Phase 2's privileged Docker job and multi-slice LCOV merge are unwired.
@@ -110,6 +118,43 @@ there and says so; seccomp and the capability drop are the confinement.
 ---
 
 ## Log
+
+### 2026-09-16 — bun test, Playwright, axe, and a dark default
+
+`web/` moved off vitest onto **`bun test`**; `vitest`, `@vitest/coverage-v8`
+and `jsdom` are gone. The runner needs a preload for a DOM, Vite's `?raw`
+imports and jest-dom's matchers — `web/src/test/preload.ts`, proved
+load-bearing by disabling it and watching `document` disappear.
+
+Swapping the DOM shim found two tests that had been passing for the wrong
+reason under jsdom:
+
+- **`readTheme` never exercised its OS-preference branch.** jsdom answered
+  every `matchMedia` query `false`, so "defaults to dark" was reached by
+  accident; happy-dom reports a light preference and the same test failed
+  while the code did exactly what it documented. AGENTS.md fixes the default
+  as **dark**, so the branch is gone: an OS setting no longer overrides a
+  stated guarantee. `src/theme-init.js` and the CSP hash in `headers.rs` were
+  updated to match — the inline script paints the first frame and must agree
+  with `readTheme`, or the operator sees a flash of the wrong theme.
+- **`spyOn(Storage.prototype, …)` intercepts nothing under happy-dom**, whose
+  `Storage` is a proxy. Both storage failure tests installed a spy cleanly and
+  tested the happy path twice. They now swap the whole `localStorage` accessor,
+  with a tripwire case that fails if the swap stops being reached.
+
+Playwright + axe then found four more, none of which a DOM-shim test could
+see:
+
+- **A `Readout` outside a `Screen`** on the module page put `--screen-blue`
+  text on the chassis — a real contrast failure, caught by axe, invisible to
+  `contrast:check` because that scans tokens rather than compositions.
+- **Focus was lost when a dialog closed.** The trigger disables itself while
+  its request is in flight, so focus had already fallen to `document.body`
+  before the dialog opened; `Modal` then "restored" it there. `Modal` no longer
+  treats the body as a place focus was, and the module page remembers its own
+  trigger.
+- The `text-transform` rule from the previous entry now has a browser-level
+  test — the only place it can be checked.
 
 ### 2026-09-16 — checkpoint hygiene
 
@@ -123,7 +168,7 @@ it (and any new scratch) from commits.
 
 Dashboard, modules, module detail, services, backups and audit are real pages
 now, built on the form engine and typed hooks that already existed. Six new
-files under `src/routes/`, 333 vitest tests.
+files under `src/routes/`, 333 tests at the time.
 
 Three defects worth remembering, all found in review rather than by a test:
 

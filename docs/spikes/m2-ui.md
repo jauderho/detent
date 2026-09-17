@@ -23,13 +23,51 @@ per PLAN §5: it needs a host whose `/etc/hosts` may be written.
 | Contrast | `cd web && bun run contrast:check` | every pairing ≥ 4.5:1, both themes |
 | API drift | `cd web && bun run api:check` | `schema.d.ts` matches `docs/openapi.json` |
 | E2e | `cd web && bun run e2e` | 22 passed (console + axe suites) |
-| Responsive | throwaway `noOverflow` spec (deleted after use) | 390 / 1280 pass; see below |
+| Responsive | throwaway `noOverflow` spec (deleted after use; script below) | dashboard @1280, module @768, login @390 — all pass, no horizontal scroll |
 
-Screenshots below are from the stubbed preview bundle at 1280px (dashboard,
-module detail) and 390px (sign-in). They were captured to `/tmp` by a
-throwaway Playwright spec (`web/e2e/m2shots.e2e.ts`, removed after the run),
-viewed, and described here rather than checked in — the permanent suite
-(`web/e2e/console.e2e.ts`, `a11y.e2e.ts`) is the regression record, not stills.
+Screenshots below were captured by that throwaway spec against the stubbed
+preview bundle and viewed during this run (not checked in — the permanent
+suite `web/e2e/console.e2e.ts` + `a11y.e2e.ts` is the regression record, not
+stills). To reproduce: save the script below as `web/e2e/m2shots.e2e.ts`,
+run `cd web && bunx playwright test e2e/m2shots.e2e.ts`, then delete it.
+`noOverflow` asserts `documentElement.scrollWidth` fits the viewport, so a
+regression fails rather than silently overflowing.
+
+```ts
+import { expect, test, type Page } from '@playwright/test'
+import { signIn, stubApi } from './api'
+
+async function noOverflow(page: Page, width: number) {
+  const scroll = await page.evaluate(() => document.documentElement.scrollWidth)
+  expect(scroll).toBeLessThanOrEqual(width)
+}
+
+test('m2: dashboard @1280', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await stubApi(page)
+  await signIn(page)
+  await page.goto('/')
+  await page.getByRole('navigation', { name: 'sections' }).waitFor()
+  await noOverflow(page, 1280)
+})
+
+test('m2: module @768', async ({ page }) => {
+  await page.setViewportSize({ width: 768, height: 900 })
+  await stubApi(page)
+  await signIn(page)
+  await page.goto('/modules/hosts')
+  await page.getByRole('button', { name: 'plan' }).waitFor()
+  await noOverflow(page, 768)
+})
+
+test('m2: login @390', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await stubApi(page)
+  await page.goto('/login')
+  await page.getByRole('button', { name: 'sign in' }).waitFor()
+  await noOverflow(page, 390)
+})
+```
 
 ## What this demonstrates
 
