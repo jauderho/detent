@@ -99,6 +99,91 @@ jobs:
           echo "rustls present, ring absent, as required"
 
 
+
+  acme-pebble:
+    name: ACME dns-01 (Pebble + challtestsrv)
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Build detent-acme
+        run: cargo build -p detent-acme
+
+      - name: Clippy (detent-acme)
+        run: cargo clippy -p detent-acme --all-targets -- -D warnings
+
+      # See docs/spikes/acme-le.md for the flag gotchas (-dnsserver, not
+      # -dns01; pebble's DNSResolver JSON key is ignored). Both containers
+      # share a bridge so pebble resolves challtestsrv by name; ports are
+      # still published so the runner (and dig preflight) can reach them
+      # on 127.0.0.1.
+      - name: Start Pebble + challtestsrv
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends dnsutils jq
+          docker network create detent-pebble 2>/dev/null || true
+          mkdir -p /tmp/detent-pebble
+          cat > /tmp/detent-pebble/pebble-config.json <<'EOF'
+          { "pebble": { "listenAddress": "0.0.0.0:14000",
+                        "managementListenAddress": "0.0.0.0:15000",
+                        "certificate": "/test/certs/localhost/cert.pem",
+                        "privateKey": "/test/certs/localhost/key.pem",
+                        "httpPort": 5002, "tlsPort": 5001,
+                        "domainBlocklist": ["blocked-domain.example"] } }
+          EOF
+          docker run -d --name pebble --network detent-pebble -p 14000:14000 -p 15000:15000 \
+            -v /tmp/detent-pebble/pebble-config.json:/test/config/pebble-config.json \
+            ghcr.io/letsencrypt/pebble:latest \
+            -config /test/config/pebble-config.json -dnsserver challtestsrv:8053
+          docker run -d --name challtestsrv --network detent-pebble \
+            -p 8053:8053 -p 8053:8053/udp -p 8055:8055 \
+            ghcr.io/letsencrypt/pebble-challtestsrv:latest \
+            -defaultIPv4 "" -defaultIPv6 "" -dnsserver ":8053" \
+            -http01 ":5002" -https01 ":5003" -tlsalpn01 ":5001" -management ":8055"
+          docker cp pebble:/test/certs/pebble.minica.pem /tmp/detent-pebble/pebble.minica.pem
+          for i in 1 2 3 4 5; do
+            if curl -fsS http://127.0.0.1:8055/health >/dev/null 2>&1 && curl -fsS -k https://127.0.0.1:14000/dir >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8055/health | head -n 1 || true
+          curl -fsS -k https://127.0.0.1:14000/dir | jq .newNonce 2>&1 | head -n 1 || true
+
+      - name: Live issuance (cargo test -- --ignored)
+        env:
+          PEBBLE_URL: https://127.0.0.1:14000/dir
+          PEBBLE_CA: /tmp/detent-pebble/pebble.minica.pem
+          CHALLTESTSRV: http://127.0.0.1:8055
+        run: |
+          set -euo pipefail
+          # Preflight: the DNS path the order flow depends on. Fail fast with logs
+          # rather than letting the test time out on "DNS problem: NXDOMAIN".
+          curl -fsS -X POST -d '{"host":"_acme-challenge.preflight.le.wtf.","value":"preflight"}' http://127.0.0.1:8055/set-txt
+          for i in 1 2 3 4 5 6; do
+            if dig @127.0.0.1 -p 8053 +short _acme-challenge.preflight.le.wtf TXT | grep -q preflight; then break; fi
+            sleep 0.5
+          done
+          dig @127.0.0.1 -p 8053 +short _acme-challenge.preflight.le.wtf TXT || true
+          curl -fsS -X POST -d '{"host":"_acme-challenge.preflight.le.wtf."}' http://127.0.0.1:8055/clear-txt || true
+          # The spike test writes both the cert chain and sanity assertions (DER,
+          # SAN = le.wtf). Capture its --nocapture output into the workflow log.
+          cargo test -p detent-acme -- --ignored --nocapture
+
   rust-macos:
     name: Rust (build, test, clippy) on macOS
     runs-on: macos-latest
