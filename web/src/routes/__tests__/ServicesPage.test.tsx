@@ -135,6 +135,23 @@ describe('ServicesPage — rows', () => {
   })
 })
 
+describe('ServicesPage — row state branches', () => {
+  it('shows unknown when the enabled field is absent', async () => {
+    const stub = stubFetch([
+      jsonResponse([buildModule('alpha', ['restart'])]),
+      jsonResponse(READ_WRITE_SESSION),
+      jsonResponse(buildStatus({ enabled: null, unit: 'alpha.service' })),
+    ])
+    renderWithProviders(<ServicesPage />, { fetch: stub.fetch })
+
+    const row = (await screen.findByText('alpha')).closest('tr')
+    expect(row).not.toBeNull()
+    if (row === null) throw new Error('unreachable')
+
+    expect(await within(row).findByText('unknown')).toBeInTheDocument()
+  })
+})
+
 describe('ServicesPage — acting on a service', () => {
   it('confirms through the modal and posts the command, then shows the result', async () => {
     const user = userEvent.setup()
@@ -201,5 +218,61 @@ describe('ServicesPage — acting on a service', () => {
         'this session carries read access only; it cannot change anything on this host.',
       )
     })
+  })
+
+  it('closes the confirm modal with the close button', async () => {
+    const user = userEvent.setup()
+    const stub = stubFetch([
+      jsonResponse([buildModule('alpha', ['restart'])]),
+      jsonResponse(READ_WRITE_SESSION),
+      jsonResponse(buildStatus({ unit: 'alpha.service' })),
+    ])
+    renderWithProviders(<ServicesPage />, { fetch: stub.fetch })
+
+    await user.click(await screen.findByRole('button', { name: 'restart' }))
+    const dialog = await screen.findByRole('dialog')
+
+    await user.click(within(dialog).getByRole('button', { name: 'close' }))
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).toBeNull()
+    })
+  })
+
+  it('closes the confirm modal with the cancel button', async () => {
+    const user = userEvent.setup()
+    const stub = stubFetch([
+      jsonResponse([buildModule('alpha', ['restart'])]),
+      jsonResponse(READ_WRITE_SESSION),
+      jsonResponse(buildStatus({ unit: 'alpha.service' })),
+    ])
+    renderWithProviders(<ServicesPage />, { fetch: stub.fetch })
+
+    await user.click(await screen.findByRole('button', { name: 'restart' }))
+    const dialog = await screen.findByRole('dialog')
+
+    await user.click(within(dialog).getByRole('button', { name: 'cancel' }))
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).toBeNull()
+    })
+  })
+
+  it('shows the resolved error when a service action fails', async () => {
+    const user = userEvent.setup()
+    const stub = stubFetch([
+      jsonResponse([buildModule('alpha', ['restart'])]),
+      jsonResponse(READ_WRITE_SESSION),
+      jsonResponse(buildStatus({ unit: 'alpha.service' })),
+      errorResponse(500, 'ops-service-failed', 'server_error'),
+    ])
+    renderWithProviders(<ServicesPage />, { fetch: stub.fetch })
+
+    await user.click(await screen.findByRole('button', { name: 'restart' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: 'restart' }))
+
+    const banner = await screen.findByRole('alert')
+    expect(banner).toHaveTextContent('the service action did not complete.')
   })
 })

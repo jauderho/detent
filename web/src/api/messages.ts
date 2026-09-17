@@ -106,14 +106,9 @@ export function fluentIdForMessageId(messageId: string): ApiMessageId | null {
  */
 export function resolveApiError(l10n: ReactLocalization, error: ApiError): string {
   const generic = l10n.getString('api-error-unknown', null, GENERIC_FALLBACK)
-  switch (error.kind) {
-    case 'network':
-      return l10n.getString('api-error-network', null, generic)
-    case 'malformed':
-      return l10n.getString('api-error-malformed', null, generic)
-    case 'http': {
-      const id = fluentIdForMessageId(error.messageId)
-      return id === null ? generic : l10n.getString(id, null, generic)
-    }
-  }
+  if (error.kind === 'network') return l10n.getString('api-error-network', null, generic)
+  if (error.kind === 'malformed') return l10n.getString('api-error-malformed', null, generic)
+  const id = fluentIdForMessageId(error.messageId)
+  if (id === null) return generic
+  return l10n.getString(id, null, generic)
 }

@@ -188,4 +188,39 @@ describe('validateModel — containers', () => {
     }
     expect(validateModel(parseSchema(hostsSchema).fields, model)).toEqual([])
   })
+
+  it('reports a tag list entry that is not a string', () => {
+    const schema = rootWith({ type: 'array', items: { type: 'string', minLength: 2 } })
+    const issues = validateModel(parseSchema(schema).fields, { subject: ['ok', 123] })
+
+    expect(issues).toHaveLength(1)
+    expect(issues[0]?.messageId).toBe('forms-error-type')
+    expect(issues[0]?.path).toEqual(['subject', '1'])
+  })
+
+  it('reports an object value with the wrong shape', () => {
+    const schema = rootWith({
+      type: 'object',
+      properties: { inner: { type: 'string' } },
+      required: ['inner'],
+    })
+
+    expect(messages(schema, { subject: 'not-an-object' })).toEqual(['forms-error-type'])
+  })
+
+  it('reports a row that is not an object', () => {
+    const schema = rootWith({
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { name: { type: 'string' } },
+        required: ['name'],
+      },
+    })
+    const issues = validateModel(parseSchema(schema).fields, { subject: [{ name: 'ok' }, 'bad'] })
+
+    expect(issues).toHaveLength(1)
+    expect(issues[0]?.messageId).toBe('forms-error-type')
+    expect(issues[0]?.path).toEqual(['subject', '1'])
+  })
 })

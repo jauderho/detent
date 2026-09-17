@@ -397,3 +397,79 @@ describe('SchemaForm — diagnostics', () => {
     expect(document.getElementById(describedBy)).toHaveTextContent('hosts-hint')
   })
 })
+
+describe('SchemaForm — nested object control', () => {
+  const schema = {
+    type: 'object',
+    properties: {
+      nested: {
+        type: 'object',
+        properties: { name: { type: 'string' } },
+        required: ['name'],
+      },
+    },
+    required: ['nested'],
+  }
+
+  it('renders a nested object in a panel with its fields', () => {
+    renderWithL10n(<Harness schema={schema} initial={{ nested: { name: 'inner' } }} />)
+
+    expect(screen.getByText('nested')).toBeInTheDocument()
+    expect(screen.getByLabelText('name')).toHaveValue('inner')
+  })
+
+  it('falls back when the nested object value has the wrong shape', () => {
+    renderWithL10n(<Harness schema={schema} initial={{ nested: 'not-an-object' }} />)
+
+    const control = screen.getByLabelText('nested')
+    expect(control).toHaveAttribute('readonly')
+    expect(control).toHaveValue('"not-an-object"')
+  })
+})
+
+describe('SchemaForm — number control edge cases', () => {
+  it('writes null when a nullable number field is emptied', async () => {
+    const schema = {
+      type: 'object',
+      properties: { count: { type: ['integer', 'null'] } },
+    }
+    const onModel = mock()
+    renderWithL10n(<Harness schema={schema} initial={{ count: 5 }} onModel={onModel} />)
+
+    const input = screen.getByLabelText('count')
+    await userEvent.clear(input)
+
+    expect(onModel).toHaveBeenLastCalledWith({ count: null })
+  })
+
+  it('drops a non-numeric draft on blur without writing to the model', async () => {
+    const schema = {
+      type: 'object',
+      properties: { count: { type: 'integer' } },
+    }
+    const onModel = mock()
+    renderWithL10n(<Harness schema={schema} initial={{ count: 5 }} onModel={onModel} />)
+
+    const input = screen.getByLabelText('count')
+    await userEvent.type(input, 'x')
+    await userEvent.tab()
+
+    expect(input).toHaveValue(5)
+  })
+})
+
+describe('SchemaForm — container-level errors', () => {
+  it('shows a diagnostic that lands on a rows control in the panel', () => {
+    renderWithL10n(
+      <Harness
+        diagnostics={[
+          { severity: 'error', id: 'hosts-row', field: 'entries/0', span: undefined, args: {} },
+        ]}
+      />,
+    )
+
+    expect(
+      screen.getByText((content) => content.replace(ISOLATES, '').includes('hosts-row')),
+    ).toBeInTheDocument()
+  })
+})

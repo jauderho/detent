@@ -70,4 +70,17 @@ describe('useTheme', () => {
     expect(document.documentElement.getAttribute('data-theme')).toBe('light')
     expect(window.localStorage.getItem('detent-theme')).toBe('light')
   })
+
+  it('setTheme applies an explicit theme value', () => {
+    document.documentElement.setAttribute('data-theme', 'dark')
+    const { result } = renderHook(() => useTheme())
+
+    act(() => {
+      result.current.setTheme('light')
+    })
+
+    expect(result.current.theme).toBe('light')
+    expect(document.documentElement.getAttribute('data-theme')).toBe('light')
+    expect(window.localStorage.getItem('detent-theme')).toBe('light')
+  })
 })

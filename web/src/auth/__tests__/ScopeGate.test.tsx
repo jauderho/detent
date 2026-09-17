@@ -8,7 +8,7 @@ import { screen, waitFor } from '@testing-library/react'
 import type { SessionView } from '@/api/auth'
 import { Button } from '@/components/Button'
 import { errorResponse, jsonResponse, renderWithProviders, stubFetch } from '@/test/providers'
-import { WriteGate } from '../ScopeGate'
+import { useCanWrite, WriteGate } from '../ScopeGate'
 
 function sessionWith(scopes: string[]): SessionView {
   return {
@@ -70,5 +70,30 @@ describe('WriteGate', () => {
       expect(screen.getByRole('button', { name: 'restart' })).toBeDisabled()
     })
     expect(screen.getByTestId('reason')).toHaveTextContent('sign in to change anything')
+  })
+})
+
+describe('useCanWrite', () => {
+  function WriteFlag() {
+    const canWrite = useCanWrite()
+    return <div data-testid="canWrite">{canWrite ? 'yes' : 'no'}</div>
+  }
+
+  it('is true for a session with the write scope', async () => {
+    const stub = stubFetch([jsonResponse(sessionWith(['read', 'write']))])
+    renderWithProviders(<WriteFlag />, { fetch: stub.fetch })
+
+    await waitFor(() => {
+      expect(screen.getByTestId('canWrite')).toHaveTextContent('yes')
+    })
+  })
+
+  it('is false for a read-only session', async () => {
+    const stub = stubFetch([jsonResponse(sessionWith(['read']))])
+    renderWithProviders(<WriteFlag />, { fetch: stub.fetch })
+
+    await waitFor(() => {
+      expect(screen.getByTestId('canWrite')).toHaveTextContent('no')
+    })
   })
 })

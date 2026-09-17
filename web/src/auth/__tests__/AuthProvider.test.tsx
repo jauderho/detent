@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it } from 'bun:test'
-import { screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useApiClient } from '@/api/ApiProvider'
 import type { SessionView } from '@/api/auth'
@@ -173,5 +173,16 @@ describe('AuthProvider — login and logout', () => {
     await waitFor(() => {
       expect(client.hasCsrfToken()).toBe(false)
     })
+  })
+})
+
+describe('useAuth', () => {
+  it('throws when used outside AuthProvider', () => {
+    function Consumer() {
+      const { status } = useAuth()
+      return <div>{status}</div>
+    }
+
+    expect(() => render(<Consumer />)).toThrow('useAuth must be used inside <AuthProvider>')
   })
 })

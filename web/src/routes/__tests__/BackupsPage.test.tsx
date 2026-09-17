@@ -192,4 +192,60 @@ describe('BackupsPage — restoring a backup', () => {
       )
     })
   })
+
+  it('closes the restore modal with the close button', async () => {
+    const user = userEvent.setup()
+    const stub = stubFetch([
+      jsonResponse([buildModule('alpha')]),
+      jsonResponse(READ_WRITE_SESSION),
+      jsonResponse([buildBackup({ name: 'alpha-1.tar', id: 7 })]),
+    ])
+    renderWithProviders(<BackupsPage />, { fetch: stub.fetch })
+
+    await user.click(await screen.findByRole('button', { name: 'restore' }))
+    const dialog = await screen.findByRole('dialog')
+
+    await user.click(within(dialog).getByRole('button', { name: 'close' }))
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).toBeNull()
+    })
+  })
+
+  it('closes the restore modal with the cancel button', async () => {
+    const user = userEvent.setup()
+    const stub = stubFetch([
+      jsonResponse([buildModule('alpha')]),
+      jsonResponse(READ_WRITE_SESSION),
+      jsonResponse([buildBackup({ name: 'alpha-1.tar', id: 7 })]),
+    ])
+    renderWithProviders(<BackupsPage />, { fetch: stub.fetch })
+
+    await user.click(await screen.findByRole('button', { name: 'restore' }))
+    const dialog = await screen.findByRole('dialog')
+
+    await user.click(within(dialog).getByRole('button', { name: 'cancel' }))
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).toBeNull()
+    })
+  })
+
+  it('shows the resolved error when a restore fails', async () => {
+    const user = userEvent.setup()
+    const stub = stubFetch([
+      jsonResponse([buildModule('alpha')]),
+      jsonResponse(READ_WRITE_SESSION),
+      jsonResponse([buildBackup({ name: 'alpha-1.tar', id: 7 })]),
+      errorResponse(500, 'ops-unknown-module', 'server_error'),
+    ])
+    renderWithProviders(<BackupsPage />, { fetch: stub.fetch })
+
+    await user.click(await screen.findByRole('button', { name: 'restore' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: 'restore' }))
+
+    const banner = await screen.findByRole('alert')
+    expect(banner).toHaveTextContent('there is no module by that name in this build.')
+  })
 })
