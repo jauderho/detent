@@ -19,6 +19,10 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::{fs, io};
 
+pub mod order;
+
+pub use order::{account_and_order, finalize, present_challenges, wait_ready};
+
 /// Mode of the challenge files and the state directory holding them:
 /// readable only by the account that runs the worker.
 const HOOK_MODE: u32 = 0o600;
@@ -43,6 +47,18 @@ pub enum AcmeError {
     /// A record's TXT value is not a printable ASCII token.
     #[error("invalid dns-01 txt value: {0:?}")]
     InvalidValue(String),
+    /// An ACME protocol error from instant-acme (API problem, timeout, …).
+    #[error(transparent)]
+    Acme(#[from] instant_acme::Error),
+    /// The authorization offered no dns-01 challenge to answer.
+    #[error("authorization has no dns-01 challenge")]
+    NoDns01Challenge,
+    /// ACME account credentials could not be serialized or parsed.
+    #[error("account credentials error: {0}")]
+    Credentials(String),
+    /// The ACME order ended in a non-`valid` state.
+    #[error("order did not reach valid state: {0:?}")]
+    InvalidOrder(instant_acme::OrderStatus),
 }
 
 // ---------------------------------------------------------------------------

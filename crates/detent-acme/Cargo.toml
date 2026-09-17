@@ -12,6 +12,14 @@ workspace = true
 
 [dependencies]
 thiserror = { workspace = true }
+# Account credential (de)serialization for the 0600 cache file.
+serde_json = { workspace = true }
+# ACME client (RFC 8555). Pinned exact: Phase 6 spike uses this one version;
+# it defaults to aws-lc-rs, matching the workspace crypto stack (no ring).
+instant-acme = "=0.8.5"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Only for the #[ignore]d Pebble live test: a runtime to block on the async
+# order flow. detent-acme itself stays tokio-free.
+tokio = { workspace = true, features = ["rt"] }
