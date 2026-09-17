@@ -9,9 +9,9 @@ phase or a self-contained piece of work finishes.
 
 ## Where things stand — 2026-09-18
 
-**Phases 0–5 complete. Phase 6 (ACME) in progress — dns-01, profiles, PEM
-bridge, hot reload, serve handle, and `AppState.cert_store` landed; providers,
-attestors, scheduler remain.**
+**Phase 6 (ACME) in progress — dns-01, profiles, PEM bridge, hot reload,
+serve handle, `AppState.cert_store`, providers, scheduler, attestor, and the
+read-only certificates page landed; renewal wiring remains.**
 
 Branch: `main`. Everything below is verified on this commit, not assumed.
 
@@ -20,7 +20,7 @@ Branch: `main`. Everything below is verified on this commit, not assumed.
 | Rust tests | `cargo test --workspace --all-features` | 975 pass, 6 ignored |
 | Clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean |
 | Format | `cargo fmt --all --check` | clean |
-| Web tests | `cd web && bun run test` | 425 pass, 52 files (`bun test`) |
+| Web tests | `cd web && bun run test` | 428 pass, 53 files (`bun test`) |
 | Web coverage | `cd web && bun run coverage:check` | 72 in-scope files at 100% lines |
 | Browser e2e + axe | `cd web && bun run e2e` | 22 pass (Playwright, Chromium) |
 | Web lint | `cd web && bun run lint` | clean (biome) |
@@ -132,6 +132,21 @@ there and says so; seccomp and the capability drop are the confinement.
 
 ---
 ## Log
+
+### 2026-09-18 — Read-only certificates page lands
+
+`web/src/routes/CertificatesPage.tsx` (`af521f2`): full-page read of the
+serving certificate via the same `useCert()` hook the dashboard `CertPanel`
+uses — fingerprint verbatim, locale-formatted expiry, percent used, amber
+banners inside 30 days or past expiry, `unknown` fallback when DER does not
+parse. Shared tone rule extracted to `web/src/lib/cert.ts`
+(`certTone`/`certExpired`/`certGridItems`) so dashboard and page cannot
+disagree; `AppRoutes` routes `/certificates` to it, `pages.tsx` keeps only
+the `SettingsPage` placeholder (blocked: needs user- and token-management
+endpoints `docs/API.md` does not describe). Gates: web 428 pass / 53 files;
+typecheck/lint/i18n/api-check/contrast clean; build OK (CSP hash OK);
+Playwright 22 pass; Rust fmt/clippy clean, `detent-acme` 42 pass / 1
+ignored, `ring` absent.
 
 ### 2026-09-18 — device-attest-01 attestor seam lands
 
