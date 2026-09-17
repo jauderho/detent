@@ -280,6 +280,16 @@ jobs:
         working-directory: web
         run: bun run build
 
+      # Playwright runs against the built bundle via `vite preview`, with the
+      # API stubbed per test (see web/e2e/api.ts) — no real binary needed.
+      - name: Install Playwright chromium
+        working-directory: web
+        run: bunx playwright install chromium --with-deps
+
+      - name: bun run e2e
+        working-directory: web
+        run: bun run e2e
+
   shell:
     name: Shell (shellcheck, shfmt)
     runs-on: ubuntu-26.04
