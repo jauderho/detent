@@ -255,6 +255,7 @@ fn run_worker(
     let PreparedWorker {
         runtime,
         server,
+        store: _store,
         engine_thread,
     } = prepared;
     let _ = renderer.line(
@@ -294,6 +295,9 @@ struct PreparedWorker {
     runtime: tokio::runtime::Runtime,
     /// Bound and ready; not yet serving.
     server: detent_web::Server,
+    /// The resolver the server answers handshakes from; kept alive so a
+    /// future renewal task can `replace` the certificate without a restart.
+    store: std::sync::Arc<detent_web::CertStore>,
     /// Joined once `server.serve(..)` returns.
     engine_thread: detent_web::EngineThread,
 }
@@ -380,12 +384,27 @@ fn prepare_worker(
         renderer,
         streams,
     ));
-    let server = bound?;
+    let BoundWebServer { server, store } = bound?;
     Some(PreparedWorker {
         runtime,
         server,
+        store,
         engine_thread,
     })
+}
+
+/// A bound listener plus the certificate resolver it answers from.
+///
+/// `Server` holds its own `Arc` clone internally (via
+/// `server_config_from_store`); this second handle is what a future renewal
+/// task calls `replace` on — without it the live certificate could never be
+/// swapped.
+#[cfg(feature = "web")]
+struct BoundWebServer {
+    /// Bound and ready; not yet serving.
+    server: detent_web::Server,
+    /// The resolver the server answers handshakes from.
+    store: std::sync::Arc<detent_web::CertStore>,
 }
 
 /// Bootstraps or reuses the TLS certificate, logs its fingerprint for
@@ -403,7 +422,7 @@ async fn bind_web_server(
     auth_state: detent_web::AuthState,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
-) -> Option<detent_web::Server> {
+) -> Option<BoundWebServer> {
     let tls_failed =
         |err: &dyn std::fmt::Display, renderer: &Renderer<'_>, streams: &mut Streams<'_>| {
             let _ = renderer.line(
@@ -436,8 +455,9 @@ async fn bind_web_server(
             return None;
         }
     };
+    let store = std::sync::Arc::new(store);
     let tls_config = match detent_web::server_config_from_store(
-        std::sync::Arc::new(store),
+        std::sync::Arc::clone(&store),
         detent_web::tls::ALPN_H2_HTTP11,
     ) {
         Ok(tls_config) => tls_config,
@@ -453,7 +473,7 @@ async fn bind_web_server(
     let router = detent_web::router(state);
 
     match detent_web::Server::bind(&bind_config, tls_config, router).await {
-        Ok(server) => Some(server),
+        Ok(server) => Some(BoundWebServer { server, store }),
         Err(err) => {
             let _ = renderer.line(
                 streams.notes,
@@ -754,7 +774,7 @@ mod web_tests {
             notes: &mut notes,
         };
 
-        let server = bind_web_server(
+        let bound = bind_web_server(
             config,
             &["box.example".to_owned()],
             handle,
@@ -764,12 +784,12 @@ mod web_tests {
         )
         .await
         .ok_or("bind_web_server must succeed against a fresh temp dir")?;
-        assert_ne!(server.local_addr().port(), 0);
+        assert_ne!(bound.server.local_addr().port(), 0);
         assert!(dir.path().join("certs").join("bootstrap.cert.der").exists());
         let text = String::from_utf8(notes)?;
         assert!(text.contains("fingerprint"), "{text}");
 
-        drop(server);
+        drop(bound);
         thread.join().map_err(|err| format!("{err:?}"))?;
         monitor.join().map_err(|_| "monitor thread panicked")?;
         Ok(())
