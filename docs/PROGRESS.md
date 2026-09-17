@@ -17,15 +17,15 @@ Branch: `main`. Everything below is verified on this commit, not assumed.
 
 | Check | Command | State |
 |---|---|---|
-| Rust tests | `cargo test --workspace --all-features` | 974 pass, 6 ignored |
+| Rust tests | `cargo test --workspace --all-features` | 975 pass, 6 ignored |
 | Clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean |
 | Format | `cargo fmt --all --check` | clean |
-| Web tests | `cd web && bun run test` | 424 pass, 52 files (`bun test`) |
+| Web tests | `cd web && bun run test` | 425 pass, 52 files (`bun test`) |
 | Web coverage | `cd web && bun run coverage:check` | 72 in-scope files at 100% lines |
 | Browser e2e + axe | `cd web && bun run e2e` | 22 pass (Playwright, Chromium) |
 | Web lint | `cd web && bun run lint` | clean (biome) |
 | Web types | `cd web && bun run typecheck` | clean |
-| Web i18n | `cd web && bun run i18n:check` | 247 ids, all referenced, all resolved |
+| Web i18n | `cd web && bun run i18n:check` | 253 ids, all referenced, all resolved |
 | Responsive | `cd web && bun run shots` (`web/e2e-shots/m2shots.e2e.ts`, stills to `/tmp/detent-shots`) | 3 pass (390/768/1280, no horizontal scroll) |
 | CI | 9 jobs (incl. acme-pebble) + Codespell, Lint Code Base, Dependency Review, Scorecard | all green |
 
@@ -62,10 +62,12 @@ preload that gives Bun a DOM, Vite's `?raw` imports and jest-dom's matchers.
 Playwright drives the built bundle against a stubbed API (`web/e2e/`), with
 axe-core over every section in both themes.
 
-**Not done in `web/`** — certificates and settings are still placeholders in
-`src/routes/pages.tsx`, deliberately: neither has an API to drive. Certificates
-waits on Phase 6 (ACME); settings needs user- and token-management endpoints
-that do not exist. Also missing: e2e against the real binary rather than a stub.
+**Not done in `web/`** — settings is still a placeholder in
+`src/routes/pages.tsx`, deliberately: it needs user- and token-management
+endpoints that do not exist. Certificates now has a live read path (dashboard
+`CertPanel` via `GET /api/v1/system/cert`); the full page waits on Phase 6
+(ACME) renewal/attestor flows. Also missing: e2e against the real binary
+rather than a stub.
 
 ### Traps worth knowing before you touch anything
 
@@ -130,6 +132,19 @@ there and says so; seccomp and the capability drop are the confinement.
 
 ---
 ## Log
+
+### 2026-09-18 — Serving certificate status endpoint + dashboard readout
+
+Read-only `GET /api/v1/system/cert` serves `CertReport` (`fingerprint`,
+`not_after_unix`, `lifetime_used_percent`) from the live `Arc<CertStore>` —
+the same cert handshakes answer from, never stale. Gated by the same policy
+as `HostProfile` (`authorize(&caller, &Operation::HostProfile)`); documented
+in `docs/openapi.json`, TS regenerated. Dashboard `CertPanel`: fingerprint
+(verbatim), locale-formatted expiry, percent used, amber banner inside 30
+days or past expiry, `unknown` when DER does not parse. DER dates hand-parsed
+in `tls.rs` (`validity_unix`, no new dep). e2e stub answers `/system/cert`.
+Commit `588cdda`. Gates: workspace 975 pass, 6 ignored; clippy clean; fmt
+clean; web 425 pass, lint/typecheck/i18n/api-check clean.
 
 ### 2026-09-18 — Cert store reaches AppState
 
