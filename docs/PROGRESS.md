@@ -10,7 +10,8 @@ phase or a self-contained piece of work finishes.
 ## Where things stand — 2026-09-18
 
 **Phases 0–5 complete. Phase 6 (ACME) in progress — dns-01, profiles, PEM
-bridge, and hot reload landed; providers, attestors, scheduler remain.**
+bridge, hot reload, serve handle, and `AppState.cert_store` landed; providers,
+attestors, scheduler remain.**
 
 Branch: `main`. Everything below is verified on this commit, not assumed.
 
@@ -129,6 +130,13 @@ there and says so; seccomp and the capability drop are the confinement.
 
 ---
 ## Log
+
+### 2026-09-18 — Cert store reaches AppState
+
+`AppState` carries `cert_store: Arc<CertStore>`; `bind_web_server` clones the
+live handle in so status/renew ops can `replace` without a restart. Tests use
+a throwaway `test_cert_store()`. Gates: workspace 974 pass, 6 ignored; clippy
+clean; fmt clean; `ring` absent.
 
 ### 2026-09-18 — Serve keeps the live cert handle
 
