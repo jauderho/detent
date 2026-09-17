@@ -46,7 +46,7 @@ export function StatusBar() {
         </span>
       </div>
       <div className="seg" style={{ marginLeft: 'auto' }}>
-        <span className="lbl dim">
+        <span className="lbl dim clock-label">
           <Localized id="status-clock-label">
             <span>utc</span>
           </Localized>
@@ -55,7 +55,7 @@ export function StatusBar() {
       </div>
       <div className="seg">
         <select
-          className="bg-transparent text-[11px] font-mono uppercase tracking-wider text-[var(--ink-dim)] border border-[var(--line-2)] px-1 py-0.5 cursor-pointer hover:bg-[var(--panel-3)]"
+          className="locale-select bg-transparent text-[11px] font-mono uppercase tracking-wider text-[var(--ink-dim)] border border-[var(--line-2)] px-1 py-0.5 cursor-pointer hover:bg-[var(--panel-3)]"
           value={locale}
           onChange={(e) => setLocale(e.target.value as AvailableLocale)}
           aria-label="interface language"

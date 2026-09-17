@@ -23,52 +23,27 @@ per PLAN §5: it needs a host whose `/etc/hosts` may be written.
 | Contrast | `cd web && bun run contrast:check` | every pairing ≥ 4.5:1, both themes |
 | API drift | `cd web && bun run api:check` | `schema.d.ts` matches `docs/openapi.json` |
 | E2e | `cd web && bun run e2e` | 22 passed (console + axe suites) |
-| Responsive | throwaway `noOverflow` spec (deleted after use; script below) | dashboard @1280, module @768, login @390 — all pass, no horizontal scroll |
+| Responsive | `cd web && bun run shots` (`e2e-shots/m2shots.e2e.ts`) | dashboard @1280, module @768, login @390 — all pass, no horizontal scroll |
 
-Screenshots were captured by that throwaway spec against the stubbed
-preview bundle into ephemeral files outside the repo, viewed during this run,
-then deleted — the permanent suite `web/e2e/console.e2e.ts` + `a11y.e2e.ts`
-stays the regression record, not stills. To reproduce: save the script below
-as `web/e2e/m2shots.e2e.ts`, run
-`cd web && bunx playwright test e2e/m2shots.e2e.ts`, then delete it.
-`noOverflow` asserts `documentElement.scrollWidth` fits the viewport, so a
-regression fails rather than silently overflowing.
+Responsive evidence is a committed, repeatable command rather than a script
+pasted into this document. `web/e2e-shots/m2shots.e2e.ts` runs under its own
+`web/playwright.shots.config.ts` (`testDir: './e2e-shots'`), so it never
+collides with the regression suite in `web/e2e` and needs no edits to
+`playwright.config.ts` to run:
 
-```ts
-import { expect, test, type Page } from '@playwright/test'
-import { signIn, stubApi } from './api'
-
-async function noOverflow(page: Page, width: number) {
-  const scroll = await page.evaluate(() => document.documentElement.scrollWidth)
-  expect(scroll).toBeLessThanOrEqual(width)
-}
-
-test('m2: dashboard @1280', async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 900 })
-  await stubApi(page)
-  await signIn(page)
-  await page.goto('/')
-  await page.getByRole('navigation', { name: 'sections' }).waitFor()
-  await noOverflow(page, 1280)
-})
-
-test('m2: module @768', async ({ page }) => {
-  await page.setViewportSize({ width: 768, height: 900 })
-  await stubApi(page)
-  await signIn(page)
-  await page.goto('/modules/hosts')
-  await page.getByRole('button', { name: 'plan' }).waitFor()
-  await noOverflow(page, 768)
-})
-
-test('m2: login @390', async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 })
-  await stubApi(page)
-  await page.goto('/login')
-  await page.getByRole('button', { name: 'sign in' }).waitFor()
-  await noOverflow(page, 390)
-})
 ```
+cd web && bun run shots
+```
+
+It reuses the same `stubApi` / `signIn` helpers as the e2e suite, asserts
+`noOverflow` at each breakpoint — `documentElement.scrollWidth` must fit the
+viewport, so a layout regression fails the run instead of producing a quietly
+wrong still — and writes PNGs to `SHOTS_DIR` (default `/tmp/detent-shots`).
+Stills stay outside the repo by design: `.gitignore` refuses images, and the
+durable record is this command plus the permanent `web/e2e/console.e2e.ts` +
+`a11y.e2e.ts` suites, not the pictures.
+
+Override the destination with `SHOTS_DIR=/some/dir bun run shots`.
 
 ## What this demonstrates
 

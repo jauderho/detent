@@ -203,13 +203,25 @@ p {
 }
 /* Narrow viewports (PLAN §4.4: 390px): the four fixed nowrap segments exceed
    the width. Tighten padding, then drop the verbose online label — the LED
-   still reports it — so the rocker stays reachable without scrolling. */
+   still reports it — so the rocker stays reachable without scrolling.
+
+   The language <select> sizes itself to its widest *option*, not its selected
+   value, so `qps-ploc` alone made it 88px and pushed the bar back past 390px
+   after the switcher landed. Cap it and drop the redundant "utc" word (the
+   clock reads as a clock); both controls stay usable. */
 @media (max-width: 560px) {
   .status .seg {
     padding: 0 8px;
   }
   .status .online-label {
     display: none;
+  }
+  .status .clock-label {
+    display: none;
+  }
+  .status .locale-select {
+    max-width: 58px;
+    text-overflow: ellipsis;
   }
 }
 
