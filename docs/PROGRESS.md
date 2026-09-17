@@ -130,6 +130,14 @@ there and says so; seccomp and the capability drop are the confinement.
 ---
 ## Log
 
+### 2026-09-18 — Serve keeps the live cert handle
+
+`bind_web_server` returns `BoundWebServer { server, store }` and
+`PreparedWorker` retains the `Arc<CertStore>`: the resolver the listener
+answers from now survives startup, so a future renewal task has a live
+handle to `replace` on. Gates: workspace 974 pass, 6 ignored; clippy clean;
+fmt clean; `ring` absent.
+
 ### 2026-09-18 — CA profile threads through orders
 
 `account_and_order` takes `profile: Option<&str>` (`334237b`): `None` for
