@@ -11,7 +11,7 @@ Already triaged, do NOT re-list: `useCallback` in `web/src/i18n/index.tsx` + `we
 - `delete` scripts/checkWorkflows.sh, 358-line wrapper over `gh run list` + `gh workflow run`. 5-line gh alias. [scripts/checkWorkflows.sh:1] ~-350
 - `delete` web/src/components/ui/button.tsx, zero imports; app Button.tsx replaced it. Drop `class-variance-authority` dep with it. [web/src/components/ui/button.tsx:1] ~-62, -1 dep
 - `delete` scripts/useCommitHash.sh, dead one-shot SHA migration, hardcoded SHAs stale. Nothing. [scripts/useCommitHash.sh:1] ~-42
-- `delete` 3 empty stub crates detent-mcp / detent-acme / detent-update, 1-line lib.rs each + feature gates in detent/Cargo.toml. Re-add when Phase 6/9/10 land. [crates/detent-mcp/src/lib.rs:1] ~-10
+- `delete` 2 empty stub crates detent-mcp / detent-update, 1-line lib.rs each + feature gates in detent/Cargo.toml. Re-add when Phase 9/10 land. [crates/detent-mcp/src/lib.rs:1] ~-6 (detent-acme struck — landed e4fe5f3, 437 lines, reviewed below)
 - `delete` ci.yml shell job, shellcheck/shfmt already covered by super-linter BASH_EXEC/BASH_SHFMT. Delete job. [.github/workflows/ci.yml] ~-30
 
 ## Shrink (same logic, fewer lines)
@@ -34,4 +34,13 @@ Already triaged, do NOT re-list: `useCallback` in `web/src/i18n/index.tsx` + `we
 - `yagni` statusOf + hasCsrfToken test-only API surface, zero prod callers. Delete both. [web/src/api/query.ts:55 web/src/api/client.ts:261] ~-7
 - `delete` NoSandbox empty SandboxHooks impl, defaults already Ok. Nothing. [crates/detent-platform/src/privsep/spawn.rs:107] ~-8
 
-net: -1270 lines, -1 deps possible.
+net: -1296 lines, -1 deps possible.
+
+## 2026-09-17 — e4fe5f3 detent-acme seam (crates/detent-acme/src/lib.rs, 437 lines)
+
+- `crates/detent-acme/src/lib.rs:L125: yagni: DnsProvider trait with one impl (HookProvider). Use HookProvider concretely until RFC2136 lands.`
+- `crates/detent-acme/src/lib.rs:L95: yagni: Challenge with zero prod callers (tests only). Build DnsRecord directly until order flow needs it.`
+- `crates/detent-acme/src/lib.rs:L150: yagni: wait_propagated default with zero overriders. Add back with first networked provider.`
+- `crates/detent-acme/src/lib.rs:L206: yagni: Display for HookProvider used only by display test. Delete; Debug covers it.`
+- `crates/detent-acme/src/lib.rs:L184: yagni: state_dir() accessor with zero prod callers. Drop; keep new() + trait methods.`
+- `net: -30 lines possible.`
