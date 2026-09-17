@@ -5,14 +5,15 @@
 //! None of them touches a file or a service manager directly; that is what
 //! makes adding a front end cheap, and what makes the audit log complete.
 //!
-//! # Not here yet
+//! # Certificate renewal
 //!
-//! PLAN §2.5's v1 list also names `CertStatus`, `CertRenew`, `UpdateCheck` and
-//! `UpdateApply`. They are deliberately absent rather than stubbed: certificate
-//! operations arrive with `detent-acme` in **Phase 6** and update operations
-//! with `detent-update` in **Phase 9**, and an unimplemented variant in a
-//! closed enum is a promise the engine cannot keep. Auth/user/token admin
-//! operations arrive with the web layer in Phase 4 for the same reason.
+//! [`Operation::CertRenew`] is the one Phase 6 operation that needs no ACME
+//! plumbing to be useful: this build has no `[acme]` config surface yet, so
+//! the engine cannot order, install, or hot-swap a certificate. It answers
+//! [`OpsError::Unsupported`] with the catalogued `ops-unsupported` id, which
+//! the UI renders as a disabled control with a reason rather than a control
+//! that looks live until the server answers. A full renewal flow (order,
+//! install, `CertStore::replace`) arrives with the ACME wiring, not here.
 
 use std::time::Duration;
 
@@ -174,6 +175,12 @@ pub enum Operation {
     HostProfile,
     /// Read back the audit log.
     AuditQuery(AuditQuery),
+    /// Check whether the serving certificate should renew, and renew it.
+    ///
+    /// Answered as [`OpsError::Unsupported`] until the ACME wiring lands (see
+    /// the module header): the variant exists so the API, authz, audit, and
+    /// UI can be built against the real shape instead of a stub that drifts.
+    CertRenew,
 }
 
 /// The kind of an [`Operation`], with none of its payload.
@@ -211,6 +218,8 @@ pub enum OpKind {
     HostProfile,
     /// [`Operation::AuditQuery`].
     AuditQuery,
+    /// [`Operation::CertRenew`].
+    CertRenew,
 }
 
 impl Operation {
@@ -231,6 +240,7 @@ impl Operation {
             Self::ServiceAction { .. } => OpKind::ServiceAction,
             Self::HostProfile => OpKind::HostProfile,
             Self::AuditQuery(_) => OpKind::AuditQuery,
+            Self::CertRenew => OpKind::CertRenew,
         }
     }
 
@@ -250,6 +260,7 @@ impl Operation {
             | Self::ConfirmCommit { .. }
             | Self::RollbackCommit { .. }
             | Self::HostProfile
+            | Self::CertRenew
             | Self::AuditQuery(_) => None,
         }
     }
@@ -268,6 +279,7 @@ impl Operation {
                 | Self::RollbackCommit { .. }
                 | Self::Restore { .. }
                 | Self::ServiceAction { .. }
+                | Self::CertRenew
         )
     }
 }
@@ -275,7 +287,6 @@ impl Operation {
 #[cfg(test)]
 mod tests {
     use super::{DEFAULT_CONFIRM, OpKind, Operation, ServiceCommand};
-    use crate::audit::AuditQuery;
     use detent_core::descriptor::ServiceAction as CoreServiceAction;
     use detent_platform::privsep::proto::{BackupId, CommitId, ServiceAction as WireServiceAction};
     use serde_json::json;
@@ -325,7 +336,8 @@ mod tests {
                 action: ServiceCommand::Restart,
             },
             Operation::HostProfile,
-            Operation::AuditQuery(AuditQuery::default()),
+            Operation::AuditQuery(crate::audit::AuditQuery::default()),
+            Operation::CertRenew,
         ]
     }
 
@@ -339,7 +351,7 @@ mod tests {
             assert!(!format!("{op:?}").is_empty());
             assert_eq!(op.clone(), op);
         }
-        assert_eq!(kinds.len(), 13);
+        assert_eq!(kinds.len(), 14);
         let unique: std::collections::BTreeSet<_> =
             kinds.iter().map(|kind| format!("{kind:?}")).collect();
         assert_eq!(unique.len(), kinds.len());
@@ -358,11 +370,10 @@ mod tests {
                 with_module = with_module.saturating_add(1);
             }
         }
-        // Apply, ConfirmCommit, RollbackCommit, Restore, ServiceAction.
-        assert_eq!(mutating, 5);
+        // Apply, ConfirmCommit, RollbackCommit, Restore, ServiceAction, CertRenew.
+        assert_eq!(mutating, 6);
         // Everything except ListModules, ConfirmCommit, RollbackCommit,
-        // HostProfile and AuditQuery.
-        assert_eq!(with_module, 8);
+        // HostProfile, CertRenew and AuditQuery.
         assert_eq!(
             Operation::GetModule {
                 id: "hosts".to_owned()

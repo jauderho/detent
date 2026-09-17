@@ -146,6 +146,8 @@ dashboard-cert-expires = expires
 dashboard-cert-lifetime-used = lifetime used
 dashboard-cert-expired = expired; replace this certificate.
 dashboard-cert-expiring-soon = expires within 30 days; plan renewal.
+dashboard-cert-half = half the certificate lifetime is used; renewal is scheduled.
+dashboard-cert-quarter = three quarters of the certificate lifetime is used; renew soon.
 dashboard-modules-panel = modules
 dashboard-modules-count = {$count ->
     [one] one module is compiled into this build.
@@ -270,6 +272,7 @@ audit-op-service-status = read service status
 audit-op-service-action = act on service
 audit-op-host-profile = read host profile
 audit-op-audit-query = read audit log
+audit-op-cert-renew = renew certificate
 
 ## Schema-driven module forms
 ## Chrome the form engine (web/src/forms) renders around a module's schema.

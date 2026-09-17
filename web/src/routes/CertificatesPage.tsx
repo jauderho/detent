@@ -14,7 +14,7 @@ import { GridCell, HairlineGrid } from '@/components/HairlineGrid'
 import { Label } from '@/components/Label'
 import { Panel } from '@/components/Panel'
 import { Readout, Screen } from '@/components/Screen'
-import { certExpired, certGridItems, certTone } from '@/lib/cert'
+import { certExpired, certGridItems, certTone, certWarning } from '@/lib/cert'
 
 const PAGE_STYLE = { paddingTop: 24, paddingBottom: 24 } as const
 
@@ -30,7 +30,7 @@ function CertGrid({ report }: { report: CertReport }) {
   const { l10n } = useLocalization()
   const [fingerprint, expires, used] = certGridItems(l10n, report)
   const expired = certExpired(report)
-  const expiringSoon = !expired && certTone(report) === 'amber'
+  const warning = certWarning(report)
   const tone = certTone(report)
   return (
     <>
@@ -59,7 +59,11 @@ function CertGrid({ report }: { report: CertReport }) {
       </HairlineGrid>
       {expired ? (
         <Banner tone="amber">{l10n.getString('dashboard-cert-expired')}</Banner>
-      ) : expiringSoon ? (
+      ) : warning === 'quarter' ? (
+        <Banner tone="amber">{l10n.getString('dashboard-cert-quarter')}</Banner>
+      ) : warning === 'half' ? (
+        <Banner tone="amber">{l10n.getString('dashboard-cert-half')}</Banner>
+      ) : tone === 'amber' ? (
         <Banner tone="amber">{l10n.getString('dashboard-cert-expiring-soon')}</Banner>
       ) : null}
     </>

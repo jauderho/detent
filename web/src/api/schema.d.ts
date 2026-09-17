@@ -735,7 +735,7 @@ export interface components {
          *     file bodies.
          * @enum {string}
          */
-        OpKind: "list_modules" | "get_module" | "validate" | "plan" | "apply" | "confirm_commit" | "rollback_commit" | "list_backups" | "restore" | "service_status" | "service_action" | "host_profile" | "audit_query";
+        OpKind: "list_modules" | "get_module" | "validate" | "plan" | "apply" | "confirm_commit" | "rollback_commit" | "list_backups" | "restore" | "service_status" | "service_action" | "host_profile" | "audit_query" | "cert_renew";
         /**
          * @description The operating system family of the host being configured.
          * @enum {string}
