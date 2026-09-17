@@ -503,6 +503,10 @@ dependencies = [
 [[package]]
 name = "detent-acme"
 version = "0.0.1"
+dependencies = [
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "detent-core"
