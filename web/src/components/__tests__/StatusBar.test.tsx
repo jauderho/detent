@@ -28,4 +28,38 @@ describe('StatusBar', () => {
     expect(clock).toBeInTheDocument()
     expect(clock.className).toContain('tabular-nums')
   })
+
+  it('ticks every second and clears the interval on unmount', () => {
+    const callbacks: Array<() => void> = []
+    const cleared: number[] = []
+
+    const originalSetInterval = window.setInterval
+    const originalClearInterval = window.clearInterval
+
+    window.setInterval = ((callback: () => void) => {
+      callbacks.push(callback)
+      return callbacks.length
+    }) as unknown as typeof window.setInterval
+
+    window.clearInterval = ((id: number | undefined) => {
+      if (id !== undefined) cleared.push(id)
+    }) as unknown as typeof window.clearInterval
+
+    try {
+      const { unmount } = renderWithL10n(createLocalization(['en-US']))
+      expect(callbacks.length).toBe(1)
+      expect(cleared.length).toBe(0)
+
+      const tick = callbacks[0]
+      expect(tick).toBeDefined()
+      tick?.()
+      expect(screen.getByText(/^\d{2}:\d{2}:\d{2}$/)).toBeInTheDocument()
+
+      unmount()
+      expect(cleared).toContain(1)
+    } finally {
+      window.setInterval = originalSetInterval
+      window.clearInterval = originalClearInterval
+    }
+  })
 })

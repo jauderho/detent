@@ -230,3 +230,103 @@ describe('createApiClient — 401', () => {
     expect(onUnauthorized).not.toHaveBeenCalled()
   })
 })
+
+describe('createApiClient — request method', () => {
+  it('exposes a generic request entry point', async () => {
+    const { fetch } = stubFetch([jsonResponse({ ok: true })])
+    const client = createApiClient({ fetch })
+
+    const result = await client.request('/api/v1/modules', 'get', {} as never)
+
+    expect(result.ok).toBe(true)
+  })
+})
+
+describe('createApiClient — path parameters', () => {
+  it('throws when a path parameter is missing', async () => {
+    const { fetch } = stubFetch([new Response(null, { status: 204 })])
+    const client = createApiClient({ fetch })
+
+    await expect(client.get('/api/v1/modules/{id}', {} as never)).rejects.toThrow(
+      'missing path parameter "id"',
+    )
+  })
+})
+
+describe('createApiClient — diagnostics narrowing', () => {
+  it('keeps a valid span when one is present', async () => {
+    const { fetch } = stubFetch([
+      jsonResponse(
+        {
+          code: 'unprocessable',
+          message_id: 'ops-invalid-model',
+          diagnostics: [
+            {
+              args: { name: 'x' },
+              id: 'hosts-invalid-hostname',
+              severity: 'error',
+              span: { start: 1, end: 5 },
+            },
+          ],
+        },
+        { status: 422 },
+      ),
+    ])
+    const client = createApiClient({ fetch })
+
+    const result = await client.post('/api/v1/modules/{id}/apply', {
+      path: { id: 'hosts' },
+      body: { model: {} },
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok || result.error.kind !== 'http') return
+    expect(result.error.diagnostics).toEqual([
+      {
+        args: { name: 'x' },
+        id: 'hosts-invalid-hostname',
+        severity: 'error',
+        span: { start: 1, end: 5 },
+      },
+    ])
+  })
+})
+
+describe('createApiClient — Retry-After parsing', () => {
+  it('parses an HTTP-date Retry-After header', async () => {
+    const { fetch } = stubFetch([
+      jsonResponse(
+        { code: 'rate_limited', message_id: 'web-auth-rate-limited' },
+        { status: 429, headers: { 'Retry-After': 'Wed, 21 Oct 2025 07:28:00 GMT' } },
+      ),
+    ])
+    const now = Date.parse('Wed, 21 Oct 2025 07:00:00 GMT')
+    const client = createApiClient({ fetch, now: () => now })
+
+    const result = await client.post('/api/v1/auth/login', {
+      body: { username: 'op', password: 'secret' },
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok || result.error.kind !== 'http') return
+    expect(result.error.retryAfterSeconds).toBe(1680)
+  })
+
+  it('treats a non-numeric, non-date Retry-After header as absent', async () => {
+    const { fetch } = stubFetch([
+      jsonResponse(
+        { code: 'rate_limited', message_id: 'web-auth-rate-limited' },
+        { status: 429, headers: { 'Retry-After': 'soon' } },
+      ),
+    ])
+    const client = createApiClient({ fetch })
+
+    const result = await client.post('/api/v1/auth/login', {
+      body: { username: 'op', password: 'secret' },
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok || result.error.kind !== 'http') return
+    expect(result.error.retryAfterSeconds).toBeNull()
+  })
+})

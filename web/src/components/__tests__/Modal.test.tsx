@@ -101,6 +101,42 @@ describe('Modal', () => {
     expect(commit).toHaveFocus()
   })
 
+  it('wraps Tab forward from the last focusable control to the first', () => {
+    renderWithL10n(
+      <Modal
+        open
+        onClose={mock()}
+        title="pending diff"
+        footer={<Button variant="primary">commit</Button>}
+      >
+        <Button>discard</Button>
+      </Modal>,
+    )
+
+    const close = screen.getByRole('button', { name: 'close' })
+    const commit = screen.getByRole('button', { name: 'commit' })
+    const dialog = screen.getByRole('dialog')
+
+    commit.focus()
+    fireEvent.keyDown(dialog, { key: 'Tab' })
+    expect(close).toHaveFocus()
+  })
+
+  it('prevents Tab navigation when the dialog has no focusable descendants', () => {
+    renderWithL10n(
+      <Modal open onClose={mock()} title="empty">
+        no buttons
+      </Modal>,
+    )
+
+    const dialog = screen.getByRole('dialog')
+    const close = dialog.querySelector('button')
+    close?.remove()
+
+    const event = fireEvent.keyDown(dialog, { key: 'Tab' })
+    expect(event).toBe(false)
+  })
+
   it('restores focus to the trigger when it closes', async () => {
     renderWithL10n(<Fixture />)
     const trigger = screen.getByRole('button', { name: 'review' })

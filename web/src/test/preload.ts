@@ -4,17 +4,22 @@
  * Three things the runtime does not provide on its own:
  *
  * 1. **A DOM.** `bun test` runs in plain Bun, so `document` does not exist
- *    until happy-dom registers itself onto the global object.
+ *    until happy-dom registers itself onto the global object. Older shims
+ *    ship no `ResizeObserver`, which radix-ui's popper needs — see below.
  * 2. **Vite's `?raw` imports.** `src/i18n/index.tsx` loads the Fluent bundle
  *    with `import source from '…/web.ftl?raw'`, which is a Vite convention
  *    Bun's module resolver knows nothing about. A loader plugin reads the file
  *    and hands back its text, exactly as Vite would.
  * 3. **jest-dom's matchers**, which every component test asserts with.
  */
-
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
+import { ensureResizeObserver } from './ensureResizeObserver'
 
 GlobalRegistrator.register()
+
+// happy-dom ships no ResizeObserver; radix-ui's popper (used by
+// ui/tooltip.tsx) measures its content with one as soon as a tooltip opens.
+ensureResizeObserver(globalThis as unknown as Record<string, unknown>)
 
 // Registered before any test module is evaluated, so an `import … from
 // '*.ftl?raw'` anywhere in the graph resolves through this rather than
@@ -35,16 +40,6 @@ const matchers = await import('@testing-library/jest-dom/matchers')
 expect.extend(matchers.default ?? matchers)
 
 const { cleanup } = await import('@testing-library/react')
-
-// happy-dom ships no ResizeObserver; radix-ui's popper (used by
-// ui/tooltip.tsx) measures its content with one as soon as a tooltip opens.
-if (!('ResizeObserver' in globalThis)) {
-  globalThis.ResizeObserver = class {
-    observe(): void {}
-    unobserve(): void {}
-    disconnect(): void {}
-  } as unknown as typeof ResizeObserver
-}
 
 afterEach(() => {
   cleanup()

@@ -100,6 +100,22 @@ describe('collectFieldPaths', () => {
     expect(paths.has('entries/1/comment')).toBe(true)
     expect(paths.has('entries/2/ip')).toBe(false)
   })
+
+  it('walks into nested object controls', () => {
+    const schema = parseSchema({
+      type: 'object',
+      properties: {
+        outer: {
+          type: 'object',
+          properties: { inner: { type: 'string' } },
+        },
+      },
+    })
+    const paths = collectFieldPaths(schema.fields, { outer: { inner: 'x' } })
+
+    expect(paths.has('outer')).toBe(true)
+    expect(paths.has('outer/inner')).toBe(true)
+  })
 })
 
 describe('mapDiagnostics', () => {

@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'bun:test'
 import hostsSchemaSource from '../__fixtures__/hosts.schema.json?raw'
 import type { FieldNode } from '../schema'
-import { defaultObject, MAX_SCHEMA_DEPTH, parseSchema, resolveRef } from '../schema'
+import {
+  defaultObject,
+  defaultValueForNode,
+  MAX_SCHEMA_DEPTH,
+  parseSchema,
+  resolveRef,
+} from '../schema'
 
 const hostsSchema: unknown = JSON.parse(hostsSchemaSource)
 
@@ -267,5 +273,55 @@ describe('defaultObject', () => {
     if (entries.control.type !== 'rows') throw new Error('unreachable')
 
     expect(defaultObject(entries.control.fields)).toEqual({ ip: '', hostnames: [] })
+  })
+})
+
+describe('defaultValueForNode', () => {
+  it('returns the control-specific empty value for each leaf type', () => {
+    expect(defaultValueForNode(only(rootWith({ type: 'string' })))).toBe('')
+    expect(defaultValueForNode(only(rootWith({ type: 'boolean' })))).toBe(false)
+    expect(defaultValueForNode(only(rootWith({ type: 'string', enum: ['a', 'b'] })))).toBe('a')
+    expect(defaultValueForNode(only(rootWith({ type: 'number' })))).toBe(0)
+    expect(defaultValueForNode(only(rootWith({ type: 'number', minimum: 7 })))).toBe(7)
+  })
+
+  it('returns the empty value for containers', () => {
+    expect(
+      defaultValueForNode(only(rootWith({ type: 'array', items: { type: 'string' } }))),
+    ).toEqual([])
+
+    const objectNode = only(
+      rootWith({
+        type: 'object',
+        properties: { name: { type: 'string' } },
+        required: ['name'],
+      }),
+    )
+    expect(defaultValueForNode(objectNode)).toEqual({ name: '' })
+  })
+
+  it('prefers the schema default when present', () => {
+    expect(defaultValueForNode(only(rootWith({ type: 'string', default: 'fallback' })))).toBe(
+      'fallback',
+    )
+  })
+
+  it('returns null for an unsupported control', () => {
+    expect(defaultValueForNode(only(rootWith({ type: ['string', 'number'] })))).toBe(null)
+  })
+})
+
+describe('parseSchema — oneOf enum with null', () => {
+  it('reads a nullable oneOf-of-const spelling', () => {
+    const node = only(rootWith({ oneOf: [{ const: 'a' }, { type: 'null' }] }))
+
+    expect(node.control).toEqual({ type: 'select', options: ['a'] })
+    expect(node.constraints.nullable).toBe(true)
+  })
+
+  it('falls back when a oneOf branch is neither a const nor nullable', () => {
+    const node = only(rootWith({ oneOf: [{ const: 'a' }, { type: 'number' }] }))
+
+    expect(node.control).toEqual({ type: 'unsupported', reason: 'shape' })
   })
 })

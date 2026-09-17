@@ -178,9 +178,8 @@ function deref(root: JsonObject, node: JsonObject, chain: readonly string[]): De
   let current = node
   let seen = chain
 
-  for (;;) {
-    const ref = readString(current, '$ref')
-    if (ref === undefined) return { ok: true, node: current, chain: seen }
+  let ref = readString(current, '$ref')
+  while (ref !== undefined) {
     if (seen.includes(ref)) return { ok: false, reason: 'cycle' }
 
     const target = resolveRef(root, ref)
@@ -188,7 +187,9 @@ function deref(root: JsonObject, node: JsonObject, chain: readonly string[]): De
 
     seen = [...seen, ref]
     current = target
+    ref = readString(current, '$ref')
   }
+  return { ok: true, node: current, chain: seen }
 }
 
 // ── type + enum reading ──────────────────────────────────────────────────────

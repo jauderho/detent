@@ -196,6 +196,48 @@ describe('ModuleDetailPage — states', () => {
   })
 })
 
+describe('ModuleDetailPage — editing', () => {
+  it('clears the validate-clean and applied banners when the model changes', async () => {
+    const user = userEvent.setup()
+    const stub = renderDetail({
+      [AUTH_ROUTE]: () => WRITE_SESSION,
+      [MODULE_ROUTE]: () => jsonResponse(VIEW),
+      [VALIDATE_ROUTE]: () => jsonResponse([]),
+    })
+    await screen.findByLabelText('hostname')
+
+    await user.click(screen.getByRole('button', { name: 'validate' }))
+    expect(
+      await screen.findByText('this configuration passed every check this host runs.'),
+    ).toBeInTheDocument()
+
+    await user.clear(screen.getByLabelText('hostname'))
+    await user.type(screen.getByLabelText('hostname'), 'changed')
+
+    expect(screen.queryByText('this configuration passed every check this host runs.')).toBeNull()
+    expect(stub.calls.filter((each) => each.url === VALIDATE_ROUTE)).toHaveLength(1)
+  })
+
+  it('resets the form to the on-disk model when discard is clicked', async () => {
+    const user = userEvent.setup()
+    renderDetail({
+      [AUTH_ROUTE]: () => WRITE_SESSION,
+      [MODULE_ROUTE]: () => jsonResponse(VIEW),
+    })
+    const field = await screen.findByLabelText('hostname')
+
+    await user.clear(field)
+    await user.type(field, 'changed')
+    expect(field).toHaveValue('changed')
+
+    await user.click(screen.getByRole('button', { name: 'discard edits' }))
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('hostname')).toHaveValue('box')
+    })
+  })
+})
+
 describe('ModuleDetailPage — validate', () => {
   it('shows the clean banner and sends the current model', async () => {
     const user = userEvent.setup()
@@ -233,6 +275,21 @@ describe('ModuleDetailPage — validate', () => {
       ),
     ).toBeInTheDocument()
     expect(screen.queryByText('this configuration passed every check this host runs.')).toBeNull()
+  })
+
+  it('shows a banner when validation fails on the server', async () => {
+    const user = userEvent.setup()
+    renderDetail({
+      [AUTH_ROUTE]: () => WRITE_SESSION,
+      [MODULE_ROUTE]: () => jsonResponse(VIEW),
+      [VALIDATE_ROUTE]: () => errorResponse(422, 'ops-invalid-model', 'invalid_model'),
+    })
+    await screen.findByLabelText('hostname')
+
+    await user.click(screen.getByRole('button', { name: 'validate' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('that configuration is not valid.')
   })
 })
 
@@ -312,6 +369,105 @@ describe('ModuleDetailPage — plan', () => {
     expect(failedItem).not.toHaveTextContent('exit')
     expect(screen.getAllByText('hosts.service').length).toBeGreaterThan(0)
   })
+
+  it('shows a banner when planning fails on the server', async () => {
+    const user = userEvent.setup()
+    renderDetail({
+      [AUTH_ROUTE]: () => WRITE_SESSION,
+      [MODULE_ROUTE]: () => jsonResponse(VIEW),
+      [PLAN_ROUTE]: () => errorResponse(409, 'ops-hash-conflict', 'conflict'),
+    })
+    await screen.findByLabelText('hostname')
+
+    await user.click(screen.getByRole('button', { name: 'plan' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(
+      'the file changed on disk since it was read; re-read it and try again.',
+    )
+  })
+
+  it('closes the plan dialog and returns focus to the plan button', async () => {
+    const user = userEvent.setup()
+    renderDetail({
+      [AUTH_ROUTE]: () => WRITE_SESSION,
+      [MODULE_ROUTE]: () => jsonResponse(VIEW),
+      [PLAN_ROUTE]: () =>
+        jsonResponse({
+          affected_services: [],
+          checks: [],
+          current_hash: CURRENT_HASH,
+          diagnostics: [],
+          diff: [],
+          module: 'hosts',
+          path: '/etc/hosts',
+          rendered: 'unchanged\n',
+          unified_diff: '',
+          would_change: false,
+        }),
+    })
+    await screen.findByLabelText('hostname')
+
+    await user.click(screen.getByRole('button', { name: 'plan' }))
+    const dialog = await screen.findByRole('dialog', { name: 'planned change' })
+    await user.click(within(dialog).getByRole('button', { name: 'cancel' }))
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).toBeNull()
+    })
+    expect(screen.getByRole('button', { name: 'plan' })).toHaveFocus()
+  })
+
+  it('opens the apply dialog from the plan dialog', async () => {
+    const user = userEvent.setup()
+    renderDetail({
+      [AUTH_ROUTE]: () => WRITE_SESSION,
+      [MODULE_ROUTE]: () => jsonResponse(VIEW),
+      [PLAN_ROUTE]: () =>
+        jsonResponse({
+          affected_services: [],
+          checks: [],
+          current_hash: CURRENT_HASH,
+          diagnostics: [],
+          diff: [],
+          module: 'hosts',
+          path: '/etc/hosts',
+          rendered: 'localhost 127.0.0.1\n',
+          unified_diff: '-old line\n+new line\n',
+          would_change: true,
+        }),
+    })
+    await screen.findByLabelText('hostname')
+
+    await user.click(screen.getByRole('button', { name: 'plan' }))
+    const planDialog = await screen.findByRole('dialog', { name: 'planned change' })
+    await user.click(within(planDialog).getByRole('button', { name: 'apply this change' }))
+
+    const applyDialog = await screen.findByRole('dialog', { name: 'apply this change?' })
+    expect(applyDialog).toHaveTextContent('/etc/hosts')
+  })
+})
+
+describe('ModuleDetailPage — apply dialog', () => {
+  it('closes the apply dialog with the cancel button', async () => {
+    const user = userEvent.setup()
+    renderDetail({
+      [AUTH_ROUTE]: () => WRITE_SESSION,
+      [MODULE_ROUTE]: () => jsonResponse(VIEW),
+    })
+    await screen.findByLabelText('hostname')
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'apply' })).not.toBeDisabled()
+    })
+
+    await user.click(screen.getByRole('button', { name: 'apply' }))
+    const dialog = await screen.findByRole('dialog', { name: 'apply this change?' })
+    await user.click(within(dialog).getByRole('button', { name: 'cancel' }))
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).toBeNull()
+    })
+  })
 })
 
 describe('ModuleDetailPage — apply', () => {
@@ -388,5 +544,40 @@ describe('ModuleDetailPage — apply', () => {
       'title',
       'this session carries read access only; it cannot change anything on this host.',
     )
+  })
+
+  it('shows a banner and feeds diagnostics back when apply is rejected', async () => {
+    const user = userEvent.setup()
+    renderDetail({
+      [AUTH_ROUTE]: () => WRITE_SESSION,
+      [MODULE_ROUTE]: () => jsonResponse(VIEW),
+      [APPLY_ROUTE]: () =>
+        jsonResponse(
+          {
+            code: 'invalid_model',
+            diagnostics: [
+              { severity: 'error', id: 'core-hosts-note', field: 'hostname', args: {} },
+            ],
+            message_id: 'ops-invalid-model',
+          },
+          { status: 422 },
+        ),
+    })
+    await screen.findByLabelText('hostname')
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'apply' })).not.toBeDisabled()
+    })
+
+    await user.click(screen.getByRole('button', { name: 'apply' }))
+    const dialog = await screen.findByRole('dialog', { name: 'apply this change?' })
+    await user.click(within(dialog).getByRole('button', { name: 'apply' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('that configuration is not valid.')
+    expect(
+      await screen.findByText(
+        /this host reported a check result this build has no description for/,
+      ),
+    ).toBeInTheDocument()
   })
 })
