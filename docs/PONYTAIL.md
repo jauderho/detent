@@ -38,9 +38,8 @@ net: -1296 lines, -1 deps possible.
 
 ## 2026-09-17 — e4fe5f3 detent-acme seam (crates/detent-acme/src/lib.rs, 437 lines)
 
-- `crates/detent-acme/src/lib.rs:L125: yagni: DnsProvider trait with one impl (HookProvider). Use HookProvider concretely until RFC2136 lands.`
-- `crates/detent-acme/src/lib.rs:L95: yagni: Challenge with zero prod callers (tests only). Build DnsRecord directly until order flow needs it.`
-- `crates/detent-acme/src/lib.rs:L150: yagni: wait_propagated default with zero overriders. Add back with first networked provider.`
-- `crates/detent-acme/src/lib.rs:L206: yagni: Display for HookProvider used only by display test. Delete; Debug covers it.`
+Lean by PLAN Phase 6 (§ DnsProvider trait + RFC2136/Cloudflare/acme-dns/deSEC; order flow vs Pebble next): DnsProvider, Challenge, wait_propagated kept — not YAGNI.
+
+- `crates/detent-acme/src/lib.rs:L206: yagni: Display for HookProvider used only by its display test. Debug covers it.`
 - `crates/detent-acme/src/lib.rs:L184: yagni: state_dir() accessor with zero prod callers. Drop; keep new() + trait methods.`
-- `net: -30 lines possible.`
+- `net: -5 lines possible.`
