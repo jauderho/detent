@@ -9,9 +9,10 @@ phase or a self-contained piece of work finishes.
 
 ## Where things stand — 2026-09-18
 
-**Phase 6 (ACME) in progress — dns-01, profiles, PEM bridge, hot reload,
-serve handle, `AppState.cert_store`, providers, scheduler, attestor, and the
-read-only certificates page landed; renewal wiring remains.**
+**Phase 6 (ACME) done — 6/6 slices landed (dns-01, profiles, PEM bridge, hot reload,
+serve handle, `AppState.cert_store`, providers, scheduler, attestor, read-only
+certificates page, `CertRenew` + half/quarter warnings). Phase 7 (Modules wave 1)
+in progress — resolver.**
 
 Branch: `main`. Everything below is verified on this commit, not assumed.
 
