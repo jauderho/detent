@@ -1,6 +1,15 @@
 /**
  * The guard, end to end: what an operator sees at an address, and where a
  * `401` puts them.
+ *
+ * Every case drives `ROUTES.settings` on purpose. The subject here is the
+ * guard, not a page, and settings is still a placeholder that asks the host
+ * for nothing — so the only request in flight is `AuthProvider`'s session
+ * probe, the call-order `stubFetch` stays sound, and the "no further calls
+ * after the 401" assertion counts what it says it counts. Pointing these at a
+ * real section would silently turn them into tests of that section's queries.
+ * If settings ever grows a query, move these to whatever is still inert
+ * rather than teaching the guard test about page data.
  */
 
 import { screen, waitFor } from '@testing-library/react'
@@ -38,7 +47,7 @@ function DataCall() {
 describe('routing', () => {
   it('sends an unauthenticated visitor from a guarded address to sign-in', async () => {
     const stub = stubFetch([errorResponse(401, 'web-auth-unauthenticated', 'unauthorized')])
-    renderWithProviders(<AppRoutes />, { fetch: stub.fetch, route: ROUTES.modules })
+    renderWithProviders(<AppRoutes />, { fetch: stub.fetch, route: ROUTES.settings })
 
     expect(await screen.findByRole('button', { name: 'sign in' })).toBeInTheDocument()
     expect(screen.queryByText('this section is not built yet.')).toBeNull()
@@ -46,7 +55,7 @@ describe('routing', () => {
 
   it('renders the guarded page for a live session', async () => {
     const stub = stubFetch([jsonResponse(SESSION)])
-    renderWithProviders(<AppRoutes />, { fetch: stub.fetch, route: ROUTES.modules })
+    renderWithProviders(<AppRoutes />, { fetch: stub.fetch, route: ROUTES.settings })
 
     expect(await screen.findByText('this section is not built yet.')).toBeInTheDocument()
   })
@@ -68,7 +77,7 @@ describe('routing', () => {
         <DataCall />
         <AppRoutes />
       </>,
-      { fetch: stub.fetch, route: ROUTES.services },
+      { fetch: stub.fetch, route: ROUTES.settings },
     )
     await screen.findByText('this section is not built yet.')
 

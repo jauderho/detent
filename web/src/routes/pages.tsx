@@ -1,15 +1,18 @@
 /**
- * The routed sections, as named placeholders.
+ * The routed sections that are still placeholders, plus the not-found page.
  *
- * Each one exists so the router, the guard and the nav can be exercised end to
- * end before the sections themselves land; each is a hairline `Panel`
- * (AESTHETIC_CONTRACT.md §5/§6) carrying its own silk-screen caption and
- * nothing else. A later wave replaces the body, not the route.
+ * Certificates and settings stay named placeholders because neither has an
+ * API to drive yet: certificate status arrives with Phase 6 (ACME), and
+ * settings needs the user- and token-management endpoints that `docs/API.md`
+ * does not describe. A placeholder that says so is honest; a page built
+ * against an endpoint that does not exist is not.
+ *
+ * Every other section now has its own file — see `AppRoutes`.
  */
 
 import { Localized, useLocalization } from '@fluent/react'
 import type { ReactNode } from 'react'
-import { Link, useParams } from 'react-router'
+import { Link } from 'react-router'
 import { Panel } from '@/components/Panel'
 import { ROUTES } from './paths'
 
@@ -31,41 +34,6 @@ function Placeholder({ label }: { label: string }) {
       </Localized>
     </Section>
   )
-}
-
-export function DashboardPage() {
-  const { l10n } = useLocalization()
-  return <Placeholder label={l10n.getString('page-dashboard-title')} />
-}
-
-export function ModulesPage() {
-  const { l10n } = useLocalization()
-  return <Placeholder label={l10n.getString('page-modules-title')} />
-}
-
-export function ModuleDetailPage() {
-  const { l10n } = useLocalization()
-  const params = useParams()
-  const id = params.id
-  if (id === undefined) {
-    return <NotFoundPage />
-  }
-  return <Placeholder label={l10n.getString('page-module-detail-title', { module: id })} />
-}
-
-export function ServicesPage() {
-  const { l10n } = useLocalization()
-  return <Placeholder label={l10n.getString('page-services-title')} />
-}
-
-export function BackupsPage() {
-  const { l10n } = useLocalization()
-  return <Placeholder label={l10n.getString('page-backups-title')} />
-}
-
-export function AuditPage() {
-  const { l10n } = useLocalization()
-  return <Placeholder label={l10n.getString('page-audit-title')} />
 }
 
 export function CertificatesPage() {

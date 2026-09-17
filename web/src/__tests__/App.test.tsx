@@ -2,6 +2,12 @@
  * The shell: status bar on top, the section strip, the pending-commit slot,
  * and the routed page beneath them — composed with the providers `main.tsx`
  * wires, so a missing one fails here rather than in a browser.
+ *
+ * The signed-in case sits on `ROUTES.settings`, a section that still asks the
+ * host for nothing. The subject is the frame around a page, not any page, and
+ * parking this on a section with its own queries would make it fail whenever
+ * that section's data shape changed — which is exactly what happened the first
+ * time the real sections landed underneath it.
  */
 
 import { screen } from '@testing-library/react'
@@ -22,7 +28,7 @@ const SESSION: SessionView = {
 describe('App', () => {
   it('frames a signed-in operator with the status bar and the section strip', async () => {
     const stub = stubFetch([jsonResponse(SESSION)])
-    renderWithProviders(<App />, { fetch: stub.fetch, route: ROUTES.audit })
+    renderWithProviders(<App />, { fetch: stub.fetch, route: ROUTES.settings })
 
     expect(await screen.findByText('this section is not built yet.')).toBeInTheDocument()
     expect(screen.getByRole('navigation', { name: 'sections' })).toBeInTheDocument()

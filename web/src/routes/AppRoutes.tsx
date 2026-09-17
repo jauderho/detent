@@ -7,20 +7,16 @@
  */
 
 import { Route, Routes } from 'react-router'
+import { AuditPage } from './AuditPage'
+import { BackupsPage } from './BackupsPage'
+import { DashboardPage } from './DashboardPage'
 import { LoginPage } from './LoginPage'
-import {
-  AuditPage,
-  BackupsPage,
-  CertificatesPage,
-  DashboardPage,
-  ModuleDetailPage,
-  ModulesPage,
-  NotFoundPage,
-  ServicesPage,
-  SettingsPage,
-} from './pages'
+import { ModuleDetailPage } from './ModuleDetailPage'
+import { ModulesPage } from './ModulesPage'
+import { CertificatesPage, NotFoundPage, SettingsPage } from './pages'
 import { ROUTES } from './paths'
 import { RequireAuth } from './RequireAuth'
+import { ServicesPage } from './ServicesPage'
 
 export function AppRoutes() {
   return (
