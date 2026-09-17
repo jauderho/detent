@@ -133,6 +133,16 @@ there and says so; seccomp and the capability drop are the confinement.
 ---
 ## Log
 
+### 2026-09-18 — Pure renewal-scheduling predicates land
+
+`crates/detent-acme/src/schedule.rs` (`4d1af85`): stdlib-only
+`percent_used`/`warning_for`/`should_renew`/`should_renew_in_window` — i128
+math, broken lifetime → 100, skew → 0, renew at ≥66 % before the 75 % warning,
+ARI window narrows with a ≥90 % override. No sleep, no `time` dep (ARI fetch
+stays with the caller; `instant-acme` `time` feature would need ADR-011).
+Commit `4d1af85`. Gates: `detent-acme` 39 pass, 1 ignored; workspace clippy
+`-D warnings` clean; fmt clean; `ring` absent.
+
 ### 2026-09-18 — DNS providers land (Cloudflare/acme-dns/deSEC + RFC 2136 message)
 
 `crates/detent-acme/src/providers.rs` (`1c829db`): four `DnsProvider` impls,
