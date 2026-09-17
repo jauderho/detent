@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "bunx",
+      "args": [
+        "@playwright/mcp@0.0.80",
+        "--headless",
+        "--isolated",
+        "--image-responses",
+        "omit",
+        "--allowed-origins",
+        "http://localhost:4173;http://localhost:5173"
+      ]
+    }
+  }
+}
