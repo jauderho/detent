@@ -1684,7 +1684,8 @@
           "service_status",
           "service_action",
           "host_profile",
-          "audit_query"
+          "audit_query",
+          "cert_renew"
         ]
       },
       "Os": {

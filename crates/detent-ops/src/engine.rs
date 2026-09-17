@@ -238,6 +238,11 @@ impl OpsEngine {
             Operation::AuditQuery(query) => Ok(OpOutcome::Audit(
                 self.audit.query(&query).map_err(OpsError::from)?,
             )),
+            // No `[acme]` config surface yet: cannot order, install, or
+            // hot-swap a certificate. Answered as `Unsupported` (`ops-unsupported`)
+            // so the API renders a disabled control with a reason; full renewal
+            // arrives with the ACME wiring, not here.
+            Operation::CertRenew => Err(OpsError::Unsupported { what: "cert_renew" }),
         }
     }
 

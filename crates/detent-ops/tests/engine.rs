@@ -1391,6 +1391,23 @@ fn the_host_profile_is_reported_from_detection() -> TestResult {
 }
 
 #[test]
+fn cert_renew_is_unsupported_until_acme_lands_and_writes_one_audit_record() -> TestResult {
+    let mut fx = harness(b"v1\n", Setup::default())?;
+    let err = fx.run(Operation::CertRenew);
+    assert!(matches!(
+        err,
+        Err(OpsError::Unsupported { what: "cert_renew" })
+    ));
+    let records = fx.records();
+    assert_eq!(records.len(), 1);
+    let first = records.first().ok_or("the failure was audited")?;
+    assert_eq!(first.op, OpKind::CertRenew);
+    assert_eq!(first.result, AuditResult::Error);
+    assert_eq!(first.error_id.as_deref(), Some("ops-unsupported"));
+    fx.finish()
+}
+
+#[test]
 fn the_audit_log_can_be_queried_back_through_an_operation() -> TestResult {
     let mut fx = harness(b"v1\n", Setup::default())?;
     fx.run(apply("v2\n", None))?;

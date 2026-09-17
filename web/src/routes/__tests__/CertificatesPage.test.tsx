@@ -50,6 +50,28 @@ describe('CertificatesPage', () => {
     expect(screen.getByText('certificates')).toBeInTheDocument()
   })
 
+  it('warns when half the lifetime is used', async () => {
+    const far = Math.floor(Date.now() / 1000) + 300 * 86_400
+    const stub = stubFetchByUrl([
+      ...handlers(report({ not_after_unix: far, lifetime_used_percent: 60 })),
+    ])
+    renderWithProviders(<CertificatesPage />, { fetch: stub.fetch })
+    expect(
+      await screen.findByText('half the certificate lifetime is used; renewal is scheduled.'),
+    ).toBeInTheDocument()
+  })
+
+  it('warns when three quarters of the lifetime is used', async () => {
+    const far = Math.floor(Date.now() / 1000) + 300 * 86_400
+    const stub = stubFetchByUrl([
+      ...handlers(report({ not_after_unix: far, lifetime_used_percent: 80 })),
+    ])
+    renderWithProviders(<CertificatesPage />, { fetch: stub.fetch })
+    expect(
+      await screen.findByText('three quarters of the certificate lifetime is used; renew soon.'),
+    ).toBeInTheDocument()
+  })
+
   it('warns when the certificate is expiring soon', async () => {
     const soon = Math.floor(Date.now() / 1000) + 10 * 86_400
     const stub = stubFetchByUrl([...handlers(report({ not_after_unix: soon }))])
