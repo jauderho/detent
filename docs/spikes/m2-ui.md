@@ -26,10 +26,11 @@ per PLAN §5: it needs a host whose `/etc/hosts` may be written.
 | Responsive | throwaway `noOverflow` spec (deleted after use; script below) | dashboard @1280, module @768, login @390 — all pass, no horizontal scroll |
 
 Screenshots below were captured by that throwaway spec against the stubbed
-preview bundle and viewed during this run (not checked in — the permanent
-suite `web/e2e/console.e2e.ts` + `a11y.e2e.ts` is the regression record, not
-stills). To reproduce: save the script below as `web/e2e/m2shots.e2e.ts`,
-run `cd web && bunx playwright test e2e/m2shots.e2e.ts`, then delete it.
+preview bundle and viewed during this run (checked into `docs/spikes/m2/`
+— the permanent suite `web/e2e/console.e2e.ts` + `a11y.e2e.ts` stays the
+regression record, not stills). To reproduce: save the script below as
+`web/e2e/m2shots.e2e.ts`, run
+`cd web && bunx playwright test e2e/m2shots.e2e.ts`, then delete it.
 `noOverflow` asserts `documentElement.scrollWidth` fits the viewport, so a
 regression fails rather than silently overflowing.
 
@@ -78,7 +79,8 @@ test('m2: login @390', async ({ page }) => {
   so (`e2e/console.e2e.ts`: "a read-only session cannot apply").
 - **The dashboard reads host state.** Hostname, OS, init, distro, memory,
   network/resolver backends, detection notes, module count, recent audit —
-  all from `GET /api/v1/system/profile` + `/audit` (`/tmp/m2-dashboard-1280.png`).
+  all from `GET /api/v1/system/profile` + `/audit`
+  ([dashboard @1280](m2/m2-dashboard-1280.png)).
 - **Module pages plan and apply.** Schema-driven form (`src/forms/`),
   validate → plan (unified diff + upstream checks + affected services) →
   apply with service action → commit-confirm countdown (`PendingCommitSlot`).
@@ -89,7 +91,8 @@ test('m2: login @390', async ({ page }) => {
   diffs) renders inside `.read` / `.readout` / `.verbatim` opt-outs.
   `NetworkManager` stays `NetworkManager`; the plan diff is the bytes that
   would be written (`e2e/console.e2e.ts`: "host text survives the
-  stylesheet", `/tmp/m2-module-1280.png` shows mixed-case values intact).
+  stylesheet"; [module @768](m2/m2-module-768.png) shows mixed-case values
+  intact).
 - **Keyboard and focus hold.** Focus moves into the dialog on open and back
   to the trigger on close; the full apply flow runs keyboard-only; the modal
   no longer restores focus to `document.body` (`Modal.tsx`,
@@ -99,14 +102,14 @@ test('m2: login @390', async ({ page }) => {
   (`e2e/a11y.e2e.ts`, WCAG 2.2 AA). The default is dark, not the OS
   preference (`theme.ts` + `theme-init.js`, byte-identical via
   `build-finish.ts` and pinned in `headers.rs` CSP).
-- **390px fits.** The four fixed nowrap status segments overflowed
-  (`scrollWidth` 487 > 390). Below 560px the segments tighten to 8px padding
-  and the verbose online label hides — the LED still reports it
+- **All three widths fit.** The four fixed nowrap status segments overflowed
+  at 390 (`scrollWidth` 487 > 390). Below 560px the segments tighten to 8px
+  padding and the verbose online label hides — the LED still reports it
   (`index.css`, `StatusBar.tsx` `online-label`, regression test in
   `StatusBar.test.tsx`). Verified by the throwaway `noOverflow` run:
-  dashboard + module @1280 and login @390 all pass
-  (`/tmp/m2-dashboard-1280.png`, `/tmp/m2-module-1280.png`,
-  `/tmp/m2-login-390.png`).
+  dashboard @1280, module @768, and login @390 all pass
+  ([dashboard @1280](m2/m2-dashboard-1280.png),
+  [module @768](m2/m2-module-768.png), [login @390](m2/m2-login-390.png)).
 
 ## Deliberately not shown
 
