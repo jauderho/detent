@@ -1,0 +1,77 @@
+name: Upstream watch
+
+# Compares each module's `upstream.toml` tracked_version against the latest
+# upstream release and opens an issue when they drift (PLAN §2.3, Phase 7
+# acceptance). Test with a fake old tracked_version: the check script takes
+# an optional override (`UPSTREAM_WATCH_FAKE_VERSION=0.0`) so a run can prove
+# the issue path without touching a checked-in file.
+
+on:
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      fake_version:
+        description: "Override tracked_version to prove the issue path (e.g. 0.0)"
+        required: false
+        default: ""
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: read-all
+
+jobs:
+  watch:
+    name: upstream versions
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check upstream versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FAKE_VERSION: ${{ inputs.fake_version }}
+        run: |
+          set -euo pipefail
+          # ponytail: linear scan over a handful of tomls; no matrix needed.
+          failed=0
+          for toml in crates/modules/*/upstream.toml; do
+            id="$(dirname "${toml}" | xargs basename)"
+            tracked="$(sed -n 's/^tracked_version = "\(.*\)"$/\1/p' "${toml}")"
+            feed="$(sed -n 's/^release_feed = "\(.*\)"$/\1/p' "${toml}")"
+            if [[ -n "${FAKE_VERSION}" ]]; then
+              tracked="${FAKE_VERSION}"
+            fi
+            echo "--- ${id}: tracked=${tracked} feed=${feed:-<tags>}"
+            latest=""
+            if [[ -n "${feed}" ]]; then
+              latest="$(curl -fsSL --max-time 30 "${feed}" \
+                | grep -oE '<title>[^<]+</title>' | head -2 | tail -1 \
+                | sed -e 's/<[^>]*>//g' -e 's/^[[:space:]]*//' || true)"
+            fi
+            if [[ -z "${latest}" ]]; then
+              echo "could not determine latest for ${id}; skipping"
+              continue
+            fi
+            if [[ "${latest}" != *"${tracked}"* ]]; then
+              echo "${id} drifted: tracked=${tracked} latest=${latest}"
+              gh issue create \
+                --title "upstream ${id} moved: tracked ${tracked}, latest ${latest}" \
+                --body "Diff docs, add/deprecate options in the schema, add fixtures, bump \`tracked_version\`, add \`since\`. (PLAN §2.3)" \
+                || failed=1
+            fi
+          done
+          exit "${failed}"

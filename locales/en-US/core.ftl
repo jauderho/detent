@@ -24,6 +24,32 @@ hosts-missing-localhost = there is no `localhost` entry.
 hosts-missing-ipv6-localhost = there is no ipv6 `localhost` entry.
 hosts-too-many-entries = this file has {$count} entries; consider dns instead.
 
+## resolver module — display name, security notes, schema tooltips
+resolver-name = resolver
+resolver-note-managed-symlink = on this host /etc/resolv.conf is managed by a resolver backend; detent refuses to edit a managed symlink target and configures the backend instead.
+resolver-tip-resolv = the /etc/resolv.conf directives this module models; anything else in the file is preserved untouched.
+resolver-tip-resolved = the systemd-resolved settings, in file order. Changing them restarts systemd-resolved.
+resolver-tip-unbound = the unbound.conf items this module models, in file order. Changing them restarts unbound.
+
+## resolver module — validation diagnostics
+resolver-no-nameserver = no nameserver is configured.
+resolver-duplicate-nameserver = `{$ip}` appears as more than one nameserver.
+resolver-too-many-nameservers = this file lists {$count} nameservers; glibc reads at most {$max}.
+resolver-invalid-domain = `{$domain}` is not a valid domain name.
+resolver-unknown-option = `{$option}` is not an option glibc's resolv.conf parser accepts.
+resolver-search-and-domain = both `search` and `domain` are present; glibc ignores `domain` when `search` is set.
+resolver-no-config = this model configures no resolver backend at all.
+resolver-backend-missing = these settings configure {$service}, which was not detected on this host.
+resolver-rec-dnssec = DNSSEC is set to allow-downgrade; `DNSSEC=yes` validates strictly and is recommended where upstream data allows it.
+resolver-rec-dot = DNSOverTLS is opportunistic, which downgrades to plaintext; `DNSOverTLS=yes` requires TLS instead.
+resolver-unknown-hardening = `{$key}` is not a directive this module models for unbound.
+resolver-unbound-misplaced = `{$key}` belongs in the {$section} section of unbound.conf, not here.
+resolver-invalid-forward-addr = `{$addr}` is not a valid forward-addr of the form ip[@port][#auth-name].
+resolver-invalid-forward-name = `{$name}` is not a valid forward-zone name.
+resolver-forward-tls-no-auth = this zone forwards over TLS without an `#auth-name` on its forward-addr, so the TLS connection is not authenticated.
+resolver-rec-hardening = `{$key}` is disabled; enabling it hardens unbound against upstream spoofing and delegation abuse.
+resolver-forward-zone-unnamed = a forward-zone: without a name: forwards nothing and weakens the config; give every zone a name.
+
 ## detent-core — parse, model, and edit errors
 ## These are the failures a module's own document model can raise, so they are
 ## prefixed `core-` rather than with a module id.

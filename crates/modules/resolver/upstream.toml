@@ -1,0 +1,23 @@
+# Upstream tracking for the `resolver` module (see docs/PLAN.md §2.3).
+# Kept in sync with `RESOLVER_DESCRIPTOR.upstream` in src/lib.rs — the unit
+# test `upstream_toml_matches_the_descriptor` fails when the two disagree.
+# systemd-resolved, glibc's resolv.conf and unbound ride along under
+# systemd's umbrella: the descriptor's docs list all three upstream manuals.
+
+project = "systemd"
+repo_url = "https://github.com/systemd/systemd.git"
+tracked_version = "257.6"
+docs = [
+  "https://man7.org/linux/man-pages/man5/resolv.conf.5.html",
+  "https://www.freedesktop.org/software/systemd/man/latest/resolved.conf.html",
+  "https://unbound.docs.nlnetlabs.nl/en/latest/manpages/unbound.conf.html",
+]
+
+[fixtures]
+# fixtures/resolver/<dir>/ — real samples this version's parser is held to.
+# `resolved-257` covers `/etc/systemd/resolved.conf` (systemd 257.x);
+# `unbound-1.24` covers `/etc/unbound/unbound.conf` (NLnetLabs 1.24.x, which
+# unbound publishes no release atom feed for, so upstream-watch compares git
+# tags when the feed cannot be reached); `edge` holds the hand-made
+# adversarial cases (CRLF, no trailing newline, tabs, unknown directives).
+dirs = ["glibc-2.42", "resolved-257", "unbound-1.24", "edge"]
