@@ -261,6 +261,12 @@ jobs:
         working-directory: web
         run: bun run test
 
+      # PLAN §5 acceptance: 100% lines on web/src, minus the two generated
+      # shadcn primitives named in scripts/coverage-check.ts.
+      - name: bun run coverage:check
+        working-directory: web
+        run: bun run coverage:check
+
       - name: bun run i18n:check
         working-directory: web
         run: bun run i18n:check

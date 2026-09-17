@@ -17,6 +17,7 @@
     "api:check": "bun scripts/api-check.ts",
     "build:finish": "bun scripts/build-finish.ts",
     "test:coverage": "bun test --coverage",
+    "coverage:check": "bun scripts/coverage-check.ts",
     "e2e": "playwright test"
   },
   "dependencies": {

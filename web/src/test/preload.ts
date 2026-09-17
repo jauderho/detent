@@ -6,10 +6,12 @@
  * 1. **A DOM.** `bun test` runs in plain Bun, so `document` does not exist
  *    until happy-dom registers itself onto the global object. Older shims
  *    ship no `ResizeObserver`, which radix-ui's popper needs — see below.
- * 2. **Vite's `?raw` imports.** `src/i18n/index.tsx` loads the Fluent bundle
- *    with `import source from '…/web.ftl?raw'`, which is a Vite convention
- *    Bun's module resolver knows nothing about. A loader plugin reads the file
- *    and hands back its text, exactly as Vite would.
+ * 2. **Vite's asset imports.** `src/i18n/index.tsx` loads the Fluent bundle
+ *    with `import source from '…/web.ftl?raw'`, and `src/main.tsx` pulls in
+ *    font CSS and `index.css`, all Vite conventions Bun's module resolver
+ *    knows nothing about. Loader plugins hand back the text (for `?raw`) or
+ *    nothing (for `.css`, which only matters to a real browser's paint), so
+ *    importing the entrypoint under test behaves like Vite would.
  * 3. **jest-dom's matchers**, which every component test asserts with.
  */
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
@@ -32,6 +34,9 @@ Bun.plugin({
       const text = await Bun.file(path).text()
       return { contents: `export default ${JSON.stringify(text)}`, loader: 'js' }
     })
+    // Stylesheets only matter to a browser's paint. The entrypoint imports
+    // them for Vite; under test they resolve to nothing.
+    build.onLoad({ filter: /\.css$/ }, () => ({ contents: 'export default {}', loader: 'js' }))
   },
 })
 
