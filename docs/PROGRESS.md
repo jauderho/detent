@@ -41,7 +41,7 @@ Pebble + challtestsrv (Phase 6 spike, `docs/spikes/acme-le.md`).
 service managers), `detent-ops` (the 13 operations, authz, audit),
 `detent-modules` (registry; only `hosts` is implemented), `detent-web` (axum,
 rustls TLS 1.3 only, auth, CSRF, API, SPA serving), `detent` (clap CLI), plus
-`detent-acme`, `detent-update`, `detent-mcp` skeletons.
+`detent-acme` (`DnsProvider`/`HookProvider` + async `order.rs` on `instant-acme =0.8.5`, aws-lc-rs only, `cargo tree -i ring` empty), `detent-update`, `detent-mcp` skeletons.
 
 **Web** (`web/`) — Vite + React 19 + Tailwind v4 + Fluent. Done: design tokens
 and theme rocker, status bar (with locale selector), hairline layout
@@ -131,7 +131,7 @@ there and says so; seccomp and the capability drop are the confinement.
 ## Log
 ### 2026-09-17 — Pebble dns-01 spike, Phase 6 moving
 
-Verified 970 pass / 6 ignored workspace-wide. Commits: `576a6a1` (atomic hook writes), `51083b7` (spike).
+`order.rs` drives `instant-acme 0.8.5` (aws-lc only, `cargo tree -i ring` empty): `account_and_order` (0600 credential cache, pid-suffixed tmp+rename), `present_challenges` (HookProvider file is the contract, test-side bridge POSTs to challtestsrv, `dig` confirms propagation), caller-owned `wait_ready`/`finalize` retry loops, no sleeps in the lib. `tests/pebble_live.rs` (`#[ignore]`) got a real chain from Pebble (2 PEM blocks, serial `48B71D…`, SAN `le.wtf`); assertions stay std-only (PEM→DER, SEQUENCE tag, domain bytes in leaf DER) rather than a new X.509 dep. Transcript + gotchas (`-dnsserver` flag, no `DNSResolver` config key, scratch-built Pebble) in `docs/spikes/acme-le.md`. ARI deferred to the renewal scheduler, which will have a prior cert to `replaces`. Verified 970 pass / 6 ignored workspace-wide. Commits: `576a6a1` (atomic hook writes), `51083b7` (spike).
 
 ### 2026-09-17 — Milestone M2 reached, Phase 6 next
 Phase 6 slice 1 landed (`e4fe5f3`): `DnsProvider` trait + `HookProvider` in `detent-acme`, 13 tests, workspace 965 pass. Next: instant-acme order flow against Pebble (needs cooldown-cleared dep review).
