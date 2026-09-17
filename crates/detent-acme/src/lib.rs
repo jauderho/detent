@@ -1,12 +1,12 @@
 //! ACME: dns-01 providers, device-attest-01 attestors, renewal scheduler, cert store.
 //!
-//! This module is the dns-01 seam of the ACME stack (PLAN Phase 6): a
-//! [`DnsProvider`] publishes and withdraws `_acme-challenge` TXT records, and
-//! the caller — not the provider — drives retry timing. The seam types are
-//! sync and std-only so the first provider can be tested without network
-//! access; the order flow in [`order`] is async (it drives `instant-acme`)
-//! and the RFC2136/Cloudflare/acme-dns/deSEC backends implement the same
-//! trait later.
+//! The dns-01 seam ([`DnsProvider`]) publishes `_acme-challenge` TXT records;
+//! the device-attest-01 seam ([`Attestor`]) builds the CBOR attestation
+//! object; the caller — not the seam — drives retry timing in both cases.
+//! Seam types are sync and std-only so providers and attestors test without
+//! network or hardware; the order flow in [`order`] is async (it drives
+//! `instant-acme`), and networked backends (RFC 2136/Cloudflare/acme-dns/deSEC,
+//! TPM 2.0) implement the same traits later.
 //!
 //! ```text
 //!   Challenge ──▶ DnsRecord ──▶ DnsProvider::present ──▶ (caller polls) ──▶ delete
@@ -21,11 +21,15 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::{fs, io};
 
+pub mod attest;
 pub mod order;
 pub mod providers;
 pub mod schedule;
 
-pub use order::{account_and_order, finalize, present_challenges, wait_ready};
+pub use attest::{Attestor, TestAttestor};
+pub use order::{
+    account_and_order, finalize, present_attest_challenges, present_challenges, wait_ready,
+};
 pub use providers::{AcmeDnsProvider, CloudflareProvider, DeSecProvider, Rfc2136Provider};
 pub use schedule::{Warning, percent_used, should_renew, should_renew_in_window, warning_for};
 
@@ -40,7 +44,7 @@ const HOOK_DIR_MODE: u32 = 0o700;
 // Failures
 // ---------------------------------------------------------------------------
 
-/// Why an ACME dns-01 operation failed.
+/// Why an ACME operation failed.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum AcmeError {
@@ -59,6 +63,9 @@ pub enum AcmeError {
     /// The authorization offered no dns-01 challenge to answer.
     #[error("authorization has no dns-01 challenge")]
     NoDns01Challenge,
+    /// The authorization offered no device-attest-01 challenge to answer.
+    #[error("authorization has no device-attest-01 challenge")]
+    NoDeviceAttestChallenge,
     /// ACME account credentials could not be serialized or parsed.
     #[error("account credentials error: {0}")]
     Credentials(String),

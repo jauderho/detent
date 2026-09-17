@@ -55,6 +55,45 @@ pub async fn present_challenges(
     Ok(())
 }
 
+/// Runs the device-attest-01 challenge presentation step of an order.
+///
+/// For every still-pending authorization it builds the attestation object
+/// through `attestor` and sends it with the ACME server. Authorizations that
+/// are already valid are skipped.
+///
+/// # Errors
+///
+/// [`AcmeError::Acme`] when instant-acme or the attestor fails.
+pub async fn present_attest_challenges(
+    order: &mut Order,
+    attestor: &dyn crate::Attestor,
+) -> Result<(), AcmeError> {
+    use instant_acme::DeviceAttestation;
+    use std::borrow::Cow;
+
+    let mut authorizations = order.authorizations();
+    while let Some(result) = authorizations.next().await {
+        let mut authz = result.map_err(AcmeError::from)?;
+        if !matches!(authz.status, AuthorizationStatus::Pending) {
+            continue;
+        }
+        let mut challenge = authz
+            .challenge(ChallengeType::DeviceAttest01)
+            .ok_or(AcmeError::NoDeviceAttestChallenge)?;
+        let key_authorization = challenge.key_authorization();
+        let key_id = challenge.identifier().to_string();
+        let att_obj = attestor.attest(&key_id, key_authorization.as_str())?;
+        let payload = DeviceAttestation {
+            att_obj: Cow::Borrowed(att_obj.as_slice()),
+        };
+        challenge
+            .send_device_attestation(&payload)
+            .await
+            .map_err(AcmeError::from)?;
+    }
+    Ok(())
+}
+
 /// Polls the order until the server reports `ready` or `invalid`.
 ///
 /// The retry policy owns the timing: no sleeps in this library.
