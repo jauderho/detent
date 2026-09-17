@@ -16,7 +16,7 @@ Branch: `main`. Everything below is verified on this commit, not assumed.
 
 | Check | Command | State |
 |---|---|---|
-| Rust tests | `cargo test --workspace --all-features` | 970 pass, 6 ignored |
+| Rust tests | `cargo test --workspace --all-features` | 972 pass, 6 ignored |
 | Clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean |
 | Format | `cargo fmt --all --check` | clean |
 | Web tests | `cd web && bun run test` | 424 pass, 52 files (`bun test`) |
@@ -41,7 +41,7 @@ Pebble + challtestsrv (Phase 6 spike, `docs/spikes/acme-le.md`).
 service managers), `detent-ops` (the 13 operations, authz, audit),
 `detent-modules` (registry; only `hosts` is implemented), `detent-web` (axum,
 rustls TLS 1.3 only, auth, CSRF, API, SPA serving), `detent` (clap CLI), plus
-`detent-acme` (`DnsProvider`/`HookProvider` + async `order.rs` on `instant-acme =0.8.5`, aws-lc-rs only, `cargo tree -i ring` empty), `detent-update`, `detent-mcp` skeletons.
+`detent-acme` (`DnsProvider`/`HookProvider` + async `order.rs` on `instant-acme =0.8.5`, aws-lc-rs only, `cargo tree -i ring` empty), `detent-update`, `detent-mcp` skeletons. PEM-to-serve bridge landed (`b51aec8`): `CertifiedKeyPair::from_acme_pem` parses `finalize` output into the DER pair `CertStore::replace` swaps live.
 
 **Web** (`web/`) — Vite + React 19 + Tailwind v4 + Fluent. Done: design tokens
 and theme rocker, status bar (with locale selector), hairline layout
