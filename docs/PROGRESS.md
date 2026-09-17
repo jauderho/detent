@@ -7,16 +7,16 @@ phase or a self-contained piece of work finishes.
 
 ---
 
-## Where things stand — 2026-09-17
+## Where things stand — 2026-09-18
 
-**Phases 0–4 complete. Phase 5 (web UI, Milestone M2) — all acceptance
-criteria met except certificates (Phase 6) and settings (needs API).**
+**Phases 0–5 complete. Phase 6 (ACME) in progress — dns-01, profiles, PEM
+bridge, and hot reload landed; providers, attestors, scheduler remain.**
 
 Branch: `main`. Everything below is verified on this commit, not assumed.
 
 | Check | Command | State |
 |---|---|---|
-| Rust tests | `cargo test --workspace --all-features` | 973 pass, 6 ignored |
+| Rust tests | `cargo test --workspace --all-features` | 974 pass, 6 ignored |
 | Clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean |
 | Format | `cargo fmt --all --check` | clean |
 | Web tests | `cd web && bun run test` | 424 pass, 52 files (`bun test`) |
@@ -129,6 +129,13 @@ there and says so; seccomp and the capability drop are the confinement.
 
 ---
 ## Log
+
+### 2026-09-18 — CA profile threads through orders
+
+`account_and_order` takes `profile: Option<&str>` (`334237b`): `None` for
+Pebble (no profiles extension), `Some("shortlived")` for production.
+`profile_selection_serializes_onto_the_order` proves the `NewOrder` body.
+Workspace: 974 pass, 6 ignored; fmt + clippy clean; `cargo tree -i ring` empty.
 
 ### 2026-09-17 — Cert hot reload proved live
 
