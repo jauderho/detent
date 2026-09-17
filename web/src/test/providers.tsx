@@ -19,8 +19,64 @@ export type FetchStub = {
 }
 
 /**
+ * One rule for [`stubFetchByUrl`]: a pattern, and what to answer with.
+ *
+ * The pattern is matched as a substring of the request URL, optionally
+ * prefixed with a method — `'/api/v1/modules'` matches any request whose URL
+ * contains that, while `'POST /api/v1/modules/hosts/apply'` matches only the
+ * write. Rules are tried in order, so put the specific ones first.
+ */
+export type UrlRule = readonly [pattern: string, respond: () => Response]
+
+export type UrlFetchStub = {
+  fetch: typeof globalThis.fetch
+  calls: StubCall[]
+}
+
+/**
+ * A `fetch` that answers by matching the request URL rather than by call order.
+ *
+ * **This is the right stub for any page that issues more than one request.**
+ * [`stubFetch`] answers from a queue, which silently assumes the requests
+ * arrive in the order the test queued the answers — and every page in this
+ * console fires its own query concurrently with `AuthProvider`'s session
+ * probe, so that assumption is not something a test can hold. When the order
+ * flips, one panel is handed another panel's JSON and the failure looks like a
+ * bug in the page.
+ *
+ * `stubFetch` remains correct for a single-request test, and for one that is
+ * deliberately exercising a sequence of answers to the *same* endpoint.
+ */
+export function stubFetchByUrl(rules: readonly UrlRule[]): UrlFetchStub {
+  const calls: StubCall[] = []
+  const fetch = (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input)
+    const method = (init?.method ?? 'GET').toUpperCase()
+    calls.push({ url, init: init ?? {} })
+
+    const rule = rules.find(([pattern]) => {
+      const space = pattern.indexOf(' ')
+      if (space === -1) return url.includes(pattern)
+      return (
+        method === pattern.slice(0, space).toUpperCase() && url.includes(pattern.slice(space + 1))
+      )
+    })
+    if (rule === undefined) {
+      return Promise.reject(new TypeError(`stubFetchByUrl: no rule matches ${method} ${url}`))
+    }
+    // A `Response` body can only be read once, and a rule may match repeatedly.
+    return Promise.resolve(rule[1]().clone())
+  }
+  return { fetch: fetch as unknown as typeof globalThis.fetch, calls }
+}
+
+/**
  * A `fetch` that answers from a queue and records what it was asked for. No
  * test in this suite reaches the network.
+ *
+ * Answers strictly in call order. Use [`stubFetchByUrl`] instead whenever the
+ * component under test can have two requests in flight at once — which is
+ * every page that renders alongside `AuthProvider`'s session probe.
  */
 export function stubFetch(responses: readonly Response[] = []): FetchStub {
   const queue = [...responses]
