@@ -17,15 +17,15 @@ Branch: `main`. Everything below is verified on this commit, not assumed.
 
 | Check | Command | State |
 |---|---|---|
-| Rust tests | `cargo test --workspace --all-features` | 975 pass, 6 ignored |
+| Rust tests | `cargo test --workspace --all-features` | 999 pass, 6 ignored |
 | Clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean |
 | Format | `cargo fmt --all --check` | clean |
-| Web tests | `cd web && bun run test` | 428 pass, 53 files (`bun test`) |
+| Web tests | `cd web && bun run test` | 431 pass, 53 files (`bun test`) |
 | Web coverage | `cd web && bun run coverage:check` | 72 in-scope files at 100% lines |
 | Browser e2e + axe | `cd web && bun run e2e` | 22 pass (Playwright, Chromium) |
 | Web lint | `cd web && bun run lint` | clean (biome) |
 | Web types | `cd web && bun run typecheck` | clean |
-| Web i18n | `cd web && bun run i18n:check` | 253 ids, all referenced, all resolved |
+| Web i18n | `cd web && bun run i18n:check` | 256 ids, all referenced, all resolved |
 | Responsive | `cd web && bun run shots` (`web/e2e-shots/m2shots.e2e.ts`, stills to `/tmp/detent-shots`) | 3 pass (390/768/1280, no horizontal scroll) |
 | CI | 9 jobs (incl. acme-pebble) + Codespell, Lint Code Base, Dependency Review, Scorecard | all green |
 
@@ -39,7 +39,7 @@ Pebble + challtestsrv (Phase 6 spike, `docs/spikes/acme-le.md`).
 
 **Rust** — 19 crates. `detent-core` (CST, model, schema, diag), `detent-i18n`
 (Fluent), `detent-platform` (host detection, privsep monitor/worker, sandbox,
-service managers), `detent-ops` (the 13 operations, authz, audit),
+service managers), `detent-ops` (the 14 operations, authz, audit),
 `detent-modules` (registry; only `hosts` is implemented), `detent-web` (axum,
 rustls TLS 1.3 only, auth, CSRF, API, SPA serving), `detent` (clap CLI), plus
 `detent-acme` (`DnsProvider`/`HookProvider` + async `order.rs` on `instant-acme =0.8.5`, aws-lc-rs only, `cargo tree -i ring` empty), `detent-update`, `detent-mcp` skeletons. PEM-to-serve bridge landed (`b51aec8`): `CertifiedKeyPair::from_acme_pem` parses `finalize` output into the DER pair `CertStore::replace` swaps live.
@@ -132,6 +132,20 @@ there and says so; seccomp and the capability drop are the confinement.
 
 ---
 ## Log
+
+### 2026-09-18 — CertRenew op + half/quarter cert warnings land
+
+`Operation::CertRenew` (`682458c`): engine answers `Unsupported{what:"cert_renew"}`
+(`ops-unsupported`, audited `Error`, one record) until ACME config/scheduler lands;
+`Scope::Write`, `OpKind::CertRenew`, `docs/openapi.json` + `web/src/api/schema.d.ts`
+regenerated together. Web derives amber from `lifetime_used_percent` via
+`certWarning` (half at 50 %, quarter at 75 %, mirroring
+`detent-acme::schedule::warning_for`) with the 30-day wall-clock floor as fallback;
+`dashboard-cert-half|quarter` + `audit-op-cert-renew` Fluent ids; all four banners
+(expired > quarter > half > 30-day) locked in `CertificatesPage` tests, `cert_renew`
+caption in audit `OP_CASES`. Full renewal flow (order/install/`CertStore::replace`)
+stays deferred to the ACME-config phase. Gates: Rust 999 pass, 6 ignored;
+clippy/fmt clean; web 431 pass, typecheck/lint/i18n/api/contrast clean; build OK.
 
 ### 2026-09-18 — Read-only certificates page lands
 
