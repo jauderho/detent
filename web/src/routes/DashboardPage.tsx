@@ -21,7 +21,8 @@ import { GridCell, HairlineGrid } from '@/components/HairlineGrid'
 import { Label } from '@/components/Label'
 import { Panel } from '@/components/Panel'
 import { Readout, Screen } from '@/components/Screen'
-import { formatUnixSeconds, localeOf } from '@/lib/format'
+import { certExpired, certGridItems, certTone } from '@/lib/cert'
+import { localeOf } from '@/lib/format'
 import { auditOpText, auditResultNode, auditRowKey, auditWhenText } from './AuditPage'
 import { ROUTES } from './paths'
 
@@ -157,29 +158,10 @@ function CertPanel() {
   )
 }
 
-/** Expiry tone: amber once inside 30 days or past expiry, blue otherwise. */
-function certTone(report: CertReport): 'blue' | 'amber' {
-  if (report.not_after_unix === null || report.not_after_unix === undefined) return 'blue'
-  const leftMs = report.not_after_unix * 1000 - Date.now()
-  return leftMs < 30 * 86_400 * 1000 ? 'amber' : 'blue'
-}
-
 function CertGrid({ report }: { report: CertReport }) {
   const { l10n } = useLocalization()
-  const locale = localeOf(l10n)
-  const unknown = l10n.getString('state-unknown')
-  const expires =
-    report.not_after_unix === null || report.not_after_unix === undefined
-      ? unknown
-      : (formatUnixSeconds(locale, report.not_after_unix) ?? unknown)
-  const used =
-    report.lifetime_used_percent === null || report.lifetime_used_percent === undefined
-      ? unknown
-      : `${new Intl.NumberFormat(locale).format(report.lifetime_used_percent)}%`
-  const expired =
-    report.not_after_unix !== null &&
-    report.not_after_unix !== undefined &&
-    report.not_after_unix * 1000 < Date.now()
+  const [fingerprint, expires, used] = certGridItems(l10n, report)
+  const expired = certExpired(report)
   const expiringSoon = !expired && certTone(report) === 'amber'
   const tone = certTone(report)
   return (
@@ -190,7 +172,7 @@ function CertGrid({ report }: { report: CertReport }) {
           <Screen>
             {/* Host text, never localized — verbatim so case survives. */}
             <span className="verbatim" style={{ wordBreak: 'break-all' }}>
-              <Readout value={report.fingerprint} tone={tone} />
+              <Readout value={fingerprint} tone={tone} />
             </span>
           </Screen>
         </GridCell>
