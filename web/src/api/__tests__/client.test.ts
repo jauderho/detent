@@ -6,7 +6,7 @@
  * about the request the client built or the value it resolved to.
  */
 
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, mock } from 'bun:test'
 import { jsonResponse, type StubCall, stubFetch } from '@/test/providers'
 import { CSRF_HEADER, createApiClient } from '../client'
 
@@ -124,7 +124,7 @@ describe('createApiClient — error shapes', () => {
   })
 
   it('reports a transport failure as a network error rather than throwing', async () => {
-    const fetch = vi.fn(() => Promise.reject(new TypeError('offline')))
+    const fetch = mock(() => Promise.reject(new TypeError('offline')))
     const client = createApiClient({ fetch: fetch as unknown as typeof globalThis.fetch })
 
     const result = await client.get('/api/v1/modules', {})
@@ -167,7 +167,7 @@ describe('createApiClient — 401', () => {
       ),
     ])
     const client = createApiClient({ fetch })
-    const onUnauthorized = vi.fn()
+    const onUnauthorized = mock()
     client.setUnauthorizedHandler(onUnauthorized)
 
     await client.get('/api/v1/modules', {})
@@ -183,7 +183,7 @@ describe('createApiClient — 401', () => {
       ),
     ])
     const client = createApiClient({ fetch })
-    const onUnauthorized = vi.fn()
+    const onUnauthorized = mock()
     client.setUnauthorizedHandler(onUnauthorized)
 
     await client.get('/api/v1/auth/session', { suppressUnauthorizedEvent: true })
@@ -203,7 +203,7 @@ describe('createApiClient — 401', () => {
       ),
     ])
     const client = createApiClient({ fetch })
-    client.setUnauthorizedHandler(vi.fn())
+    client.setUnauthorizedHandler(mock())
 
     const result = await client.get('/api/v1/modules', {})
 
@@ -221,7 +221,7 @@ describe('createApiClient — 401', () => {
       ),
     ])
     const client = createApiClient({ fetch })
-    const onUnauthorized = vi.fn()
+    const onUnauthorized = mock()
     client.setUnauthorizedHandler(onUnauthorized)
     client.setUnauthorizedHandler(null)
 

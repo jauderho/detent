@@ -1,6 +1,6 @@
+import { describe, expect, it } from 'bun:test'
 import { LocalizationProvider, type ReactLocalization } from '@fluent/react'
 import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
 import { createLocalization } from '@/i18n'
 import { StatusBar } from '../StatusBar'
 

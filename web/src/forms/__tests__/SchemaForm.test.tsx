@@ -1,7 +1,7 @@
+import { describe, expect, it, mock } from 'bun:test'
 import { screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { type ReactNode, useState } from 'react'
-import { describe, expect, it, vi } from 'vitest'
 import { renderWithL10n } from '@/test/l10n'
 import hostsSchemaSource from '../__fixtures__/hosts.schema.json?raw'
 import type { FormDiagnostic } from '../diagnostics'
@@ -82,7 +82,7 @@ describe('SchemaForm — mapping onto the component layer', () => {
       },
       required: ['enabled', 'mode'],
     }
-    const onModel = vi.fn()
+    const onModel = mock()
     renderWithL10n(
       <Harness schema={schema} initial={{ enabled: false, mode: 'dhcp' }} onModel={onModel} />,
     )
@@ -102,7 +102,7 @@ describe('SchemaForm — mapping onto the component layer', () => {
       properties: { port: { type: 'integer', minimum: 1, maximum: 65535 } },
       required: ['port'],
     }
-    const onModel = vi.fn()
+    const onModel = mock()
     renderWithL10n(<Harness schema={schema} initial={{ port: 53 }} onModel={onModel} />)
 
     const input = screen.getByLabelText('port')
@@ -115,7 +115,7 @@ describe('SchemaForm — mapping onto the component layer', () => {
   })
 
   it('writes null when a nullable text field is emptied', async () => {
-    const onModel = vi.fn()
+    const onModel = mock()
     renderWithL10n(
       <Harness
         initial={{ entries: [{ ip: '127.0.0.1', hostnames: ['a'], comment: 'x' }] }}
@@ -217,7 +217,7 @@ describe('SchemaForm — basic / advanced disclosure', () => {
 
 describe('SchemaForm — the row editor', () => {
   it('adds a row built from the required fields, at the end', async () => {
-    const onModel = vi.fn()
+    const onModel = mock()
     renderWithL10n(<Harness onModel={onModel} />)
 
     await userEvent.click(screen.getByRole('button', { name: named('add a row to entries') }))
@@ -232,7 +232,7 @@ describe('SchemaForm — the row editor', () => {
   })
 
   it('removes a row and closes the gap without disturbing the others', async () => {
-    const onModel = vi.fn()
+    const onModel = mock()
     renderWithL10n(<Harness onModel={onModel} />)
 
     await userEvent.click(screen.getByRole('button', { name: named('remove entries row 1') }))
@@ -250,7 +250,7 @@ describe('SchemaForm — the row editor', () => {
         { ip: '3.3.3.3', hostnames: ['c'] },
       ],
     }
-    const onModel = vi.fn()
+    const onModel = mock()
     renderWithL10n(<Harness initial={initial} onModel={onModel} />)
 
     await userEvent.click(screen.getByRole('button', { name: named('move entries row 3 up') }))
@@ -295,7 +295,7 @@ describe('SchemaForm — the row editor', () => {
 
 describe('SchemaForm — the tag list', () => {
   it('adds, edits, removes and reorders items in place', async () => {
-    const onModel = vi.fn()
+    const onModel = mock()
     renderWithL10n(
       <Harness
         initial={{ entries: [{ ip: '1.1.1.1', hostnames: ['a', 'b'] }] }}

@@ -53,7 +53,7 @@ pub const CROSS_ORIGIN_EMBEDDER_POLICY: HeaderName =
 /// `<head>`, which hashes differently and would have been refused by the CSP.
 /// Phase 5, which owns the build, should inject the file rather than let a
 /// copy of it be edited.
-pub const THEME_SCRIPT_SHA256: &str = "3zlYTnQTZuwnL+xrzSWfNYqLqsOtGcI8M5zSwEemRuw=";
+pub const THEME_SCRIPT_SHA256: &str = "n8ZCMTrvqTZT1jopUGZ8VOuIQ0IrMQBU0Xxdc4h9zjE=";
 
 /// The `Content-Security-Policy` of PLAN §2.7, with
 /// [`THEME_SCRIPT_SHA256`] substituted into `script-src`.

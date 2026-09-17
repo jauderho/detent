@@ -11,7 +11,7 @@
  */
 
 import { useLocalization } from '@fluent/react'
-import { type ReactNode, useEffect, useMemo, useState } from 'react'
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { Navigate, useParams } from 'react-router'
 import { resolveApiError } from '@/api/messages'
 import {
@@ -132,6 +132,13 @@ function ModuleDetailView({ id }: { id: string }) {
   const [applyContext, setApplyContext] = useState<ApplyContext | null>(null)
   const [serviceAction, setServiceAction] = useState<ServiceActionValue | ''>('')
 
+  // The control that opened the plan dialog, so closing the dialog can put
+  // focus back on it. `Modal` cannot work this out for itself here: the button
+  // disables itself while the plan request is in flight, which drops focus to
+  // the body before the dialog ever opens, so there is nothing for the dialog
+  // to have captured.
+  const planTrigger = useRef<HTMLButtonElement | null>(null)
+
   const validate = useValidateModule(id)
   const plan = usePlanModule(id)
   const apply = useApplyModule(id)
@@ -236,6 +243,12 @@ function ModuleDetailView({ id }: { id: string }) {
     })
   }
 
+  /** Closes the plan dialog and returns focus to the control that opened it. */
+  function closePlan() {
+    setPlanOpen(false)
+    planTrigger.current?.focus()
+  }
+
   function openApplyFromPlan() {
     if (planReport === null) return
     setServiceAction('')
@@ -328,7 +341,14 @@ function ModuleDetailView({ id }: { id: string }) {
               {view.current_hash === null || view.current_hash === undefined ? (
                 l10n.getString('state-unknown')
               ) : (
-                <Readout value={shortDigest(view.current_hash)} />
+                // A `Readout` lights its value with `--screen-blue`, which
+                // only clears 4.5:1 against the never-themed screen fill — on
+                // the chassis it is a contrast failure, which is how axe found
+                // it. AESTHETIC_CONTRACT.md §4/§12: a lit value belongs on a
+                // `Screen` or it is not a lit value.
+                <Screen className="inline-block px-2 py-1">
+                  <Readout value={shortDigest(view.current_hash)} />
+                </Screen>
               )}
             </FactRow>
             {descriptor.security_notes.length === 0 ? null : (
@@ -377,7 +397,7 @@ function ModuleDetailView({ id }: { id: string }) {
                   ? l10n.getString('module-busy')
                   : l10n.getString('module-action-validate')}
               </Button>
-              <Button onClick={onPlan} disabled={anyPending || model === null}>
+              <Button ref={planTrigger} onClick={onPlan} disabled={anyPending || model === null}>
                 {plan.isPending
                   ? l10n.getString('module-busy')
                   : l10n.getString('module-action-plan')}
@@ -402,9 +422,7 @@ function ModuleDetailView({ id }: { id: string }) {
 
       <Modal
         open={planOpen}
-        onClose={() => {
-          setPlanOpen(false)
-        }}
+        onClose={closePlan}
         title={l10n.getString('module-plan-title')}
         footer={
           <ButtonGroup>
@@ -416,13 +434,7 @@ function ModuleDetailView({ id }: { id: string }) {
             >
               {l10n.getString('module-plan-apply')}
             </Button>
-            <Button
-              onClick={() => {
-                setPlanOpen(false)
-              }}
-            >
-              {l10n.getString('module-cancel')}
-            </Button>
+            <Button onClick={closePlan}>{l10n.getString('module-cancel')}</Button>
           </ButtonGroup>
         }
       >

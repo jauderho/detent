@@ -1,10 +1,21 @@
+import { afterEach, describe, expect, it } from 'bun:test'
 import { render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
 import { SCREEN_BG, SCREEN_BORDER } from '@/styles/screen-constants'
 import { Readout, Screen } from '../Screen'
 
-const SCREEN_BG_RGB = 'rgb(6, 18, 31)'
-const SCREEN_BORDER_RGB = 'rgb(10, 50, 82)'
+/**
+ * Colours are compared across themes rather than against a literal string.
+ * How a DOM serializes an inline colour is its own business — jsdom rewrote
+ * `#06121f` as `rgb(6, 18, 31)` and happy-dom hands back what was authored —
+ * and pinning one spelling tests the engine, not the component. What §4
+ * actually promises is that the value does not move when the theme does, and
+ * that it is the sanctioned constant; both are asserted without caring how it
+ * is written.
+ */
+function colorsOf(surface: HTMLElement): { background: string; border: string } {
+  const computed = window.getComputedStyle(surface)
+  return { background: computed.backgroundColor, border: computed.borderColor }
+}
 
 afterEach(() => {
   document.documentElement.removeAttribute('data-theme')
@@ -23,14 +34,17 @@ describe('Screen', () => {
     if (surface === null) return
 
     document.documentElement.setAttribute('data-theme', 'dark')
-    const dark = window.getComputedStyle(surface)
-    expect(dark.backgroundColor).toBe(SCREEN_BG_RGB)
-    expect(dark.borderColor).toBe(SCREEN_BORDER_RGB)
+    const dark = colorsOf(surface)
 
     document.documentElement.setAttribute('data-theme', 'light')
-    const light = window.getComputedStyle(surface)
-    expect(light.backgroundColor).toBe(SCREEN_BG_RGB)
-    expect(light.borderColor).toBe(SCREEN_BORDER_RGB)
+    const light = colorsOf(surface)
+
+    expect(light).toEqual(dark)
+    // And they are the §4 constants, not merely stable at some other value:
+    // the inline style is what the component wrote, whatever the DOM's own
+    // serialization of it.
+    expect(surface.style.background).toBe(SCREEN_BG)
+    expect(surface.style.borderColor).toBe(SCREEN_BORDER)
   })
 
   it('keeps a zero radius', () => {

@@ -2,7 +2,7 @@
  * The hard rule, tested directly: a `message_id` never reaches a person.
  */
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'bun:test'
 import { createLocalization } from '@/i18n'
 import type { ApiError } from '../client'
 import { API_MESSAGE_IDS, fluentIdForMessageId, resolveApiError } from '../messages'

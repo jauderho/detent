@@ -603,7 +603,7 @@ localized, with schema-driven module forms.
 - Pages: Login (+TOTP), Dashboard (service LEDs, cert status readout, update status, pending commit banner), Module page (schema-driven form: Basic/Advanced, tooltips, recommendations, diff/plan modal, apply + service action, commit-confirm countdown), Services, Backups/Restore, Audit, Settings (users, tokens, locale, update policy), Certificates.
 - Schema-driven form engine: JSON Schema + `x-detent` → shadcn fields (Input, Select, Switch, Combobox, Tag list, IP/CIDR inputs with validation mirroring the backend), array/table editors for entries (hosts rows, exports, shares).
 - State: TanStack Query; no global client state beyond theme/locale/session.
-- Tests: vitest + testing-library (components, form engine, i18n fallback), Playwright e2e against the real binary with bootstrap cert (login, edit hosts, plan, apply, confirm), axe-core, contrast check script, viewport screenshots 390/768/1280.
+- Tests: `bun test` + testing-library (components, form engine, i18n fallback), Playwright e2e + axe-core against the built bundle with a stubbed API, contrast check script, viewport screenshots 390/768/1280. E2e against the *real binary* (bootstrap cert, a writable target) is deferred: the Rust suite already drives the assembled router, and a browser run needs a host whose `/etc/hosts` may be written.
 
 **Tasks**
 1. Tokens/theme/status bar → verify: contract §13 checklist run and recorded; contrast script passes both themes.
@@ -612,7 +612,7 @@ localized, with schema-driven module forms.
 4. i18n → verify: pseudo-locale run shows no untranslated strings; `i18n:check` in CI.
 5. `improve-it` and `frontend-design` skill passes → verify: findings triaged in a doc, applied ones referenced.
 
-**Acceptance:** M2 demo (screenshots in `docs/spikes/m2-ui.md`); vitest 100 % lines on `web/src` (exclude generated shadcn primitives only, listed explicitly); e2e green.
+**Acceptance:** M2 demo (screenshots in `docs/spikes/m2-ui.md`); `bun test --coverage` 100 % lines on `web/src` (exclude generated shadcn primitives only, listed explicitly); e2e and axe green.
 
 **Delegation:** design system + form engine → Fable Low (design quality matters); pages → Sonnet; tests → Sonnet; orchestrator does the contract compliance review.
 
@@ -760,7 +760,7 @@ Both are commit-confirm modules. Network model is backend-neutral (interface →
 
 | Workflow | Trigger | Content |
 |---|---|---|
-| `ci.yml` | PR, push main | fmt, clippy `-D warnings` (all features + minimal feature sets matrix), test (Linux x86_64 + aarch64 via QEMU for musl), `cargo deny`, `cargo audit`, `cargo llvm-cov` (100 % lines gate), web `biome ci` + vitest + Playwright, `i18n:check`, contrast check, `cbindgen --verify`, size-check, shellcheck/shfmt, `checkWorkflows.sh` |
+| `ci.yml` | PR, push main | fmt, clippy `-D warnings` (all features + minimal feature sets matrix), test (Linux x86_64 + aarch64 via QEMU for musl), `cargo deny`, `cargo audit`, `cargo llvm-cov` (100 % lines gate), web `biome ci` + `bun test` + Playwright/axe, `i18n:check`, contrast check, `cbindgen --verify`, size-check, shellcheck/shfmt, `checkWorkflows.sh` |
 | `fuzz.yml` | PR (60 s/target), nightly (20 min/target) | cargo-fuzz all targets; crash artifacts uploaded; corpus cached |
 | `privileged-tests.yml` | PR | docker `--privileged` job for privsep/sandbox tests; systemd container; Alpine OpenRC container |
 | `freebsd.yml` | deferred (§1.6) | — |
@@ -778,7 +778,7 @@ All jobs: `permissions: read-all` default with per-job elevation; `step-security
 - Gate: **100 % line coverage** across the workspace, measured by `cargo llvm-cov` with LCOV slices from Linux (unprivileged), Linux privileged container, FreeBSD VM, and ACME containers merged by `scripts/coverage-merge.sh` (lcov `-a`), then checked by the script (no third-party service).
 - Region coverage reported and ratcheted (`coverage-baseline.json`, never decreases).
 - No `#[cfg(not(coverage))]` or `// LCOV_EXCL` in the codebase. Platform-only code is covered on its platform. If something is genuinely unreachable it should not exist.
-- Web: vitest `--coverage` lines 100 % on `web/src` excluding the explicit list of copied shadcn primitives (which have their own tests upstream).
+- Web: `bun test --coverage` lines 100 % on `web/src` excluding the explicit list of copied shadcn primitives (which have their own tests upstream).
 
 ### 6.3 Testing pyramid
 
@@ -970,7 +970,7 @@ Phase 0 state (still true):
 
 What exists and passes locally:
 - Workspace of 19 crates (`crates/*`, `crates/modules/*`), all empty except the `detent` binary (clap skeleton, mimalloc secure). `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace`, `cargo deny check` pass. Toolchain pinned to 1.98.0.
-- `web/`: Vite + React 19 + TS strict + Tailwind v4 + shadcn (radius 0) + biome + Fluent i18n + vitest (13 tests). Catfu tokens in `web/src/styles/tokens.css`; components `StatusBar`, `ThemeRocker`, `Led`, `Label`, `KickerTag`; nameplate page per `docs/DESIGN_SEED.md`. `bun run lint|typecheck|test|i18n:check|build` pass. Preview via `.claude/launch.json` (`web-preview`, port 4173).
+- `web/`: Vite + React 19 + TS strict + Tailwind v4 + shadcn (radius 0) + biome + Fluent i18n + `bun test` (13 tests). Catfu tokens in `web/src/styles/tokens.css`; components `StatusBar`, `ThemeRocker`, `Led`, `Label`, `KickerTag`; nameplate page per `docs/DESIGN_SEED.md`. `bun run lint|typecheck|test|i18n:check|build` pass. Preview via `.claude/launch.json` (`web-preview`, port 4173).
 - `docs/adr/ADR-001…012`, `docs/DESIGN_SEED.md`, `docs/spikes/00-02`, `CONTRIBUTING.md`, `.github/CODEOWNERS`, stubs for `MODULE_GUIDE.md`/`TRANSLATING.md`.
 - CI: `.github/workflows/ci.yml` (rust, supply-chain incl. cargo-cooldown, coverage gate at 0 % ratchet, web, shell, size, pins) and `fuzz.yml`; Dependabot cooldown 7 days for cargo/bun/docker/actions; `scripts/size-check.sh`, `scripts/coverage-merge.sh`. **Not yet executed on GitHub** — first PR will prove it.
 - Local tooling installed: cargo-llvm-cov, cargo-deny, cargo-audit, cbindgen, cargo-cyclonedx, cargo-auditable, cargo-zigbuild (zig via `uv`; shim at `spikes/bin/zig`), musl/FreeBSD rustup targets. Docker is OrbStack.

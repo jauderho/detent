@@ -12,9 +12,9 @@
  * rather than teaching the guard test about page data.
  */
 
+import { describe, expect, it } from 'bun:test'
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it } from 'vitest'
 import { useApiClient } from '@/api/ApiProvider'
 import type { SessionView } from '@/api/auth'
 import { errorResponse, jsonResponse, renderWithProviders, stubFetch } from '@/test/providers'

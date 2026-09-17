@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'bun:test'
 import { jsonResponse, stubFetch } from '@/test/providers'
 import { fetchBackups } from '../backups'
 import { createApiClient } from '../client'

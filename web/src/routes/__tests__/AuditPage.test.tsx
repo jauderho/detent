@@ -10,9 +10,9 @@
  * of the two concurrent queries fires first.
  */
 
+import { describe, expect, it } from 'bun:test'
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it } from 'vitest'
 import type { SessionView } from '@/api/auth'
 import type { components } from '@/api/schema'
 import type { AuditRecord } from '@/api/system'

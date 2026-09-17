@@ -9,17 +9,19 @@ function isTheme(value: string | null): value is Theme {
   return value === 'dark' || value === 'light'
 }
 
-/** Reads the persisted theme, falling back to the OS preference, then dark. */
+/**
+ * Reads the persisted theme, defaulting to dark.
+ *
+ * Deliberately does **not** consult `prefers-color-scheme`. AGENTS.md fixes
+ * the default as dark, and an OS preference that silently overrode it meant
+ * the console opened light on a light-preferring desktop — not the documented
+ * behaviour, and not what an operator who never touched the toggle was
+ * promised. The toggle is one click and its choice is remembered, so honouring
+ * the system setting buys little and costs a stated guarantee.
+ */
 export function readTheme(): Theme {
   const stored = getItem(STORAGE_KEY)
-  if (isTheme(stored)) return stored
-  if (
-    typeof window !== 'undefined' &&
-    window.matchMedia?.('(prefers-color-scheme: light)').matches
-  ) {
-    return 'light'
-  }
-  return 'dark'
+  return isTheme(stored) ? stored : 'dark'
 }
 
 /** Applies the theme to `<html data-theme>` and persists it. */

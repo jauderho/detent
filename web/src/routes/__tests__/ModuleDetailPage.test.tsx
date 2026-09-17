@@ -8,10 +8,10 @@
  * order.
  */
 
+import { describe, expect, it } from 'bun:test'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { Route, Routes } from 'react-router'
-import { describe, expect, it } from 'vitest'
 import type { ApplyReport, ModuleDescriptor, ModuleView, PlanReport } from '@/api/modules'
 import { PendingCommitSlot } from '@/app/PendingCommit'
 import { errorResponse, jsonResponse, renderWithProviders, type StubCall } from '@/test/providers'

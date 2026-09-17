@@ -1,7 +1,7 @@
+import { afterEach, describe, expect, it } from 'bun:test'
 import { LocalizationProvider } from '@fluent/react'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, describe, expect, it } from 'vitest'
 import { createLocalization } from '@/i18n'
 import { ThemeRocker } from '../ThemeRocker'
 
