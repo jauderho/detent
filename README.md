@@ -134,13 +134,18 @@ backend (`crypto-aws-lc`, `crypto-ring`), and the optional `web`, `ui`,
 ```bash
 cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cd web && bun run test && bun run lint
+cd web && bun run test && bun run lint && bun run e2e
 ```
+
+The web console's unit tests run on `bun test`; `bun run e2e` drives the built
+bundle in Chromium with Playwright and axe-core, so it needs
+`bunx playwright install chromium` once.
 
 [`AGENTS.md`](AGENTS.md) covers coding standards,
 [`AESTHETIC_CONTRACT.md`](AESTHETIC_CONTRACT.md) the UI design contract,
-[`docs/PLAN.md`](docs/PLAN.md) the roadmap and
-[`docs/PROGRESS.md`](docs/PROGRESS.md) the current state.
+[`docs/PLAN.md`](docs/PLAN.md) the roadmap,
+[`docs/PROGRESS.md`](docs/PROGRESS.md) the current state and
+[`docs/TOOLS.md`](docs/TOOLS.md) the toolchain and how to reclaim disk.
 
 ## License
 
