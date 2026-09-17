@@ -1,11 +1,17 @@
+import { afterEach, describe, expect, it, jest, mock, spyOn } from 'bun:test'
 import { act, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
 import { renderWithL10n } from '@/test/l10n'
 import { Countdown, formatMmSs, remainingSeconds } from '../Countdown'
 
-/** Replaces jsdom's matchMedia so the reduced-motion branch can be exercised. */
+/**
+ * Replaces the DOM's `matchMedia` so the reduced-motion branch can be
+ * exercised. The original is captured once and put back after every test, so
+ * a case that stubs it cannot leak a preference into the next one.
+ */
+const REAL_MATCH_MEDIA = globalThis.matchMedia
+
 function stubReducedMotion(reduce: boolean): void {
-  vi.stubGlobal('matchMedia', (query: string) => ({
+  globalThis.matchMedia = ((query: string) => ({
     matches: reduce && query.includes('prefers-reduced-motion'),
     media: query,
     onchange: null,
@@ -14,13 +20,13 @@ function stubReducedMotion(reduce: boolean): void {
     addListener: () => undefined,
     removeListener: () => undefined,
     dispatchEvent: () => false,
-  }))
+  })) as unknown as typeof globalThis.matchMedia
 }
 
 afterEach(() => {
-  vi.unstubAllGlobals()
-  vi.useRealTimers()
-  vi.restoreAllMocks()
+  globalThis.matchMedia = REAL_MATCH_MEDIA
+  jest.useRealTimers()
+  jest.restoreAllMocks()
 })
 
 describe('countdown math', () => {
@@ -41,36 +47,36 @@ describe('countdown math', () => {
 describe('Countdown', () => {
   it('ticks down once a second and fires onExpire exactly once', () => {
     stubReducedMotion(false)
-    vi.useFakeTimers()
-    const onExpire = vi.fn()
+    jest.useFakeTimers()
+    const onExpire = mock()
     const deadline = Date.now() + 3_000
 
     renderWithL10n(<Countdown deadline={deadline} onExpire={onExpire} label="commit window" />)
     expect(screen.getByLabelText('commit window')).toHaveTextContent('00:03')
 
     act(() => {
-      vi.advanceTimersByTime(1_000)
+      jest.advanceTimersByTime(1_000)
     })
     expect(screen.getByLabelText('commit window')).toHaveTextContent('00:02')
     expect(onExpire).not.toHaveBeenCalled()
 
     act(() => {
-      vi.advanceTimersByTime(2_000)
+      jest.advanceTimersByTime(2_000)
     })
     expect(screen.getByLabelText('commit window')).toHaveTextContent('00:00')
     expect(onExpire).toHaveBeenCalledTimes(1)
 
     act(() => {
-      vi.advanceTimersByTime(5_000)
+      jest.advanceTimersByTime(5_000)
     })
     expect(onExpire).toHaveBeenCalledTimes(1)
   })
 
   it('clears its interval on unmount and stops calling back', () => {
     stubReducedMotion(false)
-    vi.useFakeTimers()
-    const clearInterval = vi.spyOn(window, 'clearInterval')
-    const onExpire = vi.fn()
+    jest.useFakeTimers()
+    const clearInterval = spyOn(window, 'clearInterval')
+    const onExpire = mock()
 
     const { unmount } = renderWithL10n(
       <Countdown deadline={Date.now() + 5_000} onExpire={onExpire} label="commit window" />,
@@ -79,7 +85,7 @@ describe('Countdown', () => {
 
     expect(clearInterval).toHaveBeenCalled()
     act(() => {
-      vi.advanceTimersByTime(10_000)
+      jest.advanceTimersByTime(10_000)
     })
     expect(onExpire).not.toHaveBeenCalled()
   })
@@ -89,8 +95,8 @@ describe('Countdown', () => {
     // this is the commit-confirm window. A frame frozen at 02:00 while 30s
     // have elapsed tells the operator they have time they do not have.
     stubReducedMotion(true)
-    vi.useFakeTimers()
-    const onExpire = vi.fn()
+    jest.useFakeTimers()
+    const onExpire = mock()
 
     renderWithL10n(
       <Countdown deadline={Date.now() + 120_000} onExpire={onExpire} label="commit window" />,
@@ -98,13 +104,13 @@ describe('Countdown', () => {
     expect(screen.getByLabelText('commit window')).toHaveTextContent('02:00')
 
     act(() => {
-      vi.advanceTimersByTime(30_000)
+      jest.advanceTimersByTime(30_000)
     })
     expect(screen.getByLabelText('commit window')).toHaveTextContent('01:30')
     expect(onExpire).not.toHaveBeenCalled()
 
     act(() => {
-      vi.advanceTimersByTime(90_000)
+      jest.advanceTimersByTime(90_000)
     })
     expect(screen.getByLabelText('commit window')).toHaveTextContent('00:00')
     expect(onExpire).toHaveBeenCalledTimes(1)

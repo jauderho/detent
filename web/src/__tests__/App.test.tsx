@@ -10,8 +10,8 @@
  * time the real sections landed underneath it.
  */
 
+import { describe, expect, it } from 'bun:test'
 import { screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
 import type { SessionView } from '@/api/auth'
 import { errorResponse, jsonResponse, renderWithProviders, stubFetch } from '@/test/providers'
 import App from '../App'

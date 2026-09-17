@@ -6,9 +6,9 @@
  * gate disabling the restore control.
  */
 
+import { describe, expect, it } from 'bun:test'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it } from 'vitest'
 import type { SessionView } from '@/api/auth'
 import type { BackupInfo, RestoredView } from '@/api/backups'
 import type { ModuleDescriptor } from '@/api/modules'

@@ -7,8 +7,8 @@
  * requests race, so responses are dispatched by URL rather than call order.
  */
 
+import { describe, expect, it } from 'bun:test'
 import { screen, within } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
 import type { ModuleDescriptor } from '@/api/modules'
 import { errorResponse, jsonResponse, renderWithProviders, type StubCall } from '@/test/providers'
 import { ModulesPage } from '../ModulesPage'

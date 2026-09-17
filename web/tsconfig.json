@@ -1,4 +1,14 @@
 {
   "files": [],
-  "references": [{ "path": "./tsconfig.app.json" }, { "path": "./tsconfig.node.json" }]
+  "references": [{ "path": "./tsconfig.app.json" }, { "path": "./tsconfig.node.json" }],
+  // This solution file compiles nothing — `tsc -b` delegates to the two
+  // references above, each of which declares this same `paths` mapping for the
+  // sources it owns. It is repeated here because `bun test` resolves `@/…`
+  // by reading the *root* tsconfig and does not follow project references,
+  // so without it every import through the alias fails to resolve.
+  "compilerOptions": {
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  }
 }

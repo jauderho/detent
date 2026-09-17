@@ -111,6 +111,14 @@ there and says so; seccomp and the capability drop are the confinement.
 
 ## Log
 
+### 2026-09-16 — checkpoint hygiene
+
+Scratch scripts and one-off tools belong under `/tmp`, never in the repo —
+`scripts/` holds CI-running helpers only. Claude's `scripts/clean.sh` was
+dropped from the Phase 5 checkpoint for this reason; its `docs/TOOLS.md`
+reference stays missing until the owner fills it in. Harness: keep excluding
+it (and any new scratch) from commits.
+
 ### 2026-09-16 — Phase 5 route pages
 
 Dashboard, modules, module detail, services, backups and audit are real pages

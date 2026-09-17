@@ -222,7 +222,7 @@ jobs:
           retention-days: 14
 
   web:
-    name: Web (bun, biome, vitest, i18n, build)
+    name: Web (bun, biome, bun test, i18n, build)
     runs-on: ubuntu-26.04
     steps:
       - name: Harden Runner

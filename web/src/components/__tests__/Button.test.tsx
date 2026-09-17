@@ -1,6 +1,6 @@
+import { describe, expect, it, mock } from 'bun:test'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
 import { Button, ButtonGroup } from '../Button'
 
 describe('Button', () => {
@@ -26,7 +26,7 @@ describe('Button', () => {
   })
 
   it('is keyboard operable and blocks activation when disabled', async () => {
-    const onClick = vi.fn()
+    const onClick = mock()
     render(
       <>
         <Button onClick={onClick}>go</Button>

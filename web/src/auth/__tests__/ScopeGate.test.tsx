@@ -3,8 +3,8 @@
  * never live until the server answers `403`.
  */
 
+import { describe, expect, it } from 'bun:test'
 import { screen, waitFor } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
 import type { SessionView } from '@/api/auth'
 import { Button } from '@/components/Button'
 import { errorResponse, jsonResponse, renderWithProviders, stubFetch } from '@/test/providers'

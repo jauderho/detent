@@ -2,3 +2,10 @@
 exact = true
 minimumReleaseAge = 604800
 minimumReleaseAgeExcludes = []
+
+[test]
+# See src/test/preload.ts: registers a DOM, teaches Bun Vite's `?raw` imports,
+# and installs jest-dom's matchers. Every test file needs all three, so this is
+# a preload rather than an import each file would have to remember.
+preload = ["./src/test/preload.ts"]
+coverageSkipTestFiles = true

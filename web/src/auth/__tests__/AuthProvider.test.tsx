@@ -3,9 +3,9 @@
  * the operator back at sign-in, with no crash and no loop.
  */
 
+import { describe, expect, it } from 'bun:test'
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it } from 'vitest'
 import { useApiClient } from '@/api/ApiProvider'
 import type { SessionView } from '@/api/auth'
 import { type ApiClient, createApiClient } from '@/api/client'

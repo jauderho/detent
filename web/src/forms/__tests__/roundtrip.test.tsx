@@ -1,7 +1,7 @@
+import { describe, expect, it } from 'bun:test'
 import { screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { type ReactNode, useState } from 'react'
-import { describe, expect, it } from 'vitest'
 import { renderWithL10n } from '@/test/l10n'
 import hostsSchemaSource from '../__fixtures__/hosts.schema.json?raw'
 import { getAtPath, isJsonObject, type JsonValue, parseJsonValue } from '../json'

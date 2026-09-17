@@ -9,8 +9,8 @@
  * responses are matched by URL rather than by call order.
  */
 
+import { describe, expect, it } from 'bun:test'
 import { screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
 import type { SessionView } from '@/api/auth'
 import type { ModuleDescriptor } from '@/api/modules'
 import type { AuditRecord, HostReport } from '@/api/system'

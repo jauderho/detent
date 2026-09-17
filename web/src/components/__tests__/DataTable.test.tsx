@@ -1,5 +1,5 @@
+import { describe, expect, it } from 'bun:test'
 import { screen, within } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
 import { renderWithL10n } from '@/test/l10n'
 import { DataTable, type DataTableColumn } from '../DataTable'
 

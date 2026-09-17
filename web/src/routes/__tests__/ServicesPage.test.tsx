@@ -5,9 +5,9 @@
  * flow through to the mutation, and the write gate disabling the controls.
  */
 
+import { describe, expect, it } from 'bun:test'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it } from 'vitest'
 import type { SessionView } from '@/api/auth'
 import type { ModuleDescriptor } from '@/api/modules'
 import type { ServiceCommand, ServiceReport, ServiceStatus } from '@/api/services'

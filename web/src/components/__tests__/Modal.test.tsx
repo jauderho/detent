@@ -1,7 +1,7 @@
+import { describe, expect, it, mock } from 'bun:test'
 import { fireEvent, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
-import { describe, expect, it, vi } from 'vitest'
 import { renderWithL10n } from '@/test/l10n'
 import { Button } from '../Button'
 import { Modal } from '../Modal'
@@ -34,7 +34,7 @@ function Fixture() {
 describe('Modal', () => {
   it('carries the dialog role, modal flag and an accessible name', () => {
     renderWithL10n(
-      <Modal open onClose={vi.fn()} title="pending diff">
+      <Modal open onClose={mock()} title="pending diff">
         body
       </Modal>,
     )
@@ -46,7 +46,7 @@ describe('Modal', () => {
 
   it('renders nothing while closed', () => {
     renderWithL10n(
-      <Modal open={false} onClose={vi.fn()} title="pending diff">
+      <Modal open={false} onClose={mock()} title="pending diff">
         body
       </Modal>,
     )
@@ -56,7 +56,7 @@ describe('Modal', () => {
 
   it('moves focus to the first focusable control on open', () => {
     renderWithL10n(
-      <Modal open onClose={vi.fn()} title="pending diff">
+      <Modal open onClose={mock()} title="pending diff">
         <Button>discard</Button>
       </Modal>,
     )
@@ -65,7 +65,7 @@ describe('Modal', () => {
   })
 
   it('closes on Escape', async () => {
-    const onClose = vi.fn()
+    const onClose = mock()
     renderWithL10n(
       <Modal open onClose={onClose} title="pending diff">
         <Button>discard</Button>
@@ -81,7 +81,7 @@ describe('Modal', () => {
     renderWithL10n(
       <Modal
         open
-        onClose={vi.fn()}
+        onClose={mock()}
         title="pending diff"
         footer={<Button variant="primary">commit</Button>}
       >

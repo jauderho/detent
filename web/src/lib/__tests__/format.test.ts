@@ -1,6 +1,6 @@
+import { describe, expect, it } from 'bun:test'
 import { FluentBundle } from '@fluent/bundle'
 import { ReactLocalization } from '@fluent/react'
-import { describe, expect, it } from 'vitest'
 import {
   formatBytes,
   formatDateTime,

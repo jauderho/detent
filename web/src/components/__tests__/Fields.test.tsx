@@ -1,6 +1,6 @@
+import { describe, expect, it, mock } from 'bun:test'
 import { screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
 import { renderWithL10n } from '@/test/l10n'
 import { NumberField } from '../NumberField'
 import { SelectField } from '../SelectField'
@@ -42,7 +42,7 @@ describe('TextField', () => {
   })
 
   it('accepts typed input', async () => {
-    const onChange = vi.fn()
+    const onChange = mock()
     renderWithL10n(<TextField label="hostname" onChange={onChange} />)
 
     await userEvent.type(screen.getByLabelText('hostname'), 'nas')
@@ -83,7 +83,7 @@ describe('SelectField', () => {
   ] as const
 
   it('renders its options and is selectable from the keyboard', async () => {
-    const onChange = vi.fn()
+    const onChange = mock()
     renderWithL10n(
       <SelectField label="addressing" options={options} defaultValue="dhcp" onChange={onChange} />,
     )
@@ -109,7 +109,7 @@ describe('SelectField', () => {
 
 describe('SwitchField', () => {
   it('is a labelled role=switch, not a checkbox pill', () => {
-    renderWithL10n(<SwitchField label="ipv6" checked={false} onCheckedChange={vi.fn()} />)
+    renderWithL10n(<SwitchField label="ipv6" checked={false} onCheckedChange={mock()} />)
     const toggle = screen.getByRole('switch', { name: 'ipv6' })
 
     expect(toggle).toHaveClass('switch')
@@ -118,7 +118,7 @@ describe('SwitchField', () => {
   })
 
   it('toggles from the keyboard', async () => {
-    const onCheckedChange = vi.fn()
+    const onCheckedChange = mock()
     renderWithL10n(<SwitchField label="ipv6" checked={false} onCheckedChange={onCheckedChange} />)
 
     screen.getByRole('switch', { name: 'ipv6' }).focus()
@@ -128,7 +128,7 @@ describe('SwitchField', () => {
   })
 
   it('reflects the checked state and localizes its on/off cells', () => {
-    renderWithL10n(<SwitchField label="ipv6" checked onCheckedChange={vi.fn()} />)
+    renderWithL10n(<SwitchField label="ipv6" checked onCheckedChange={mock()} />)
 
     expect(screen.getByRole('switch', { name: 'ipv6' })).toHaveAttribute('aria-checked', 'true')
     expect(screen.getByText('on')).toHaveClass('switch-cell', 'is-on')
@@ -140,7 +140,7 @@ describe('SwitchField', () => {
       <SwitchField
         label="ipv6"
         checked={false}
-        onCheckedChange={vi.fn()}
+        onCheckedChange={mock()}
         error="locked by policy"
       />,
     )

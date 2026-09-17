@@ -6,9 +6,9 @@
  * must never do is put a `message_id` in front of an operator.
  */
 
+import { describe, expect, it } from 'bun:test'
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it } from 'vitest'
 import type { SessionView } from '@/api/auth'
 import { CSRF_HEADER } from '@/api/client'
 import { errorResponse, jsonResponse, renderWithProviders, stubFetch } from '@/test/providers'

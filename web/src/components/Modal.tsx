@@ -44,8 +44,15 @@ export function Modal({ open, onClose, title, children, footer, className }: Mod
 
   useEffect(() => {
     if (!open) return
+    // `document.body` is not a place focus was: it is where focus *fell* when
+    // whatever the operator was on stopped being focusable — a trigger button
+    // that disabled itself while its request was in flight, most often.
+    // Restoring to it on close would move focus back to the top of the page
+    // and silently discard a keyboard user's position, so a caller that knows
+    // better is left to place focus itself.
+    const active = document.activeElement
     const previouslyFocused =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null
+      active instanceof HTMLElement && active !== document.body ? active : null
     const dialog = dialogRef.current
     const first = dialog === null ? null : focusableWithin(dialog)[0]
     ;(first ?? dialog)?.focus()

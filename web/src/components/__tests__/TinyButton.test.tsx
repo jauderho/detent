@@ -1,6 +1,6 @@
+import { describe, expect, it, mock } from 'bun:test'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
 import { TinyButton } from '../TinyButton'
 
 describe('TinyButton', () => {
@@ -21,7 +21,7 @@ describe('TinyButton', () => {
   })
 
   it('fires onClick from the keyboard', async () => {
-    const onClick = vi.fn()
+    const onClick = mock()
     render(<TinyButton onClick={onClick}>rnd</TinyButton>)
 
     screen.getByRole('button', { name: 'rnd' }).focus()

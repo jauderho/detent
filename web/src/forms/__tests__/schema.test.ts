@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'bun:test'
 import hostsSchemaSource from '../__fixtures__/hosts.schema.json?raw'
 import type { FieldNode } from '../schema'
 import { defaultObject, MAX_SCHEMA_DEPTH, parseSchema, resolveRef } from '../schema'
