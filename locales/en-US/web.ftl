@@ -2,13 +2,6 @@
 ## Source of truth for every user-facing string in web/src. IDs referenced via
 ## <Localized id="…"> or l10n.getString("…"). Keep alphabetized by section.
 
-## Nameplate / hero
-app-designation = detent.
-app-lede = the busybox of config files — one console for hosts, resolver, chrony, mounts, and more.
-kicker-model = dt-7
-kicker-class = config console
-kicker-rev = rev. e
-
 ## Status bar
 status-brand = detent
 status-online = system online
@@ -26,13 +19,6 @@ component-modal-close = close
 component-switch-off = off
 component-switch-on = on
 component-table-empty = no records
-
-## hstats readout strip
-hstat-services-active-label = services active
-hstat-pending-commit-label = pending commit
-hstat-cert-expiry-label = cert time-to-expiry
-hstat-update-state-label = update state
-hstat-uptime-label = uptime
 
 ## API failures
 ## docs/API.md: every failure is `{ code, message_id }`, and `message_id` is a
@@ -116,7 +102,9 @@ nav-certificates = certificates
 nav-settings = settings
 
 ## Routed pages
-## Every section beyond sign-in is a named placeholder until its own wave.
+## Certificates and settings are still named placeholders: neither has an API
+## to drive. Certificates waits on Phase 6 (ACME); settings waits on the user
+## and token endpoints.
 page-placeholder-body = this section is not built yet.
 page-dashboard-title = dashboard
 page-modules-title = modules
@@ -133,6 +121,149 @@ page-not-found-home = go to the dashboard
 ## Pending commit
 pending-commit-message = a configuration change is waiting to be confirmed; it rolls back on its own when this window closes.
 pending-commit-countdown-label = time left to confirm
+
+## Shared page states
+## Every section is a query away from its data, so loading, failure and "this
+## host has none of these" are shared rather than re-worded per page.
+state-loading = loading
+state-unknown = unknown
+value-no = no
+value-yes = yes
+
+## Dashboard
+dashboard-host-panel = host
+dashboard-host-hostname = host name
+dashboard-host-os = operating system
+dashboard-host-init = init system
+dashboard-host-distro = distribution
+dashboard-host-ram = memory
+dashboard-host-network-backend = network backend
+dashboard-host-resolver-backend = resolver backend
+dashboard-host-notes = detection notes
+dashboard-modules-panel = modules
+dashboard-modules-count = {$count ->
+    [one] one module is compiled into this build.
+   *[other] {$count} modules are compiled into this build.
+}
+dashboard-audit-panel = recent activity
+dashboard-view-all = view all
+
+## Modules
+modules-panel-label = installed modules
+modules-col-module = module
+modules-col-targets = files
+modules-col-services = services
+modules-col-commit-confirm = commit-confirm
+modules-commit-confirm-required = required
+modules-commit-confirm-not-required = not required
+modules-empty = this build has no modules compiled into it.
+modules-none = none
+
+## One module
+module-about-panel = module
+module-configuration-panel = configuration
+module-upstream-label = tracks upstream
+module-targets-label = files
+module-services-label = services
+module-current-hash-label = digest on disk
+module-security-notes-label = security notes
+module-model-missing = this module's file does not exist on this host yet. the form below starts from the module's own defaults, and applying it creates the file.
+module-action-validate = validate
+module-action-plan = plan
+module-action-apply = apply
+module-action-discard = discard edits
+module-busy = working
+module-validate-clean = this configuration passed every check this host runs.
+module-plan-title = planned change
+module-plan-no-change = this configuration matches what is already on disk; there is nothing to apply.
+module-plan-diff-label = diff
+module-plan-checks-label = upstream checks
+module-plan-check-passed = passed
+module-plan-check-failed = failed
+module-plan-check-exit = exit {$code}
+module-plan-services-label = services this would affect
+module-plan-apply = apply this change
+module-apply-title = apply this change?
+module-apply-body = this writes {$path} on this host. the current contents are backed up first.
+module-apply-commit-confirm = this module can lock an administrator out, so the change arms a commit-confirm window: it rolls back on its own unless you confirm it before the deadline.
+module-apply-service-label = afterwards
+module-apply-service-none = leave the service alone
+module-apply-cancel = cancel
+module-applied = the change was written to {$path}.
+module-applied-created = {$path} did not exist and was created.
+module-cancel = cancel
+
+## Services
+services-panel-label = services
+services-col-module = module
+services-col-unit = unit
+services-col-state = state
+services-col-enabled = at boot
+services-col-since = since
+services-col-actions = actions
+services-state-active = active
+services-state-inactive = inactive
+services-state-failed = failed
+services-state-activating = starting
+services-state-deactivating = stopping
+services-state-unknown = unknown
+services-action-restart = restart
+services-action-reload = reload
+services-action-start = start
+services-action-stop = stop
+services-acted = {$unit}: {$detail}
+services-empty = no module in this build controls a service on this host.
+services-confirm-title = {$action} {$unit}?
+services-confirm-body = this acts on the running service immediately.
+services-confirm-cancel = cancel
+
+## Backups
+backups-col-name = backup
+backups-col-created = taken
+backups-col-size = size
+backups-col-digest = digest
+backups-col-actions = actions
+backups-action-restore = restore
+backups-confirm-title = restore this backup?
+backups-confirm-body = this replaces {$target} with the retained copy. the current contents are backed up first.
+backups-confirm-cancel = cancel
+backups-restored = the backup was restored.
+backups-empty = nothing has been backed up for this module yet.
+backups-module-panel = {$module} backups
+
+## Audit log
+audit-panel-label = audit log
+audit-col-when = when
+audit-col-who = caller
+audit-col-how = credential
+audit-col-op = operation
+audit-col-module = module
+audit-col-result = result
+audit-filter-module-label = module
+audit-filter-who-label = caller
+audit-filter-limit-label = rows
+audit-filter-apply = filter
+audit-filter-clear = clear
+audit-empty = nothing has been recorded on this host yet.
+audit-result-ok = ok
+audit-result-denied = denied
+audit-result-error = failed
+audit-identity-local-user = local user
+audit-identity-session = session
+audit-identity-token = api token
+audit-op-list-modules = list modules
+audit-op-get-module = read module
+audit-op-validate = validate
+audit-op-plan = plan
+audit-op-apply = apply
+audit-op-confirm-commit = confirm commit
+audit-op-rollback-commit = roll back commit
+audit-op-list-backups = list backups
+audit-op-restore = restore backup
+audit-op-service-status = read service status
+audit-op-service-action = act on service
+audit-op-host-profile = read host profile
+audit-op-audit-query = read audit log
 
 ## Schema-driven module forms
 ## Chrome the form engine (web/src/forms) renders around a module's schema.

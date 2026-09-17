@@ -105,6 +105,34 @@ p {
   letter-spacing: 0.04em;
 }
 
+/*
+ * Data surfaces opt out of the body's lowercase.
+ *
+ * §1's "lowercase by default" is about typography — hierarchy from layout and
+ * weight rather than grammar — and it holds for every word this console
+ * writes. It must not hold for words the *host* supplies. `NetworkManager`
+ * rendered as `networkmanager` is a daemon name an operator cannot paste into
+ * a shell; `hosts.20260916T123456Z` loses the `T` and `Z` that make it a
+ * timestamp; `MiB` stops being the IEC symbol and becomes a word. Lowercasing
+ * a value is an edit to it, and this console does not edit what the host said.
+ *
+ * Localized copy that lands in these elements is already written lowercase in
+ * web.ftl, so nothing here changes how the console's own words look.
+ *
+ * `.verbatim` is the same opt-out for host text that lands somewhere other
+ * than a readout or a table cell — detection notes, a service manager's reply,
+ * and above all the unified diff in the plan dialog. That diff is the file an
+ * operator is about to write, and showing it in a case it will not be written
+ * in is the one rendering bug on this page that could get a change approved on
+ * the strength of bytes that are not the bytes.
+ */
+.read,
+.readout,
+.dtable td,
+.verbatim {
+  text-transform: none;
+}
+
 /* ── mechanical motion — steps()/step-end only, §9 ──────────────── */
 @keyframes led-blink {
   0%,

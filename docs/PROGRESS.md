@@ -18,7 +18,7 @@ Branch: `main`. Everything below is verified on this commit, not assumed.
 | Rust tests | `cargo test --workspace --all-features` | 952 pass, 5 ignored |
 | Clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean |
 | Format | `cargo fmt --all --check` | clean |
-| Web tests | `cd web && bun run test` | 254 pass, 32 files |
+| Web tests | `cd web && bun run test` | 333 pass, 39 files |
 | Web lint | `cd web && bun run lint` | clean (biome) |
 | Web types | `cd web && bun run typecheck` | clean |
 | CI | 8 jobs + Codespell, Lint Code Base, Dependency Review, Scorecard | all green |
@@ -43,9 +43,13 @@ generated from `docs/openapi.json`, `AuthProvider`/`ScopeGate`, router with
 `RequireAuth`, the login page, and the **schema-driven form engine**
 (`src/forms/`) with validation mirroring the backend.
 
-**Not done in `web/`** — the seven routed sections are placeholders
-(`src/routes/pages.tsx`): dashboard, module detail, services, backups, audit,
-settings, certificates. Also missing: Playwright e2e, axe-core, the i18n
+Routed sections: dashboard, modules, module detail, services, backups and
+audit are real pages, each in its own file under `src/routes/`.
+
+**Not done in `web/`** — certificates and settings are still placeholders in
+`src/routes/pages.tsx`, deliberately: neither has an API to drive. Certificates
+waits on Phase 6 (ACME); settings needs user- and token-management endpoints
+that do not exist. Also missing: Playwright e2e, axe-core, the i18n
 pseudo-locale and language switcher, and vitest 100% on `src`.
 
 ### Traps worth knowing before you touch anything
@@ -69,6 +73,16 @@ pseudo-locale and language switcher, and vitest 100% on `src`.
   unrun for exactly this reason.
 - **`scripts/checkWorkflows.sh` re-triggers failed GitHub workflows.** Pass its
   `DRY_RUN` flag unless you mean to dispatch.
+- **The body is `text-transform: lowercase`** (AESTHETIC_CONTRACT §1), which
+  would edit host-supplied text on its way to the screen. `.read`, `.readout`,
+  `.dtable td` and `.verbatim` opt out. **Put host text inside one of them** —
+  a unit name, a path, a digest, a diff. `NetworkManager` shown as
+  `networkmanager` is a daemon an operator cannot paste into a shell, and a
+  lowercased diff is not the bytes that will be written.
+- **`stubFetch` in `src/test/providers.tsx` answers in call order**, which no
+  page can rely on — every one of them races `AuthProvider`'s session probe.
+  Use `stubFetchByUrl`. Three separate tasks each hit this and each invented
+  their own copy before it was shared.
 
 ### Test hosts
 
@@ -96,6 +110,32 @@ there and says so; seccomp and the capability drop are the confinement.
 ---
 
 ## Log
+
+### 2026-09-16 — Phase 5 route pages
+
+Dashboard, modules, module detail, services, backups and audit are real pages
+now, built on the form engine and typed hooks that already existed. Six new
+files under `src/routes/`, 333 vitest tests.
+
+Three defects worth remembering, all found in review rather than by a test:
+
+- **Host text was being lowercased on its way to the screen** by the body's
+  `text-transform`. Worst instance was the plan dialog's unified diff — the
+  operator approves an apply on the strength of those bytes, and they were not
+  the bytes. `.verbatim` is the opt-out; see the traps above.
+- **The module page's outcome banners never cleared on edit.** "passed every
+  check" stayed on screen after the model it described had been changed — the
+  one stale state that tells an operator it is safe to stop.
+- **The apply dialog's service-action menu showed raw enum values**, though
+  `services-action-*` ids existed. Both pages now share `serviceLabels.ts`.
+
+Also: `stubFetchByUrl` moved into `src/test/providers.tsx` after all three
+tasks independently worked around the call-order `stubFetch`, and the guard
+tests in `routing.test.tsx`/`App.test.tsx` were re-pointed at an inert
+placeholder route so they test the guard rather than a page's queries.
+
+`i18n:check` now fails on an id nothing references, which removed twelve dead
+messages from the shipped bundle.
 
 ### 2026-09-16 — `/api/v1/openapi.json` closed
 
