@@ -34,6 +34,16 @@ describe('StatusBar', () => {
     expect(hook).not.toBeNull()
     expect(hook?.textContent).toBe('system online')
   })
+
+  it('renders a locale selector with all available locales', () => {
+    renderWithL10n(createLocalization(['en-US']))
+    const select = screen.getByRole('combobox', { name: 'interface language' })
+    expect(select).toBeInTheDocument()
+    expect(select).toHaveValue('en-US')
+    expect(screen.getByRole('option', { name: 'en-US' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'qps-ploc' })).toBeInTheDocument()
+  })
+
   it('renders a live tabular-nums UTC clock', () => {
     renderWithL10n(createLocalization(['en-US']))
     const clock = screen.getByText(/^\d{2}:\d{2}:\d{2}$/)

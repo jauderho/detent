@@ -1,5 +1,6 @@
 import { Localized } from '@fluent/react'
 import { useEffect, useState } from 'react'
+import { AVAILABLE_LOCALES, type AvailableLocale, useLocale } from '@/i18n'
 import { Led } from './Led'
 import { ThemeRocker } from './ThemeRocker'
 
@@ -26,6 +27,7 @@ function useUtcClock(): string {
 
 export function StatusBar() {
   const clock = useUtcClock()
+  const { locale, setLocale } = useLocale()
 
   return (
     <header className="status">
@@ -52,6 +54,18 @@ export function StatusBar() {
         <span className="clock read tabular-nums">{clock}</span>
       </div>
       <div className="seg">
+        <select
+          className="bg-transparent text-[11px] font-mono uppercase tracking-wider text-[var(--ink-dim)] border border-[var(--line-2)] px-1 py-0.5 cursor-pointer hover:bg-[var(--panel-3)]"
+          value={locale}
+          onChange={(e) => setLocale(e.target.value as AvailableLocale)}
+          aria-label="interface language"
+        >
+          {AVAILABLE_LOCALES.map((loc) => (
+            <option key={loc} value={loc}>
+              {loc}
+            </option>
+          ))}
+        </select>
         <ThemeRocker />
       </div>
     </header>
