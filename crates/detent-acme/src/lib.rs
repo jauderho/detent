@@ -22,8 +22,10 @@ use std::path::{Path, PathBuf};
 use std::{fs, io};
 
 pub mod order;
+pub mod providers;
 
 pub use order::{account_and_order, finalize, present_challenges, wait_ready};
+pub use providers::{AcmeDnsProvider, CloudflareProvider, DeSecProvider, Rfc2136Provider};
 
 /// Mode of the challenge files and the state directory holding them:
 /// readable only by the account that runs the worker.
@@ -61,6 +63,14 @@ pub enum AcmeError {
     /// The ACME order ended in a non-`valid` state.
     #[error("order did not reach valid state: {0:?}")]
     InvalidOrder(instant_acme::OrderStatus),
+    /// A dns provider was constructed or used with an unusable configuration,
+    /// or its backend returned an unusable response.
+    #[error("dns provider error: {0}")]
+    Config(String),
+    /// A networked provider could not yet confirm that the challenge record
+    /// is visible; the caller owns retry timing and polls again.
+    #[error("dns-01 record not yet propagated: {0}")]
+    NotPropagated(String),
 }
 
 // ---------------------------------------------------------------------------
