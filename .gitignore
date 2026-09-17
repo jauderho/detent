@@ -10,17 +10,21 @@ web/coverage
 lcov.info
 locales/qps-ploc/
 .DS_Store
-*.png
-*.jpg
-*.jpeg
-*.gif
-*.webp
-*.avif
-*.bmp
-*.tif
-*.tiff
-*.mp4
-*.mov
-*.webm
+# Spike evidence stays ephemeral: captures are reproduced with
+# `cd web && bun run shots`, not checked in. Scoped to docs/spikes so that
+# genuine UI assets (favicons, OG images, docs diagrams) are NOT silently
+# ignored -- the previous blanket `*.png` would have swallowed them.
+docs/spikes/**/*.png
+docs/spikes/**/*.jpg
+docs/spikes/**/*.jpeg
+docs/spikes/**/*.gif
+docs/spikes/**/*.webp
+docs/spikes/**/*.avif
+docs/spikes/**/*.bmp
+docs/spikes/**/*.tif
+docs/spikes/**/*.tiff
+docs/spikes/**/*.mp4
+docs/spikes/**/*.mov
+docs/spikes/**/*.webm
 /spikes/artifacts
 /spikes/**/target

@@ -24,15 +24,19 @@ describe('StatusBar', () => {
 
   // PLAN §4.4 promises 390px with no horizontal scroll. The four status
   // segments are fixed nowrap content that overflowed (scrollWidth 487);
-  // the `online-label` hook below is what the narrow CSS hides. If the class
-  it('marks the online label for the narrow-viewport CSS', () => {
+  // the hooks below are what the narrow CSS hides/caps. If the classes
+  it('marks the online/clock labels and locale select for the narrow-viewport CSS', () => {
     const { container } = renderWithL10n(createLocalization(['en-US']))
 
-    // `<Localized>` renders its own child span, so the hook lives on the
-    // wrapper, not on the text node `getByText` returns.
-    const hook = container.querySelector('.status .online-label')
-    expect(hook).not.toBeNull()
-    expect(hook?.textContent).toBe('system online')
+    // `<Localized>` renders its own child span, so the hooks live on the
+    // wrappers, not on the text nodes `getByText` returns.
+    const online = container.querySelector('.status .online-label')
+    expect(online).not.toBeNull()
+    expect(online?.textContent).toBe('system online')
+    const clockLabel = container.querySelector('.status .clock-label')
+    expect(clockLabel).not.toBeNull()
+    expect(clockLabel?.textContent).toBe('utc')
+    expect(container.querySelector('.status .locale-select')).not.toBeNull()
   })
 
   it('renders a locale selector with all available locales', () => {

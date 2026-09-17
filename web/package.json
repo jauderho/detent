@@ -19,7 +19,8 @@
     "build:finish": "bun scripts/build-finish.ts",
     "test:coverage": "bun test --coverage",
     "coverage:check": "bun scripts/coverage-check.ts",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "shots": "playwright test --config playwright.shots.config.ts"
   },
   "dependencies": {
     "@fluent/bundle": "0.19.1",
