@@ -93,11 +93,10 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn runtime() -> tokio::runtime::Runtime {
+fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .unwrap_or_else(|e| unimplemented!("tokio runtime: {e}"))
 }
 
 /// Proves a full dns-01 issuance against a live Pebble. Requires:
@@ -120,7 +119,7 @@ fn pebble_dns01_issuance() -> Result<(), Box<dyn std::error::Error>> {
     let creds_path = std::env::temp_dir().join("detent-pebble-spike-account.json");
     let _ = std::fs::remove_file(&creds_path); // fresh account per full run
 
-    let issued = runtime().block_on(async {
+    let issued = runtime()?.block_on(async {
         let (account, mut order) =
             account_and_order(&directory, &[TEST_DOMAIN], &creds_path, ca.as_deref()).await?;
         println!("account: {}", account.id());

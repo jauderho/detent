@@ -16,7 +16,7 @@ Branch: `main`. Everything below is verified on this commit, not assumed.
 
 | Check | Command | State |
 |---|---|---|
-| Rust tests | `cargo test --workspace --all-features` | 952 pass, 5 ignored |
+| Rust tests | `cargo test --workspace --all-features` | 970 pass, 6 ignored |
 | Clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean |
 | Format | `cargo fmt --all --check` | clean |
 | Web tests | `cd web && bun run test` | 424 pass, 52 files (`bun test`) |
@@ -25,13 +25,14 @@ Branch: `main`. Everything below is verified on this commit, not assumed.
 | Web lint | `cd web && bun run lint` | clean (biome) |
 | Web types | `cd web && bun run typecheck` | clean |
 | Web i18n | `cd web && bun run i18n:check` | 247 ids, all referenced, all resolved |
-| Responsive | throwaway `noOverflow` spec (deleted after use; script in `docs/spikes/m2-ui.md`) | 390/768/1280 pass, no horizontal scroll |
+| Responsive | `cd web && bun run shots` (`web/e2e-shots/m2shots.e2e.ts`, stills to `/tmp/detent-shots`) | 3 pass (390/768/1280, no horizontal scroll) |
 | CI | 8 jobs + Codespell, Lint Code Base, Dependency Review, Scorecard | all green |
 
-The five ignored Rust tests are deliberate: `write_openapi_json` regenerates a
+The six ignored Rust tests are deliberate: `write_openapi_json` regenerates a
 checked-in artefact, `crash_child_worker` is the child half of the
-crash-consistency test, the Argon2 equal-cost test is wall-clock timing, and
-two are `conformance.rs` doc examples.
+crash-consistency test, the Argon2 equal-cost test is wall-clock timing, two
+are `conformance.rs` doc examples, and `pebble_dns01_issuance` needs a live
+Pebble + challtestsrv (Phase 6 spike, `docs/spikes/acme-le.md`).
 
 ### What exists
 
@@ -127,11 +128,12 @@ there and says so; seccomp and the capability drop are the confinement.
 - `detent-web` coverage floor is 97, not the 100 Phase 4 set for itself.
 
 ---
-
 ## Log
-### 2026-09-17 — Milestone M2 reached, Phase 6 next
+### 2026-09-17 — Pebble dns-01 spike, Phase 6 moving
 
-Phase 5 closed in PLAN (`[x]`, change log entry). Verified on this commit before closing: `coverage:check` 72 files at 100% lines (note: gate reads `% Lines`, so the raw table's 80% `% Funcs` on `ensureResizeObserver.ts` is not a shortfall), `e2e` 22 pass (11 console + 11 axe-core), plus `bun test` 424, lint, typecheck, i18n:check 247 ids, contrast:check. Certificates + settings stay placeholders; real-binary e2e stays deferred per §5.
+Verified 970 pass / 6 ignored workspace-wide. Commits: `576a6a1` (atomic hook writes), `51083b7` (spike).
+
+### 2026-09-17 — Milestone M2 reached, Phase 6 next
 Phase 6 slice 1 landed (`e4fe5f3`): `DnsProvider` trait + `HookProvider` in `detent-acme`, 13 tests, workspace 965 pass. Next: instant-acme order flow against Pebble (needs cooldown-cleared dep review).
 
 

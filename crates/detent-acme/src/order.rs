@@ -153,13 +153,13 @@ async fn load_or_create_account(
 
     let json = serde_json::to_string(&credentials)
         .map_err(|e| AcmeError::Credentials(format!("serialize: {e}")))?;
-    // Atomic 0600 write, same pattern as HookProvider: temp file in the
-    // target directory, then rename, so a crash never leaves a partial
-    // credential file readable under the umask.
+    // Atomic 0600 write, same pattern as HookProvider: pid-suffixed temp
+    // file in the target directory, then rename, so a crash never leaves a
+    // partial credential file readable under the umask.
     if let Some(parent) = credentials_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = credentials_path.with_extension("tmp");
+    let tmp = credentials_path.with_extension(format!("{}.tmp", std::process::id()));
     let write = || -> Result<(), AcmeError> {
         let mut f = std::fs::OpenOptions::new()
             .write(true)
