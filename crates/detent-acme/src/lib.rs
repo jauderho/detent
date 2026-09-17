@@ -211,12 +211,31 @@ impl fmt::Display for HookProvider {
 
 impl DnsProvider for HookProvider {
     fn present(&self, record: &DnsRecord) -> Result<(), AcmeError> {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
         self.confine_dir()?;
         let path = self.challenge_path(record);
-        fs::write(&path, record.value())?;
-        // `fs::write` keeps the mode of an existing file, so an earlier file
-        // created too permissively would stay that way. Assert the mode.
-        fs::set_permissions(&path, fs::Permissions::from_mode(HOOK_MODE))?;
+        // Atomic: challtestsrv may read the file at any moment, so it must
+        // never observe a partial digest or a stale-umask mode. Write a
+        // 0600 temp in the same directory, then rename over the target.
+        let tmp = self
+            .state_dir
+            .join(format!("{}.{}.tmp", record.fqdn(), std::process::id()));
+        let write_tmp = || -> Result<(), AcmeError> {
+            let mut f = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(HOOK_MODE)
+                .open(&tmp)?;
+            f.write_all(record.value().as_bytes())?;
+            fs::rename(&tmp, &path)?;
+            Ok(())
+        };
+        if let Err(e) = write_tmp() {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -371,6 +390,8 @@ mod tests {
         for bad in [
             "",
             "example.com/path",
+            "..",
+            "../escape.example.com",
             "-leading-hyphen.example.com",
             "double..dot.example.com",
             "white space.example.com",
