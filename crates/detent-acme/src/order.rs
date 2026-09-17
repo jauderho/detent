@@ -92,6 +92,11 @@ pub async fn finalize(
 /// permissions on first use and restored from it afterwards, so repeated
 /// runs reuse one ACME account.
 ///
+/// `profile` names the CA profile to request (e.g. `"shortlived"`, the
+/// default on Let's Encrypt); pass `None` where the server advertises no
+/// profiles extension (Pebble). An unsupported profile fails the order with
+/// [`AcmeError::Acme`] — the caller picks the fallback, not this module.
+///
 /// # Errors
 ///
 /// [`AcmeError::Acme`] on API errors, [`AcmeError::Io`] on credential
@@ -101,14 +106,19 @@ pub async fn account_and_order(
     domains: &[&str],
     credentials_path: &Path,
     ca_root: Option<&Path>,
+    profile: Option<&str>,
 ) -> Result<(Account, Order), AcmeError> {
     let account = load_or_create_account(directory_url, credentials_path, ca_root).await?;
     let identifiers: Vec<Identifier> = domains
         .iter()
         .map(|d| Identifier::Dns((*d).to_owned()))
         .collect();
+    let new_order = match profile {
+        Some(p) => NewOrder::new(&identifiers).profile(p),
+        None => NewOrder::new(&identifiers),
+    };
     let order = account
-        .new_order(&NewOrder::new(&identifiers))
+        .new_order(&new_order)
         .await
         .map_err(AcmeError::from)?;
     Ok((account, order))
@@ -223,6 +233,23 @@ mod tests {
         assert!(matches!(ch.r#type, ChallengeType::Dns01));
         assert!(matches!(ch.status, ChallengeStatus::Pending));
         assert_eq!(ch.token, "token-1");
+        Ok(())
+    }
+
+    #[test]
+    fn profile_selection_serializes_onto_the_order() -> Result<(), String> {
+        let ids = [Identifier::Dns("example.com".to_owned())];
+        // Pebble advertises no profiles extension: no profile requested.
+        let plain = serde_json::to_value(NewOrder::new(&ids))
+            .map_err(|e| format!("order must serialize: {e}"))?;
+        assert!(plain.get("profile").is_none());
+        // Production default: the shortlived profile rides the new-order body.
+        let profiled = serde_json::to_value(NewOrder::new(&ids).profile("shortlived"))
+            .map_err(|e| format!("profiled order must serialize: {e}"))?;
+        assert_eq!(
+            profiled.get("profile").and_then(|p| p.as_str()),
+            Some("shortlived")
+        );
         Ok(())
     }
 
