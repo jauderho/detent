@@ -23,9 +23,11 @@ use std::{fs, io};
 
 pub mod order;
 pub mod providers;
+pub mod schedule;
 
 pub use order::{account_and_order, finalize, present_challenges, wait_ready};
 pub use providers::{AcmeDnsProvider, CloudflareProvider, DeSecProvider, Rfc2136Provider};
+pub use schedule::{Warning, percent_used, should_renew, should_renew_in_window, warning_for};
 
 /// Mode of the challenge files and the state directory holding them:
 /// readable only by the account that runs the worker.
