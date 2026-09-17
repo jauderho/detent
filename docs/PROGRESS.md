@@ -133,6 +133,21 @@ there and says so; seccomp and the capability drop are the confinement.
 
 ---
 ## Log
+### 2026-09-18 — Module handler tails + upstream tag fallback (`f23b867`)
+
+`EngineHandle::stubbed(outcome)` + 5 tests cover `api/modules.rs`
+`render_*` tails (211/253/295/350) and malformed-id POST 404s
+(244/286/330). `upstream-watch.yml`: `repo_url` tag fallback
+(`git ls-remote --tags --refs | sort -V | tail -1`) + open-issue dedup.
+Gates: workspace 1070 pass / 0 fail / 6 ignored; clippy/fmt clean.
+`scripts/coverage-merge.sh --verbose /tmp/a.lcov`:
+`per-path crates/modules/: lines 100.00% (min 100%, 2546/2546 lines)`,
+`per-path crates/detent-web/: lines 97.04% (min 97%, 7419/7645 lines)`,
+`PASS: all coverage thresholds met`. Floors unchanged (modules 100, web 97).
+FAKE_VERSION=0.0 drift path proves YES for hosts+resolver (stubbed
+`latest`; `tracked` override works). `ubuntu-26.04` label is repo-standard
+ (16 jobs); actionlint's unknown-label warning is its stale builtin list.
+
 ### 2026-09-18 — Resolver module lands (Phase 7 wave 1)
 
 `detent-module-resolver` (lossless resolv.conf + resolved.conf + unbound.conf,
