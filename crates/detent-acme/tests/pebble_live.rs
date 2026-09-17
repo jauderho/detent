@@ -121,7 +121,7 @@ fn pebble_dns01_issuance() -> Result<(), Box<dyn std::error::Error>> {
 
     let issued = runtime()?.block_on(async {
         let (account, mut order) =
-            account_and_order(&directory, &[TEST_DOMAIN], &creds_path, ca.as_deref()).await?;
+            account_and_order(&directory, &[TEST_DOMAIN], &creds_path, ca.as_deref(), None).await?;
         println!("account: {}", account.id());
         println!("order:   {}", order.url());
 
