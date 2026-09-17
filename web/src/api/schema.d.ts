@@ -269,6 +269,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/system/cert": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /api/v1/system/cert`. */
+        get: operations["cert"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/system/profile": {
         parameters: {
             query?: never;
@@ -422,6 +439,28 @@ export interface components {
             name: string;
             /** @description Which target the backup came from. */
             target: components["schemas"]["TargetId"];
+        };
+        /**
+         * @description What the serving TLS certificate looks like: its fingerprint, when it
+         *     expires, and how much of its lifetime is left.
+         *
+         *     `not_after_unix` is `None` when the DER did not parse — reported as
+         *     "unknown", never a failure: status must work even when the parse does not.
+         */
+        CertReport: {
+            /** @description Uppercase colon-separated SHA-256 of the DER, as printed at startup. */
+            fingerprint: string;
+            /**
+             * Format: int32
+             * @description Whole percent of `[not_before, not_after]` elapsed at read time, when
+             *     both endpoints parse. `None` means "unknown", not zero.
+             */
+            lifetime_used_percent?: number | null;
+            /**
+             * Format: int64
+             * @description Validity end, whole seconds since the Unix epoch, when parseable.
+             */
+            not_after_unix?: number | null;
         };
         /** @description How the result of an [`ExternalCheck`] is judged. */
         CheckExpectation: "exit_zero" | {
@@ -1509,6 +1548,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    cert: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Serving certificate status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CertReport"];
                 };
             };
         };

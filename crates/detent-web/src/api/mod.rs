@@ -378,9 +378,10 @@ mod tests {
 
     #[test]
     fn the_merged_table_registers_every_endpoint_and_no_get_mutates() {
-        // The 13 `Operation` endpoints PLAN Phase 4 lists, plus
+        // The 13 `Operation` endpoints PLAN Phase 4 lists, plus cert status
+        // (read-only, served from the live `CertStore`) and
         // `/api/v1/openapi.json` itself.
-        assert_eq!(table().len(), 14, "{:?}", table());
+        assert_eq!(table().len(), 15, "{:?}", table());
         assert!(
             table()
                 .iter()

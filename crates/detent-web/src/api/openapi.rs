@@ -259,6 +259,7 @@ impl utoipa::Modify for SecurityAddon {
         super::services::status,
         super::services::action,
         super::system::profile,
+        super::system::cert,
         super::system::audit,
         serve,
     ),
@@ -267,8 +268,7 @@ impl utoipa::Modify for SecurityAddon {
         (name = "modules", description = "List, read, validate, plan and apply module configuration"),
         (name = "commits", description = "Confirm or roll back a commit-confirm window"),
         (name = "backups", description = "List and restore a module's retained backups"),
-        (name = "services", description = "Read or act on a module's service"),
-        (name = "system", description = "Host profile, audit log, and liveness"),
+        (name = "system", description = "Host profile, certificate status, audit log, and liveness"),
     ),
     modifiers(&SecurityAddon),
 )]

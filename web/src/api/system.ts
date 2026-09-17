@@ -1,8 +1,8 @@
 /**
- * The `system` resource: what detection found about this host, and the audit
- * log.
+ * The `system` resource: what detection found about this host, the serving
+ * certificate, and the audit log.
  *
- * Both are read-only and both change slowly — the host profile only when the
+ * All three are read-only and change slowly — the host profile only when the
  * host itself changes — so they share this file rather than each getting one.
  */
 
@@ -14,9 +14,11 @@ import { type ApiRequestError, unwrap } from './query'
 import type { components } from './schema'
 
 export type HostReport = components['schemas']['HostReport']
+export type CertReport = components['schemas']['CertReport']
 export type AuditRecord = components['schemas']['AuditRecord']
 
 export const HOST_PROFILE_QUERY_KEY = ['system', 'profile'] as const
+export const CERT_QUERY_KEY = ['system', 'cert'] as const
 
 /** Filters `GET /api/v1/audit` accepts. The server caps `limit` itself. */
 export type AuditQuery = {
@@ -38,6 +40,10 @@ export function fetchHostProfile(
 ): Promise<ApiResult<HostReport>> {
   return client.get('/api/v1/system/profile', signal === undefined ? {} : { signal })
 }
+/** `GET /api/v1/system/cert`. */
+export function fetchCert(client: ApiClient, signal?: AbortSignal): Promise<ApiResult<CertReport>> {
+  return client.get('/api/v1/system/cert', signal === undefined ? {} : { signal })
+}
 
 /** `GET /api/v1/audit`, newest first. */
 export function fetchAudit(
@@ -58,6 +64,14 @@ export function useHostProfile(): UseQueryResult<HostReport, ApiRequestError> {
   return useQuery({
     queryKey: HOST_PROFILE_QUERY_KEY,
     queryFn: ({ signal }) => unwrap(fetchHostProfile(client, signal)),
+  })
+}
+
+export function useCert(): UseQueryResult<CertReport, ApiRequestError> {
+  const client = useApiClient()
+  return useQuery({
+    queryKey: CERT_QUERY_KEY,
+    queryFn: ({ signal }) => unwrap(fetchCert(client, signal)),
   })
 }
 

@@ -246,6 +246,18 @@ impl CertifiedKeyPair {
         fingerprint(&self.cert_der)
     }
 
+    /// Validity end of the end-entity certificate, as whole seconds since the
+    /// Unix epoch.
+    ///
+    /// Parsed once, with no new dependency: the DER this wraps was just built
+    /// or just accepted by rustls, so a hand walk of the outer `SEQUENCE` +
+    /// `TBSCertificate` + validity `SEQUENCE` is enough — `time` already parses
+    /// the two timestamps inside.
+    #[must_use]
+    pub fn not_after_unix(&self) -> Option<i64> {
+        validity_unix(&self.cert_der).map(|(_, not_after)| not_after)
+    }
+
     /// Load the pair into the installed provider.
     ///
     /// # Errors
@@ -279,6 +291,135 @@ pub fn fingerprint(der: &[u8]) -> String {
         out.push(nibble(byte & 0x0f));
     }
     out
+}
+/// `(not_before, not_after)` of a DER certificate, whole seconds since the
+/// Unix epoch.
+///
+/// Hand-walks the outer certificate `SEQUENCE`, the `TBSCertificate` `SEQUENCE`,
+/// then its children (version?, serial, signature, issuer, validity, ...),
+/// returning the first child `SEQUENCE` that holds exactly two time values.
+/// Every length is DER short/long form, every tag checked. `None` on anything
+/// unexpected — the caller reports "unknown", never a parse panic.
+pub(crate) fn validity_unix(der: &[u8]) -> Option<(i64, i64)> {
+    let outer = read_tlv(der, 0x30)?;
+    let mut rest = read_tlv(outer.content, 0x30)?.content;
+    for _ in 0..6 {
+        let child = read_tlv(rest, 0x30)
+            .or_else(|| read_tlv(rest, 0x02))
+            .or_else(|| {
+                // [0] EXPLICIT version: tag 0xA0, contents hold the INTEGER.
+                read_tlv(rest, 0xA0)
+            })?;
+        // A Name is itself a SEQUENCE of RDNs — but its children are SETs,
+        // never bare time values, so `validity_pair` rejects it cheaply.
+        if let Some(pair) = validity_pair(child.content) {
+            return Some(pair);
+        }
+        rest = child.rest;
+    }
+    None
+}
+
+/// One DER TLV: its value bytes and whatever follows it.
+struct Tlv<'a> {
+    /// The value bytes (length already stripped).
+    content: &'a [u8],
+    /// Everything after this TLV.
+    rest: &'a [u8],
+}
+
+/// Read one TLV with the expected tag, handling DER short/long lengths.
+fn read_tlv(bytes: &[u8], tag: u8) -> Option<Tlv<'_>> {
+    let (&actual, rest) = bytes.split_first()?;
+    if actual != tag {
+        return None;
+    }
+    let (&len_byte, mut rest) = rest.split_first()?;
+    let len = if len_byte & 0x80 == 0 {
+        usize::from(len_byte)
+    } else {
+        let count = usize::from(len_byte & 0x7F);
+        if count == 0 || count > 4 {
+            return None;
+        }
+        let mut len = 0_usize;
+        for _ in 0..count {
+            let (&b, r) = rest.split_first()?;
+            len = len.checked_mul(256)?.checked_add(usize::from(b))?;
+            rest = r;
+        }
+        len
+    };
+    let (content, rest) = rest.split_at_checked(len)?;
+    Some(Tlv { content, rest })
+}
+
+/// Parse a validity SEQUENCE body: exactly two UTCTime/GeneralizedTime values.
+fn validity_pair(bytes: &[u8]) -> Option<(i64, i64)> {
+    let first = read_tlv(bytes, 0x17)
+        .map(|tlv| (tlv, 2))
+        .or_else(|| read_tlv(bytes, 0x18).map(|tlv| (tlv, 4)))?;
+    let (first_tlv, year_width) = first;
+    let not_before = time_text_unix(first_tlv.content, year_width)?;
+    let second = read_tlv(first_tlv.rest, 0x17)
+        .map(|tlv| (tlv, 2))
+        .or_else(|| read_tlv(first_tlv.rest, 0x18).map(|tlv| (tlv, 4)))?;
+    let not_after = time_text_unix(second.0.content, second.1)?;
+    if second.0.rest.is_empty() {
+        Some((not_before, not_after))
+    } else {
+        None
+    }
+}
+
+/// Parse `YYMMDDHHMMSSZ` (`UTCTime`) or `YYYYMMDDHHMMSSZ` (`GeneralizedTime`).
+// Lengths are tiny and bounded (12/14 chars); checked by `time::Date` below.
+#[allow(clippy::arithmetic_side_effects)]
+fn time_text_unix(text: &[u8], year_width: usize) -> Option<i64> {
+    let text = core::str::from_utf8(text).ok()?;
+    let digits = text.strip_suffix('Z')?;
+    if digits.len() != year_width + 10 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let num = |range: core::ops::Range<usize>| digits.get(range)?.parse::<i32>().ok();
+    let (year, mo, day, hour, min, sec) = if year_width == 2 {
+        let yy = num(0..2)?;
+        (
+            if yy >= 50 { 1900 + yy } else { 2000 + yy },
+            num(2..4)?,
+            num(4..6)?,
+            num(6..8)?,
+            num(8..10)?,
+            num(10..12)?,
+        )
+    } else {
+        (
+            num(0..4)?,
+            num(4..6)?,
+            num(6..8)?,
+            num(8..10)?,
+            num(10..12)?,
+            num(12..14)?,
+        )
+    };
+    // `time` already parses these formats; confirming via construction keeps
+    // one date implementation. Month range is 1-12; day/hour/min/sec checked
+    // by the constructor below.
+    time::Date::from_calendar_date(
+        year,
+        time::Month::try_from(u8::try_from(mo).ok()?).ok()?,
+        u8::try_from(day).ok()?,
+    )
+    .ok()?
+    .with_hms(
+        u8::try_from(hour).ok()?,
+        u8::try_from(min).ok()?,
+        u8::try_from(sec).ok()?,
+    )
+    .ok()?
+    .assume_utc()
+    .unix_timestamp()
+    .into()
 }
 
 /// One uppercase hex digit from the low four bits of `value`.
@@ -594,7 +735,7 @@ mod tests {
     use super::{
         ALPN_H2_HTTP11, BOOTSTRAP_CERT_FILE, BOOTSTRAP_KEY_FILE, CertStore, CertifiedKeyPair,
         TlsError, bootstrap_self_signed, confine_cert_dir, fingerprint, install_crypto_provider,
-        load_bootstrap, load_or_bootstrap, server_config, store_bootstrap,
+        load_bootstrap, load_or_bootstrap, server_config, store_bootstrap, validity_unix,
     };
     use std::os::unix::fs::PermissionsExt as _;
     use std::sync::Arc;
@@ -625,6 +766,31 @@ mod tests {
         let pair = pair()?;
         let key = pair.to_certified_key()?;
         assert!(!key.cert.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    // Test-only window math on bounded constants; no overflow path matters.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn the_expiry_reads_90_days_after_creation() -> R {
+        use time::OffsetDateTime;
+        let before = OffsetDateTime::now_utc().unix_timestamp();
+        let pair = pair()?;
+        let after = OffsetDateTime::now_utc().unix_timestamp();
+        let not_after = pair
+            .not_after_unix()
+            .ok_or("bootstrap cert must carry validity")?;
+        // 90 days, minus the 1-hour backdate, in whole seconds.
+        let min = before + 90 * 86_400 - 3_600 - 120;
+        let max = after + 90 * 86_400 - 3_600 + 120;
+        assert!(
+            (min..=max).contains(&not_after),
+            "{not_after} not in {min}..={max}"
+        );
+        // Garbage is "unknown", never a panic.
+        assert!(validity_unix(b"nope").is_none());
+        let der = pair.cert_der();
+        assert!(validity_unix(der.get(..der.len() / 2).unwrap_or(&[])).is_none());
         Ok(())
     }
 

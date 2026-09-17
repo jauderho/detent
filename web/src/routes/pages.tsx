@@ -1,11 +1,11 @@
 /**
  * The routed sections that are still placeholders, plus the not-found page.
  *
- * Certificates and settings stay named placeholders because neither has an
- * API to drive yet: certificate status arrives with Phase 6 (ACME), and
- * settings needs the user- and token-management endpoints that `docs/API.md`
- * does not describe. A placeholder that says so is honest; a page built
- * against an endpoint that does not exist is not.
+ * Settings stays a named placeholder: it needs the user- and token-management
+ * endpoints `docs/API.md` does not describe. Certificates graduated to its own
+ * `CertificatesPage` once `GET /api/v1/system/cert` landed. A placeholder that
+ * says so is honest; a page built against an endpoint that does not exist is
+ * not.
  *
  * Every other section now has its own file — see `AppRoutes`.
  */

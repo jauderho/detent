@@ -1,14 +1,14 @@
-//! `/api/v1/system/profile` and `/api/v1/audit`: read-only host and history
-//! views. Neither route ever mutates.
+//! `/api/v1/system/profile`, `/api/v1/system/cert`, and `/api/v1/audit`:
+//! read-only host, certificate, and history views. None ever mutates.
 
 use axum::Json;
 use axum::Router;
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{Query, State};
 use axum::routing::get;
+use detent_ops::Operation;
 use detent_ops::audit::{AuditQuery, AuditRecord};
-use detent_ops::report::HostReport;
-use detent_ops::{OpOutcome, Operation};
+use detent_ops::report::{CertReport, HostReport};
 use serde::Deserialize;
 
 use crate::auth::extract::Caller;
@@ -16,10 +16,12 @@ use crate::error::ApiError;
 use crate::state::AppState;
 
 use super::{authorize, bad_request, query_rejection, unexpected_outcome};
+use detent_ops::OpOutcome;
 
 /// `GET /api/v1/system/profile`.
 pub const PROFILE_PATH: &str = "/api/v1/system/profile";
-
+/// `GET /api/v1/system/cert`.
+pub const CERT_PATH: &str = "/api/v1/system/cert";
 /// `GET /api/v1/audit`.
 pub const AUDIT_PATH: &str = "/api/v1/audit";
 
@@ -42,6 +44,11 @@ pub fn table() -> Vec<crate::auth::routes::Route> {
         },
         Route {
             method: Method::GET,
+            path: CERT_PATH,
+            mutating: false,
+        },
+        Route {
+            method: Method::GET,
             path: AUDIT_PATH,
             mutating: false,
         },
@@ -52,7 +59,58 @@ pub fn table() -> Vec<crate::auth::routes::Route> {
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(PROFILE_PATH, get(profile))
+        .route(CERT_PATH, get(cert))
         .route(AUDIT_PATH, get(audit))
+}
+
+/// `GET /api/v1/system/cert`.
+#[cfg_attr(test, utoipa::path(
+    get,
+    path = CERT_PATH,
+    tag = "system",
+    responses((status = 200, description = "Serving certificate status", body = CertReport)),
+))]
+pub(super) async fn cert(
+    State(state): State<AppState>,
+    caller: Caller,
+) -> Result<Json<CertReport>, ApiError> {
+    // Read-only but still gated: the fingerprint answers "which cert is this
+    // serving", so the same policy as the host profile applies. No
+    // `Operation` crosses to the engine thread — this reads the live resolver
+    // `AppState` already holds, the same `Arc` handshakes answer from.
+    authorize(&caller, &Operation::HostProfile)?;
+    Ok(Json(cert_report(&state)))
+}
+
+/// The certificate answer, pulled out of [`cert`] so tests need no caller.
+fn cert_report(state: &AppState) -> CertReport {
+    use time::OffsetDateTime;
+    let current = state.cert_store.current();
+    let der: &[u8] = current.cert.first().map_or(&[], |c| c.as_ref());
+    let fingerprint = crate::tls::fingerprint(der);
+    let (not_after_unix, lifetime_used_percent) = match crate::tls::validity_unix(der) {
+        Some((not_before, not_after)) => {
+            let now = OffsetDateTime::now_utc().unix_timestamp();
+            // `not_after > not_before` is checked first, so the subtraction
+            // cannot underflow; `saturating_*` on the rest keeps the percent
+            // inside 0-100 even across clock skew.
+            #[allow(clippy::arithmetic_side_effects)]
+            let pct = if not_after > not_before {
+                let elapsed = now.saturating_sub(not_before).max(0);
+                let total = not_after - not_before;
+                u8::try_from((i128::from(elapsed) * 100 / i128::from(total)).clamp(0, 100)).ok()
+            } else {
+                None
+            };
+            (Some(not_after), pct)
+        }
+        None => (None, None),
+    };
+    CertReport {
+        fingerprint,
+        not_after_unix,
+        lifetime_used_percent,
+    }
 }
 
 /// The query string of `GET /api/v1/audit`.

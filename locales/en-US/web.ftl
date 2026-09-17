@@ -140,6 +140,12 @@ dashboard-host-ram = memory
 dashboard-host-network-backend = network backend
 dashboard-host-resolver-backend = resolver backend
 dashboard-host-notes = detection notes
+dashboard-cert-panel = certificate
+dashboard-cert-fingerprint = fingerprint
+dashboard-cert-expires = expires
+dashboard-cert-lifetime-used = lifetime used
+dashboard-cert-expired = expired; replace this certificate.
+dashboard-cert-expiring-soon = expires within 30 days; plan renewal.
 dashboard-modules-panel = modules
 dashboard-modules-count = {$count ->
     [one] one module is compiled into this build.

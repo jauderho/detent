@@ -173,6 +173,23 @@ pub struct HostReport {
     pub notes: Vec<String>,
 }
 
+/// What the serving TLS certificate looks like: its fingerprint, when it
+/// expires, and how much of its lifetime is left.
+///
+/// `not_after_unix` is `None` when the DER did not parse — reported as
+/// "unknown", never a failure: status must work even when the parse does not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CertReport {
+    /// Uppercase colon-separated SHA-256 of the DER, as printed at startup.
+    pub fingerprint: String,
+    /// Validity end, whole seconds since the Unix epoch, when parseable.
+    pub not_after_unix: Option<i64>,
+    /// Whole percent of `[not_before, not_after]` elapsed at read time, when
+    /// both endpoints parse. `None` means "unknown", not zero.
+    pub lifetime_used_percent: Option<u8>,
+}
+
 /// The stable wire name of a network backend.
 const fn network_backend_name(backend: NetworkBackend) -> &'static str {
     match backend {
