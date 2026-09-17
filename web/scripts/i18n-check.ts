@@ -9,11 +9,16 @@
  * Checks:
  *   1. Every `<Localized id="…">` / `l10n.getString("…")` id used under
  *      src/ is defined in locales/en-US/web.ftl.
- *   2. No JSX text node containing a letter appears outside test files and
+ *   2. Every id defined in web.ftl is referenced from src/. The bundle is
+ *      compiled into the binary (`vite` `?raw` import → rust-embed), and
+ *      detent targets SBCs where every byte is argued for, so a message no
+ *      code can reach is dead weight. It is also the usual shape of a
+ *      rename gone half-done: the new id is referenced, the old one lingers.
+ *   3. No JSX text node containing a letter appears outside test files and
  *      outside the fallback children of a <Localized> element (which
  *      intentionally mirror the message text per @fluent/react convention).
  *
- * Exits non-zero and prints violations if either check fails.
+ * Exits non-zero and prints violations if any check fails.
  */
 
 import { readdirSync, readFileSync, statSync } from 'node:fs'
@@ -65,6 +70,31 @@ export function findReferencedIds(text: string): string[] {
   return ids
 }
 
+/**
+ * Every quoted string literal in `text` that spells out one of `known`.
+ *
+ * Check 1 asks "is this id defined?" and so must only look where an id is
+ * unambiguously being *rendered* — `<Localized id>` and `getString`. Check 2
+ * asks the opposite question, "can any code reach this id?", and the honest
+ * answer is broader: `validate.ts` pushes `'forms-error-min-length'` through
+ * an `issue()` helper, and `messages.ts` lists every server-sent id in the
+ * `API_MESSAGE_IDS` array. Both are real references that the narrow patterns
+ * cannot see, and calling them dead would delete messages an operator does
+ * read.
+ *
+ * Matching against ids that are already defined is what keeps this from
+ * drowning in ordinary strings: a literal has to spell a real message id
+ * exactly before it counts.
+ */
+export function findIdLiterals(text: string, known: ReadonlySet<string>): string[] {
+  const found: string[] = []
+  for (const m of text.matchAll(/["'`]([a-zA-Z][a-zA-Z0-9_-]*)["'`]/g)) {
+    const id = m[1]
+    if (id !== undefined && known.has(id)) found.push(id)
+  }
+  return found
+}
+
 /** Strips <Localized>…</Localized> fallback-children blocks (non-nesting, sufficient for this codebase). */
 function stripLocalizedBlocks(text: string): string {
   return text.replace(/<Localized\b[^>]*>[\s\S]*?<\/Localized>/g, '<Localized />')
@@ -109,15 +139,20 @@ function main(): number {
   let failed = false
   const missingIds: { file: string; id: string }[] = []
   const hardcodedText: { file: string; text: string }[] = []
+  const referenced = new Set<string>()
 
   for (const file of files) {
     const text = readFileSync(file, 'utf8')
     const rel = relative(WEB_ROOT, file)
 
     for (const id of findReferencedIds(text)) {
+      referenced.add(id)
       if (!ftlIds.has(id)) {
         missingIds.push({ file: rel, id })
       }
+    }
+    for (const id of findIdLiterals(text, ftlIds)) {
+      referenced.add(id)
     }
 
     if (!isTestFile(file) && /\.tsx$/.test(file)) {
@@ -137,6 +172,21 @@ function main(): number {
     }
   }
 
+  const unused = [...ftlIds].filter((id) => !referenced.has(id)).sort()
+  if (unused.length > 0) {
+    failed = true
+    console.error(
+      'i18n-check: message ids defined in locales/en-US/web.ftl but referenced nowhere in src/:',
+    )
+    for (const id of unused) {
+      console.error(`  "${id}"`)
+    }
+    console.error(
+      '  Delete them, or reference them. The bundle ships inside the binary, so an ' +
+        'unreachable message is bytes on an SBC that nothing can ever print.',
+    )
+  }
+
   if (hardcodedText.length > 0) {
     failed = true
     console.error(
@@ -151,7 +201,9 @@ function main(): number {
     return 1
   }
 
-  console.log(`i18n-check: OK — ${ftlIds.size} message ids defined, all references resolved.`)
+  console.log(
+    `i18n-check: OK — ${ftlIds.size} message ids defined, all referenced, all references resolved.`,
+  )
   return 0
 }
 
