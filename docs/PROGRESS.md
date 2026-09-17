@@ -129,6 +129,17 @@ there and says so; seccomp and the capability drop are the confinement.
 
 ---
 ## Log
+
+### 2026-09-17 — ACME PEM-to-serve bridge
+
+`CertifiedKeyPair::from_acme_pem` parses `finalize` output (PEM chain + PEM
+PKCS#8 key) into the DER pair `CertStore::replace` already swaps live — the
+seam Phase 6 renewal needs, proved by `acme_pem_round_trips_through_a_store_swap`
+and `acme_pem_rejects_the_wrong_armour_with_a_catalogued_id`. Wrong-armour key
+material (SEC1 `EC PRIVATE KEY`) is refused, not converted; new
+`web-tls-acme-pem-rejected` catalogue id. `cargo test -p detent-web`: 284 pass,
+2 ignored; fmt + clippy clean.
+
 ### 2026-09-17 — Pebble dns-01 now gated in CI
 
 `d17b6c8` gates Phase 6 Task 1 in CI: `acme-pebble` job on `ubuntu-26.04` host (Harden Runner audit, `dtolnay/rust-toolchain` via `RUST_TOOLCHAIN`, `rust-cache`, `cargo build` + `clippy` on `detent-acme`), shared bridge `detent-pebble` so `pebble -dnsserver challtestsrv:8053` resolves challtestsrv by name (not `127.0.0.1`; flag gotchas in `docs/spikes/acme-le.md`), publish still via `127.0.0.1:8055/8053` from the runner, health loop + dns preflight (`curl /set-txt` → `dig @127.0.0.1 -p 8053` → `clear-txt`), then `cargo test -p detent-acme -- --ignored --nocapture`. Prior spike `51083b7`/`576a6a1` already verified 970 pass / 6 ignored workspace-wide (incl. `#[ignore]` live test) and `cargo tree -i ring` empty; this commit makes the same issuance replay on every push.
