@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { findHardcodedJsxText, findReferencedIds, loadFtlIdsFrom } from '../i18n-check.ts'
+import {
+  findHardcodedJsxText,
+  findIdLiterals,
+  findReferencedIds,
+  loadFtlIdsFrom,
+} from '../i18n-check.ts'
 
 describe('findReferencedIds', () => {
   it('finds both the component and the imperative form', () => {
@@ -16,6 +21,29 @@ describe('loadFtlIdsFrom', () => {
     )
 
     expect([...loadFtlIdsFrom(ftl)].sort()).toEqual(['first-id', 'second-id'])
+  })
+})
+
+describe('findIdLiterals', () => {
+  const known = new Set(['forms-error-required', 'ops-denied'])
+
+  it('sees an id reached through a helper rather than getString', () => {
+    const source = `issues.push(issue(path, 'forms-error-required'))`
+
+    expect(findIdLiterals(source, known)).toEqual(['forms-error-required'])
+  })
+
+  it('sees an id listed in a table of ids', () => {
+    const source = `export const API_MESSAGE_IDS = [\n  'ops-denied',\n] as const`
+
+    expect(findIdLiterals(source, known)).toEqual(['ops-denied'])
+  })
+
+  // The bound that keeps this from matching every string in the codebase: a
+  // literal counts only when it spells an id that actually exists.
+  it('ignores a string that is not a defined id', () => {
+    expect(findIdLiterals(`const unit = 'chronyd.service'`, known)).toEqual([])
+    expect(findIdLiterals(`getString('ops-denied-typo')`, known)).toEqual([])
   })
 })
 
