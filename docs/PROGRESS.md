@@ -25,7 +25,7 @@ Branch: `main`. Everything below is verified on this commit, not assumed.
 | Web lint | `cd web && bun run lint` | clean (biome) |
 | Web types | `cd web && bun run typecheck` | clean |
 | Web i18n | `cd web && bun run i18n:check` | 247 ids, all referenced, all resolved |
-| Responsive | throwaway `noOverflow` spec | 390/768/1280 pass (evidence in `docs/spikes/m2/`) |
+| Responsive | throwaway `noOverflow` spec (deleted after use; script in `docs/spikes/m2-ui.md`) | 390/768/1280 pass, no horizontal scroll |
 | CI | 8 jobs + Codespell, Lint Code Base, Dependency Review, Scorecard | all green |
 
 The five ignored Rust tests are deliberate: `write_openapi_json` regenerates a
