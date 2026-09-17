@@ -100,8 +100,9 @@ detent token list
 ```
 
 The API is documented in [`docs/API.md`](docs/API.md); the machine-readable
-spec is [`docs/openapi.json`](docs/openapi.json) and is served unauthenticated
-at `/api/v1/openapi.json`.
+spec is [`docs/openapi.json`](docs/openapi.json), also served at
+`/api/v1/openapi.json`. Every `/api/v1` route needs a credential — only
+`/healthz` and the login endpoint are open.
 
 ## Security
 

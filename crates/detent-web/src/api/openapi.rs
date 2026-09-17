@@ -14,7 +14,7 @@
 //!     include_str!(docs/openapi.json) ──▶ DOCUMENT ─────────────┘
 //!                                             │
 //!                                             ▼
-//!                                GET /api/v1/openapi.json (unauthenticated)
+//!                                GET /api/v1/openapi.json (authenticated)
 //! ```
 //!
 //! # Why the document is built by tests and served as a constant
@@ -44,11 +44,13 @@
 //!
 //! # Guarantees
 //!
-//! * **`/api/v1/openapi.json` is unauthenticated**, matching the plan's own
-//!   description of it as a discovery document, not a protected resource: PLAN
-//!   §2.6 lists it in the same breath as the API surface it describes, with no
-//!   auth requirement called out, and the SPA needs it before a session
-//!   exists. See the module doc for the tradeoff this implies.
+//! * **`/api/v1/openapi.json` needs a credential**, like every other
+//!   `/api/v1` route. It is a map of the whole attack surface — every path,
+//!   every parameter, every body shape — and nothing needs it before sign-in:
+//!   the SPA's client is generated from the checked-in copy at build time
+//!   (`web/scripts/api-check.ts`), never fetched at runtime. `/healthz` is the
+//!   only route in this document that stays open, because a liveness probe has
+//!   no credential to present and its body is a constant that reveals nothing.
 //! * **The checked-in document and the one this build generates never
 //!   drift.** [`tests::the_checked_in_document_matches_what_this_build_generates`]
 //!   regenerates it and fails, naming the regeneration command, the moment
@@ -102,15 +104,20 @@ const DOCUMENT: &str = include_str!(concat!(
 /// The one response body in this document that is not named by a schema: it
 /// *is* the document, and describing it would mean carrying a copy of the
 /// `OpenAPI` meta-schema.
+///
+/// The `Caller` is taken and dropped: it is not used, but taking it is what
+/// makes this route authenticated — a handler that takes no `Caller` is open
+/// by construction (see [`crate::auth::extract::Caller`]).
 #[cfg_attr(test, utoipa::path(
     get,
     path = PATH,
     tag = "system",
-    // Unauthenticated: a front end needs the document before it has a session.
-    security(),
-    responses((status = 200, description = "This document", body = Object)),
+    responses(
+        (status = 200, description = "This document", body = Object),
+        (status = 401, description = "No credential", body = crate::error::ErrorBody),
+    ),
 ))]
-async fn serve() -> impl axum::response::IntoResponse {
+async fn serve(_caller: crate::auth::extract::Caller) -> impl axum::response::IntoResponse {
     (
         [(
             axum::http::header::CONTENT_TYPE,

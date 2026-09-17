@@ -8,9 +8,10 @@ skip-check:
   # solely to carry the annotation.
   - CKV_OPENAPI_21
   # Flags any operation with `security: []`. That is the standard way to mark
-  # an operation as deliberately public, and detent has exactly two: `/healthz`
-  # (a liveness probe has no credential) and `/api/v1/openapi.json` (a front
-  # end needs the document before it has a session). The check cannot tell
-  # "explicitly public" from "forgot to set security", and the alternative is a
-  # document that claims those endpoints are authenticated when they are not.
+  # an operation as deliberately public, and detent has exactly one: `/healthz`,
+  # because a liveness probe has no credential to present. The check cannot
+  # tell "explicitly public" from "forgot to set security", and the alternative
+  # is a document that claims that endpoint is authenticated when it is not.
+  # `no_api_route_is_reachable_without_a_credential` is what actually holds the
+  # line on the rest of the surface.
   - CKV_OPENAPI_5

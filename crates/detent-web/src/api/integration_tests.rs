@@ -580,9 +580,14 @@ async fn audit_query() -> R {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn openapi_document_is_unauthenticated() -> R {
+async fn openapi_document_needs_a_credential() -> R {
     let live = Live::new()?;
-    let response = get(live.state(), "/api/v1/openapi.json", None).await?;
+    let (read, _write) = tokens(live.state())?;
+
+    let unauthenticated = get(live.state(), "/api/v1/openapi.json", None).await?;
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    let response = get(live.state(), "/api/v1/openapi.json", Some(&read)).await?;
     assert_eq!(response.status(), StatusCode::OK);
     let body = json(response).await?;
     assert!(body.get("openapi").is_some());
@@ -603,6 +608,60 @@ async fn openapi_document_is_unauthenticated() -> R {
         body, generated,
         "the served document is not the one this build generates"
     );
+
+    live.shutdown();
+    Ok(())
+}
+
+/// Every route under `/api/v1` other than `/auth/*` refuses a request that
+/// carries no credential.
+///
+/// The per-endpoint tests above each assert this for the one path they drive,
+/// but they can only cover a route somebody remembered to write a test for.
+/// This one is driven off [`crate::api::table`] — the same table the routers
+/// are built from — so a new endpoint whose handler forgets to take a `Caller`
+/// fails here instead of shipping open. `/api/v1/openapi.json` was exactly
+/// that: it described the whole surface and needed nothing to read it.
+///
+/// `/healthz` is deliberately excluded: it is not in this table, and a
+/// liveness probe has no credential to present.
+#[tokio::test]
+async fn no_api_route_is_reachable_without_a_credential() -> R {
+    let live = Live::new()?;
+
+    for route in crate::api::table() {
+        // A path parameter's value is irrelevant — authentication is refused
+        // before the engine ever sees the id.
+        let path = route
+            .path
+            .split('/')
+            .map(|segment| {
+                if segment.starts_with('{') {
+                    "x"
+                } else {
+                    segment
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+
+        assert!(
+            matches!(route.method, Method::GET | Method::POST),
+            "{} {path}: this sweep can only drive GET and POST",
+            route.method
+        );
+        let response = if route.method == Method::GET {
+            get(live.state(), &path, None).await?
+        } else {
+            post(live.state(), &path, None, "{}").await?
+        };
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "{} {path} answered without a credential",
+            route.method
+        );
+    }
 
     live.shutdown();
     Ok(())
