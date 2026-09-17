@@ -54,8 +54,8 @@ time by `bun scripts/gen-pseudo.ts`; language switcher in the status bar,
 persisted in localStorage. Responsive: status bar fits 390px (tighter
 padding + online-label hidden below 560px).
 
-Routed sections: dashboard, modules, module detail, services, backups and
-audit are real pages, each in its own file under `src/routes/`.
+Routed sections: dashboard, modules, module detail, services, backups, audit
+and certificates are real pages, each in its own file under `src/routes/`.
 
 Tests run on **`bun test`**, not vitest — see [`TOOLS.md`](TOOLS.md) for the
 preload that gives Bun a DOM, Vite's `?raw` imports and jest-dom's matchers.
@@ -64,10 +64,10 @@ axe-core over every section in both themes.
 
 **Not done in `web/`** — settings is still a placeholder in
 `src/routes/pages.tsx`, deliberately: it needs user- and token-management
-endpoints that do not exist. Certificates now has a live read path (dashboard
-`CertPanel` via `GET /api/v1/system/cert`); the full page waits on Phase 6
-(ACME) renewal/attestor flows. Also missing: e2e against the real binary
-rather than a stub.
+endpoints that do not exist. Certificates ships a full read-only page
+(`CertificatesPage.tsx` + shared `src/lib/cert.ts`, via `GET
+/api/v1/system/cert`); renewal wiring is still Phase 6. Also missing: e2e
+against the real binary rather than a stub.
 
 ### Traps worth knowing before you touch anything
 
