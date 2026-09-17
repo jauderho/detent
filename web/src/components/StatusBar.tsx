@@ -37,7 +37,7 @@ export function StatusBar() {
       </div>
       <div className="seg">
         <Led variant="on" />
-        <span className="lbl">
+        <span className="lbl online-label">
           <Localized id="status-online">
             <span>system online</span>
           </Localized>
