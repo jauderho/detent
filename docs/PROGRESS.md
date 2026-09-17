@@ -18,7 +18,7 @@ Branch: `main`. Everything below is verified on this commit, not assumed.
 
 | Check | Command | State |
 |---|---|---|
-| Rust tests | `cargo test --workspace --all-features` | 999 pass, 6 ignored |
+| Rust tests | `cargo test --workspace --all-features` | 1070 pass, 6 ignored |
 | Clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean |
 | Format | `cargo fmt --all --check` | clean |
 | Web tests | `cd web && bun run test` | 431 pass, 53 files (`bun test`) |
@@ -129,7 +129,7 @@ there and says so; seccomp and the capability drop are the confinement.
 - `scripts/tls-check.sh` is not wired into CI (needs root; now feasible on
   a009).
 - Phase 2's privileged Docker job and multi-slice LCOV merge are unwired.
-- `detent-web` coverage floor is 97, not the 100 Phase 4 set for itself.
+- `detent-web` coverage floor is 97 (PASS at 97.04%), not the 100 Phase 4 set for itself.
 
 ---
 ## Log

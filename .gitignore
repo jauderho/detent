@@ -8,6 +8,7 @@ web/dist/*
 web/coverage
 *.profraw
 lcov.info
+merged.info
 locales/qps-ploc/
 .DS_Store
 # Spike evidence stays ephemeral: captures are reproduced with
