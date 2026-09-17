@@ -22,6 +22,18 @@ describe('StatusBar', () => {
     expect(screen.getByText('mode')).toBeInTheDocument()
   })
 
+  // PLAN §4.4 promises 390px with no horizontal scroll. The four status
+  // segments are fixed nowrap content that overflowed (scrollWidth 487);
+  // the `online-label` hook below is what the narrow CSS hides. If the class
+  it('marks the online label for the narrow-viewport CSS', () => {
+    const { container } = renderWithL10n(createLocalization(['en-US']))
+
+    // `<Localized>` renders its own child span, so the hook lives on the
+    // wrapper, not on the text node `getByText` returns.
+    const hook = container.querySelector('.status .online-label')
+    expect(hook).not.toBeNull()
+    expect(hook?.textContent).toBe('system online')
+  })
   it('renders a live tabular-nums UTC clock', () => {
     renderWithL10n(createLocalization(['en-US']))
     const clock = screen.getByText(/^\d{2}:\d{2}:\d{2}$/)

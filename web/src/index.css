@@ -201,6 +201,17 @@ p {
   color: var(--blue-bright);
   font-size: 12px;
 }
+/* Narrow viewports (PLAN §4.4: 390px): the four fixed nowrap segments exceed
+   the width. Tighten padding, then drop the verbose online label — the LED
+   still reports it — so the rocker stays reachable without scrolling. */
+@media (max-width: 560px) {
+  .status .seg {
+    padding: 0 8px;
+  }
+  .status .online-label {
+    display: none;
+  }
+}
 
 /* ── kicker chips ─────────────────────────────────────────────── */
 .kicker {
