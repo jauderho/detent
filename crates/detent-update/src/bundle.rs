@@ -1,0 +1,519 @@
+//! The Sigstore bundle (v0.3, ADR-014): JSON shape, size cap, and the
+//! fully-decoded view the verifier consumes.
+//!
+//! Strictness follows ADR-014: every field the verifier consumes is required —
+//! a missing `mediaType`, `verificationMaterial`, `tlogEntries`,
+//! `inclusionProof`, or `dsseEnvelope` is a hard error — while unknown extra
+//! fields are tolerated, because GitHub may extend the predicate at any time.
+
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use serde::Deserialize;
+
+/// Largest accepted bundle, in bytes (ADR-014 step 1).
+pub const MAX_BUNDLE_BYTES: usize = 1 << 20;
+
+/// The only bundle media type this verifier consumes (ADR-014: pinned to
+/// v0.3; unknown major bumps are refused).
+pub const MEDIA_TYPE: &str = "application/vnd.dev.sigstore.bundle.v0.3+json";
+
+/// The DSSE envelope payload type carried by `actions/attest` bundles.
+pub const DSSE_PAYLOAD_TYPE: &str = "application/vnd.dsse.envelope.v1+json";
+
+/// The in-toto statement type the payload must declare.
+pub const STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
+
+/// A bundle error. Folded into [`crate::VerificationError::BundleMalformed`]
+/// at the verify boundary; kept separate so tests can name the reason.
+#[derive(Debug, PartialEq, thiserror::Error)]
+pub enum BundleError {
+    /// The bundle exceeded [`MAX_BUNDLE_BYTES`].
+    #[error("bundle exceeds the {MAX_BUNDLE_BYTES}-byte cap")]
+    Oversized,
+    /// The JSON was unparsable or a required field was missing.
+    #[error("bundle is malformed: {0}")]
+    Malformed(String),
+    /// The media type was not [`MEDIA_TYPE`].
+    #[error("unsupported bundle media type: {0}")]
+    BadMediaType(String),
+    /// A base64 field did not decode.
+    #[error("bundle contains undecodable base64: {0}")]
+    BadBase64(&'static str),
+    /// The decoded payload was not a well-formed in-toto v1 statement.
+    #[error("payload is not a valid in-toto v1 statement: {0}")]
+    BadStatement(&'static str),
+}
+
+/// The bundle as JSON, all fields the verifier consumes required.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BundleJson {
+    media_type: String,
+    verification_material: VerificationMaterialJson,
+    dsse_envelope: DsseEnvelopeJson,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VerificationMaterialJson {
+    x509_certificate_chain: X509ChainJson,
+    tlog_entries: Vec<TlogEntryJson>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct X509ChainJson {
+    /// Base64 DER, leaf first (ADR-014).
+    certificates: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TlogEntryJson {
+    log_index: i64,
+    integrated_time: i64,
+    log_id: LogIdJson,
+    kind_version: KindVersionJson,
+    canonicalized_body: String,
+    inclusion_proof: InclusionProofJson,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LogIdJson {
+    key_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KindVersionJson {
+    kind: String,
+    version: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InclusionProofJson {
+    log_index: i64,
+    tree_size: u64,
+    checkpoint: CheckpointJson,
+    hashes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CheckpointJson {
+    envelope: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DsseEnvelopeJson {
+    payload_type: String,
+    payload: String,
+    signatures: Vec<SignatureJson>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SignatureJson {
+    sig: String,
+}
+
+/// The in-toto v1 statement carried in the DSSE payload.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Statement {
+    /// The in-toto statement type: [`STATEMENT_TYPE`].
+    #[serde(rename = "_type")]
+    pub statement_type: String,
+    /// The attested artifacts; the verifier requires exactly one match.
+    pub subject: Vec<Subject>,
+}
+
+/// One attested artifact.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Subject {
+    /// The artifact name, e.g. `detent-aarch64-unknown-linux-musl`.
+    pub name: String,
+    /// The artifact's digests.
+    pub digest: SubjectDigest,
+}
+
+/// The digests of one subject; only `sha256` is consumed.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubjectDigest {
+    /// The SHA-256 of the artifact, 64 lowercase hex characters.
+    pub sha256: String,
+}
+
+/// A fully decoded bundle: everything the six verification steps need, no
+/// base64 left in it.
+#[derive(Debug)]
+pub struct Decoded {
+    /// `integratedTime` of the tlog entry, in Unix seconds; the chain is
+    /// validated at this instant, not now (ADR-014 step 2).
+    pub integrated_time: i64,
+    /// DER certificates, leaf first; `certs[0]` is the leaf, the rest are
+    /// intermediates in order.
+    pub certs: Vec<Vec<u8>>,
+    /// The decoded in-toto statement.
+    pub statement: Statement,
+    /// The raw DSSE payload bytes (the statement JSON).
+    pub dsse_payload: Vec<u8>,
+    /// The DSSE payload type.
+    pub dsse_payload_type: String,
+    /// The decoded DSSE signature (DER ECDSA).
+    pub dsse_signature: Vec<u8>,
+    /// `logIndex` of the tlog entry.
+    pub log_index: i64,
+    /// The tlog entry's `keyId`, decoded.
+    pub log_key_id: Vec<u8>,
+    /// The tlog entry kind, e.g. `hashedrekord`.
+    pub kind: String,
+    /// The tlog entry version, e.g. `0.0.1`.
+    pub kind_version: String,
+    /// The canonicalized (hashedrekord) body, decoded JSON.
+    pub body: Vec<u8>,
+    /// `treeSize` the proof was computed against.
+    pub tree_size: u64,
+    /// The proof's leaf index within the tree.
+    pub proof_log_index: i64,
+    /// Sibling hashes along the inclusion path, decoded, leaf-upwards.
+    pub path_hashes: Vec<Vec<u8>>,
+    /// The checkpoint envelope text (body and signature lines).
+    pub checkpoint: String,
+}
+
+/// Parses and decodes a bundle, enforcing the 1 MiB cap and the strict field
+/// set.
+///
+/// # Errors
+///
+/// [`BundleError`] naming the first thing wrong, in ADR-014 step order:
+/// size, JSON shape, media type, base64, then statement.
+pub fn parse(bytes: &[u8]) -> Result<Decoded, BundleError> {
+    if bytes.len() > MAX_BUNDLE_BYTES {
+        return Err(BundleError::Oversized);
+    }
+    let json: BundleJson =
+        serde_json::from_slice(bytes).map_err(|err| BundleError::Malformed(err.to_string()))?;
+    if json.media_type != MEDIA_TYPE {
+        return Err(BundleError::BadMediaType(json.media_type));
+    }
+    // One tlog entry per bundle is the shape `actions/attest` emits; taking
+    // the first is the same check cosign makes.
+    let tlog = json
+        .verification_material
+        .tlog_entries
+        .first()
+        .ok_or_else(|| BundleError::Malformed("no tlog entries".to_owned()))?;
+
+    let dsse_payload = decode(json.dsse_envelope.payload.as_bytes(), "dsse payload")?;
+    if json.dsse_envelope.payload_type != DSSE_PAYLOAD_TYPE {
+        return Err(BundleError::Malformed(format!(
+            "unexpected DSSE payload type: {}",
+            json.dsse_envelope.payload_type
+        )));
+    }
+    let first_signature = json
+        .dsse_envelope
+        .signatures
+        .first()
+        .ok_or_else(|| BundleError::Malformed("no DSSE signatures".to_owned()))?;
+    let dsse_signature = decode(first_signature.sig.as_bytes(), "dsse signature")?;
+
+    let statement: Statement = serde_json::from_slice(&dsse_payload)
+        .map_err(|_| BundleError::BadStatement("unparsable"))?;
+    if statement.statement_type != STATEMENT_TYPE {
+        return Err(BundleError::BadStatement("wrong _type"));
+    }
+    if statement.subject.is_empty() {
+        return Err(BundleError::BadStatement("no subjects"));
+    }
+    for subject in &statement.subject {
+        if subject.digest.sha256.len() != 64
+            || !subject
+                .digest
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(BundleError::BadStatement(
+                "subject digest is not hex sha256",
+            ));
+        }
+    }
+
+    let mut certs = Vec::with_capacity(
+        json.verification_material
+            .x509_certificate_chain
+            .certificates
+            .len(),
+    );
+    for cert in &json
+        .verification_material
+        .x509_certificate_chain
+        .certificates
+    {
+        certs.push(decode(cert.as_bytes(), "certificate")?);
+    }
+    if certs.is_empty() {
+        return Err(BundleError::Malformed("empty certificate chain".to_owned()));
+    }
+
+    Ok(Decoded {
+        integrated_time: tlog.integrated_time,
+        certs,
+        statement,
+        dsse_payload,
+        dsse_payload_type: json.dsse_envelope.payload_type,
+        dsse_signature,
+        log_index: tlog.log_index,
+        log_key_id: decode(tlog.log_id.key_id.as_bytes(), "log key id")?,
+        kind: tlog.kind_version.kind.clone(),
+        kind_version: tlog.kind_version.version.clone(),
+        body: decode(tlog.canonicalized_body.as_bytes(), "canonicalized body")?,
+        tree_size: tlog.inclusion_proof.tree_size,
+        proof_log_index: tlog.inclusion_proof.log_index,
+        path_hashes: {
+            let mut out = Vec::with_capacity(tlog.inclusion_proof.hashes.len());
+            for hash in &tlog.inclusion_proof.hashes {
+                out.push(decode(hash.as_bytes(), "inclusion path hash")?);
+            }
+            out
+        },
+        checkpoint: tlog.inclusion_proof.checkpoint.envelope.clone(),
+    })
+}
+
+fn decode(raw: &[u8], field: &'static str) -> Result<Vec<u8>, BundleError> {
+    BASE64
+        .decode(raw)
+        .map_err(|_| BundleError::BadBase64(field))
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+
+    /// A parsable statement, base64-encoded, for [`minimal`].
+    const STATEMENT_B64: &str = "eyJfdHlwZSI6Imh0dHBzOi8vaW4tdG90by5pby9TdGF0ZW1lbnQvdjEiLCJwcmVkaWNhdGVUeXBlIjoiaHR0cHM6Ly9zbHNhLmRldi9wcm92ZW5hbmNlL3YxIiwic3ViamVjdCI6W3sibmFtZSI6ImRldGVudCIsImRpZ2VzdCI6eyJzaGEyNTYiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIn19XX0=";
+
+    /// The smallest bundle-shaped JSON every mutation test starts from.
+    fn minimal() -> serde_json::Value {
+        serde_json::json!({
+            "mediaType": MEDIA_TYPE,
+            "verificationMaterial": {
+                "x509CertificateChain": { "certificates": ["AAAA"] },
+                "tlogEntries": [{
+                    "logIndex": 0, "integratedTime": 1_758_000_000,
+                    "logId": { "keyId": "AAAA" },
+                    "kindVersion": { "kind": "hashedrekord", "version": "0.0.1" },
+                    "canonicalizedBody": "AAAA",
+                    "inclusionProof": {
+                        "logIndex": 0, "treeSize": 1,
+                        "checkpoint": { "envelope": "name 1\nAAAA\n\nQUJD\n" },
+                        "hashes": ["AAAA"]
+                    }
+                }]
+            },
+            "dsseEnvelope": {
+                "payloadType": DSSE_PAYLOAD_TYPE,
+                "payload": STATEMENT_B64,
+                "signatures": [ { "keyid": "", "sig": "AAAA" } ]
+            }
+        })
+    }
+
+    /// A bundle JSON mutated by `change`, plus a generous budget for the
+    /// unknown-field tolerance check.
+    fn parse_json(value: &serde_json::Value) -> Result<Decoded, BundleError> {
+        parse(value.to_string().as_bytes())
+    }
+
+    #[test]
+    fn accepts_minimal_shape_and_tolerates_unknown_fields() {
+        let mut value = minimal();
+        value["extraTopLevel"] = serde_json::json!({"github": "may extend this"});
+        value["dsseEnvelope"]["signatures"][0]["extra"] = serde_json::json!(1);
+        let decoded = parse_json(&value).map_err(|err| err.to_string());
+        let decoded = decoded.expect("minimal bundle parses");
+        assert_eq!(decoded.integrated_time, 1_758_000_000);
+        assert_eq!(decoded.kind, "hashedrekord");
+        assert_eq!(decoded.certs.len(), 1);
+    }
+
+    #[test]
+    fn refuses_oversized() {
+        let filler = vec![b'a'; MAX_BUNDLE_BYTES + 1];
+        assert!(matches!(parse(&filler), Err(BundleError::Oversized)));
+    }
+
+    #[test]
+    fn refuses_unparsable_json() {
+        assert!(matches!(
+            parse(b"{not json"),
+            Err(BundleError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn refuses_missing_required_fields() {
+        for field in [
+            "/mediaType",
+            "/verificationMaterial/x509CertificateChain",
+            "/verificationMaterial/tlogEntries",
+            "/verificationMaterial/tlogEntries/0/inclusionProof",
+            "/dsseEnvelope/payload",
+            "/dsseEnvelope/signatures",
+        ] {
+            let mut value = minimal();
+            remove_pointer(&mut value, field);
+            assert!(
+                parse_json(&value).is_err(),
+                "missing {field} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_wrong_media_type() {
+        let mut value = minimal();
+        value["mediaType"] = serde_json::json!("application/vnd.dev.sigstore.bundle.v0.4+json");
+        assert!(matches!(
+            parse_json(&value),
+            Err(BundleError::BadMediaType(_))
+        ));
+    }
+
+    #[test]
+    fn refuses_undecodable_base64() {
+        for field in [
+            "/dsseEnvelope/payload",
+            "/dsseEnvelope/signatures/0/sig",
+            "/verificationMaterial/x509CertificateChain/certificates/0",
+            "/verificationMaterial/tlogEntries/0/logId/keyId",
+            "/verificationMaterial/tlogEntries/0/canonicalizedBody",
+            "/verificationMaterial/tlogEntries/0/inclusionProof/hashes/0",
+        ] {
+            let mut value = minimal();
+            let slot = pointer_mut(&mut value, field);
+            *slot = serde_json::json!("not base64!");
+            assert!(
+                matches!(parse_json(&value), Err(BundleError::BadBase64(_))),
+                "{field} must name its base64 failure"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_bad_statement_shapes() {
+        // Wrong _type.
+        let payload = serde_json::json!({
+            "_type": "https://example.com/other",
+            "subject": [{ "name": "detent", "digest": { "sha256": &"0".repeat(64) } }]
+        });
+        let mut value = minimal();
+        value["dsseEnvelope"]["payload"] = serde_json::json!(BASE64.encode(payload.to_string()));
+        assert!(matches!(
+            parse_json(&value),
+            Err(BundleError::BadStatement("wrong _type"))
+        ));
+
+        // No subjects.
+        let payload = serde_json::json!({
+            "_type": STATEMENT_TYPE,
+            "subject": []
+        });
+        let mut value = minimal();
+        value["dsseEnvelope"]["payload"] = serde_json::json!(BASE64.encode(payload.to_string()));
+        assert!(matches!(
+            parse_json(&value),
+            Err(BundleError::BadStatement("no subjects"))
+        ));
+
+        // Unparsable payload.
+        let mut value = minimal();
+        value["dsseEnvelope"]["payload"] = serde_json::json!(BASE64.encode(b"{"));
+        assert!(matches!(
+            parse_json(&value),
+            Err(BundleError::BadStatement("unparsable"))
+        ));
+
+        // Subject digest not 64 hex.
+        let payload = serde_json::json!({
+            "_type": STATEMENT_TYPE,
+            "subject": [{ "name": "detent", "digest": { "sha256": "zz" } }]
+        });
+        let mut value = minimal();
+        value["dsseEnvelope"]["payload"] = serde_json::json!(BASE64.encode(payload.to_string()));
+        assert!(matches!(
+            parse_json(&value),
+            Err(BundleError::BadStatement(
+                "subject digest is not hex sha256"
+            ))
+        ));
+    }
+
+    #[test]
+    fn refuses_bad_payload_type_and_empty_chain_and_no_signatures() {
+        let mut value = minimal();
+        value["dsseEnvelope"]["payloadType"] = serde_json::json!("application/other");
+        assert!(matches!(parse_json(&value), Err(BundleError::Malformed(_))));
+
+        let mut value = minimal();
+        value["verificationMaterial"]["x509CertificateChain"]["certificates"] =
+            serde_json::json!([]);
+        assert!(matches!(parse_json(&value), Err(BundleError::Malformed(_))));
+
+        let mut value = minimal();
+        value["dsseEnvelope"]["signatures"] = serde_json::json!([]);
+        assert!(matches!(parse_json(&value), Err(BundleError::Malformed(_))));
+
+        let mut value = minimal();
+        value["verificationMaterial"]["tlogEntries"] = serde_json::json!([]);
+        assert!(matches!(parse_json(&value), Err(BundleError::Malformed(_))));
+    }
+
+    // -- tiny JSON pointer helpers (test-only; serde_json has no remover) --
+
+    fn remove_pointer(value: &mut serde_json::Value, pointer: &str) {
+        let path: Vec<&str> = pointer.split('/').skip(1).collect();
+        remove_path(value, &path);
+    }
+
+    fn remove_path(value: &mut serde_json::Value, path: &[&str]) {
+        let Some((head, rest)) = path.split_first() else {
+            return;
+        };
+        if rest.is_empty() {
+            if let Some(map) = value.as_object_mut() {
+                map.remove(*head);
+            }
+            return;
+        }
+        if let Ok(key) = head.parse::<usize>()
+            && let Some(entry) = value.as_array_mut().and_then(|array| array.get_mut(key))
+        {
+            remove_path(entry, rest);
+        } else if let Some(entry) = value.as_object_mut().and_then(|map| map.get_mut(*head)) {
+            remove_path(entry, rest);
+        }
+    }
+
+    /// `pointer_mut` never misses here: every pointer above is written
+    /// against [`minimal`].
+    #[allow(clippy::expect_used)]
+    fn pointer_mut<'a>(
+        value: &'a mut serde_json::Value,
+        pointer: &str,
+    ) -> &'a mut serde_json::Value {
+        value
+            .pointer_mut(pointer)
+            .expect("every pointer in this test hits minimal()")
+    }
+}

@@ -1,6 +1,6 @@
 detent: the busybox of config files
 
-Usage: detent [OPTIONS] <COMMAND>
+Usage: detent [OPTIONS] [COMMAND]
 
 Commands:
   serve        Start the privileged monitor and the unprivileged worker
@@ -10,6 +10,7 @@ Commands:
   backup       List and restore the backups the monitor retains
   audit        Read the audit log back
   host         Report the detected host profile and facts
+  update       Check for a newer release of detent, or apply one (PLAN §2.9, ADR-005, ADR-014). Every install passes the Sigstore verification of `detent-update`; a build that cannot verify refuses closed
   doctor       Check this host for common misconfigurations
   setup        First-run bootstrap: create the initial administrator account
   user         Manage web ui / api accounts
@@ -23,6 +24,7 @@ Options:
       --config <PATH>      Path to detent.toml (default: /etc/detent/detent.toml)
       --locale <TAG>       BCP-47 locale tag for messages (default: from the locale environment)
       --state-root <PATH>  Root of detent's mutable state (default: /var/lib/detent)
+      --self-test          Print the running version and compiled feature set, then exit. This is how the updater health-checks a freshly staged binary before swapping it in (PLAN §2.9 step 5, `detent --self-test --json`). It is the whole command: `dispatch` rejects it alongside a subcommand so the probe can never be silently ignored
   -h, --help               Print help
   -V, --version            Print version
 

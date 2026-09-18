@@ -183,6 +183,16 @@ fn dispatch(
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
+    // `detent --self-test` is the whole command (PLAN §2.9 step 5): with a
+    // subcommand it is a usage error, never a silently ignored flag.
+    if cli.self_test && cli.command.is_some() {
+        writeln!(
+            streams.out,
+            "{}",
+            renderer.messages.get(MessageId::new("cli-no-command"))
+        )?;
+        return Ok(Exit::Usage);
+    }
     let settings = Settings::from_cli(cli);
     renderer.note(
         streams.notes,
@@ -194,29 +204,44 @@ fn dispatch(
         ],
     )?;
 
-    match cli.command {
-        Command::Completions { shell } => {
-            crate::completions::write(streams.out, shell)?;
+    match &cli.command {
+        // `detent --self-test` (PLAN §2.9 step 5): the updater's health probe.
+        // It is the whole command; anything else without a subcommand is a
+        // usage error.
+        None if cli.self_test => self_test(cli, renderer, streams),
+        None => {
+            renderer.note(streams.notes, MessageId::new("cli-note-settings"), &[])?;
+            writeln!(
+                streams.out,
+                "{}",
+                renderer.messages.get(MessageId::new("cli-no-command"))
+            )?;
+            Ok(Exit::Usage)
+        }
+        Some(Command::Completions { shell }) => {
+            crate::completions::write(streams.out, *shell)?;
             Ok(Exit::Ok)
         }
-        Command::Doctor => crate::doctor::report(&settings, renderer, streams),
-        Command::Serve => crate::serve::run(cli.dryrun, &settings, renderer, streams),
+        Some(Command::Doctor) => crate::doctor::report(&settings, renderer, streams),
+        Some(Command::Serve) => crate::serve::run(cli.dryrun, &settings, renderer, streams),
         #[cfg(feature = "web")]
-        Command::Setup(ref args) => {
+        Some(Command::Setup(args)) => {
             crate::webadmin::setup(args, cli.dryrun, &settings, renderer, streams)
         }
         #[cfg(feature = "web")]
-        Command::User { ref action } => {
+        Some(Command::User { action }) => {
             crate::webadmin::user(action, cli.dryrun, &settings, renderer, streams)
         }
         #[cfg(feature = "web")]
-        Command::Token { ref action } => {
+        Some(Command::Token { action }) => {
             crate::webadmin::token(action, cli.dryrun, &settings, renderer, streams)
         }
-        Command::Config {
-            ref module,
+        #[cfg(feature = "update")]
+        Some(Command::Update(args)) => run_update(args, cli, renderer, streams),
+        Some(Command::Config {
+            module,
             action: ConfigAction::Defaults,
-        } => defaults(
+        }) => defaults(
             &detent_modules::modules(),
             &detent_platform::host::detect_real().profile,
             module,
@@ -370,11 +395,8 @@ pub fn target_path(
 ///
 /// [`UsageError`] when stdin is not JSON, or `--expect-hash` is not a digest.
 pub fn operation_for(cli: &Cli, input: &mut dyn Read) -> Result<Operation, UsageError> {
-    match cli.command {
-        Command::Config {
-            ref module,
-            ref action,
-        } => match *action {
+    match &cli.command {
+        Some(Command::Config { module, action }) => match action {
             // `defaults` never reaches the engine (see `defaults`); it maps to
             // the same read-only operation only so this function is total.
             ConfigAction::Get | ConfigAction::Defaults => {
@@ -388,7 +410,7 @@ pub fn operation_for(cli: &Cli, input: &mut dyn Read) -> Result<Operation, Usage
                 id: module.clone(),
                 model: read_model(input)?,
             }),
-            ConfigAction::Apply(ref args) => {
+            ConfigAction::Apply(args) => {
                 let model = read_model(input)?;
                 let expected_hash = match args.expect_hash {
                     Some(ref hex) => Some(parse_digest(hex)?),
@@ -403,46 +425,288 @@ pub fn operation_for(cli: &Cli, input: &mut dyn Read) -> Result<Operation, Usage
                 })
             }
         },
-        Command::Commit { ref action } => Ok(match *action {
+        Some(Command::Commit { action }) => Ok(match action {
             CommitAction::Confirm { id } => Operation::ConfirmCommit {
-                commit_id: CommitId(id),
+                commit_id: CommitId(*id),
             },
             CommitAction::Rollback { id } => Operation::RollbackCommit {
-                commit_id: CommitId(id),
+                commit_id: CommitId(*id),
             },
         }),
-        Command::Service { ref module, action } => Ok(match action.command() {
+        Some(Command::Service { module, action }) => Ok(match action.command() {
             Some(command) => Operation::ServiceAction {
                 id: module.clone(),
                 action: command,
             },
             None => Operation::ServiceStatus { id: module.clone() },
         }),
-        Command::Backup { ref action } => Ok(match *action {
-            BackupAction::List { ref module } => Operation::ListBackups { id: module.clone() },
-            BackupAction::Restore {
-                ref module,
-                backup_id,
-            } => Operation::Restore {
+        Some(Command::Backup { action }) => Ok(match action {
+            BackupAction::List { module } => Operation::ListBackups { id: module.clone() },
+            BackupAction::Restore { module, backup_id } => Operation::Restore {
                 id: module.clone(),
-                backup_id: BackupId(backup_id),
+                backup_id: BackupId(*backup_id),
             },
         }),
-        Command::Audit(ref args) => Ok(Operation::AuditQuery(AuditQuery {
+        Some(Command::Audit(args)) => Ok(Operation::AuditQuery(AuditQuery {
             module: args.module.clone(),
             who: args.who.clone(),
             limit: args.limit,
         })),
-        Command::Host => Ok(Operation::HostProfile),
-        // `dispatch` routes these away before an operation is needed.
-        Command::Serve | Command::Doctor | Command::Completions { .. } => {
-            Ok(Operation::ListModules)
-        }
-        #[cfg(feature = "web")]
-        Command::Setup(_) | Command::User { .. } | Command::Token { .. } => {
-            Ok(Operation::ListModules)
-        }
+        Some(Command::Host) => Ok(Operation::HostProfile),
+        // `dispatch` routes these away before an operation is needed; they
+        // answer ListModules only so `operation_for` stays total.
+        Some(_) | None => Ok(Operation::ListModules),
     }
+}
+
+/// `detent --self-test` (PLAN §2.9 step 5): the updater's health probe on a
+/// freshly staged binary. Prints the running version and the compiled
+/// feature set, as JSON under `--json`, one line per id otherwise.
+///
+/// Ungated: a minimal build without `update` still answers the probe. The
+/// shape matches `detent_update::FeatureSet` so the updater's `covers` check
+/// reads either one.
+fn self_test(
+    _cli: &Cli,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Exit> {
+    #[derive(serde::Serialize)]
+    struct SelfTest {
+        version: String,
+        features: Vec<String>,
+    }
+    let modules = detent_modules::modules();
+    let mut features: Vec<String> = modules.iter().map(|entry| entry.id().to_owned()).collect();
+    // ponytail: cfg! per feature so the probe reports this build, not the superset.
+    if cfg!(feature = "web") {
+        features.push("web".to_owned());
+    }
+    if cfg!(feature = "ui") {
+        features.push("ui".to_owned());
+    }
+    if cfg!(feature = "acme-dns01") {
+        features.push("acme-dns01".to_owned());
+    }
+    if cfg!(feature = "acme-dns-providers") {
+        features.push("acme-dns-providers".to_owned());
+    }
+    if cfg!(feature = "acme-attest") {
+        features.push("acme-attest".to_owned());
+    }
+    if cfg!(feature = "update") {
+        features.push("update".to_owned());
+    }
+    if cfg!(feature = "mcp") {
+        features.push("mcp".to_owned());
+    }
+    if cfg!(feature = "init-systemd") {
+        features.push("init-systemd".to_owned());
+    }
+    if cfg!(feature = "init-openrc") {
+        features.push("init-openrc".to_owned());
+    }
+    if cfg!(feature = "init-bsdrc") {
+        features.push("init-bsdrc".to_owned());
+    }
+    if cfg!(feature = "crypto-aws-lc") {
+        features.push("crypto-aws-lc".to_owned());
+    }
+    if cfg!(feature = "crypto-ring") {
+        features.push("crypto-ring".to_owned());
+    }
+    features.sort();
+    features.dedup();
+    let set = SelfTest {
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        features,
+    };
+    if renderer.json {
+        let text = serde_json::to_string_pretty(&set).map_err(std::io::Error::other)?;
+        writeln!(streams.out, "{text}")?;
+    } else {
+        renderer.line(
+            streams.out,
+            MessageId::new("cli-self-test"),
+            &[
+                ("version", &set.version),
+                ("features", &set.features.join(" ")),
+            ],
+        )?;
+    }
+    Ok(Exit::Ok)
+}
+
+/// `detent update …` (PLAN §2.9): `--check` reports, the bare form verifies
+/// into staging and stops — the privileged swap is unwired, so it refuses
+/// with the reason rather than installing anything unverified.
+#[cfg(feature = "update")]
+fn run_update(
+    args: &crate::cli::UpdateArgs,
+    _cli: &Cli,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Exit> {
+    use detent_update::Policy;
+    use detent_update::fetch::RealTransport;
+    let current = match semver::Version::parse(env!("CARGO_PKG_VERSION")) {
+        Ok(version) => version,
+        Err(err) => {
+            return failed(renderer, streams, &err.to_string());
+        }
+    };
+    let transport = match RealTransport::new() {
+        Ok(transport) => transport,
+        Err(err) => {
+            return failed(renderer, streams, &err.to_string());
+        }
+    };
+    let staging_parent = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_else(std::env::temp_dir);
+    run_update_on(
+        &transport,
+        &current,
+        &Policy {
+            min_age_days: Policy::default().min_age_days,
+            allow_downgrade: args.allow_downgrade,
+        },
+        time::OffsetDateTime::now_utc(),
+        args.check,
+        &staging_parent,
+        renderer,
+        streams,
+    )
+}
+
+/// The policy half of `run_update`, behind a `Transport` seam so tests run
+/// hermetic: pick `--check` vs bare-update without touching the network.
+#[cfg(feature = "update")]
+#[allow(clippy::too_many_arguments)]
+fn run_update_on(
+    transport: &dyn detent_update::fetch::Transport,
+    current: &semver::Version,
+    policy: &detent_update::Policy,
+    now: time::OffsetDateTime,
+    check_only: bool,
+    staging_parent: &std::path::Path,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Exit> {
+    if check_only {
+        return check_report(transport, current, policy, now, renderer, streams);
+    }
+    apply_update(
+        transport,
+        current,
+        policy,
+        now,
+        staging_parent,
+        renderer,
+        streams,
+    )
+}
+
+/// The `--check` half of `run_update`: resolve the policy, print the report.
+#[cfg(feature = "update")]
+fn check_report(
+    transport: &dyn detent_update::fetch::Transport,
+    current: &semver::Version,
+    policy: &detent_update::Policy,
+    now: time::OffsetDateTime,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Exit> {
+    let report = match detent_update::update::check(transport, current, policy, now) {
+        Ok(report) => report,
+        Err(err) => {
+            return failed(renderer, streams, &err.to_string());
+        }
+    };
+    if renderer.json {
+        let text = serde_json::to_string_pretty(&report).map_err(std::io::Error::other)?;
+        writeln!(streams.out, "{text}")?;
+    } else if report.update_available {
+        render_available(&report, renderer, streams)?;
+    } else {
+        renderer.line(
+            streams.out,
+            MessageId::new("cli-update-none"),
+            &[("current", &report.current)],
+        )?;
+    }
+    Ok(Exit::Ok)
+}
+
+/// The human half of a positive `--check`: the security line when the
+/// release body carries the marker, the plain line otherwise.
+#[cfg(feature = "update")]
+fn render_available(
+    report: &detent_update::CheckReport,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<()> {
+    let args = [
+        ("tag", report.tag.as_deref().unwrap_or_default()),
+        ("published", report.published.as_deref().unwrap_or_default()),
+    ];
+    if report.security {
+        renderer.line(
+            streams.out,
+            MessageId::new("cli-update-security-available"),
+            &args,
+        )?;
+    } else {
+        renderer.line(streams.out, MessageId::new("cli-update-available"), &args)?;
+    }
+    Ok(())
+}
+
+/// The bare-`update` half: verify into staging, then refuse the unwired swap.
+#[cfg(feature = "update")]
+fn apply_update(
+    transport: &dyn detent_update::fetch::Transport,
+    current: &semver::Version,
+    policy: &detent_update::Policy,
+    now: time::OffsetDateTime,
+    staging_parent: &std::path::Path,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Exit> {
+    let trust = match detent_update::trust::embedded() {
+        Ok(trust) => trust,
+        Err(err) => {
+            return failed(renderer, streams, &err.to_string());
+        }
+    };
+    match detent_update::update::prepare(transport, current, policy, now, &trust, staging_parent) {
+        Ok(candidate) => {
+            renderer.line(
+                streams.notes,
+                MessageId::new("cli-update-swap-unimplemented"),
+                &[("tag", &candidate.tag)],
+            )?;
+            Ok(Exit::Failed)
+        }
+        Err(err) => failed(renderer, streams, &err.to_string()),
+    }
+}
+
+/// One localized failure line on `notes`, always `Failed` — never `Usage`,
+/// so a refused update cannot be mistaken for a misspelled command.
+#[cfg(feature = "update")]
+fn failed(
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+    reason: &str,
+) -> std::io::Result<Exit> {
+    renderer.line(
+        streams.notes,
+        MessageId::new("cli-update-failed"),
+        &[("reason", reason)],
+    )?;
+    Ok(Exit::Failed)
 }
 
 /// Reads a JSON model from `input`.
@@ -813,6 +1077,522 @@ mod tests {
         assert_eq!(exit, Exit::Usage);
         assert!(out.is_empty());
         assert!(!notes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn self_test_reports_the_compiled_feature_gates() -> R {
+        let (exit, out, _) = run_with(&["detent", "--self-test", "--json"])?;
+        assert_eq!(exit, Exit::Ok);
+        let parsed: serde_json::Value = serde_json::from_str(&out)?;
+        let features: Vec<String> =
+            serde_json::from_value(parsed.get("features").cloned().unwrap_or_default())?;
+        let gated = [
+            (cfg!(feature = "web"), "web"),
+            (cfg!(feature = "update"), "update"),
+            (cfg!(feature = "init-systemd"), "init-systemd"),
+            (cfg!(feature = "crypto-aws-lc"), "crypto-aws-lc"),
+        ];
+        for (compiled, name) in gated {
+            assert_eq!(features.iter().any(|got| got == name), compiled, "{name}");
+        }
+        let (exit, out, _) = run_with(&["detent", "--self-test"])?;
+        assert_eq!(exit, Exit::Ok);
+        assert!(out.contains("version"), "{out}");
+        let (exit, out, _) = run_with(&["detent"])?;
+        assert_eq!(exit, Exit::Usage);
+        assert!(!out.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn self_test_with_a_subcommand_is_usage() -> R {
+        let cli = parse(&["detent", "--self-test", "doctor"])?;
+        assert!(cli.self_test && cli.command.is_some());
+        let exit = run(
+            &cli,
+            &mut Streams {
+                input: &mut std::io::empty(),
+                out: &mut Vec::new(),
+                notes: &mut Vec::new(),
+            },
+        );
+        assert_eq!(exit, Exit::Usage);
+        Ok(())
+    }
+    #[cfg(feature = "web")]
+    #[test]
+    fn web_config_errors_report_the_path_and_fail() -> R {
+        use crate::i18n::Messages;
+        use crate::output::Renderer;
+        let messages = Messages::new(Some("en-US"));
+        let renderer = Renderer {
+            messages: &messages,
+            json: false,
+            verbose: false,
+        };
+        let settings = Settings::from_cli(&parse(&["detent", "host"])?);
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = super::report_web_config_error(
+            &detent_web::ConfigError::ZeroValue {
+                field: "listen.max_connections",
+            },
+            &settings,
+            &renderer,
+            &mut Streams {
+                input: &mut std::io::empty(),
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        assert_eq!(exit, Exit::Failed);
+        assert!(String::from_utf8(notes)?.contains("listen.max_connections"));
+        Ok(())
+    }
+
+    #[test]
+    fn run_maps_a_broken_stream_to_failure() -> R {
+        struct Broken;
+        impl std::io::Write for Broken {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+        }
+        let cli = parse(&["detent"])?;
+        let exit = run(
+            &cli,
+            &mut Streams {
+                input: &mut std::io::empty(),
+                out: &mut Broken,
+                notes: &mut Broken,
+            },
+        );
+        assert_eq!(exit, Exit::Failed);
+        Ok(())
+    }
+    #[cfg(feature = "update")]
+    #[test]
+    fn run_update_on_routes_check_and_bare_update() -> R {
+        use crate::i18n::Messages;
+        use crate::output::Renderer;
+        let messages = Messages::new(Some("en-US"));
+        let renderer = Renderer {
+            messages: &messages,
+            json: false,
+            verbose: false,
+        };
+        let current = semver::Version::new(0, 0, 1);
+        let policy = detent_update::Policy::default();
+        let now = time::OffsetDateTime::now_utc();
+        let parent = std::env::temp_dir();
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = super::run_update_on(
+            &OneFeed {
+                tag: "v0.0.2",
+                body: "",
+                when: "2020-01-01T00:00:00Z",
+            },
+            &current,
+            &policy,
+            now,
+            true,
+            &parent,
+            &renderer,
+            &mut Streams {
+                input: &mut std::io::empty(),
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        assert_eq!(exit, Exit::Ok);
+        assert!(String::from_utf8(out)?.contains("v0.0.2"));
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = super::run_update_on(
+            &FailingFeed,
+            &current,
+            &policy,
+            now,
+            false,
+            &parent,
+            &renderer,
+            &mut Streams {
+                input: &mut std::io::empty(),
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        assert_eq!(exit, Exit::Failed);
+        assert!(out.is_empty());
+        assert!(!notes.is_empty());
+        Ok(())
+    }
+    #[cfg(feature = "update")]
+    #[test]
+    fn a_failed_check_is_a_localized_failure_not_usage() -> R {
+        use crate::i18n::Messages;
+        use crate::output::Renderer;
+        let messages = Messages::new(Some("en-US"));
+        let renderer = Renderer {
+            messages: &messages,
+            json: false,
+            verbose: false,
+        };
+        let current = semver::Version::new(0, 0, 1);
+        let policy = detent_update::Policy::default();
+        let now = time::OffsetDateTime::now_utc();
+        let parent = std::env::temp_dir();
+        // FailingFeed refuses the list call: `check_report` must land on
+        // `failed`, never Usage, so a refused update is not mistaken for a
+        // misspelled command.
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = super::run_update_on(
+            &FailingFeed,
+            &current,
+            &policy,
+            now,
+            true,
+            &parent,
+            &renderer,
+            &mut Streams {
+                input: &mut std::io::empty(),
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        assert_eq!(exit, Exit::Failed);
+        assert!(out.is_empty());
+        let notes = String::from_utf8(notes)?;
+        assert!(notes.contains("update failed"), "{notes}");
+        Ok(())
+    }
+
+    fn run_with(argv: &[&str]) -> Result<(Exit, String, String), Box<dyn std::error::Error>> {
+        let cli = parse(argv)?;
+        let mut input = std::io::empty();
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = run(
+            &cli,
+            &mut Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+        );
+        Ok((exit, String::from_utf8(out)?, String::from_utf8(notes)?))
+    }
+
+    #[cfg(feature = "update")]
+    struct OneFeed {
+        tag: &'static str,
+        body: &'static str,
+        when: &'static str,
+    }
+
+    #[cfg(feature = "update")]
+    impl detent_update::fetch::Transport for OneFeed {
+        fn get(
+            &self,
+            _url: &str,
+            _cap: u64,
+            sink: &mut dyn std::io::Write,
+        ) -> Result<u64, detent_update::fetch::FetchError> {
+            let triple = detent_update::fetch::target_triple();
+            let doc = serde_json::json!([{
+                "tag_name": self.tag,
+                "draft": false,
+                "prerelease": false,
+                "published_at": self.when,
+                "body": self.body,
+                "assets": [
+                    {"name": format!("detent-{triple}"), "browser_download_url": "https://example.invalid/b"},
+                    {"name": "SHA256SUMS", "browser_download_url": "https://example.invalid/s"},
+                    {"name": format!("detent-{triple}.sigstore.json"), "browser_download_url": "https://example.invalid/j"},
+                ],
+            }]);
+            let bytes = serde_json::to_vec(&doc)
+                .map_err(|err| detent_update::fetch::FetchError::BadJson(err.to_string()))?;
+            let len = bytes.len() as u64;
+            std::io::Write::write_all(sink, &bytes)
+                .map_err(|err| detent_update::fetch::FetchError::BadJson(err.to_string()))?;
+            Ok(len)
+        }
+    }
+
+    #[cfg(feature = "update")]
+    struct FailingFeed;
+
+    #[cfg(feature = "update")]
+    impl detent_update::fetch::Transport for FailingFeed {
+        fn get(
+            &self,
+            url: &str,
+            _cap: u64,
+            _sink: &mut dyn std::io::Write,
+        ) -> Result<u64, detent_update::fetch::FetchError> {
+            Err(detent_update::fetch::FetchError::Unreachable {
+                url: url.to_owned(),
+                reason: "offline".to_owned(),
+            })
+        }
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn update_check_report_renders_all_four_shapes() -> R {
+        use detent_update::{CheckReport, Policy};
+        let current = semver::Version::new(0, 0, 1);
+        let policy = Policy::default();
+        let now = time::OffsetDateTime::now_utc();
+        let when = "2020-01-01T00:00:00Z";
+        let messages = crate::i18n::Messages::new(Some("en-US"));
+        let renderer = crate::output::Renderer {
+            messages: &messages,
+            json: false,
+            verbose: false,
+        };
+        for (tag, body, available, security) in [
+            ("v0.0.2", "", true, false),
+            ("v0.0.2", "detent-security: true", true, true),
+            ("v0.0.0", "", false, false),
+        ] {
+            let feed = OneFeed { tag, body, when };
+            let report: CheckReport = detent_update::update::check(&feed, &current, &policy, now)?;
+            assert_eq!(report.update_available, available, "{tag} {body}");
+            assert_eq!(report.security, security);
+            let mut out = Vec::new();
+            let mut notes = Vec::new();
+            let exit = super::check_report(
+                &feed,
+                &current,
+                &policy,
+                now,
+                &renderer,
+                &mut Streams {
+                    input: &mut std::io::empty(),
+                    out: &mut out,
+                    notes: &mut notes,
+                },
+            )?;
+            assert_eq!(exit, Exit::Ok);
+            let text = String::from_utf8(out)?;
+            if available {
+                assert!(text.contains("v0.0.2"), "{text}");
+            } else {
+                assert!(text.contains("0.0.1"), "{text}");
+            }
+        }
+        let messages_json = crate::i18n::Messages::new(Some("en-US"));
+        let renderer_json = crate::output::Renderer {
+            messages: &messages_json,
+            json: true,
+            verbose: false,
+        };
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = super::check_report(
+            &OneFeed {
+                tag: "v0.0.2",
+                body: "",
+                when,
+            },
+            &current,
+            &policy,
+            now,
+            &renderer_json,
+            &mut Streams {
+                input: &mut std::io::empty(),
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        assert_eq!(exit, Exit::Ok);
+        let parsed: serde_json::Value = serde_json::from_slice(&out)?;
+        assert_eq!(parsed.get("tag"), Some(&serde_json::json!("v0.0.2")));
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = super::check_report(
+            &FailingFeed,
+            &current,
+            &policy,
+            now,
+            &renderer,
+            &mut Streams {
+                input: &mut std::io::empty(),
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        assert_eq!(exit, Exit::Failed);
+        assert!(out.is_empty());
+        assert!(!notes.is_empty());
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn failed_is_always_a_localized_failure_never_usage() -> R {
+        let messages = crate::i18n::Messages::new(Some("en-US"));
+        let renderer = crate::output::Renderer {
+            messages: &messages,
+            json: false,
+            verbose: false,
+        };
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = super::failed(
+            &renderer,
+            &mut Streams {
+                input: &mut std::io::empty(),
+                out: &mut out,
+                notes: &mut notes,
+            },
+            "offline",
+        )?;
+        assert_eq!(exit, Exit::Failed);
+        assert!(out.is_empty());
+        assert!(String::from_utf8(notes)?.contains("offline"));
+        Ok(())
+    }
+    #[cfg(feature = "update")]
+    #[test]
+    fn update_and_dispatch_only_arms_map_without_side_effects() -> R {
+        let mut input = std::io::empty();
+        let cli = parse(&["detent", "update", "--check"])?;
+        assert!(matches!(
+            operation_for(&cli, &mut input).map_err(|usage| usage.id.as_str())?,
+            Operation::ListModules
+        ));
+        let cli = parse(&["detent", "update"])?;
+        assert!(matches!(
+            operation_for(&cli, &mut input).map_err(|usage| usage.id.as_str())?,
+            Operation::ListModules
+        ));
+        let cli = parse(&["detent", "serve"])?;
+        assert!(matches!(
+            operation_for(&cli, &mut input).map_err(|usage| usage.id.as_str())?,
+            Operation::ListModules
+        ));
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn bare_update_refuses_closed_on_placeholder_trust() -> R {
+        let messages = crate::i18n::Messages::new(Some("en-US"));
+        let renderer = crate::output::Renderer {
+            messages: &messages,
+            json: false,
+            verbose: false,
+        };
+        let current = semver::Version::new(0, 0, 1);
+        let policy = detent_update::Policy::default();
+        let now = time::OffsetDateTime::now_utc();
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let parent = std::env::temp_dir();
+        let exit = super::apply_update(
+            &FailingFeed,
+            &current,
+            &policy,
+            now,
+            &parent,
+            &renderer,
+            &mut Streams {
+                input: &mut std::io::empty(),
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        assert_eq!(exit, Exit::Failed);
+        assert!(out.is_empty());
+        assert!(!notes.is_empty());
+        Ok(())
+    }
+    #[cfg(feature = "update")]
+    #[test]
+    fn update_check_none_renders_current_and_succeeds() -> R {
+        let messages = crate::i18n::Messages::new(Some("en-US"));
+        let renderer = crate::output::Renderer {
+            messages: &messages,
+            json: false,
+            verbose: false,
+        };
+        let current = semver::Version::new(0, 0, 1);
+        let policy = detent_update::Policy::default();
+        let now = time::OffsetDateTime::now_utc();
+        let feed = OneFeed {
+            tag: "v0.0.0",
+            body: "",
+            when: "2020-01-01T00:00:00Z",
+        };
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = super::check_report(
+            &feed,
+            &current,
+            &policy,
+            now,
+            &renderer,
+            &mut Streams {
+                input: &mut std::io::empty(),
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        assert_eq!(exit, Exit::Ok);
+        assert!(String::from_utf8(out)?.contains("0.0.1"));
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn update_check_offline_fails_closed() -> R {
+        let messages = crate::i18n::Messages::new(Some("en-US"));
+        let renderer = crate::output::Renderer {
+            messages: &messages,
+            json: false,
+            verbose: false,
+        };
+        let current = semver::Version::new(0, 0, 1);
+        let policy = detent_update::Policy::default();
+        let now = time::OffsetDateTime::now_utc();
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = super::check_report(
+            &FailingFeed,
+            &current,
+            &policy,
+            now,
+            &renderer,
+            &mut Streams {
+                input: &mut std::io::empty(),
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        assert_eq!(exit, Exit::Failed);
+        assert!(out.is_empty());
+        assert!(!notes.is_empty());
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn update_operation_maps_without_side_effects() -> R {
+        let cli = parse(&["detent", "update", "--check"])?;
+        let mut input = std::io::empty();
+        assert!(matches!(
+            operation_for(&cli, &mut input).map_err(|usage| usage.id.as_str())?,
+            Operation::ListModules
+        ));
         Ok(())
     }
 

@@ -211,12 +211,14 @@ fn digest() -> Sha256Digest {
     Sha256Digest::of(b"fixture")
 }
 
-/// A `Planned` outcome, changed or unchanged.
-pub fn planned(would_change: bool) -> OpOutcome {
+/// A `Planned` report, changed or unchanged: the `OpOutcome` wrapper is
+/// built by the caller, so `dry_run` needs no `unreachable!` arm and this
+/// file's error paths stay at zero.
+pub fn planned(would_change: bool) -> PlanReport {
     let old = "old\n";
     let new = if would_change { "new\n" } else { old };
     let hunks = detent_ops::diff::diff(old, new, detent_ops::diff::DEFAULT_CONTEXT);
-    OpOutcome::Planned(Box::new(PlanReport {
+    PlanReport {
         module: MODULE.to_owned(),
         path: "/etc/fake.conf".to_owned(),
         unified_diff: detent_ops::diff::render_unified("/etc/fake.conf", "/etc/fake.conf", &hunks),
@@ -245,7 +247,7 @@ pub fn planned(would_change: bool) -> OpOutcome {
         diagnostics: diagnostics(),
         current_hash: digest(),
         would_change,
-    }))
+    }
 }
 
 /// One warning diagnostic.
@@ -269,17 +271,37 @@ pub fn module_view(with_model: bool) -> OpOutcome {
     }))
 }
 
-/// One value of every [`OpOutcome`] variant.
+/// An `Applied` outcome with no service action and no armed commit: the
+/// skip-branches of `output::applied` that `every_outcome` never takes.
+pub fn applied_without_commit() -> OpOutcome {
+    OpOutcome::Applied(Box::new(ApplyReport {
+        module: MODULE.to_owned(),
+        path: "/etc/fake.conf".to_owned(),
+        prev_hash: None,
+        new_hash: digest(),
+        created: true,
+        backed_up: false,
+        service: None,
+        commit: None,
+    }))
+}
+
+/// The host profile `every_outcome` renders: Linux/systemd, no probed
+/// service versions (add some for the service-version line).
+pub fn host_profile() -> HostProfile {
+    HostProfile {
+        os: Os::Linux,
+        init: InitSystem::Systemd,
+        hostname: "box".to_owned(),
+        service_versions: std::collections::BTreeMap::new(),
+        ram_mib: 512,
+    }
+}
+
 pub fn every_outcome() -> Vec<OpOutcome> {
     let descriptor = descriptor(Path::new("/etc/fake.conf"));
     let host = Detected {
-        profile: HostProfile {
-            os: Os::Linux,
-            init: InitSystem::Systemd,
-            hostname: "box".to_owned(),
-            service_versions: std::collections::BTreeMap::new(),
-            ram_mib: 512,
-        },
+        profile: host_profile(),
         facts: detent_platform::host::HostFacts {
             notes: vec!["a note".to_owned()],
             ..detent_platform::host::HostFacts::default()
@@ -290,7 +312,7 @@ pub fn every_outcome() -> Vec<OpOutcome> {
         OpOutcome::Modules(vec![descriptor]),
         module_view(true),
         OpOutcome::Validated(diagnostics()),
-        planned(true),
+        OpOutcome::Planned(Box::new(planned(true))),
         OpOutcome::Applied(Box::new(ApplyReport {
             module: MODULE.to_owned(),
             path: "/etc/fake.conf".to_owned(),
@@ -363,10 +385,6 @@ pub fn every_outcome() -> Vec<OpOutcome> {
 
 /// A withheld mutation, with or without the plan an `Apply` would have shown.
 pub fn dry_run(with_plan: bool) -> crate::run::DryRun {
-    let plan = match planned(true) {
-        OpOutcome::Planned(plan) => Some(*plan),
-        _ => None,
-    };
     crate::run::DryRun {
         dryrun: true,
         operation: if with_plan {
@@ -375,7 +393,17 @@ pub fn dry_run(with_plan: bool) -> crate::run::DryRun {
             OpKind::Restore
         },
         module: Some(MODULE.to_owned()),
-        plan: if with_plan { plan } else { None },
+        plan: with_plan.then(|| planned(true)),
+    }
+}
+/// A withheld mutation carrying an explicit plan (which `dry_run(bool)`
+/// cannot build for the no-change branch: its fixture always changes).
+pub fn dry_run_plan(plan: PlanReport) -> crate::run::DryRun {
+    crate::run::DryRun {
+        dryrun: true,
+        operation: OpKind::Apply,
+        module: Some(MODULE.to_owned()),
+        plan: Some(plan),
     }
 }
 

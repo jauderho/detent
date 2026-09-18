@@ -45,3 +45,4 @@ File naming: `ADR-NNN-<kebab-slug>.md`, zero-padded to three digits.
 | ADR-011 | 7-day supply-chain cooldown | Accepted |
 | ADR-012 | Commit-confirm auto-rollback | Accepted |
 | ADR-013 | Platform and architecture tiers | Accepted |
+| ADR-014 | In-tree Sigstore bundle verifier | Accepted |

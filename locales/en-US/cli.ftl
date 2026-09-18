@@ -29,6 +29,15 @@ cli-bad-hash = `{$value}` is not a sha-256 digest of 64 hex characters.
 cli-start-failed = the privileged helper could not be started: {$reason}
 cli-monitor-stop = the privileged helper did not stop cleanly: {$reason}
 cli-config-load-failed = the configuration at {$path} could not be loaded: {$reason}
+cli-no-command = no command was given.
+
+## self-test probe and self-update (PLAN §2.9)
+cli-self-test = version {$version} features {$features}
+cli-update-available = update available: {$tag} published {$published}
+cli-update-security-available = security update available: {$tag} published {$published}
+cli-update-none = no update available (current {$current})
+cli-update-failed = update failed: {$reason}
+cli-update-swap-unimplemented = verified {$tag} but the binary swap is not implemented yet
 
 ## config
 cli-module-line = {$id}  {$name}
