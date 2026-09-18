@@ -154,6 +154,7 @@ impl ScopedAuthz {
             | Operation::ServiceStatus { .. }
             | Operation::HostProfile
             | Operation::CertStatus
+            | Operation::UpdateStatus
             | Operation::AuditQuery(_) => Scope::Read,
         }
     }

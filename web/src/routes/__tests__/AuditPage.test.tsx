@@ -121,6 +121,7 @@ describe('AuditPage — populated table', () => {
     ['host_profile', 'read host profile'],
     ['audit_query', 'read audit log'],
     ['cert_status', 'read certificate status'],
+    ['update_status', 'read update status'],
     ['cert_renew', 'renew certificate'],
   ]
 

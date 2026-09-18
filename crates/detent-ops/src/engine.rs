@@ -248,6 +248,9 @@ impl OpsEngine {
             Operation::CertStatus => Err(OpsError::Unsupported {
                 what: "cert_status",
             }),
+            Operation::UpdateStatus => Err(OpsError::Unsupported {
+                what: "update_status",
+            }),
             Operation::CertRenew => Err(OpsError::Unsupported { what: "cert_renew" }),
         }
     }

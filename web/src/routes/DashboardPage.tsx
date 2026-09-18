@@ -1,20 +1,20 @@
 /**
  * The landing page: what detection found about this host, the serving
- * certificate, how many modules this build carries, and the tail of the audit
- * log.
+ * certificate, the update status, how many modules this build carries, and
+ * the tail of the audit log.
  *
- * Four independent panels, four independent queries — a host that cannot
+ * Five independent panels, five independent queries — a host that cannot
  * answer `audit` should not blank the module count next to it, so each panel
  * owns its own loading and error state rather than the page gating on all
- * four together.
+ * five together.
  */
 
 import { Localized, type ReactLocalization, useLocalization } from '@fluent/react'
 import { Link } from 'react-router'
 import { useModules } from '@/api/modules'
 import { useApiErrorMessage } from '@/api/query'
-import type { AuditRecord, CertReport, HostReport } from '@/api/system'
-import { useAudit, useCert, useHostProfile } from '@/api/system'
+import type { AuditRecord, CertReport, HostReport, UpdateReport } from '@/api/system'
+import { useAudit, useCert, useHostProfile, useUpdate } from '@/api/system'
 import { Banner } from '@/components/Banner'
 import { DataTable, type DataTableColumn } from '@/components/DataTable'
 import { GridCell, HairlineGrid } from '@/components/HairlineGrid'
@@ -22,7 +22,7 @@ import { Label } from '@/components/Label'
 import { Panel } from '@/components/Panel'
 import { Readout, Screen } from '@/components/Screen'
 import { certExpired, certGridItems, certTone, certWarning } from '@/lib/cert'
-import { localeOf } from '@/lib/format'
+import { formatRfc3339, localeOf } from '@/lib/format'
 import { auditOpText, auditResultNode, auditRowKey, auditWhenText } from './AuditPage'
 import { ROUTES } from './paths'
 
@@ -201,6 +201,75 @@ function CertGrid({ report }: { report: CertReport }) {
     </>
   )
 }
+
+/**
+ * The update panel. Read-only by design: this build *reports* what the update
+ * policy says is available. There is no apply control until the privileged
+ * swap lands (PLAN §2.9 steps 5b–5c); when it does, the control goes here —
+ * `write`-scoped, CSRF-checked, behind its own endpoint.
+ */
+function UpdatePanel() {
+  const { l10n } = useLocalization()
+  const query = useUpdate()
+  const errorMessage = useApiErrorMessage()
+
+  return (
+    <Panel label={l10n.getString('dashboard-update-panel')}>
+      {query.isPending ? (
+        <Localized id="state-loading">
+          <p>loading</p>
+        </Localized>
+      ) : query.isError ? (
+        <Banner tone="amber">{errorMessage(query.error)}</Banner>
+      ) : (
+        <UpdateGrid report={query.data} l10n={l10n} />
+      )}
+    </Panel>
+  )
+}
+
+function UpdateGrid({ report, l10n }: { report: UpdateReport; l10n: ReactLocalization }) {
+  const published =
+    report.published === undefined || report.published === null
+      ? null
+      : formatRfc3339(localeOf(l10n), report.published)
+  return (
+    <>
+      <HairlineGrid columns={published === null ? 2 : 3}>
+        <GridCell>
+          <Label>{l10n.getString('dashboard-update-current')}</Label>
+          <Screen>
+            {/* Host text, never localized — verbatim so the semver survives. */}
+            <span className="verbatim">
+              <Readout value={report.current} />
+            </span>
+          </Screen>
+        </GridCell>
+        {published === null ? null : (
+          <GridCell>
+            <Label>{l10n.getString('dashboard-update-published')}</Label>
+            <Screen>
+              <Readout value={published} />
+            </Screen>
+          </GridCell>
+        )}
+      </HairlineGrid>
+      {!report.update_available ? (
+        <Banner tone="blue">{l10n.getString('dashboard-update-up-to-date')}</Banner>
+      ) : report.tag === undefined || report.tag === null ? null : (
+        <>
+          <Banner tone={report.security ? 'amber' : 'blue'}>
+            {l10n.getString('dashboard-update-available', { tag: report.tag })}
+          </Banner>
+          {report.security ? (
+            <Banner tone="amber">{l10n.getString('dashboard-update-security')}</Banner>
+          ) : null}
+        </>
+      )}
+    </>
+  )
+}
+
 function ModulesPanel() {
   const { l10n } = useLocalization()
   const query = useModules()
@@ -296,6 +365,7 @@ export function DashboardPage() {
       <div style={PANELS_STYLE}>
         <HostPanel />
         <CertPanel />
+        <UpdatePanel />
         <ModulesPanel />
         <RecentAuditPanel />
       </div>

@@ -13,7 +13,7 @@ import { describe, expect, it } from 'bun:test'
 import { screen } from '@testing-library/react'
 import type { SessionView } from '@/api/auth'
 import type { ModuleDescriptor } from '@/api/modules'
-import type { AuditRecord, CertReport, HostReport } from '@/api/system'
+import type { AuditRecord, CertReport, HostReport, UpdateReport } from '@/api/system'
 import {
   errorResponse,
   jsonResponse,
@@ -52,6 +52,14 @@ const CERT_REPORT: CertReport = {
   not_after_unix: 2_000_000_000,
 }
 
+const UPDATE_REPORT: UpdateReport = {
+  current: '0.0.1',
+  published: '2026-09-10T00:00:00Z',
+  security: false,
+  tag: 'v0.0.2',
+  update_available: true,
+}
+
 function moduleDescriptor(id: string): ModuleDescriptor {
   return {
     checks: [],
@@ -84,12 +92,13 @@ function record(overrides: Partial<AuditRecord> = {}): AuditRecord {
 }
 
 function allHandlers(
-  overrides: Partial<Record<'profile' | 'cert' | 'modules' | 'audit', UrlRule[1]>> = {},
+  overrides: Partial<Record<'profile' | 'cert' | 'modules' | 'audit' | 'update', UrlRule[1]>> = {},
 ): UrlRule[] {
   return [
     ['/auth/session', () => jsonResponse(SESSION)],
     ['/system/profile', overrides.profile ?? (() => jsonResponse(HOST_REPORT))],
     ['/system/cert', overrides.cert ?? (() => jsonResponse(CERT_REPORT))],
+    ['/system/update', overrides.update ?? (() => jsonResponse(UPDATE_REPORT))],
     ['/modules', overrides.modules ?? (() => jsonResponse(MODULES))],
     ['/audit', overrides.audit ?? (() => jsonResponse([record()]))],
   ]
@@ -218,5 +227,66 @@ describe('DashboardPage — empty and populated', () => {
 
     await screen.findByText('nas-01')
     expect(screen.queryByText('detection notes')).toBeNull()
+  })
+})
+
+describe('DashboardPage — update status', () => {
+  it('shows the available release read-only, with no apply control', async () => {
+    const stub = stubFetchByUrl(allHandlers())
+    renderWithProviders(<DashboardPage />, { fetch: stub.fetch })
+
+    // `l10n.getString` wraps the interpolated `{$tag}` in bidi-isolate
+    // marks, so the tag is matched as its own substring.
+    expect(await screen.findByText(/release .* is available for this build\./)).toHaveTextContent(
+      'v0.0.2',
+    )
+    expect(screen.getByText('0.0.1')).toBeInTheDocument()
+    // The swap (PLAN §2.9 steps 5b–5c) is not wired: the panel reports and
+    // installs nothing, so the page carries no button, only readouts.
+    expect(screen.queryByRole('button', { name: 'install' })).toBeNull()
+  })
+
+  it('reports an up-to-date build without a published date', async () => {
+    const stub = stubFetchByUrl(
+      allHandlers({
+        update: () => jsonResponse({ ...UPDATE_REPORT, update_available: false, published: null }),
+      }),
+    )
+    renderWithProviders(<DashboardPage />, { fetch: stub.fetch })
+
+    expect(
+      await screen.findByText('no newer release is offered for this build.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByText('published')).toBeNull()
+  })
+
+  it('flags a security release', async () => {
+    const stub = stubFetchByUrl(
+      allHandlers({ update: () => jsonResponse({ ...UPDATE_REPORT, security: true }) }),
+    )
+    renderWithProviders(<DashboardPage />, { fetch: stub.fetch })
+
+    expect(
+      await screen.findByText(
+        'this release is flagged as a security update; it bypasses the age gate.',
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it('fails independently: an unreachable release feed blanks only this panel', async () => {
+    const stub = stubFetchByUrl(
+      allHandlers({ update: () => errorResponse(503, 'web-update-check-failed') }),
+    )
+    renderWithProviders(<DashboardPage />, { fetch: stub.fetch })
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(
+      'the update check could not reach the release server; try again later.',
+    )
+    // The neighbours are untouched.
+    expect(await screen.findByText('nas-01')).toBeInTheDocument()
+    expect(await screen.findByText(/modules are compiled into this build\.$/)).toHaveTextContent(
+      '2',
+    )
   })
 })

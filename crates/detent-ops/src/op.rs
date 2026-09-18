@@ -175,6 +175,14 @@ pub enum Operation {
     HostProfile,
     /// Read back the audit log.
     AuditQuery(AuditQuery),
+    /// Read whether a qualifying update exists for this build.
+    ///
+    /// Not answered by the engine, for the same reason as [`Self::CertStatus`]:
+    /// the check fetches a release feed over the network and lives in
+    /// `detent-update`, which the operations layer does not depend on. The
+    /// variant exists so authorization and the audit label for a refusal are
+    /// this operation's own rather than borrowed.
+    UpdateStatus,
     /// Read the serving certificate's fingerprint and remaining lifetime.
     ///
     /// Not answered by the engine: the serving certificate belongs to the
@@ -226,6 +234,8 @@ pub enum OpKind {
     HostProfile,
     /// [`Operation::AuditQuery`].
     AuditQuery,
+    /// [`Operation::UpdateStatus`].
+    UpdateStatus,
     /// [`Operation::CertStatus`].
     CertStatus,
     /// [`Operation::CertRenew`].
@@ -250,6 +260,7 @@ impl Operation {
             Self::ServiceAction { .. } => OpKind::ServiceAction,
             Self::HostProfile => OpKind::HostProfile,
             Self::AuditQuery(_) => OpKind::AuditQuery,
+            Self::UpdateStatus => OpKind::UpdateStatus,
             Self::CertStatus => OpKind::CertStatus,
             Self::CertRenew => OpKind::CertRenew,
         }
@@ -271,6 +282,7 @@ impl Operation {
             | Self::ConfirmCommit { .. }
             | Self::RollbackCommit { .. }
             | Self::HostProfile
+            | Self::UpdateStatus
             | Self::CertStatus
             | Self::CertRenew
             | Self::AuditQuery(_) => None,
@@ -349,6 +361,7 @@ mod tests {
             },
             Operation::HostProfile,
             Operation::AuditQuery(crate::audit::AuditQuery::default()),
+            Operation::UpdateStatus,
             Operation::CertStatus,
             Operation::CertRenew,
         ]
@@ -364,7 +377,7 @@ mod tests {
             assert!(!format!("{op:?}").is_empty());
             assert_eq!(op.clone(), op);
         }
-        assert_eq!(kinds.len(), 15);
+        assert_eq!(kinds.len(), 16);
         let unique: std::collections::BTreeSet<_> =
             kinds.iter().map(|kind| format!("{kind:?}")).collect();
         assert_eq!(unique.len(), kinds.len());
@@ -386,7 +399,7 @@ mod tests {
         // Apply, ConfirmCommit, RollbackCommit, Restore, ServiceAction, CertRenew.
         assert_eq!(mutating, 6);
         // Everything except ListModules, ConfirmCommit, RollbackCommit,
-        // HostProfile, CertStatus, CertRenew and AuditQuery.
+        // HostProfile, UpdateStatus, CertStatus, CertRenew and AuditQuery.
         assert_eq!(with_module, 8);
         assert_eq!(
             Operation::GetModule {

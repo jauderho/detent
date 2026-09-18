@@ -91,6 +91,8 @@ export function auditOpText(l10n: ReactLocalization, op: OpKind): string {
       return l10n.getString('audit-op-host-profile')
     case 'audit_query':
       return l10n.getString('audit-op-audit-query')
+    case 'update_status':
+      return l10n.getString('audit-op-update-status')
     case 'cert_status':
       return l10n.getString('audit-op-cert-status')
     case 'cert_renew':

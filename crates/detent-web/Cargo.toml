@@ -14,6 +14,12 @@ workspace = true
 detent-core = { path = "../detent-core" }
 detent-ops = { path = "../detent-ops" }
 detent-platform = { path = "../detent-platform" }
+# The update-status check (`GET /api/v1/system/update`, PLAN §2.9): the web
+# layer answers it directly from `detent-update::update::check` — read-only,
+# never the engine, which cannot reach a release feed. `Operation::UpdateStatus`
+# exists only so the policy decision and the audit label are this endpoint's
+# own; the engine answers it `Unsupported`.
+detent-update = { path = "../detent-update" }
 
 argon2 = { workspace = true }
 axum = { workspace = true }
@@ -24,6 +30,8 @@ rcgen = { workspace = true }
 # Only pulled in by the `ui` feature (PLAN §4.2); see `src/spa.rs`.
 rust-embed = { workspace = true, optional = true }
 rustls = { workspace = true }
+# The running version, for the update check's report.
+semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha1 = { workspace = true }
