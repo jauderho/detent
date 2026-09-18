@@ -5,6 +5,161 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-18 - Phase 9: the atomic swap lands
+
+`detent update` now installs. Five signed commits today, each verified to
+build on its own.
+
+| Commit | What |
+|---|---|
+| `347e364` | self-test feature gate in the update flow (§2.9 step 5, first half) |
+| `e86f22c` | theme script injected at build time by a vite plugin |
+| `54b3b8e` | `GET /api/v1/system/update` + `Operation::UpdateStatus` + dashboard panel |
+| `a58f89c` | **staged binary made executable** — see below |
+| `00e35bc` | `install::swap`: atomic rename, `<target>.prev`, rollback |
+
+| Check | State |
+|---|---|
+| Rust tests | 1519 pass, 0 fail, 6 ignored |
+| Clippy `-D warnings` | clean |
+| `cargo fmt --all --check` | clean |
+| Coverage gate | PASS all thresholds; global 96.79% |
+| Web tests / lint / types / i18n | 435 pass; clean; clean; 265 ids resolved |
+
+### The trap that made the whole flow dead
+
+`update::prepare` staged the downloaded binary with `std::fs::write`, which
+creates **0644**. Step 5 *spawns* that file for `--self-test`, so the real
+flow refused with `EACCES` one step before the swap: no update could ever
+have installed, on any host.
+
+Every hermetic test passed anyway. They inject the probe through a
+`FeatureProbe` seam and never exec what `prepare` actually wrote, and the
+probe-script helper chmods its own fixture — so the gap was invisible from
+inside the seam that existed to make the flow testable. `stage_exec.rs` now
+drives the real `prepare` against the ADR-014 fixture bundle and asserts the
+mode; reverting the chmod makes it report `100644`. Worth remembering: a
+seam that lets you test a step can also hide what that step does to the thing
+it hands on.
+
+### The swap
+
+`install::swap` copies the candidate to a temp name **in the target's own
+directory** (same filesystem), applies the *target's* mode before the rename,
+fsyncs, keeps the replaced binary at `<target>.prev`, then renames over the
+target. That rename is the only step that changes what the path names, and
+`rename(2)` over an existing path is atomic, so a concurrent reader sees the
+old binary or the new one — never missing or partial.
+
+`.prev` is a hard link where the filesystem allows one: no second copy of the
+binary, and it keeps the original bytes after the rename because the old
+inode stays referenced by that name. `fs::copy` is the fallback and carries
+the mode bits.
+
+Staging happens before `.prev` exists, so any failure up to that point leaves
+the directory untouched (the `NamedTempFile` removes itself on drop). If
+keeping `.prev` or the rename fails, the target is still the original and any
+`.prev` created is removed. Every failure test asserts both the original
+bytes and the exact directory listing. A missing target, a directory and a
+symlink all refuse with `BadTarget` rather than being created or followed.
+
+### Phase 9 state
+
+Done: release + rebuild-verify workflows, Sigstore verifier (ADR-014),
+`detent update --check`, `--self-test` + feature-coverage gate,
+`size-check.sh` in CI, `[update]` config, read-only update-status endpoint +
+UI panel, and the atomic swap with rollback.
+
+**Open, in the order they matter:**
+1. **Restart via init + `GET /healthz` within 30 s, or roll back** (§2.9 step
+   5's last third). `Installed::rollback` exists and is tested; nothing calls
+   it yet, so a bad binary currently installs and stays. This is the M3
+   acceptance criterion's second half.
+2. §2.9 step 6's background check, with the interval below.
+3. `detent update --check --json`; the write-scoped install POST for the UI.
+
+### Pinned, not forgotten: the uncached update check
+
+`GET /api/v1/system/update` reaches the release feed on every call, so a
+read-scoped caller can make this host poll GitHub in a loop, one blocking
+thread per in-flight request. Deliberately **not** cached; the reasoning is a
+`ponytail:` comment at the call site.
+
+The right mitigation is a check *period*, not a cache. Nothing about a
+release feed needs to be fresher than daily — §2.9 step 6 already calls for a
+background check, and a sensible default there (no more than once a day,
+arguably once a week for something that ships this rarely) means the endpoint
+reads the last background result and makes no network call on the request
+path at all. A cache would be a second mechanism solving a problem the
+interval removes. Revisit only if the interval turns out not to cover it.
+---
+
+## 2026-09-18 - Update status endpoint + theme-script injection
+
+Picked up omp's uncommitted tree. It did **not** pass its gates — `cargo fmt`
+was dirty, clippy failed on `detent-update/tests/verify_fixtures.rs`, and
+`biome` failed on `web/index.html`. Fixed, then finished the work.
+
+| Check | Command | State |
+|---|---|---|
+| Rust tests | `cargo test --workspace --all-features` | 1506 pass, 0 fail, 6 ignored |
+| Clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean |
+| Format | `cargo fmt --all --check` | clean |
+| Rust coverage | `cargo llvm-cov` + `scripts/coverage-merge.sh` | PASS all thresholds; ops back to 100%, global 96.80% |
+| Web tests | `cd web && bun run test` | 435 pass, 53 files |
+| Web lint/types/build | `bun run lint && bun run typecheck && bun run build` | clean; CSP hash OK |
+| Web i18n | `bun run i18n:check` | 265 ids, all referenced, all resolved |
+
+**`GET /api/v1/system/update`** (omp's, reviewed and kept): read-only update
+status, `spawn_blocking` around the 30 s feed fetch, refuse-closed on an
+unreachable feed (503 `web-update-check-failed`, never folded into "no
+update"), and a `UpdateReport` mirror of `CheckReport` so `detent-update`
+keeps no `utoipa` dependency. Its `update_report` seam is driven by mock
+transports and the unit tests are non-vacuous — that part needed no changes.
+
+**Gave it `Operation::UpdateStatus`.** It was authorizing against
+`Operation::HostProfile`'s identity — the same borrowed-identity defect fixed
+for `/api/v1/system/cert` on 2026-09-17, with a comment deferring it. The
+engine still cannot answer an update check (the feed lives in
+`detent-update`), so the variant answers `OpsError::Unsupported` there and
+exists for the policy decision and the audit label, exactly like `CertStatus`.
+Added `audit-op-update-status`, regenerated `docs/openapi.json` and
+`schema.d.ts`, and added the engine-dispatch test that the 100% `detent-ops`
+gate immediately demanded.
+
+**Theme-script injection, two real defects.** omp moved the inline theme
+script out of `index.html` behind a `<!--THEME_INIT_SCRIPT-->` placeholder
+injected by a new vite plugin, and deleted
+`the_inline_script_in_index_html_is_the_file_byte_for_byte` from `headers.rs`.
+The deletion is **correct** — the source page no longer holds the script, and
+`scripts/build-finish.ts` already re-hashes the *built* page against the pinned
+constant and fails the build, which is the stronger check. But:
+
+* the plugin carried `apply: 'build'`, so in `vite dev` the placeholder
+  survived into the page, where `<!--…-->` is a legacy JS line comment: the
+  theme silently never initialised and every dev reload flashed unthemed.
+  Dropped the `apply` gate; verified in the browser that dev now sets
+  `data-theme="dark"` and leaves no placeholder.
+* an empty `<script>` holding the placeholder is not parseable JavaScript, so
+  `biome` failed on `index.html`. The placeholder is now a bare HTML comment
+  and the plugin injects the whole element.
+
+While fixing that, the CSP gate caught my own first attempt: the explanatory
+comment I wrote contained a literal script tag, and `build-finish`'s
+`inlineScript()` regex matched *that* before the real one. Reworded, and the
+comment now warns the next person. The gate did its job.
+
+`verify_fixtures.rs` is DER surgery on self-minted fixtures — raw indexing,
+two-byte length arithmetic and `usize as u8` length bytes are the job. One
+documented file-level `allow` (matching the file's existing `expect_used`
+posture) rather than six scattered ones; `items_after_statements` was fixed
+properly by moving the consts, not suppressed.
+
+Added a `web-dev` entry to `.claude/launch.json` so the dev server is
+launchable for exactly this kind of check.
+
+---
+
 ## 2026-09-18 - Updater (`44618d0`, signed)
 
 ADR-014 (sigstore verifier) flipped to Accepted + indexed. `--self-test` features gated on cfg with pin test; `--self-test` with subcommand rejected as usage error. `run_update_on` seam extracted with hermetic tests; hermetic coverage tests for run/output/doctor added.
