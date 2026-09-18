@@ -7,6 +7,15 @@ repository.workspace = true
 description = "ACME: dns-01 providers, device-attest-01 attestors, renewal scheduler, cert store."
 publish = false
 
+[features]
+# The four networked dns-01 providers (RFC 2136, Cloudflare, acme-dns, deSEC).
+# Off by default: detent-acme links no TLS client and no HMAC crate, so every
+# one of them refuses at the send step. Their request building and response
+# parsing are implemented and unit-tested against recorded fixtures, so this
+# turns on for that -- but compiling ~1200 lines that cannot reach a server
+# into the shipped binary is weight for nothing. Turn on with the transport.
+dns-providers = []
+
 [lints]
 workspace = true
 

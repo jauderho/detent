@@ -535,29 +535,39 @@ const TSIG_ALGORITHMS: [&str; 6] = [
 /// `wait_propagated` keeps the instant default.
 pub struct Rfc2136Provider {
     server: String,
+    zone: String,
     key_name: String,
-    // Held for the future TSIG signer; never sent unauthenticated.
+    // Held for the future TSIG signer; never sent, and never logged.
     #[allow(dead_code)]
     key_value: String,
     tsig_algorithm: String,
 }
 
 impl Rfc2136Provider {
-    /// Creates a provider updating `server` (`host:port`), authenticated with
-    /// the TSIG key `key_name`/`key_value` (base64 secret).
+    /// Creates a provider updating `server` (`host:port`) for `zone`,
+    /// authenticated with the TSIG key `key_name`/`key_value` (base64 secret).
+    ///
+    /// `zone` is the name of the zone holding the SOA — the one this key is
+    /// authorized to update — and must be configured, not guessed. RFC 2136
+    /// §2.3 requires the Zone section to name that zone exactly, and a
+    /// challenge name gives no way to find it: `_acme-challenge.a.b.example`
+    /// may live in `a.b.example`, `b.example` or `example`, and only an SOA
+    /// lookup could tell which. A wrong guess earns NOTAUTH.
     ///
     /// # Errors
     ///
-    /// [`AcmeError::Config`] when the server is empty, the key name is not a
-    /// valid DNS name, the key value is empty or non-printable, or the
+    /// [`AcmeError::Config`] when the server is empty, the zone or key name is
+    /// not a valid DNS name, the key value is empty or non-printable, or the
     /// algorithm is not a known TSIG HMAC.
     pub fn new(
         server: impl Into<String>,
+        zone: impl Into<String>,
         key_name: impl Into<String>,
         key_value: impl Into<String>,
         tsig_algorithm: impl Into<String>,
     ) -> Result<Self, AcmeError> {
         let server = server.into();
+        let zone = zone.into();
         let key_name = key_name.into();
         let key_value = key_value.into();
         let tsig_algorithm = tsig_algorithm.into();
@@ -566,6 +576,11 @@ impl Rfc2136Provider {
                 "rfc2136: server must not be empty".into(),
             ));
         }
+        validate_fqdn(&zone).map_err(|_| {
+            AcmeError::Config(format!(
+                "rfc2136: zone must be a valid DNS name, got {zone:?}"
+            ))
+        })?;
         validate_fqdn(&key_name).map_err(|_| {
             AcmeError::Config(format!(
                 "rfc2136: key name must be a valid DNS name, got {key_name:?}"
@@ -583,6 +598,7 @@ impl Rfc2136Provider {
         }
         Ok(Self {
             server,
+            zone,
             key_name,
             key_value,
             tsig_algorithm,
@@ -590,41 +606,64 @@ impl Rfc2136Provider {
     }
 
     /// Builds the UPDATE for `record`, adding `add` as the new TXT when set.
-    fn update(record: &DnsRecord, add: Option<&str>) -> Result<Vec<u8>, AcmeError> {
-        let zone = zone_of(record.fqdn())?;
-        let message = update_message(zone, record.fqdn(), add)?;
-        // TSIG (RFC 8945 §10.2): HMAC over the message plus the TSIG
-        // variables, appended as an additional record. The `hmac` crate is
-        // not a detent-acme dependency, and every sane server refuses an
-        // unauthenticated update — refuse here instead.
-        let _ = message;
-        Err(AcmeError::Config(
-            "rfc2136: TSIG signing needs the `hmac` crate, which detent-acme does not \
-             depend on (new dependency awaits ADR-011); UPDATE message building is \
-             implemented and unit-tested, sending unauthenticated is refused"
-                .into(),
-        ))
+    fn update(&self, record: &DnsRecord, add: Option<&str>) -> Result<Vec<u8>, AcmeError> {
+        let zone = self.zone_for(record)?;
+        update_message(zone, record.fqdn(), add)
+    }
+
+    /// Signs `message` with the configured TSIG key and sends it.
+    ///
+    /// Always refuses today. TSIG (RFC 8945 §10.2) is an HMAC over the
+    /// message plus the TSIG variables, appended as an additional record;
+    /// the `hmac` crate is not a detent-acme dependency, and every sane
+    /// server refuses an unauthenticated update, so refusing here is the
+    /// honest answer rather than putting an unsigned message on the wire.
+    ///
+    /// Kept separate from [`Self::update`] so that the message building —
+    /// which *is* implemented and unit-tested — has a return type that means
+    /// what it says.
+    fn send_signed(&self, message: &[u8]) -> Result<(), AcmeError> {
+        debug_assert!(!message.is_empty(), "an UPDATE was built before sending");
+        Err(AcmeError::Config(format!(
+            "rfc2136: cannot sign the {} byte UPDATE for {} with key {:?} ({}): TSIG \
+             signing needs the `hmac` crate, which detent-acme does not depend on \
+             (new dependency awaits ADR-011). UPDATE message building is implemented \
+             and unit-tested; sending unauthenticated is refused",
+            message.len(),
+            self.server,
+            self.key_name,
+            self.tsig_algorithm,
+        )))
     }
 }
 
 impl DnsProvider for Rfc2136Provider {
     fn present(&self, record: &DnsRecord) -> Result<(), AcmeError> {
-        Self::update(record, Some(record.value()))?;
-        Ok(())
+        self.send_signed(&self.update(record, Some(record.value()))?)
     }
 
     fn delete(&self, record: &DnsRecord) -> Result<(), AcmeError> {
-        Self::update(record, None)?;
-        Ok(())
+        self.send_signed(&self.update(record, None)?)
     }
 }
 
-/// The zone a challenge name lives in: everything after its first label.
-fn zone_of(fqdn: &str) -> Result<&str, AcmeError> {
-    fqdn.split_once('.')
-        .map(|(_, zone)| zone)
-        .filter(|zone| !zone.is_empty())
-        .ok_or_else(|| AcmeError::Config(format!("rfc2136: cannot derive a zone from {fqdn:?}")))
+impl Rfc2136Provider {
+    /// The configured zone, once `record` is confirmed to live inside it.
+    ///
+    /// An UPDATE whose Zone section does not cover the name it changes is
+    /// refused by the server (RFC 2136 §3.1), so it is refused here first,
+    /// with an error that names both halves.
+    fn zone_for(&self, record: &DnsRecord) -> Result<&str, AcmeError> {
+        let fqdn = record.fqdn();
+        if fqdn == self.zone || fqdn.ends_with(&format!(".{}", self.zone)) {
+            Ok(&self.zone)
+        } else {
+            Err(AcmeError::Config(format!(
+                "rfc2136: record {fqdn:?} is outside zone {:?}",
+                self.zone
+            )))
+        }
+    }
 }
 
 /// Appends `name` in wire format: length-prefixed labels, zero terminator.
@@ -703,6 +742,7 @@ impl fmt::Debug for Rfc2136Provider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Rfc2136Provider")
             .field("server", &self.server)
+            .field("zone", &self.zone)
             .field("key_name", &self.key_name)
             .field("key_value", &"[redacted]")
             .field("tsig_algorithm", &self.tsig_algorithm)
@@ -795,6 +835,7 @@ mod tests {
             Box::new(DeSecProvider::new("tok", "example.com")?),
             Box::new(Rfc2136Provider::new(
                 "ns1.example.com:53",
+                "example.com",
                 "k.example.com",
                 "s3cr3t-key",
                 "hmac-sha256",
@@ -1006,7 +1047,6 @@ mod tests {
 
     #[test]
     fn rfc2136_builds_the_update_wire_message() -> R {
-        assert_eq!(zone_of("_acme-challenge.example.com")?, "example.com");
         let msg = update_message(
             "example.com",
             "_acme-challenge.example.com",
@@ -1042,21 +1082,129 @@ mod tests {
     }
 
     #[test]
+    fn rfc2136_update_returns_the_built_message() -> R {
+        // `update` used to build the message, discard it, and return `Err`
+        // unconditionally — a `Result<Vec<u8>, _>` that could never be `Ok`.
+        // Message building and the refusal to send are now separate, so this
+        // return type means what it says.
+        let r2 = Rfc2136Provider::new(
+            "ns1.example.com:53",
+            "example.com",
+            "k.example.com",
+            "s3cr3t-key",
+            "hmac-sha256",
+        )?;
+        let record = record()?;
+        let add = r2.update(&record, Some(record.value()))?;
+        assert_eq!(
+            add,
+            update_message("example.com", record.fqdn(), Some(record.value()))?
+        );
+        let withdraw = r2.update(&record, None)?;
+        assert!(withdraw.len() < add.len(), "a delete carries no rdata");
+        // Sending is still refused, and that is now the only refusing step.
+        assert!(matches!(
+            r2.send_signed(&add),
+            Err(AcmeError::Config(m)) if m.contains("does not depend on")
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn rfc2136_refuses_to_send_without_tsig() -> R {
         let r2 = Rfc2136Provider::new(
             "ns1.example.com:53",
+            "example.com",
             "k.example.com",
             "s3cr3t-key",
             "hmac-sha256",
         )?;
         assert!(matches!(
             r2.present(&record()?),
-            Err(AcmeError::Config(m)) if m.contains("hmac")
+            Err(AcmeError::Config(ref m)) if m.contains("does not depend on")
         ));
         assert!(matches!(
             r2.delete(&record()?),
-            Err(AcmeError::Config(m)) if m.contains("hmac")
+            Err(AcmeError::Config(ref m)) if m.contains("does not depend on")
         ));
+        // The refusal names the key it would have signed with, never the key.
+        let refusal = match r2.present(&record()?) {
+            Err(AcmeError::Config(m)) => m,
+            other => return Err(format!("expected a config error, got {other:?}").into()),
+        };
+        assert!(refusal.contains("k.example.com"), "{refusal}");
+        assert!(
+            !refusal.contains("s3cr3t"),
+            "the TSIG key leaked: {refusal}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rfc2136_uses_the_configured_zone_not_the_parent_label() -> R {
+        // RFC 2136 §2.3: the Zone section names the zone holding the SOA. A
+        // challenge name gives no way to find it — `_acme-challenge.a.example`
+        // may live in `a.example` or in `example` — so the zone is configured.
+        // Stripping the first label, which is what this used to do, would put
+        // `a.example` here and earn NOTAUTH from the primary.
+        let deep = DnsRecord::new("_acme-challenge.a.b.example.com", "digest-value-42")?;
+        let r2 = Rfc2136Provider::new(
+            "ns1.example.com:53",
+            "example.com",
+            "k.example.com",
+            "s3cr3t-key",
+            "hmac-sha256",
+        )?;
+        assert_eq!(r2.zone_for(&deep)?, "example.com");
+
+        // The record must be inside the configured zone.
+        let outside = DnsRecord::new("_acme-challenge.other.org", "digest-value-42")?;
+        assert!(matches!(r2.zone_for(&outside), Err(AcmeError::Config(_))));
+        // A near-miss that only shares a suffix as a substring is still out:
+        // `notexample.com` is not inside `example.com`.
+        let suffix_trap = DnsRecord::new("_acme-challenge.notexample.com", "digest-value-42")?;
+        assert!(matches!(
+            r2.zone_for(&suffix_trap),
+            Err(AcmeError::Config(_))
+        ));
+        // The zone apex itself is inside its own zone.
+        let apex = DnsRecord::new("example.com", "digest-value-42")?;
+        assert_eq!(r2.zone_for(&apex)?, "example.com");
+
+        // And the built message carries the configured zone in its Zone
+        // section. That section starts right after the 12-byte header, so
+        // compare there rather than searching: the encoded parent label
+        // `b.example.com` is a *substring* of the encoded record name, and a
+        // search would find it whichever zone was used.
+        let msg = update_message("example.com", deep.fqdn(), Some(deep.value()))?;
+        let mut want = Vec::new();
+        encode_name("example.com", &mut want)?;
+        assert_eq!(
+            msg.get(12..12 + want.len()).map(<[u8]>::to_vec),
+            Some(want),
+            "the zone section must hold the configured zone"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rfc2136_refuses_a_record_outside_its_zone_before_sending() -> R {
+        let r2 = Rfc2136Provider::new(
+            "ns1.example.com:53",
+            "example.com",
+            "k.example.com",
+            "s3cr3t-key",
+            "hmac-sha256",
+        )?;
+        let outside = DnsRecord::new("_acme-challenge.other.org", "digest-value-42")?;
+        // The zone check runs before the TSIG refusal, so the error names the
+        // zone rather than the missing `hmac` crate.
+        for result in [r2.present(&outside), r2.delete(&outside)] {
+            assert!(
+                matches!(result, Err(AcmeError::Config(ref m)) if m.contains("outside zone")),
+                "expected a zone error, got {result:?}"
+            );
+        }
         Ok(())
     }
 
@@ -1066,11 +1214,115 @@ mod tests {
         ad.wait_propagated(&record()?)?;
         let r2 = Rfc2136Provider::new(
             "ns1.example.com:53",
+            "example.com",
             "k.example.com",
             "s3cr3t-key",
             "hmac-sha256",
         )?;
         r2.wait_propagated(&record()?)?;
+        Ok(())
+    }
+
+    #[test]
+    fn provider_api_failures_surface_instead_of_passing_silently() -> R {
+        let record = record()?;
+
+        // A non-2xx on the list call, the write, and the delete.
+        let (send, _) = scripted(&[(500, "")]);
+        let cf = CloudflareProvider::new("tok", "a".repeat(32))?.with_transport(send);
+        assert!(matches!(
+            cf.present(&record),
+            Err(AcmeError::Config(m)) if m.contains("list returned HTTP 500")
+        ));
+
+        let (send, _) = scripted(&[(200, r#"{"result":[]}"#), (403, "")]);
+        let cf = CloudflareProvider::new("tok", "a".repeat(32))?.with_transport(send);
+        assert!(matches!(
+            cf.present(&record),
+            Err(AcmeError::Config(m)) if m.contains("write returned HTTP 403")
+        ));
+
+        let (send, _) = scripted(&[
+            (
+                200,
+                r#"{"result":[{"id":"cf-1","content":"digest-value-42"}]}"#,
+            ),
+            (500, ""),
+        ]);
+        let cf = CloudflareProvider::new("tok", "a".repeat(32))?.with_transport(send);
+        assert!(matches!(
+            cf.delete(&record),
+            Err(AcmeError::Config(m)) if m.contains("delete returned HTTP 500")
+        ));
+
+        // acme-dns and deSEC report their own non-2xx too.
+        let (send, _) = scripted(&[(401, "")]);
+        let ad = AcmeDnsProvider::new("https://dns.example", "user", "pass")?.with_transport(send);
+        assert!(matches!(
+            ad.present(&record),
+            Err(AcmeError::Config(m)) if m.contains("update returned HTTP 401")
+        ));
+
+        let (send, _) = scripted(&[(500, "")]);
+        let ds = DeSecProvider::new("tok", "example.com")?.with_transport(send);
+        assert!(matches!(
+            ds.present(&record),
+            Err(AcmeError::Config(m)) if m.contains("PUT returned HTTP 500")
+        ));
+
+        let (send, _) = scripted(&[(500, "")]);
+        let ds = DeSecProvider::new("tok", "example.com")?.with_transport(send);
+        assert!(matches!(
+            ds.delete(&record),
+            Err(AcmeError::Config(m)) if m.contains("DELETE returned HTTP 500")
+        ));
+
+        let (send, _) = scripted(&[(500, "")]);
+        let ds = DeSecProvider::new("tok", "example.com")?.with_transport(send);
+        assert!(matches!(
+            ds.wait_propagated(&record),
+            Err(AcmeError::Config(m)) if m.contains("GET returned HTTP 500")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn unreadable_api_responses_are_refused_not_guessed() -> R {
+        // A 200 whose body is not the shape the API documents must fail
+        // loudly: treating it as "no record" would make `present` POST a
+        // duplicate and `wait_propagated` loop until the order expired.
+        assert!(matches!(
+            cf_txt_id("not json", "v"),
+            Err(AcmeError::Config(m)) if m.contains("unreadable list response")
+        ));
+        assert!(matches!(
+            cf_txt_id(r#"{"success":true}"#, "v"),
+            Err(AcmeError::Config(m)) if m.contains("no result array")
+        ));
+        // A record at the name carrying somebody else's value is not ours.
+        assert_eq!(
+            cf_txt_id(r#"{"result":[{"id":"x","content":"other"}]}"#, "mine")?,
+            None
+        );
+        assert!(matches!(
+            rrset_contains("not json", "v"),
+            Err(AcmeError::Config(m)) if m.contains("unreadable RRset response")
+        ));
+        // A well-formed response that simply does not carry our value.
+        assert!(!rrset_contains(r#"[{"records":["other"]}]"#, "mine")?);
+        Ok(())
+    }
+
+    #[test]
+    fn desec_maps_the_zone_apex_to_the_at_subname() -> R {
+        let apex = DnsRecord::new("example.com", "digest-value-42")?;
+        let (send, script) = scripted(&[(200, "{}")]);
+        let ds = DeSecProvider::new("tok", "example.com")?.with_transport(send);
+        ds.present(&apex)?;
+        assert!(
+            last(&script)?.url.contains("/records/@/TXT/"),
+            "the apex is `@`, not an empty subname"
+        );
         Ok(())
     }
 
@@ -1097,11 +1349,23 @@ mod tests {
             Err(AcmeError::Config(_))
         ));
         assert!(matches!(
-            Rfc2136Provider::new("ns1.example.com:53", "bad name!", "key", "hmac-sha256"),
+            Rfc2136Provider::new(
+                "ns1.example.com:53",
+                "example.com",
+                "bad name!",
+                "key",
+                "hmac-sha256"
+            ),
             Err(AcmeError::Config(_))
         ));
         assert!(matches!(
-            Rfc2136Provider::new("ns1.example.com:53", "k.example.com", "key", "md5-but-fake"),
+            Rfc2136Provider::new(
+                "ns1.example.com:53",
+                "example.com",
+                "k.example.com",
+                "key",
+                "md5-but-fake"
+            ),
             Err(AcmeError::Config(_))
         ));
     }
@@ -1125,6 +1389,7 @@ mod tests {
                 "{:?}",
                 Rfc2136Provider::new(
                     "ns1.example.com:53",
+                    "example.com",
                     "tsig-key",
                     "s3cr3t-key",
                     "hmac-sha256"

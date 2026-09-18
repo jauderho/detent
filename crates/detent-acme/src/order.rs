@@ -105,7 +105,20 @@ pub async fn wait_ready(order: &mut Order, policy: &RetryPolicy) -> Result<Order
     order.poll_ready(policy).await.map_err(AcmeError::from)
 }
 
-/// Finalizes a `ready` order and returns the PEM certificate chain.
+/// What a finalized ACME order hands back.
+///
+/// Named rather than a `(String, String)`: both halves are PEM, so a tuple
+/// lets `let (key, chain) = finalize(..)` compile and write the private key
+/// to the certificate's path. The field names make that a type error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Issued {
+    /// The certificate chain, leaf first, then intermediates.
+    pub chain_pem: String,
+    /// The PKCS#8 private key for the leaf.
+    pub key_pem: String,
+}
+
+/// Finalizes a `ready` order and returns the certificate and its key.
 ///
 /// The CSR is generated with the `rcgen` feature of instant-acme; the
 /// returned chain is the leaf followed by intermediates.
@@ -113,16 +126,13 @@ pub async fn wait_ready(order: &mut Order, policy: &RetryPolicy) -> Result<Order
 /// # Errors
 ///
 /// [`AcmeError::Acme`] when finalization or the certificate download fails.
-pub async fn finalize(
-    order: &mut Order,
-    policy: &RetryPolicy,
-) -> Result<(String, String), AcmeError> {
-    let private_key_pem = order.finalize().await.map_err(AcmeError::from)?;
-    let cert_chain_pem = order
+pub async fn finalize(order: &mut Order, policy: &RetryPolicy) -> Result<Issued, AcmeError> {
+    let key_pem = order.finalize().await.map_err(AcmeError::from)?;
+    let chain_pem = order
         .poll_certificate(policy)
         .await
         .map_err(AcmeError::from)?;
-    Ok((cert_chain_pem, private_key_pem))
+    Ok(Issued { chain_pem, key_pem })
 }
 
 /// Creates (or restores) an ACME account and issues a new dns-01 order.
@@ -163,6 +173,23 @@ pub async fn account_and_order(
     Ok((account, order))
 }
 
+/// The cached account credentials, or `None` when this host has no account
+/// yet.
+///
+/// Only a *missing* file means "no account yet". Every other failure —
+/// EACCES, EIO, a dangling symlink, a directory in the file's place — is
+/// propagated, because falling through would register a **second** ACME
+/// account at the CA and then rename over the first one's credentials,
+/// silently rotating an identity the CA still honours and destroying the key
+/// for the old one.
+fn read_credentials(path: &Path) -> Result<Option<String>, AcmeError> {
+    match std::fs::read_to_string(path) {
+        Ok(json) => Ok(Some(json)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(AcmeError::Io(e)),
+    }
+}
+
 /// Restores an account from the credential file, or creates a new one and
 /// persists the credentials atomically with `0600` permissions.
 async fn load_or_create_account(
@@ -173,12 +200,17 @@ async fn load_or_create_account(
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
 
+    // Read before building anything: a caller whose credential file is
+    // unreadable gets that answer without a crypto provider or a network
+    // client having to exist first.
+    let cached = read_credentials(credentials_path)?;
+
     let builder = match ca_root {
         Some(pem) => Account::builder_with_root(pem).map_err(AcmeError::from)?,
         None => Account::builder().map_err(AcmeError::from)?,
     };
 
-    if let Ok(json) = std::fs::read_to_string(credentials_path) {
+    if let Some(json) = cached {
         let credentials: AccountCredentials = serde_json::from_str(&json)
             .map_err(|e| AcmeError::Credentials(format!("deserialize: {e}")))?;
         return builder
@@ -210,10 +242,17 @@ async fn load_or_create_account(
     }
     let tmp = credentials_path.with_extension(format!("{}.tmp", std::process::id()));
     let write = || -> Result<(), AcmeError> {
+        // `create_new`, not `create`: `mode` is applied only when the file is
+        // created, so reopening a leftover temp file — a crash plus PID reuse
+        // — would write the account key through whatever mode that file
+        // already carries. A stale one is removed first, so this still
+        // succeeds on the retry rather than wedging the host forever.
+        if tmp.exists() {
+            std::fs::remove_file(&tmp)?;
+        }
         let mut f = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
             .open(&tmp)?;
         f.write_all(json.as_bytes())?;
@@ -322,6 +361,88 @@ mod tests {
             .any(|c| matches!(c.r#type, ChallengeType::Dns01));
         assert!(!has_dns01);
         Ok(())
+    }
+
+    /// A credential file that exists but cannot be read must not be mistaken
+    /// for "no account yet".
+    ///
+    /// Falling through would register a *second* ACME account at the CA and
+    /// then rename over the first one's credentials — silently rotating an
+    /// identity the CA still honours and destroying the key for the old one.
+    /// A directory in the file's place fails with `EISDIR` deterministically,
+    /// even as root, and needs neither a network nor a crypto provider.
+    #[test]
+    fn an_unreadable_credential_file_is_not_a_missing_one() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let dir = tempfile::tempdir()?;
+
+        // Absent: the create path, reported as "no account yet".
+        assert_eq!(read_credentials(&dir.path().join("absent.json"))?, None);
+
+        // Present and readable: handed back for `from_credentials`.
+        let good = dir.path().join("account.json");
+        std::fs::write(&good, "{}")?;
+        assert_eq!(read_credentials(&good)?.as_deref(), Some("{}"));
+
+        // Present but unreadable: refused, never mistaken for absent.
+        let occupied = dir.path().join("occupied.json");
+        std::fs::create_dir(&occupied)?;
+        let err = read_credentials(&occupied)
+            .err()
+            .ok_or("an unreadable credential file must fail")?;
+        assert!(
+            matches!(err, AcmeError::Io(ref e) if e.kind() != std::io::ErrorKind::NotFound),
+            "expected the read failure to propagate, got {err:?}"
+        );
+        Ok(())
+    }
+
+    /// The whole `account_and_order` entry point refuses an unreadable
+    /// credential file before it builds an ACME client.
+    ///
+    /// This is why `read_credentials` runs first: the refusal must not depend
+    /// on a crypto provider existing. Under `--all-features` both rustls
+    /// providers are compiled in and `Account::builder()` panics on the
+    /// ambiguous default, so a test that reached the builder could not run
+    /// here at all.
+    #[tokio::test]
+    async fn account_and_order_refuses_before_it_builds_a_client()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let occupied = dir.path().join("account.json");
+        std::fs::create_dir(&occupied)?;
+
+        let err = account_and_order(
+            "https://acme.invalid/directory",
+            &["example.com"],
+            &occupied,
+            None,
+            Some("shortlived"),
+        )
+        .await
+        .err()
+        .ok_or("an unreadable credential file must fail the order")?;
+
+        assert!(
+            matches!(err, AcmeError::Io(_)),
+            "expected the read failure to propagate, got {err:?}"
+        );
+        assert!(occupied.is_dir(), "the existing path must be left alone");
+        Ok(())
+    }
+
+    #[test]
+    fn issued_names_its_halves() {
+        // Both halves are PEM strings; the field names are what stop a caller
+        // writing the private key to the certificate's path.
+        let issued = Issued {
+            chain_pem: "-----BEGIN CERTIFICATE-----".to_owned(),
+            key_pem: "-----BEGIN PRIVATE KEY-----".to_owned(),
+        };
+        assert!(issued.chain_pem.contains("CERTIFICATE"));
+        assert!(issued.key_pem.contains("PRIVATE KEY"));
+        assert_eq!(issued.clone(), issued);
+        assert!(format!("{issued:?}").contains("chain_pem"));
     }
 
     #[test]
