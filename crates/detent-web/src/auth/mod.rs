@@ -45,7 +45,7 @@ use std::path::PathBuf;
 use detent_core::diag::MessageId;
 use detent_platform::fs::atomic::AtomicError;
 
-pub use audit::{AuthAudit, AuthEvent, AuthRecord, CaptureAuthAudit, FileAuthAudit, NullAuthAudit};
+pub use audit::{AuthAudit, AuthEvent, AuthRecord, CaptureAuthAudit, FileAuthAudit};
 pub use extract::{Caller, ClientIp, WriteCaller};
 pub use password::Hasher;
 pub use ratelimit::{Principal, RateLimiter};

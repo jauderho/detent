@@ -51,11 +51,6 @@ export function toApiError(error: unknown): ApiError {
   return { kind: 'malformed', status: 0 }
 }
 
-/** The HTTP status of a failure, when it came from a server at all. */
-export function statusOf(error: ApiError): number | null {
-  return error.kind === 'http' ? error.status : null
-}
-
 /**
  * One localized sentence for anything a query or mutation failed with.
  *

@@ -28,7 +28,6 @@ import { usePendingCommit } from '@/app/PendingCommit'
 import { useWriteGate } from '@/auth/ScopeGate'
 import { Banner } from '@/components/Banner'
 import { Button, ButtonGroup } from '@/components/Button'
-import { KickerTag } from '@/components/KickerTag'
 import { Label } from '@/components/Label'
 import { Modal } from '@/components/Modal'
 import { Panel } from '@/components/Panel'
@@ -43,6 +42,7 @@ import {
   SchemaForm,
 } from '@/forms'
 import { shortDigest } from '@/lib/format'
+import { cn } from '@/lib/utils'
 import { ROUTES } from './paths'
 import { serviceActionCaption } from './serviceLabels'
 
@@ -103,6 +103,19 @@ function FactRow({ label, children }: { label: string; children: ReactNode }) {
       <dd>{children}</dd>
     </div>
   )
+}
+
+/** A bordered tag chip for the `.kicker` row — model · class · revision. */
+function KickerTag({
+  children,
+  variant,
+  className,
+}: {
+  children: ReactNode
+  variant?: 'blue'
+  className?: string
+}) {
+  return <span className={cn('tag', variant, className)}>{children}</span>
 }
 
 export function ModuleDetailPage() {

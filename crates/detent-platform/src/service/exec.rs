@@ -54,18 +54,20 @@ pub struct ProcessOutput {
     pub timed_out: bool,
 }
 
-/// A command could not be run at all.
+/// A command could not be run at all: `fork`/`exec` (or the platform
+/// equivalent) failed.
+///
+/// A struct, not an enum: starting the child is the only thing that can fail
+/// *before* there is an outcome to report. Everything after it — a non-zero
+/// exit, a timeout, output past [`OUTPUT_CAP`] — is a successful run with a
+/// bad result, and lives in [`ProcessOutput`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[non_exhaustive]
-pub enum ProcessError {
-    /// `fork`/`exec` (or the platform equivalent) failed.
-    #[error("failed to start {program}: {message}")]
-    Spawn {
-        /// The program that could not be started.
-        program: String,
-        /// The underlying OS error message.
-        message: String,
-    },
+#[error("failed to start {program}: {message}")]
+pub struct ProcessError {
+    /// The program that could not be started.
+    pub program: String,
+    /// The underlying OS error message.
+    pub message: String,
 }
 
 /// Runs one external command under the discipline described in the module
@@ -82,7 +84,7 @@ pub trait ProcessRunner: Send + Sync {
     ///
     /// # Errors
     ///
-    /// [`ProcessError::Spawn`] when the child could not be started at all.
+    /// [`ProcessError`] when the child could not be started at all.
     fn run(
         &self,
         program: &'static str,
@@ -140,7 +142,7 @@ fn run_confined(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut child = command.spawn().map_err(|source| ProcessError::Spawn {
+    let mut child = command.spawn().map_err(|source| ProcessError {
         program: program.to_owned(),
         message: source.to_string(),
     })?;

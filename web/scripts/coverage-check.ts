@@ -1,27 +1,20 @@
 #!/usr/bin/env bun
 /**
- * coverage-check — enforces the PLAN Phase 5 line gate on `web/src`.
- *
  * Runs `bun test --coverage`, parses the per-file table, and fails unless
- * every coverable file under `src/` reads 100% lines. The only exclusions are
- * the two generated shadcn primitives, named explicitly per PLAN §5
- * ("exclude generated shadcn primitives only, listed explicitly") and §6.2
- * ("excluding the explicit list of copied shadcn primitives"):
+ * every coverable file under `src/` reads 100% lines. No exclusions: the
+ * generated shadcn primitives (`ui/button.tsx`, `ui/tooltip.tsx`) were
+ * deleted, `FieldFrame` uses Radix primitives directly.
  *
- * - `src/components/ui/button.tsx`
- * - `src/components/ui/tooltip.tsx`
- *
- * Everything else coverable under `src/` is gated, including `src/test/`
+ * Everything coverable under `src/` is gated, including `src/test/`
  * (the harness itself) — a fallback branch in a helper is still a branch.
  * Rows that are not coverable TypeScript (`*.json?raw` fixtures,
  * `*.ftl?raw` locale bundles, `*.d.ts` declarations, anything outside
  * `src/`) are ignored, not counted as passes.
  *
  * The gate is fail-closed on inventory: every `.ts`/`.tsx` file under `src/`
- * (minus `__tests__`, `__fixtures__`, `*.d.ts`, and the two excluded
- * primitives) must appear in the coverage table. A file with zero tests that
- * the runner never loads produces no row, which must fail — not pass by
- * absence.
+ * (minus `__tests__`, `__fixtures__`, and `*.d.ts`) must appear in the
+ * coverage table. A file with zero tests that the runner never loads
+ * produces no row, which must fail — not pass by absence.
  *
  * Usage:
  *   bun run coverage:check              run the gate, exit non-zero on shortfall
@@ -46,12 +39,6 @@ import { fileURLToPath } from 'node:url'
 const EXIT_OK = 0
 const EXIT_SHORTFALL = 1
 const EXIT_RUN_FAILED = 2
-
-/** The only files excluded from the gate — the generated shadcn primitives. */
-export const EXCLUDED_FILES: readonly string[] = [
-  'src/components/ui/button.tsx',
-  'src/components/ui/tooltip.tsx',
-]
 
 export type FileCoverage = { file: string; linesPct: number }
 
@@ -94,11 +81,9 @@ export function isCoverableRow(file: string): boolean {
   if (file.endsWith('.d.ts')) return false
   return true
 }
-
 /**
  * Lists every coverable source file under `srcDir`, as `src/`-rooted paths.
- * Skips test files, fixtures, and declarations; the caller applies
- * EXCLUDED_FILES. Sorted for stable output.
+ * Skips test files, fixtures, and declarations. Sorted for stable output.
  */
 export function listCoverableSrcFiles(srcDir: string): string[] {
   const out: string[] = []
@@ -130,12 +115,10 @@ export function checkRows(rows: FileCoverage[], inventory: string[]): CoverageVe
   for (const row of rows) {
     seen[row.file] = true
     if (!isCoverableRow(row.file)) continue
-    if (EXCLUDED_FILES.includes(row.file)) continue
     if (row.linesPct < 100) short.push(row)
   }
   const missing: string[] = []
   for (const file of inventory) {
-    if (EXCLUDED_FILES.includes(file)) continue
     if (!(file in seen)) missing.push(file)
   }
   return { short, missing }
@@ -146,14 +129,12 @@ function main(argv: readonly string[]): number {
   if (argv.includes('--help') || argv.includes('-h')) {
     console.log(
       [
-        'coverage-check — enforce 100% lines on web/src (minus two shadcn primitives).',
+        'coverage-check — enforce 100% lines on web/src (no exclusions).',
         '',
         'Usage: bun run coverage:check [-- --verbose] [-- --help]',
         '',
         '  --verbose, -v  print every in-scope file and its line %',
         '  --help, -h     print this message',
-        '',
-        `Excluded files: ${EXCLUDED_FILES.join(', ')}.`,
       ].join('\n'),
     )
     return EXIT_OK
@@ -174,9 +155,7 @@ function main(argv: readonly string[]): number {
 
   const inventory = listCoverableSrcFiles(join(root, 'src'))
   const { short, missing } = checkRows(rows, inventory)
-  const scoped = rows.filter(
-    (row) => isCoverableRow(row.file) && !EXCLUDED_FILES.includes(row.file),
-  )
+  const scoped = rows.filter((row) => isCoverableRow(row.file))
   if (verbose || short.length > 0 || missing.length > 0) {
     for (const { file, linesPct } of scoped) {
       console.log(`coverage-check: ${file} → ${linesPct.toFixed(2)}% lines`)
@@ -200,10 +179,7 @@ function main(argv: readonly string[]): number {
   }
   if (failed) return EXIT_SHORTFALL
 
-  console.log(
-    `coverage-check: OK — ${scoped.length} in-scope file(s) at 100% lines ` +
-      `(excluded: ${EXCLUDED_FILES.join(', ')}).`,
-  )
+  console.log(`coverage-check: OK — ${scoped.length} in-scope file(s) at 100% lines.`)
   return EXIT_OK
 }
 

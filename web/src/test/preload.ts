@@ -19,8 +19,9 @@ import { ensureResizeObserver } from './ensureResizeObserver'
 
 GlobalRegistrator.register()
 
-// happy-dom ships no ResizeObserver; radix-ui's popper (used by
-// ui/tooltip.tsx) measures its content with one as soon as a tooltip opens.
+// happy-dom ships no ResizeObserver; radix-ui's popper (used by the tooltip
+// in components/FieldFrame.tsx) measures its content with one as soon as a
+// tooltip opens.
 ensureResizeObserver(globalThis as unknown as Record<string, unknown>)
 
 // Registered before any test module is evaluated, so an `import … from

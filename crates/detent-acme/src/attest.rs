@@ -26,9 +26,11 @@ pub trait Attestor: Send + Sync {
 
 /// Deterministic test double: the payload is `key_id/key_authorization`,
 /// so a driver test can assert what the attestor saw.
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub struct TestAttestor;
 
+#[cfg(test)]
 impl Attestor for TestAttestor {
     fn attest(&self, key_id: &str, key_authorization: &str) -> Result<Vec<u8>, AcmeError> {
         if key_id.is_empty() || key_authorization.is_empty() {

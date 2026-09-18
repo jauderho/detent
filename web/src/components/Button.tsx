@@ -7,9 +7,9 @@ import { cn } from '@/lib/utils'
  * `.primary` is a `--blue` fill with `--cta-ink`, hovering to `--blue-bright`
  * and pressing to `translateY(1px)`.
  *
- * This exists instead of restyling `components/ui/button.tsx`: the generated
- * shadcn primitive carries `rounded-md`, `shadow-xs` and `transition-all`,
- * all three of which are §1 violations.
+ * This exists instead of restyling a generated shadcn `Button` primitive:
+ * that generated component carries `rounded-md`, `shadow-xs` and
+ * `transition-all`, all three of which are §1 violations.
  */
 export type ButtonVariant = 'default' | 'primary'
 
