@@ -7,12 +7,11 @@ phase or a self-contained piece of work finishes.
 
 ---
 
-## Where things stand — 2026-09-18 (Phase 7 wave 2 committed as `907316e`)
+## Where things stand — 2026-09-18 (deps `48d3389` + `0add9a6` on top of `907316e`)
 
-**Phase 6 (ACME) done. Phase 7 wave 1 done (resolver, chrony, mounts, nfs,
-samba). Wave 2 (dhcp, network) committed — 61 files, signed.**
+**Phase 6 (ACME) done. Phase 7 waves 1–2 done (8/8 modules). Supply-chain allow + cooled web pins landed — 2 signed commits.**
 
-Branch: `main` @ `907316e`. Working tree clean. Everything below verified,
+Branch: `main` @ `0add9a6`. Working tree clean. Everything below verified,
 not assumed.
 |---|---|---|
 | Rust tests | `cargo test --workspace --all-features` | 1424 pass, 0 fail, 6 ignored |
@@ -137,6 +136,10 @@ there and says so; seccomp and the capability drop are the confinement.
 
 ---
 ## Log
+### 2026-09-18 — Cooled web pins (`0add9a6`)
+Bun-only: react/react-dom 19.2.8→19.3.0, @testing-library/react 16.3.2→16.3.3, user-event 14.6.6→14.6.7, @types/react 19.2.18→19.3.0, @types/react-dom 19.2.4→19.3.0, plugin-react 6.1.0→6.1.1, vite 8.2.2→8.3.0 — every publish date ≥7d per ADR-011 (`web/bunfig.toml` minimumReleaseAge 604800). TS held at 6.0.3: 7.0.2 tried and reverted — `openapi-typescript@7.13.0` (latest dist-tag) crashes on TS7 (`ts.factory.createKeywordTypeNode` TypeError in `api-check`); retry when upstream ships TS7 support. Cargo: no cooled patch/minor (`embedded-io` 0.4→0.6 is a transitive 0.x major via postcard, left alone). Gates: cooldown-check OK, deny all-ok, fmt clean, clippy clean, cargo test 1424 pass / 6 ignored, web typecheck/lint/biome clean, bun test 430 pass, i18n 257 ids, build CSP OK, api-check EXIT 0 on installed TS 6.0.3. Committed `web/package.json` + `web/bun.lock` (26 ins/26 del, signed).
+### 2026-09-18 — CDLA-Permissive-2.0 allow (`48d3389`)
+`deny.toml` allow += `CDLA-Permissive-2.0` for `webpki-root-certs 1.0.9` (Mozilla root-cert data via `rustls-platform-verifier → hyper-rustls → instant-acme → detent-acme`). wasm32-only + upstream dev-dep — Linux/Pi use `rustls-native-certs` OS store, nothing bundled. `cargo deny check` all-ok. Committed signed, 1 file +4.
 ### 2026-09-18 — Phase 7 wave 2 committed: dhcp, network land (`907316e`)
 Two modules implemented via subagents (orchestrator wired registry/shared
 files, verified independently): `detent-module-dhcp` (dnsmasq + Kea v4/v6 —
