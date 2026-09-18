@@ -32,6 +32,7 @@
 
 pub mod bundle;
 pub mod fetch;
+pub mod health;
 pub mod install;
 pub mod policy;
 pub mod trust;
