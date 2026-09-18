@@ -165,6 +165,16 @@ pub(super) async fn update(
     };
     // The fetch is synchronous network I/O with a 30 s cap per GET; keep it
     // off the async workers.
+    //
+    // ponytail: uncached — every call reaches the release feed, so a
+    // read-scoped caller can make this host poll GitHub in a loop, holding one
+    // blocking thread per request. Deliberately not cached yet: the real
+    // mitigation is a check *period*, not a cache. Nothing about a release
+    // feed needs to be fresher than daily (PLAN §2.9 step 6's background
+    // check), so once that lands with its interval, the background result is
+    // what this endpoint should read and the network call disappears from the
+    // request path entirely. Add a cache only if that turns out not to cover
+    // it.
     let report = tokio::task::spawn_blocking(move || {
         let transport =
             detent_update::fetch::RealTransport::new().map_err(|_| update_check_failed())?;
