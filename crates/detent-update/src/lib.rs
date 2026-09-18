@@ -21,8 +21,10 @@
 //!   [`VerificationError::TrustRootUnavailable`];
 //! * [`update`] is the flow: [`update::check`] for `detent update --check`,
 //!   [`update::prepare`] through the verified candidate and
-//!   [`update::confirm_features`] through its self-test, with the privileged
-//!   swap (`ReplaceBinary`) still unwired.
+//!   [`update::confirm_features`] through its self-test;
+//! * [`install`] is the last step: [`install::swap`] renames the candidate
+//!   over the running binary atomically, keeping the old one at
+//!   `<target>.prev` so [`Installed::rollback`] can undo it.
 //!
 //! The verifier itself is fully offline (ADR-014): bundles carry certificate
 //! chain, DSSE signature and Rekor inclusion proof, so nothing but the
@@ -30,6 +32,7 @@
 
 pub mod bundle;
 pub mod fetch;
+pub mod install;
 pub mod policy;
 pub mod trust;
 pub mod update;
@@ -37,6 +40,7 @@ pub mod verify;
 
 pub use bundle::{Decoded, Statement, Subject, SubjectDigest};
 pub use fetch::{FetchError, Transport};
+pub use install::Installed;
 pub use policy::{Candidate, Policy, PolicyError};
 pub use trust::TrustRoot;
 pub use update::{Candidate as StagedUpdate, CheckReport, FeatureSet, UpdateError};
