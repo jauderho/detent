@@ -1,0 +1,6 @@
+# kerberos-style options and lines this module does not model
+/srv/krb5 @trusted(sec=krb5p:krb5i,rw,sync)
+/srv/gss gssbox.lan(sec=krb5p,rw,sync)
+/srv/half h(rw
+@(trusted)(sec=krb5p)
+/srv/quoted "/srv/with space" host.lan(rw)

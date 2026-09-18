@@ -1,0 +1,3 @@
+/srv/nfs4 192.168.1.0/24(rw,sync,no_subtree_check)
+# no newline after the next line
+/srv/nfs4/home 192.168.1.0/24(rw,sync)

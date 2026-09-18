@@ -1,0 +1,7 @@
+# aligned by hand, do not reformat
+[global]
+workgroup	=	SAMBA
+	server services = -smb2 +smb3
+   log file = /var/log/samba/log.%m
+[homes]
+	writable   =    yes

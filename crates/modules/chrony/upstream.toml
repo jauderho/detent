@@ -1,0 +1,16 @@
+# Upstream tracking for the `chrony` module (see docs/PLAN.md §2.3).
+# Kept in sync with `DESCRIPTOR.upstream` in src/lib.rs — the unit test
+# `upstream_toml_matches_the_descriptor` fails when the two disagree.
+
+project = "chrony"
+repo_url = "https://gitlab.com/chrony/chrony.git"
+tracked_version = "4.9"
+docs = ["https://chrony-project.org/doc/stable/chrony.conf.html"]
+
+# chrony publishes no release atom feed; the upstream-watch workflow compares
+# `tracked_version` against the tags in `repo_url` instead.
+release_feed = ""
+
+[fixtures]
+# fixtures/chrony/<dir>/ — real samples this version's parser is held to.
+dirs = ["chrony-4.9", "edge"]

@@ -16,6 +16,10 @@ serde_json = "1"
 detent-core = { path = "../crates/detent-core", features = ["fuzzing"] }
 detent-module-hosts = { path = "../crates/modules/hosts", features = ["fuzzing"] }
 detent-module-resolver = { path = "../crates/modules/resolver", features = ["fuzzing"] }
+detent-module-chrony = { path = "../crates/modules/chrony", features = ["fuzzing"] }
+detent-module-mounts = { path = "../crates/modules/mounts", features = ["fuzzing"] }
+detent-module-nfs = { path = "../crates/modules/nfs", features = ["fuzzing"] }
+detent-module-samba = { path = "../crates/modules/samba", features = ["fuzzing"] }
 detent-platform = { path = "../crates/detent-platform", features = ["fuzzing"] }
 detent-web = { path = "../crates/detent-web" }
 
@@ -81,6 +85,90 @@ bench = false
 [[bin]]
 name = "fuzz_resolver_edit"
 path = "fuzz_targets/fuzz_resolver_edit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_chrony_parse"
+path = "fuzz_targets/fuzz_chrony_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_chrony_roundtrip"
+path = "fuzz_targets/fuzz_chrony_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_chrony_edit"
+path = "fuzz_targets/fuzz_chrony_edit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_mounts_parse"
+path = "fuzz_targets/fuzz_mounts_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_mounts_roundtrip"
+path = "fuzz_targets/fuzz_mounts_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_mounts_edit"
+path = "fuzz_targets/fuzz_mounts_edit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_nfs_parse"
+path = "fuzz_targets/fuzz_nfs_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_nfs_roundtrip"
+path = "fuzz_targets/fuzz_nfs_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_nfs_edit"
+path = "fuzz_targets/fuzz_nfs_edit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_samba_parse"
+path = "fuzz_targets/fuzz_samba_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_samba_roundtrip"
+path = "fuzz_targets/fuzz_samba_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_samba_edit"
+path = "fuzz_targets/fuzz_samba_edit.rs"
 test = false
 doc = false
 bench = false

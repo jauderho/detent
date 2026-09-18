@@ -4,6 +4,24 @@
 ## suite asserts every `MessageId` it uses has an entry here. Keep alphabetized by
 ## module prefix.
 
+## chrony module — display name, security notes, schema tooltips
+chrony-name = chrony
+chrony-note-precedence = this file overrides the compiled-in defaults; a wrong value silently changes how the host keeps time.
+chrony-tip-settings = the chrony.conf directives this module models, in file order; anything else in the file is preserved untouched.
+chrony-tip-key = the directive name, one word, case-insensitive.
+chrony-tip-value = the value of this directive, up to the end of the line; empty for valueless directives such as `rtcsync`.
+chrony-rec-value = prefer an explicit value over relying on the compiled-in default.
+
+## chrony module — validation diagnostics
+chrony-invalid-key = `{$key}` is not a valid chrony directive name.
+chrony-duplicate-key = `{$key}` is set more than once; the last value wins.
+chrony-too-many-settings = this file has {$count} settings; split it into drop-in files under /etc/chrony/conf.d.
+chrony-allow-open = `allow {$value}` serves time to the whole internet; allow only the networks that need it.
+chrony-missing-makestep = makestep is not set; at startup the clock can drift unbounded instead of being stepped into range.
+chrony-missing-rtcsync = rtcsync is not set; the hardware clock will drift relative to the system clock.
+chrony-rec-nts = the pool {$pool} is used without the nts option; prefer nts-capable sources so time cannot be spoofed.
+chrony-cmdport-open = cmdport is {$port}; set cmdport 0 unless chronyc must reach this host over the network.
+
 ## hosts module — display name, security notes, schema tooltips
 hosts-name = hosts
 hosts-note-spoofing = entries here override dns; a wrong or malicious entry silently redirects lookups.
@@ -23,6 +41,51 @@ hosts-localhost-not-loopback = `localhost` points at `{$ip}`, which is not a loo
 hosts-missing-localhost = there is no `localhost` entry.
 hosts-missing-ipv6-localhost = there is no ipv6 `localhost` entry.
 hosts-too-many-entries = this file has {$count} entries; consider dns instead.
+
+## mounts module — display name, security notes, schema tooltips
+mounts-name = mounts
+mounts-note-boot = a bad /etc/fstab can leave the host unbootable at the next restart; every change needs a second confirmation.
+mounts-tip-entries = the mount entries in /etc/fstab, in file order.
+mounts-tip-spec = what is mounted: a device, `UUID=...`/`LABEL=...`, an nfs export, or `none` for swap.
+mounts-tip-mountpoint = where the filesystem is mounted, or `none`/`swap` for swap.
+mounts-tip-fstype = the filesystem type, e.g. ext4, or `swap`.
+mounts-tip-options = the comma-separated mount options, e.g. defaults,nosuid.
+mounts-tip-dump = the dump(8) backup frequency; almost always 0.
+mounts-tip-pass = the fsck pass number: 1 for root, 2 for other checked filesystems, 0 to skip.
+mounts-rec-options = guard user-writable data with nosuid, nodev and noexec; prefer x-systemd.automount on network filesystems.
+
+## mounts module — validation diagnostics
+mounts-empty-spec = entry {$index} has an empty spec (first column).
+mounts-empty-mountpoint = entry {$index} has an empty mount point (second column).
+mounts-invalid-fstype = `{$fstype}` is not a valid filesystem type.
+mounts-pass-too-high = entry {$index} has pass `{$pass}`; fsck runs at most 2 passes.
+mounts-root-pass = the root filesystem should have pass 1, not `{$pass}`.
+mounts-missing-nofail = `{$mountpoint}` is removable media without `nofail`; the boot hangs when it is unplugged.
+mounts-missing-guards = `{$mountpoint}` mounts user-writable data without `{$missing}`; add them.
+mounts-network-automount = `{$mountpoint}` is a network filesystem without `x-systemd.automount`; the boot waits for the network.
+mounts-noauto-without-user = `noauto` without `user`: only root can mount it, defeating the point.
+
+## nfs module — display name, security notes, schema tooltips
+nfs-name = nfs
+nfs-note-live-state = exports are enforced by the kernel on every mount; a wrong line silently changes which hosts can read which filesystems.
+nfs-tip-entries = the exports in /etc/exports, in file order.
+nfs-tip-path = the export point: an absolute directory path on this host.
+nfs-tip-clients = the hosts allowed to mount this export, in match order; the first matching specification wins.
+nfs-tip-host = the client specification: a name, address, address/netmask, wildcard, `*` (every client), or @netgroup.
+nfs-tip-options = this client's export options, comma-separated; an empty list takes the file defaults.
+nfs-rec-options = state rw/ro, sync/async, root_squash and subtree handling explicitly; defaults drift between nfs-utils releases.
+
+## nfs module — validation diagnostics
+nfs-empty-path = an export point is empty.
+nfs-relative-path = `{$path}` is not absolute; an export point must start with `/`.
+nfs-empty-host = a client of `{$path}` has no host specification.
+nfs-invalid-option = `{$option}` is not a valid export option; options are bare tokens with no whitespace or parentheses.
+nfs-no-root-squash = `{$host}` mounts with no_root_squash and keeps root privileges on the export.
+nfs-sec-sys-only = `{$host}` negotiates only sec=sys; add krb5p for cryptographic protection.
+nfs-world-export = `{$host}` is reachable read-write by every client.
+nfs-subtree-undecided = `{$host}` states neither subtree_check nor no_subtree_check; upstream changed the default, so say which one you want.
+nfs-root-squash-undecided = `{$host}` states neither root_squash nor no_root_squash; say which one you want.
+nfs-sync-undecided = `{$host}` states neither sync nor async; prefer sync, which commits writes to stable storage.
 
 ## resolver module — display name, security notes, schema tooltips
 resolver-name = resolver
@@ -49,6 +112,27 @@ resolver-invalid-forward-name = `{$name}` is not a valid forward-zone name.
 resolver-forward-tls-no-auth = this zone forwards over TLS without an `#auth-name` on its forward-addr, so the TLS connection is not authenticated.
 resolver-rec-hardening = `{$key}` is disabled; enabling it hardens unbound against upstream spoofing and delegation abuse.
 resolver-forward-zone-unnamed = a forward-zone: without a name: forwards nothing and weakens the config; give every zone a name.
+
+## samba module — display name, security notes, schema tooltips
+samba-name = samba
+samba-note-guest-access = guest access is granted per share at connection time; a wrong value exposes files without a password.
+samba-tip-entries = the smb.conf entries this module models, in file order: `[section]` headers and directives alike.
+samba-tip-section = the section name for a `[section]` header; empty for a plain directive line.
+samba-tip-key = the parameter name, case-insensitive and possibly multi-word (`guest ok`).
+samba-tip-value = the value of the parameter, up to the end of the line; `%` macros are preserved verbatim.
+samba-rec-value = prefer an explicit hardened value over relying on upstream's compiled-in default.
+
+## samba module — validation diagnostics
+samba-empty-key = a directive has no parameter name.
+samba-empty-section = a section header is empty.
+samba-guest-ok = `guest ok` is set to {$value}; unauthenticated clients can connect to every share that inherits it.
+samba-map-to-guest = `map to guest` is {$value}; anything but Never turns failed logins into guest sessions.
+samba-min-protocol = `server min protocol` is {$value}; set at least SMB3_00 and drop the SMB1-era protocol levels.
+samba-smb-encrypt = `smb encrypt` is {$value}; set required so SMB traffic cannot travel unencrypted.
+samba-restrict-anonymous = `restrict anonymous` is {$value}; 2 hides the share list from anonymous users.
+samba-rec-server-signing = `server signing` is {$value}; set mandatory so SMB traffic is cryptographically signed.
+samba-rec-load-printers = `load printers` is {$value}; set no unless this host actually shares printers.
+samba-rec-interfaces = no `interfaces` directive is set; bind samba to explicit addresses instead of listening on every interface.
 
 ## detent-core — parse, model, and edit errors
 ## These are the failures a module's own document model can raise, so they are

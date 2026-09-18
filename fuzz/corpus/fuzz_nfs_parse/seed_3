@@ -1,0 +1,2 @@
+/srv/krb5 @trusted(sec=krb5p:krb5i,rw,sync)
+/srv/gss gssbox.lan(sec=krb5p,rw,sync)

@@ -45,17 +45,75 @@ fn resolver() -> Vec<Box<dyn DynModule>> {
     Vec::new()
 }
 
-// `module-chrony`, `module-mounts`, `module-nfs`, `module-samba`,
-// `module-dhcp` and `module-network` are all wired as far as the feature
-// flag and the (currently empty) crate: see
-// `crates/detent-modules/Cargo.toml`. None has a constructor pair here yet
-// because none has a `ConfigModule` impl yet (PLAN §2.3 Appendix A) — add one
-// alongside its module crate, following the `hosts()` shape above.
+/// The `chrony` module, because `module-chrony` is enabled.
+#[cfg(feature = "module-chrony")]
+fn chrony() -> Vec<Box<dyn DynModule>> {
+    vec![Box::new(detent_core::module::Dyn::<
+        detent_module_chrony::ChronyModule,
+    >::new())]
+}
+
+/// Nothing, because `module-chrony` is disabled.
+#[cfg(not(feature = "module-chrony"))]
+fn chrony() -> Vec<Box<dyn DynModule>> {
+    Vec::new()
+}
+
+/// The `mounts` module, because `module-mounts` is enabled.
+#[cfg(feature = "module-mounts")]
+fn mounts() -> Vec<Box<dyn DynModule>> {
+    vec![Box::new(detent_core::module::Dyn::<
+        detent_module_mounts::MountsModule,
+    >::new())]
+}
+
+/// Nothing, because `module-mounts` is disabled.
+#[cfg(not(feature = "module-mounts"))]
+fn mounts() -> Vec<Box<dyn DynModule>> {
+    Vec::new()
+}
+
+/// The `nfs` module, because `module-nfs` is enabled.
+#[cfg(feature = "module-nfs")]
+fn nfs() -> Vec<Box<dyn DynModule>> {
+    vec![Box::new(detent_core::module::Dyn::<
+        detent_module_nfs::NfsModule,
+    >::new())]
+}
+
+/// Nothing, because `module-nfs` is disabled.
+#[cfg(not(feature = "module-nfs"))]
+fn nfs() -> Vec<Box<dyn DynModule>> {
+    Vec::new()
+}
+
+/// The `samba` module, because `module-samba` is enabled.
+#[cfg(feature = "module-samba")]
+fn samba() -> Vec<Box<dyn DynModule>> {
+    vec![Box::new(detent_core::module::Dyn::<
+        detent_module_samba::SambaModule,
+    >::new())]
+}
+
+/// Nothing, because `module-samba` is disabled.
+#[cfg(not(feature = "module-samba"))]
+fn samba() -> Vec<Box<dyn DynModule>> {
+    Vec::new()
+}
+
+// `module-dhcp` and `module-network` are all wired as far as the feature flag
+// and the (currently empty) crate: see `crates/detent-modules/Cargo.toml`.
+// Neither has a constructor pair here yet because neither has a
+// `ConfigModule` impl yet (PLAN §2.3 Appendix A) — add one alongside its
+// module crate, following the `hosts()` shape above.
 
 /// The modules this build was compiled with, in registry order.
 #[must_use]
 pub fn modules() -> Vec<Box<dyn DynModule>> {
-    [hosts(), resolver()].into_iter().flatten().collect()
+    [hosts(), resolver(), chrony(), mounts(), nfs(), samba()]
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 #[cfg(test)]
@@ -113,6 +171,98 @@ mod tests {
                 .and_then(|v| v.pointer("/resolv/0/nameserver/ip"))
                 .and_then(|v| v.as_str()),
             Some("192.0.2.1")
+        );
+    }
+
+    #[cfg(feature = "module-chrony")]
+    #[test]
+    fn chrony_is_registered_and_speaks_json() {
+        let registry = modules();
+        let found = registry.iter().find(|m| m.id() == "chrony");
+        assert!(
+            found.is_some(),
+            "module-chrony is enabled but `chrony` is not in the registry"
+        );
+        let Some(module) = found else { return };
+        assert_eq!(module.descriptor().id, "chrony");
+        assert!(!module.schema_json().is_null());
+        assert_eq!(
+            module
+                .parse_to_model_json("pool time.cloudflare.com iburst nts\n")
+                .ok()
+                .as_ref()
+                .and_then(|v| v.pointer("/settings/0/key"))
+                .and_then(|v| v.as_str()),
+            Some("pool")
+        );
+    }
+
+    #[cfg(feature = "module-mounts")]
+    #[test]
+    fn mounts_is_registered_and_speaks_json() {
+        let registry = modules();
+        let found = registry.iter().find(|m| m.id() == "mounts");
+        assert!(
+            found.is_some(),
+            "module-mounts is enabled but `mounts` is not in the registry"
+        );
+        let Some(module) = found else { return };
+        assert_eq!(module.descriptor().id, "mounts");
+        assert!(!module.schema_json().is_null());
+        assert_eq!(
+            module
+                .parse_to_model_json("UUID=x / ext4 defaults 0 1\n")
+                .ok()
+                .as_ref()
+                .and_then(|v| v.pointer("/entries/0/fstype"))
+                .and_then(|v| v.as_str()),
+            Some("ext4")
+        );
+    }
+
+    #[cfg(feature = "module-nfs")]
+    #[test]
+    fn nfs_is_registered_and_speaks_json() {
+        let registry = modules();
+        let found = registry.iter().find(|m| m.id() == "nfs");
+        assert!(
+            found.is_some(),
+            "module-nfs is enabled but `nfs` is not in the registry"
+        );
+        let Some(module) = found else { return };
+        assert_eq!(module.descriptor().id, "nfs");
+        assert!(!module.schema_json().is_null());
+        assert_eq!(
+            module
+                .parse_to_model_json("/srv/nfs4 192.168.1.0/24(rw,sync)\n")
+                .ok()
+                .as_ref()
+                .and_then(|v| v.pointer("/entries/0/clients/0/host"))
+                .and_then(|v| v.as_str()),
+            Some("192.168.1.0/24")
+        );
+    }
+
+    #[cfg(feature = "module-samba")]
+    #[test]
+    fn samba_is_registered_and_speaks_json() {
+        let registry = modules();
+        let found = registry.iter().find(|m| m.id() == "samba");
+        assert!(
+            found.is_some(),
+            "module-samba is enabled but `samba` is not in the registry"
+        );
+        let Some(module) = found else { return };
+        assert_eq!(module.descriptor().id, "samba");
+        assert!(!module.schema_json().is_null());
+        assert_eq!(
+            module
+                .parse_to_model_json("[global]\n   guest ok = yes\n")
+                .ok()
+                .as_ref()
+                .and_then(|v| v.pointer("/entries/1/key"))
+                .and_then(|v| v.as_str()),
+            Some("guest ok")
         );
     }
 

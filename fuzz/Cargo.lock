@@ -3,15 +3,6 @@
 version = 4
 
 [[package]]
-name = "aho-corasick"
-version = "1.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
-dependencies = [
- "memchr",
-]
-
-[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -372,7 +363,12 @@ dependencies = [
  "arbitrary",
  "axum",
  "detent-core",
+ "detent-module-chrony",
  "detent-module-hosts",
+ "detent-module-mounts",
+ "detent-module-nfs",
+ "detent-module-resolver",
+ "detent-module-samba",
  "detent-platform",
  "detent-web",
  "libfuzzer-sys",
@@ -381,7 +377,62 @@ dependencies = [
 ]
 
 [[package]]
+name = "detent-module-chrony"
+version = "0.0.1"
+dependencies = [
+ "arbitrary",
+ "detent-core",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "detent-module-hosts"
+version = "0.0.1"
+dependencies = [
+ "arbitrary",
+ "detent-core",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "detent-module-mounts"
+version = "0.0.1"
+dependencies = [
+ "arbitrary",
+ "detent-core",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "detent-module-nfs"
+version = "0.0.1"
+dependencies = [
+ "arbitrary",
+ "detent-core",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "detent-module-resolver"
+version = "0.0.1"
+dependencies = [
+ "arbitrary",
+ "detent-core",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "detent-module-samba"
 version = "0.0.1"
 dependencies = [
  "arbitrary",
@@ -452,7 +503,6 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
- "utoipa",
  "zeroize",
 ]
 
@@ -785,8 +835,6 @@ checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
  "hashbrown",
- "serde",
- "serde_core",
 ]
 
 [[package]]
@@ -1059,35 +1107,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "regex"
-version = "1.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
-dependencies = [
- "aho-corasick",
- "memchr",
- "regex-automata",
- "regex-syntax",
-]
-
-[[package]]
-name = "regex-automata"
-version = "0.4.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
-dependencies = [
- "aho-corasick",
- "memchr",
- "regex-syntax",
-]
-
-[[package]]
-name = "regex-syntax"
-version = "0.8.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
-
-[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1125,9 +1144,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.44"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6725596c3f2c3a0aef021139e145d4eafe314a6623e4680ca83852b2c67ab2ba"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -1643,30 +1662,6 @@ name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
-
-[[package]]
-name = "utoipa"
-version = "5.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bde15df68e80b16c7d16b9616e80770ad158988daa56a27dccd1e55558b0160"
-dependencies = [
- "indexmap",
- "serde",
- "serde_json",
- "utoipa-gen",
-]
-
-[[package]]
-name = "utoipa-gen"
-version = "5.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ba0b99ee52df3028635d93840c797102da61f8a7bb3cf751032455895b52ef8"
-dependencies = [
- "proc-macro2",
- "quote",
- "regex",
- "syn 2.0.119",
-]
 
 [[package]]
 name = "version_check"

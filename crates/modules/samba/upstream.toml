@@ -1,0 +1,27 @@
+# Upstream tracking for the `samba` module (see docs/PLAN.md §2.3).
+# Kept in sync with `SAMBA_DESCRIPTOR.upstream` in src/lib.rs — the unit test
+# `upstream_toml_matches_the_descriptor` fails when the two disagree.
+
+# Upstream project name, as it appears in its own documentation.
+project = "samba"
+# Canonical source repository (verified live: `git ls-remote --tags` lists
+# `samba-4.24.7` among the tags). Used by upstream-watch to list tags.
+repo_url = "https://git.samba.org/samba.git"
+# The upstream release this module's option set was derived from: the newest
+# non-rc tag on the tracked repository at the time the module was written
+# (4.25.x exists only as release candidates). Bump only together with new
+# fixtures under fixtures/samba/<version>/.
+tracked_version = "4.24.7"
+# Documentation URLs shown in the UI (man pages, reference manual).
+docs = ["https://www.samba.org/samba/docs/current/man-html/smb.conf.5.html"]
+
+# Samba publishes no release atom feed; the upstream-watch workflow compares
+# `tracked_version` against the tags in `repo_url` instead.
+release_feed = ""
+
+[fixtures]
+# fixtures/samba/<dir>/ — real samples this version's parser is held to.
+# `samba-4.24.7` is upstream's own `examples/smb.conf.default` at that tag;
+# `edge` holds the hand-made adversarial cases (CRLF, no trailing newline,
+# tabs, lines this module does not model).
+dirs = ["samba-4.24.7", "edge"]

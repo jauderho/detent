@@ -1,0 +1,4 @@
+[global]
+workgroup = MYGROUP
+# no newline after the next line
+max log size = 50

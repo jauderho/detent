@@ -1,0 +1,4 @@
+[bad
+bare continuation
+   192.168.1.0/24
+include = /etc/samba/smb.conf.%m

@@ -1,0 +1,7 @@
+[global]
+workgroup = SAMBA
+# crlf throughout
+log file = /var/log/samba/log.%m
+
+[homes]
+writable = yes

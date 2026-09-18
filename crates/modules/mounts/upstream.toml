@@ -1,0 +1,27 @@
+# Upstream tracking for the `mounts` module (see docs/PLAN.md §2.3).
+#
+# `.github/workflows/upstream-watch.yml` reads this file weekly and opens an
+# issue when `tracked_version` falls behind the newest upstream release. Keep
+# it in sync with the descriptor's `upstream` in src/lib.rs — the unit test
+# `upstream_toml_matches_the_descriptor` fails when the two disagree.
+
+# Upstream project name, as it appears in its own documentation.
+project = "util-linux"
+# Canonical source repository. Used by upstream-watch to list tags.
+repo_url = "https://github.com/util-linux/util-linux.git"
+# The upstream release this module's option set was derived from. Bump only
+# together with new fixtures under fixtures/mounts/<version>/.
+tracked_version = "2.42.3"
+# Documentation URLs shown in the UI (man pages, reference manual).
+docs = ["https://man7.org/linux/man-pages/man5/fstab.5.html"]
+
+# Atom feed of releases (GitHub publishes one for every tag; upstream-watch
+# falls back to comparing git tags when the feed cannot be reached).
+release_feed = "https://github.com/util-linux/util-linux/releases.atom"
+
+[fixtures]
+# fixtures/mounts/<dir>/ — real samples this version's parser is held to.
+# `util-linux-2.42.3` covers the stock `/etc/fstab` shape (UUID specs,
+# comments, hand-aligned columns); `edge` holds the hand-made adversarial
+# cases (CRLF, no trailing newline, tabs, unparseable garbage lines).
+dirs = ["util-linux-2.42.3", "edge"]

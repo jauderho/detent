@@ -1,0 +1,10 @@
+# systemd automount x-options parse as ordinary options
+UUID=1c2d3e4f-5a6b-7c8d-9e0f-1a2b3c4d5e6f	/data/nas	cifs	credentials=/etc/nas.cred,x-systemd.automount,x-systemd.idle-timeout=60	0	0
+# a line that is one field short: unknown, copied through
+UUID=9f8e7d6c-5b4a-3f2e-1d0c-9b8a7f6e5d4c	/mnt/usb
+# dump and pass are not numbers: unknown, copied through
+/dev/sdb1	/mnt/backup	ext4	defaults	zero	one
+# a line with an extra field: unknown, copied through
+tmpfs	/dev/shm	tmpfs	defaults	0	0	extra
+# a comment, not an entry: copied through as a comment
+# <file system> <mount point> <type> <options> <dump> <pass>

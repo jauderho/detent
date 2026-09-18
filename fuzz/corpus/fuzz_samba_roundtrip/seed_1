@@ -1,0 +1,3 @@
+[global]
+   workgroup = MYGROUP
+   server role = standalone server

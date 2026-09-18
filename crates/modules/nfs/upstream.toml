@@ -1,0 +1,24 @@
+# Upstream tracking for the `nfs` module (see docs/PLAN.md §2.3).
+# Kept in sync with `NFS_DESCRIPTOR.upstream` in src/lib.rs — the unit test
+# `upstream_toml_matches_the_descriptor` fails when the two disagree.
+
+project = "nfs-utils"
+# The assignment's candidate URLs were verified and are dead:
+# `https://git.linux-nfs.org/?p=nfs-utils.git` is 404 and the kernel.org mirror
+# does not exist. This is the live cgit repository; its tag list carries
+# `nfs-utils-2-9-2` as the newest non-rc stable release (2.9.3 exists only as
+# release candidates).
+repo_url = "https://git.linux-nfs.org/?p=steved/nfs-utils.git"
+tracked_version = "2.9.2"
+docs = ["https://man7.org/linux/man-pages/man5/exports.5.html"]
+
+# nfs-utils publishes no release atom feed; the upstream-watch workflow compares
+# `tracked_version` against the tags in `repo_url` instead.
+release_feed = ""
+
+[fixtures]
+# fixtures/nfs/<dir>/ — real samples this version's parser is held to.
+# `nfs-utils-2.9.2` covers the stock `/etc/exports`; `edge` holds the hand-made
+# adversarial cases (CRLF, no trailing newline, tabs, kerberos-style options,
+# lines this module does not model).
+dirs = ["nfs-utils-2.9.2", "edge"]
