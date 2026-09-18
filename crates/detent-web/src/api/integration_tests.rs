@@ -759,6 +759,65 @@ async fn openapi_document_needs_a_credential() -> R {
     Ok(())
 }
 
+#[tokio::test]
+async fn cert_status_describes_the_certificate_the_listener_serves() -> R {
+    let live = Live::new()?;
+    let (read, _write) = tokens(live.state())?;
+
+    let unauthenticated = get(live.state(), "/api/v1/system/cert", None).await?;
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    let response = get(live.state(), "/api/v1/system/cert", Some(&read)).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await?;
+
+    // The answer must describe the certificate the store actually holds, not
+    // a re-derived one: compare against the live resolver.
+    let served = live.state().cert_store.current();
+    let der = served.cert.first().map(|c| c.to_vec()).unwrap_or_default();
+    assert_eq!(
+        body.get("fingerprint").and_then(serde_json::Value::as_str),
+        Some(crate::tls::fingerprint(&der).as_str())
+    );
+
+    // A bootstrap certificate is 90 days long and backdated one hour, so it
+    // expires in the future and has spent almost none of its life.
+    let not_after = body
+        .get("not_after_unix")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or("not_after_unix must parse from a bootstrap certificate")?;
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    assert!(not_after > now, "{not_after} should be in the future");
+    let used = body
+        .get("lifetime_used_percent")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("lifetime_used_percent must be known for a parseable certificate")?;
+    assert!(
+        used <= 1,
+        "a fresh certificate has spent ~0% of its life, got {used}"
+    );
+
+    live.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn cert_status_reports_unknown_rather_than_failing_on_unparseable_der() -> R {
+    // `validity_unix` is deliberately total: a certificate whose DER it cannot
+    // walk is reported as "unknown", never as a 500. The store cannot hold
+    // garbage, so the report function is driven directly.
+    let live = Live::new()?;
+    let report = super::system::cert_report(live.state());
+    assert!(report.not_after_unix.is_some());
+
+    let blank = crate::tls::fingerprint(&[]);
+    assert_ne!(report.fingerprint, blank, "the real certificate was hashed");
+    assert_eq!(crate::tls::validity_unix(b"not a certificate"), None);
+
+    live.shutdown();
+    Ok(())
+}
+
 /// Every route under `/api/v1` other than `/auth/*` refuses a request that
 /// carries no credential.
 ///

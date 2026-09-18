@@ -175,6 +175,14 @@ pub enum Operation {
     HostProfile,
     /// Read back the audit log.
     AuditQuery(AuditQuery),
+    /// Read the serving certificate's fingerprint and remaining lifetime.
+    ///
+    /// Not answered by the engine: the serving certificate belongs to the
+    /// front end that owns the TLS listener, and `detent-ops` has no TLS
+    /// types. The variant exists so that authorization and the audit record
+    /// for a refusal carry this operation's own identity instead of
+    /// borrowing [`Operation::HostProfile`]'s.
+    CertStatus,
     /// Check whether the serving certificate should renew, and renew it.
     ///
     /// Answered as [`OpsError::Unsupported`] until the ACME wiring lands (see
@@ -218,6 +226,8 @@ pub enum OpKind {
     HostProfile,
     /// [`Operation::AuditQuery`].
     AuditQuery,
+    /// [`Operation::CertStatus`].
+    CertStatus,
     /// [`Operation::CertRenew`].
     CertRenew,
 }
@@ -240,6 +250,7 @@ impl Operation {
             Self::ServiceAction { .. } => OpKind::ServiceAction,
             Self::HostProfile => OpKind::HostProfile,
             Self::AuditQuery(_) => OpKind::AuditQuery,
+            Self::CertStatus => OpKind::CertStatus,
             Self::CertRenew => OpKind::CertRenew,
         }
     }
@@ -260,6 +271,7 @@ impl Operation {
             | Self::ConfirmCommit { .. }
             | Self::RollbackCommit { .. }
             | Self::HostProfile
+            | Self::CertStatus
             | Self::CertRenew
             | Self::AuditQuery(_) => None,
         }
@@ -337,6 +349,7 @@ mod tests {
             },
             Operation::HostProfile,
             Operation::AuditQuery(crate::audit::AuditQuery::default()),
+            Operation::CertStatus,
             Operation::CertRenew,
         ]
     }
@@ -351,7 +364,7 @@ mod tests {
             assert!(!format!("{op:?}").is_empty());
             assert_eq!(op.clone(), op);
         }
-        assert_eq!(kinds.len(), 14);
+        assert_eq!(kinds.len(), 15);
         let unique: std::collections::BTreeSet<_> =
             kinds.iter().map(|kind| format!("{kind:?}")).collect();
         assert_eq!(unique.len(), kinds.len());
@@ -373,7 +386,8 @@ mod tests {
         // Apply, ConfirmCommit, RollbackCommit, Restore, ServiceAction, CertRenew.
         assert_eq!(mutating, 6);
         // Everything except ListModules, ConfirmCommit, RollbackCommit,
-        // HostProfile, CertRenew and AuditQuery.
+        // HostProfile, CertStatus, CertRenew and AuditQuery.
+        assert_eq!(with_module, 8);
         assert_eq!(
             Operation::GetModule {
                 id: "hosts".to_owned()

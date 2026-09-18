@@ -1685,6 +1685,7 @@
           "service_action",
           "host_profile",
           "audit_query",
+          "cert_status",
           "cert_renew"
         ]
       },

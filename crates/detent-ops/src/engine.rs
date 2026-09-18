@@ -242,6 +242,12 @@ impl OpsEngine {
             // hot-swap a certificate. Answered as `Unsupported` (`ops-unsupported`)
             // so the API renders a disabled control with a reason; full renewal
             // arrives with the ACME wiring, not here.
+            // The front end that owns the TLS listener answers this one from
+            // its own resolver; it reaches the engine only if something routes
+            // it here by mistake, and then it must fail loudly.
+            Operation::CertStatus => Err(OpsError::Unsupported {
+                what: "cert_status",
+            }),
             Operation::CertRenew => Err(OpsError::Unsupported { what: "cert_renew" }),
         }
     }

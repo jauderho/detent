@@ -272,6 +272,7 @@ audit-op-service-status = read service status
 audit-op-service-action = act on service
 audit-op-host-profile = read host profile
 audit-op-audit-query = read audit log
+audit-op-cert-status = read certificate status
 audit-op-cert-renew = renew certificate
 
 ## Schema-driven module forms

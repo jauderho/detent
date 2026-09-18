@@ -1408,6 +1408,22 @@ fn cert_renew_is_unsupported_until_acme_lands_and_writes_one_audit_record() -> T
 }
 
 #[test]
+fn cert_status_is_unsupported_in_the_engine_and_writes_no_audit_record() -> TestResult {
+    let mut fx = harness(b"v1\n", Setup::default())?;
+    let err = fx.run(Operation::CertStatus);
+    assert!(matches!(
+        err,
+        Err(OpsError::Unsupported {
+            what: "cert_status"
+        })
+    ));
+    // Read-only ops return before auditing (engine.rs `!mutating` early
+    // return); CertRenew above is the mutating contrast that writes one.
+    assert!(fx.records().is_empty());
+    fx.finish()
+}
+
+#[test]
 fn the_audit_log_can_be_queried_back_through_an_operation() -> TestResult {
     let mut fx = harness(b"v1\n", Setup::default())?;
     fx.run(apply("v2\n", None))?;
