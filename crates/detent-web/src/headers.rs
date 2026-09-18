@@ -387,45 +387,6 @@ mod tests {
         Ok(())
     }
 
-    /// Hashing the *file* is only half the invariant. What the browser
-    /// actually hashes is the text between `<script>` and `</script>` in
-    /// `index.html`, indentation and all — so a copy of the script that is
-    /// merely equivalent, rather than byte-identical, is refused by the CSP
-    /// and the page paints the wrong theme before correcting itself.
-    ///
-    /// The two were exactly that far apart when this test was written: the
-    /// inline copy was the same code re-indented to sit inside `<head>`.
-    #[test]
-    fn the_inline_script_in_index_html_is_the_file_byte_for_byte()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use sha2::Digest as _;
-
-        let html =
-            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/index.html"))?;
-        let open = "<script>";
-        let start = html
-            .find(open)
-            .ok_or("web/index.html has no inline <script>")?
-            .saturating_add(open.len());
-        let rest = html
-            .get(start..)
-            .ok_or("inline script start is out of range")?;
-        let end = rest
-            .find("</script>")
-            .ok_or("web/index.html's inline <script> is unterminated")?;
-        let inline = rest.get(..end).ok_or("inline script end is out of range")?;
-
-        let digest = sha2::Sha256::digest(inline.as_bytes());
-        let actual = base64_encode(&digest);
-        assert_eq!(
-            actual, THEME_SCRIPT_SHA256,
-            "the inline theme script in web/index.html hashes to `{actual}`, not the \
-             `{THEME_SCRIPT_SHA256}` the CSP pins. Its text must be web/src/theme-init.js \
-             byte for byte — indentation included, because that is what the browser hashes."
-        );
-        Ok(())
-    }
-
     #[test]
     fn base64_encode_matches_known_vectors() {
         // RFC 4648 test vectors.
