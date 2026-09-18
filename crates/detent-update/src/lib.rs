@@ -20,8 +20,9 @@
 //!   this build refuses every update with
 //!   [`VerificationError::TrustRootUnavailable`];
 //! * [`update`] is the flow: [`update::check`] for `detent update --check`,
-//!   [`update::prepare`] through the verified, self-testable candidate, with
-//!   the privileged swap (`ReplaceBinary`) still unwired.
+//!   [`update::prepare`] through the verified candidate and
+//!   [`update::confirm_features`] through its self-test, with the privileged
+//!   swap (`ReplaceBinary`) still unwired.
 //!
 //! The verifier itself is fully offline (ADR-014): bundles carry certificate
 //! chain, DSSE signature and Rekor inclusion proof, so nothing but the

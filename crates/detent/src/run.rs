@@ -459,26 +459,12 @@ pub fn operation_for(cli: &Cli, input: &mut dyn Read) -> Result<Operation, Usage
     }
 }
 
-/// `detent --self-test` (PLAN §2.9 step 5): the updater's health probe on a
-/// freshly staged binary. Prints the running version and the compiled
-/// feature set, as JSON under `--json`, one line per id otherwise.
-///
-/// Ungated: a minimal build without `update` still answers the probe. The
-/// shape matches `detent_update::FeatureSet` so the updater's `covers` check
-/// reads either one.
-fn self_test(
-    _cli: &Cli,
-    renderer: &Renderer<'_>,
-    streams: &mut Streams<'_>,
-) -> std::io::Result<Exit> {
-    #[derive(serde::Serialize)]
-    struct SelfTest {
-        version: String,
-        features: Vec<String>,
-    }
+/// The running build's own feature set, minus the JSON shape: the module ids
+/// plus the compiled-in feature gates. `cfg!` per feature so the probe
+/// reports this build, not the superset.
+fn compiled_feature_ids() -> Vec<String> {
     let modules = detent_modules::modules();
     let mut features: Vec<String> = modules.iter().map(|entry| entry.id().to_owned()).collect();
-    // ponytail: cfg! per feature so the probe reports this build, not the superset.
     if cfg!(feature = "web") {
         features.push("web".to_owned());
     }
@@ -517,7 +503,31 @@ fn self_test(
     }
     features.sort();
     features.dedup();
-    let set = SelfTest {
+    features
+}
+
+/// What `detent --self-test` prints (shape mirrors
+/// `detent_update::FeatureSet` so the updater's `covers` check reads either).
+#[derive(serde::Serialize)]
+struct SelfTestReport {
+    version: String,
+    features: Vec<String>,
+}
+
+/// `detent --self-test` (PLAN §2.9 step 5): the updater's health probe on a
+/// freshly staged binary. Prints the running version and the compiled
+/// feature set, as JSON under `--json`, one line per id otherwise.
+///
+/// Ungated: a minimal build without `update` still answers the probe. The
+/// shape matches `detent_update::FeatureSet` so the updater's `covers` check
+/// reads either one.
+fn self_test(
+    _cli: &Cli,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Exit> {
+    let features = compiled_feature_ids();
+    let set = SelfTestReport {
         version: env!("CARGO_PKG_VERSION").to_owned(),
         features,
     };
@@ -537,9 +547,10 @@ fn self_test(
     Ok(Exit::Ok)
 }
 
-/// `detent update …` (PLAN §2.9): `--check` reports, the bare form verifies
-/// into staging and stops — the privileged swap is unwired, so it refuses
-/// with the reason rather than installing anything unverified.
+/// `detent update …` (PLAN §2.9): `--check` reports; the bare form verifies,
+/// self-tests and then stops — the privileged swap is unwired, so it refuses
+/// after a fully verified and self-tested candidate rather than installing
+/// anything.
 #[cfg(feature = "update")]
 fn run_update(
     args: &crate::cli::UpdateArgs,
@@ -561,6 +572,12 @@ fn run_update(
             return failed(renderer, streams, &err.to_string());
         }
     };
+    let trust = match detent_update::trust::embedded() {
+        Ok(trust) => trust,
+        Err(err) => {
+            return failed(renderer, streams, &err.to_string());
+        }
+    };
     let staging_parent = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
@@ -573,15 +590,38 @@ fn run_update(
             allow_downgrade: args.allow_downgrade,
         },
         time::OffsetDateTime::now_utc(),
+        &trust,
         args.check,
         &staging_parent,
+        &|path| detent_update::update::confirm_features(path, &current_features()),
         renderer,
         streams,
     )
 }
 
+/// The running build's own feature set, as the updater's `covers` check reads
+/// it (PLAN §2.9 step 5).
+#[cfg(feature = "update")]
+fn current_features() -> detent_update::FeatureSet {
+    detent_update::FeatureSet {
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        features: compiled_feature_ids(),
+    }
+}
+
+/// The self-test probe run on a verified candidate (PLAN §2.9 step 5): the
+/// candidate binary's own `--self-test --json`, feature-checked against the
+/// running build. A seam so hermetic tests record when the probe ran
+/// without executing anything.
+#[cfg(feature = "update")]
+type FeatureProbe =
+    dyn Fn(&std::path::Path) -> Result<detent_update::FeatureSet, detent_update::UpdateError>;
+
 /// The policy half of `run_update`, behind a `Transport` seam so tests run
 /// hermetic: pick `--check` vs bare-update without touching the network.
+/// The trust root and the candidate self-test probe are injected the same
+/// way, so the full bare-`update` order (verify → self-test → refuse) is
+/// observable with zero subprocesses.
 #[cfg(feature = "update")]
 #[allow(clippy::too_many_arguments)]
 fn run_update_on(
@@ -589,8 +629,10 @@ fn run_update_on(
     current: &semver::Version,
     policy: &detent_update::Policy,
     now: time::OffsetDateTime,
+    trust: &detent_update::TrustRoot,
     check_only: bool,
     staging_parent: &std::path::Path,
+    probe: &FeatureProbe,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
@@ -602,7 +644,9 @@ fn run_update_on(
         current,
         policy,
         now,
+        trust,
         staging_parent,
+        probe,
         renderer,
         streams,
     )
@@ -663,31 +707,40 @@ fn render_available(
     Ok(())
 }
 
-/// The bare-`update` half: verify into staging, then refuse the unwired swap.
+/// The bare-`update` half: verify into staging, run the candidate's own
+/// self-test probe (feature-checked), and only then refuse the unwired swap
+/// — the refusal states how far the flow got, never installs anything.
 #[cfg(feature = "update")]
+#[allow(clippy::too_many_arguments)]
 fn apply_update(
     transport: &dyn detent_update::fetch::Transport,
     current: &semver::Version,
     policy: &detent_update::Policy,
     now: time::OffsetDateTime,
+    trust: &detent_update::TrustRoot,
     staging_parent: &std::path::Path,
+    probe: &FeatureProbe,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
-    let trust = match detent_update::trust::embedded() {
-        Ok(trust) => trust,
-        Err(err) => {
-            return failed(renderer, streams, &err.to_string());
-        }
-    };
-    match detent_update::update::prepare(transport, current, policy, now, &trust, staging_parent) {
+    match detent_update::update::prepare(transport, current, policy, now, trust, staging_parent) {
         Ok(candidate) => {
-            renderer.line(
-                streams.notes,
-                MessageId::new("cli-update-swap-unimplemented"),
-                &[("tag", &candidate.tag)],
-            )?;
-            Ok(Exit::Failed)
+            // §2.9 step 5's first half: the verified candidate must run and
+            // cover this build's feature set before the refusal may claim
+            // verification. The swap itself is still unwired, so even a
+            // passing candidate stays a failure — the staging dir is dropped
+            // untouched.
+            match probe(&candidate.binary_path) {
+                Ok(_) => {
+                    renderer.line(
+                        streams.notes,
+                        MessageId::new("cli-update-swap-unimplemented"),
+                        &[("tag", &candidate.tag)],
+                    )?;
+                    Ok(Exit::Failed)
+                }
+                Err(err) => failed(renderer, streams, &err.to_string()),
+            }
         }
         Err(err) => failed(renderer, streams, &err.to_string()),
     }
@@ -1177,99 +1230,257 @@ mod tests {
     #[cfg(feature = "update")]
     #[test]
     fn run_update_on_routes_check_and_bare_update() -> R {
-        use crate::i18n::Messages;
-        use crate::output::Renderer;
-        let messages = Messages::new(Some("en-US"));
-        let renderer = Renderer {
-            messages: &messages,
-            json: false,
-            verbose: false,
-        };
         let current = semver::Version::new(0, 0, 1);
         let policy = detent_update::Policy::default();
-        let now = time::OffsetDateTime::now_utc();
-        let parent = std::env::temp_dir();
-        let mut out = Vec::new();
-        let mut notes = Vec::new();
-        let exit = super::run_update_on(
-            &OneFeed {
-                tag: "v0.0.2",
-                body: "",
-                when: "2020-01-01T00:00:00Z",
-            },
+        let trust = fixture_trust()?;
+        // `--check` reports and succeeds without ever probing a candidate.
+        let never = probe_log();
+        let feed = OneFeed {
+            tag: "v0.0.2",
+            body: "",
+            when: "2020-01-01T00:00:00Z".to_owned(),
+        };
+        let run = run_update_hermetic(
+            &feed,
             &current,
             &policy,
-            now,
+            &trust,
+            &recording_ok_probe(&never, &[]),
             true,
-            &parent,
-            &renderer,
-            &mut Streams {
-                input: &mut std::io::empty(),
-                out: &mut out,
-                notes: &mut notes,
-            },
         )?;
-        assert_eq!(exit, Exit::Ok);
-        assert!(String::from_utf8(out)?.contains("v0.0.2"));
-        let mut out = Vec::new();
-        let mut notes = Vec::new();
-        let exit = super::run_update_on(
+        assert_eq!(run.exit, Exit::Ok);
+        assert!(run.out.contains("v0.0.2"), "{}", run.out);
+        assert!(never.borrow().is_empty(), "--check must not probe");
+        // The bare form lands on `failed` when the feed is unreachable.
+        let never = probe_log();
+        let run = run_update_hermetic(
             &FailingFeed,
             &current,
             &policy,
-            now,
+            &trust,
+            &recording_ok_probe(&never, &[]),
             false,
-            &parent,
-            &renderer,
-            &mut Streams {
-                input: &mut std::io::empty(),
-                out: &mut out,
-                notes: &mut notes,
-            },
         )?;
-        assert_eq!(exit, Exit::Failed);
-        assert!(out.is_empty());
-        assert!(!notes.is_empty());
+        assert_eq!(run.exit, Exit::Failed);
+        assert!(run.out.is_empty());
+        assert!(!run.notes.is_empty());
+        assert!(never.borrow().is_empty());
         Ok(())
     }
     #[cfg(feature = "update")]
     #[test]
     fn a_failed_check_is_a_localized_failure_not_usage() -> R {
-        use crate::i18n::Messages;
-        use crate::output::Renderer;
-        let messages = Messages::new(Some("en-US"));
-        let renderer = Renderer {
-            messages: &messages,
-            json: false,
-            verbose: false,
-        };
         let current = semver::Version::new(0, 0, 1);
         let policy = detent_update::Policy::default();
-        let now = time::OffsetDateTime::now_utc();
-        let parent = std::env::temp_dir();
         // FailingFeed refuses the list call: `check_report` must land on
         // `failed`, never Usage, so a refused update is not mistaken for a
         // misspelled command.
-        let mut out = Vec::new();
-        let mut notes = Vec::new();
-        let exit = super::run_update_on(
+        let run = run_update_hermetic(
             &FailingFeed,
             &current,
             &policy,
-            now,
+            &fixture_trust()?,
+            &recording_ok_probe(&probe_log(), &[]),
             true,
-            &parent,
-            &renderer,
-            &mut Streams {
-                input: &mut std::io::empty(),
-                out: &mut out,
-                notes: &mut notes,
-            },
         )?;
-        assert_eq!(exit, Exit::Failed);
-        assert!(out.is_empty());
-        let notes = String::from_utf8(notes)?;
-        assert!(notes.contains("update failed"), "{notes}");
+        assert_eq!(run.exit, Exit::Failed);
+        assert!(run.out.is_empty());
+        assert!(run.notes.contains("update failed"), "{}", run.notes);
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn bare_update_refuses_a_downgrade_without_allow_downgrade() -> R {
+        let current = semver::Version::new(0, 0, 1);
+        let trust = fixture_trust()?;
+        let feed = VerifiableFeed {
+            tag: "v0.0.0".to_owned(),
+            body: String::new(),
+            when: "2020-01-01T00:00:00Z".to_owned(),
+            binary: binary_fixture()?,
+        };
+        let never = probe_log();
+        let run = run_update_hermetic(
+            &feed,
+            &current,
+            &detent_update::Policy::default(),
+            &trust,
+            &recording_ok_probe(&never, &[]),
+            false,
+        )?;
+        assert_eq!(run.exit, Exit::Failed);
+        assert!(run.notes.contains("update failed"), "{}", run.notes);
+        assert!(run.notes.contains("no update to install"), "{}", run.notes);
+        assert!(
+            never.borrow().is_empty(),
+            "a downgrade must be refused before the probe runs"
+        );
+        // With `--allow-downgrade` the gate opens and the flow moves on to
+        // verification — which refuses the mis-tagged candidate.
+        let run = run_update_hermetic(
+            &feed,
+            &current,
+            &detent_update::Policy {
+                allow_downgrade: true,
+                ..detent_update::Policy::default()
+            },
+            &trust,
+            &recording_ok_probe(&probe_log(), &[]),
+            false,
+        )?;
+        assert_eq!(run.exit, Exit::Failed);
+        assert!(
+            !run.notes.contains("no update to install"),
+            "allow_downgrade must get past the policy gate: {}",
+            run.notes
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn min_age_gate_and_the_security_bypass() -> R {
+        let current = semver::Version::new(0, 0, 1);
+        let trust = fixture_trust()?;
+        // One day old: below the default two-day gate.
+        let young = fixed_now()? - time::Duration::days(1);
+        let when = young.format(&time::format_description::well_known::Rfc3339)?;
+        let young_feed = VerifiableFeed {
+            tag: "v0.0.2".to_owned(),
+            body: String::new(),
+            when: when.clone(),
+            binary: binary_fixture()?,
+        };
+        let never = probe_log();
+        let run = run_update_hermetic(
+            &young_feed,
+            &current,
+            &detent_update::Policy::default(),
+            &trust,
+            &recording_ok_probe(&never, &[]),
+            false,
+        )?;
+        assert_eq!(run.exit, Exit::Failed);
+        assert!(run.notes.contains("no update to install"), "{}", run.notes);
+        assert!(
+            never.borrow().is_empty(),
+            "a too-young release must be refused before the probe"
+        );
+        // The same release carrying `detent-security: true` bypasses the gate
+        // and drives the whole flow through verification to the probe.
+        let security = VerifiableFeed {
+            body: "detent-security: true".to_owned(),
+            ..young_feed
+        };
+        let calls = probe_log();
+        let run = run_update_hermetic(
+            &security,
+            &current,
+            &detent_update::Policy::default(),
+            &trust,
+            &recording_ok_probe(&calls, &["hosts", "web", "update"]),
+            false,
+        )?;
+        assert_eq!(run.exit, Exit::Failed);
+        assert!(
+            run.notes.contains("swap is not implemented"),
+            "the bypassed release must reach the probe and the refusal: {}",
+            run.notes
+        );
+        assert_eq!(calls.borrow().len(), 1, "the self-test probe must run once");
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn refusal_order_verify_then_self_test_then_refuse() -> R {
+        let current = semver::Version::new(0, 0, 1);
+        let trust = fixture_trust()?;
+        // Step 1: verification fails (the feed JSON is served as the SUMS
+        // file), so the self-test probe must never run and nothing may be
+        // claimed verified.
+        let calls = probe_log();
+        let run = run_update_hermetic(
+            &OneFeed {
+                tag: "v0.0.2",
+                body: "",
+                when: "2020-01-01T00:00:00Z".to_owned(),
+            },
+            &current,
+            &detent_update::Policy::default(),
+            &trust,
+            &recording_ok_probe(&calls, &[]),
+            false,
+        )?;
+        assert_eq!(run.exit, Exit::Failed);
+        assert!(
+            calls.borrow().is_empty(),
+            "a failed verification must never run the probe"
+        );
+        assert!(
+            !run.notes.contains("swap is not implemented"),
+            "{}",
+            run.notes
+        );
+        // Step 2: on a fully verified candidate, a failing self-test refuses
+        // before the swap message is claimed.
+        let calls = probe_log();
+        let run = run_update_hermetic(
+            &verified_feed()?,
+            &current,
+            &detent_update::Policy::default(),
+            &trust,
+            &recording_err_probe(&calls, make_self_test_failure),
+            false,
+        )?;
+        assert_eq!(run.exit, Exit::Failed);
+        assert_eq!(
+            calls.borrow().len(),
+            1,
+            "the probe runs on a verified candidate"
+        );
+        assert!(
+            !run.notes.contains("swap is not implemented"),
+            "{}",
+            run.notes
+        );
+        assert!(run.notes.contains("self-test"), "{}", run.notes);
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn a_fully_verified_candidate_reaches_the_refusal() -> R {
+        // End to end over the synthetic-but-real Sigstore fixtures: policy
+        // pass, SUMS match, bundle verifies, the candidate's own path is
+        // probed, and only then the (unwired) swap refusal is claimed.
+        let calls = probe_log();
+        let run = run_update_hermetic(
+            &verified_feed()?,
+            &semver::Version::new(0, 0, 1),
+            &detent_update::Policy::default(),
+            &fixture_trust()?,
+            &recording_ok_probe(&calls, &["hosts", "web", "update"]),
+            false,
+        )?;
+        assert_eq!(run.exit, Exit::Failed);
+        assert!(
+            run.notes.contains("swap is not implemented"),
+            "{}",
+            run.notes
+        );
+        assert!(run.out.is_empty());
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 1, "the self-test probe must run exactly once");
+        assert_eq!(
+            calls
+                .first()
+                .and_then(|path| path.file_name())
+                .and_then(|name| name.to_str()),
+            Some(detent_update::fetch::asset_name().as_str()),
+            "the probe must run on the staged candidate"
+        );
         Ok(())
     }
 
@@ -1289,11 +1500,206 @@ mod tests {
         Ok((exit, String::from_utf8(out)?, String::from_utf8(notes)?))
     }
 
+    // -- update-flow hermetic helpers ---------------------------------------
+    //
+    // The bare-`update` flow is exercised end to end against the
+    // detent-update fixtures (a synthetic-but-real Sigstore bundle): policy,
+    // SUMS cross-check and all six verification steps run for real, and the
+    // only seams are the `Transport` and the candidate self-test probe, so
+    // no test touches the network or executes a downloaded binary.
+
+    #[cfg(feature = "update")]
+    fn fixed_now() -> Result<time::OffsetDateTime, Box<dyn std::error::Error>> {
+        Ok(time::OffsetDateTime::from_unix_timestamp(1_786_780_800)?)
+    }
+
+    #[cfg(feature = "update")]
+    fn update_fixtures() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../detent-update/tests/fixtures")
+    }
+
+    #[cfg(feature = "update")]
+    fn binary_fixture() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        Ok(std::fs::read(update_fixtures().join("binary.bin"))?)
+    }
+
+    /// The fixture trust root: the embedded one is still a placeholder, so
+    /// hermetic verification runs through the fixture PEMs instead.
+    #[cfg(feature = "update")]
+    fn fixture_trust() -> Result<detent_update::TrustRoot, Box<dyn std::error::Error>> {
+        let dir = update_fixtures();
+        let root = std::fs::read_to_string(dir.join("fulcio-root.pem"))?;
+        let rekor = std::fs::read_to_string(dir.join("rekor-pub.pem"))?;
+        Ok(detent_update::trust::from_pems(&root, &rekor)?)
+    }
+
+    /// Every call a probe seam received, for the order assertions.
+    #[cfg(feature = "update")]
+    type ProbeLog = std::rc::Rc<std::cell::RefCell<Vec<std::path::PathBuf>>>;
+
+    #[cfg(feature = "update")]
+    fn probe_log() -> ProbeLog {
+        std::rc::Rc::default()
+    }
+
+    /// A probe that records each path it is handed and answers a superset.
+    #[cfg(feature = "update")]
+    fn recording_ok_probe(
+        log: &ProbeLog,
+        features: &[&str],
+    ) -> impl Fn(&std::path::Path) -> Result<detent_update::FeatureSet, detent_update::UpdateError> + use<>
+    {
+        let log = log.clone();
+        let set = detent_update::FeatureSet {
+            version: "0.0.2".to_owned(),
+            features: features
+                .iter()
+                .map(|feature| (*feature).to_owned())
+                .collect(),
+        };
+        move |path| {
+            log.borrow_mut().push(path.to_owned());
+            Ok(set.clone())
+        }
+    }
+
+    /// A probe that records each path it is handed and answers a fresh error.
+    #[cfg(feature = "update")]
+    fn recording_err_probe(
+        log: &ProbeLog,
+        make: fn() -> detent_update::UpdateError,
+    ) -> impl Fn(&std::path::Path) -> Result<detent_update::FeatureSet, detent_update::UpdateError> + use<>
+    {
+        let log = log.clone();
+        move |path| {
+            log.borrow_mut().push(path.to_owned());
+            Err(make())
+        }
+    }
+
+    #[cfg(feature = "update")]
+    fn make_self_test_failure() -> detent_update::UpdateError {
+        detent_update::UpdateError::SelfTest("exit status: 1".to_owned())
+    }
+
+    /// The release feed whose assets verify against the fixture bundle.
+    #[cfg(feature = "update")]
+    fn verified_feed() -> Result<VerifiableFeed, Box<dyn std::error::Error>> {
+        Ok(VerifiableFeed {
+            tag: "v0.0.2".to_owned(),
+            body: String::new(),
+            when: "2020-01-01T00:00:00Z".to_owned(),
+            binary: binary_fixture()?,
+        })
+    }
+
+    #[cfg(feature = "update")]
+    struct BareRun {
+        exit: Exit,
+        out: String,
+        notes: String,
+    }
+
+    /// Runs the bare-`update` flow with a fixed clock and no subprocesses.
+    #[cfg(feature = "update")]
+    #[allow(clippy::too_many_arguments)]
+    fn run_update_hermetic(
+        feed: &impl detent_update::fetch::Transport,
+        current: &semver::Version,
+        policy: &detent_update::Policy,
+        trust: &detent_update::TrustRoot,
+        probe: &super::FeatureProbe,
+        check_only: bool,
+    ) -> Result<BareRun, Box<dyn std::error::Error>> {
+        let messages = crate::i18n::Messages::new(Some("en-US"));
+        let renderer = crate::output::Renderer {
+            messages: &messages,
+            json: false,
+            verbose: false,
+        };
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = super::run_update_on(
+            feed,
+            current,
+            policy,
+            fixed_now()?,
+            trust,
+            check_only,
+            &std::env::temp_dir(),
+            probe,
+            &renderer,
+            &mut Streams {
+                input: &mut std::io::empty(),
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        Ok(BareRun {
+            exit,
+            out: String::from_utf8(out)?,
+            notes: String::from_utf8(notes)?,
+        })
+    }
+
+    /// A feed whose assets verify end to end: the fixture binary bytes with a
+    /// minted SUMS line and the fixture Sigstore bundle, one URL route each.
+    #[cfg(feature = "update")]
+    struct VerifiableFeed {
+        tag: String,
+        body: String,
+        when: String,
+        binary: Vec<u8>,
+    }
+
+    #[cfg(feature = "update")]
+    impl detent_update::fetch::Transport for VerifiableFeed {
+        fn get(
+            &self,
+            url: &str,
+            _cap: u64,
+            sink: &mut dyn std::io::Write,
+        ) -> Result<u64, detent_update::fetch::FetchError> {
+            let bad = |reason: String| detent_update::fetch::FetchError::BadJson(reason);
+            let bytes = if url == detent_update::fetch::RELEASES_URL {
+                serde_json::to_vec(&serde_json::json!([{
+                    "tag_name": self.tag,
+                    "draft": false,
+                    "prerelease": false,
+                    "published_at": self.when,
+                    "body": self.body,
+                    "assets": [
+                        {"name": detent_update::fetch::asset_name(), "browser_download_url": "https://example.invalid/b"},
+                        {"name": "SHA256SUMS", "browser_download_url": "https://example.invalid/s"},
+                        {"name": format!("{}.sigstore.json", detent_update::fetch::asset_name()), "browser_download_url": "https://example.invalid/j"},
+                    ],
+                }]))
+                .map_err(|err| bad(err.to_string()))?
+            } else if url.ends_with("/s") {
+                let mut hex = String::with_capacity(64);
+                for byte in detent_update::fetch::sha256_of(&self.binary) {
+                    use std::fmt::Write as _;
+                    let _ = write!(hex, "{byte:02x}");
+                }
+                format!("{}  {}\n", hex, detent_update::fetch::asset_name()).into_bytes()
+            } else if url.ends_with("/b") {
+                self.binary.clone()
+            } else if url.ends_with("/j") {
+                std::fs::read(update_fixtures().join("valid.json"))
+                    .map_err(|err| bad(err.to_string()))?
+            } else {
+                return Err(bad(format!("unexpected url {url}")));
+            };
+            std::io::Write::write_all(sink, &bytes).map_err(|err| bad(err.to_string()))?;
+            Ok(bytes.len() as u64)
+        }
+    }
+
     #[cfg(feature = "update")]
     struct OneFeed {
         tag: &'static str,
         body: &'static str,
-        when: &'static str,
+        when: String,
     }
 
     #[cfg(feature = "update")]
@@ -1363,7 +1769,11 @@ mod tests {
             ("v0.0.2", "detent-security: true", true, true),
             ("v0.0.0", "", false, false),
         ] {
-            let feed = OneFeed { tag, body, when };
+            let feed = OneFeed {
+                tag,
+                body,
+                when: when.to_owned(),
+            };
             let report: CheckReport = detent_update::update::check(&feed, &current, &policy, now)?;
             assert_eq!(report.update_available, available, "{tag} {body}");
             assert_eq!(report.security, security);
@@ -1401,7 +1811,7 @@ mod tests {
             &OneFeed {
                 tag: "v0.0.2",
                 body: "",
-                when,
+                when: when.to_owned(),
             },
             &current,
             &policy,
@@ -1485,36 +1895,13 @@ mod tests {
 
     #[cfg(feature = "update")]
     #[test]
-    fn bare_update_refuses_closed_on_placeholder_trust() -> R {
-        let messages = crate::i18n::Messages::new(Some("en-US"));
-        let renderer = crate::output::Renderer {
-            messages: &messages,
-            json: false,
-            verbose: false,
-        };
-        let current = semver::Version::new(0, 0, 1);
-        let policy = detent_update::Policy::default();
-        let now = time::OffsetDateTime::now_utc();
-        let mut out = Vec::new();
-        let mut notes = Vec::new();
-        let parent = std::env::temp_dir();
-        let exit = super::apply_update(
-            &FailingFeed,
-            &current,
-            &policy,
-            now,
-            &parent,
-            &renderer,
-            &mut Streams {
-                input: &mut std::io::empty(),
-                out: &mut out,
-                notes: &mut notes,
-            },
-        )?;
-        assert_eq!(exit, Exit::Failed);
-        assert!(out.is_empty());
-        assert!(!notes.is_empty());
-        Ok(())
+    fn the_embedded_trust_root_refuses_until_the_first_release() {
+        // A placeholder trust root must refuse closed (run_update resolves it
+        // before anything is fetched), never degrade to system CAs.
+        assert!(matches!(
+            detent_update::trust::embedded(),
+            Err(detent_update::VerificationError::TrustRootUnavailable)
+        ));
     }
     #[cfg(feature = "update")]
     #[test]
@@ -1531,7 +1918,7 @@ mod tests {
         let feed = OneFeed {
             tag: "v0.0.0",
             body: "",
-            when: "2020-01-01T00:00:00Z",
+            when: "2020-01-01T00:00:00Z".to_owned(),
         };
         let mut out = Vec::new();
         let mut notes = Vec::new();

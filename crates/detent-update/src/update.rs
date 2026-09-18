@@ -2,12 +2,14 @@
 //! that ends at the (still unwired) binary swap.
 //!
 //! The flow is refuse-closed end to end: any fetch, policy, or verification
-//! error aborts with the current binary untouched. The final step — the
-//! privileged swap via the monitor's `ReplaceBinary` — is answered
-//! `Unsupported` by this build's monitor, so [`prepare`] stops after a fully
-//! verified and self-tested candidate and the caller reports that the swap
-//! itself is not implemented yet (steps 5b–5c of §2.9: atomic rename keeping
-//! `detent.prev`, restart, `GET /healthz` within 30 s or roll back).
+//! error aborts with the current binary untouched. After [`prepare`]
+//! verifies the candidate, [`confirm_features`] executes its `--self-test`
+//! probe and checks the feature set — only then may the caller admit how far
+//! the flow got. The final step — the privileged swap via the monitor's
+//! `ReplaceBinary` — is answered `Unsupported` by this build's monitor, so
+//! the caller refuses after a fully verified and self-tested candidate
+//! (steps 5b–5c of §2.9: atomic rename keeping `detent.prev`, restart,
+//! `GET /healthz` within 30 s or roll back).
 
 use std::path::PathBuf;
 
@@ -59,6 +61,14 @@ pub enum UpdateError {
     /// The release names no matching assets.
     #[error("release {0} does not name the assets this build needs")]
     NoAssets(String),
+    /// The staged binary's `--self-test` probe did not run cleanly: it
+    /// could not be executed, exited non-zero, or printed no [`FeatureSet`].
+    #[error("staged binary failed its self-test: {0}")]
+    SelfTest(String),
+    /// The staged binary would drop a feature the running build has
+    /// (PLAN §2.9 step 5: feature set must be a superset).
+    #[error("staged binary would drop features the running build has")]
+    FeatureShrink,
     /// Nothing qualified, and nothing was installed.
     #[error("no update to install")]
     NoUpdate,
@@ -100,6 +110,50 @@ pub fn covers(current: &FeatureSet, new: &FeatureSet) -> bool {
         .features
         .iter()
         .all(|feature| new.features.contains(feature))
+}
+
+/// Runs `binary --self-test --json` (step 5's probe) and parses the feature
+/// set it reports.
+///
+/// This *executes* the downloaded binary, so it is only ever called on a
+/// candidate [`prepare`] has already verified end-to-end.
+///
+/// # Errors
+///
+/// [`UpdateError::SelfTest`] when the binary cannot be executed, exits
+/// non-zero, or prints anything but one [`FeatureSet`] JSON document.
+pub fn self_test(binary: &std::path::Path) -> Result<FeatureSet, UpdateError> {
+    // ponytail: no kill-timeout yet — a candidate whose self-test never
+    // exits hangs the update; wait_timeout when that becomes a real report.
+    let out = std::process::Command::new(binary)
+        .arg("--self-test")
+        .arg("--json")
+        .output()
+        .map_err(|err| UpdateError::SelfTest(err.to_string()))?;
+    if !out.status.success() {
+        return Err(UpdateError::SelfTest(out.status.to_string()));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    serde_json::from_str(text.trim()).map_err(|err| UpdateError::SelfTest(err.to_string()))
+}
+
+/// Confirms a verified candidate can stand in for the running build (step 5,
+/// before the swap): it passes its own self-test, and its feature set covers
+/// the running one.
+///
+/// # Errors
+///
+/// [`UpdateError::SelfTest`] for a failed probe, [`UpdateError::FeatureShrink`]
+/// when the candidate would drop a feature.
+pub fn confirm_features(
+    binary: &std::path::Path,
+    current: &FeatureSet,
+) -> Result<FeatureSet, UpdateError> {
+    let new = self_test(binary)?;
+    if !covers(current, &new) {
+        return Err(UpdateError::FeatureShrink);
+    }
+    Ok(new)
 }
 
 /// `detent update --check --json` (PLAN §2.9 step 6).
@@ -168,9 +222,10 @@ pub fn check(
 /// Sigstore verification, all into a staging directory next to the running
 /// binary.
 ///
-/// The caller runs `detent --self-test --json` on
-/// [`Candidate::binary_path`] and compares feature sets; the privileged swap
-/// (`ReplaceBinary`) is not implemented yet (see the module header).
+/// The caller then runs [`confirm_features`] on
+/// [`Candidate::binary_path`] against the running feature set; the
+/// privileged swap (`ReplaceBinary`) is not implemented yet (see the module
+/// header).
 ///
 /// # Errors
 ///
@@ -369,5 +424,86 @@ mod tests {
             check(&Failing, &current, &Policy::default(), now()),
             Err(UpdateError::Fetch(_))
         ));
+    }
+
+    /// Writes an executable `#!/bin/sh` script the probe can run.
+    #[cfg(unix)]
+    fn probe_script(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = dir.join("candidate.sh");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write probe script");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod probe script");
+        path
+    }
+
+    #[cfg(unix)]
+    fn stage() -> tempfile::TempDir {
+        tempfile::TempDir::new().expect("staging dir")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn self_test_parses_the_probe_json() {
+        let dir = stage();
+        let binary = probe_script(
+            dir.path(),
+            "echo '{\"version\":\"0.0.2\",\"features\":[\"hosts\",\"update\"]}'",
+        );
+        let set = self_test(&binary).expect("self-test parses");
+        assert_eq!(set.version, "0.0.2");
+        assert_eq!(set.features, vec!["hosts".to_owned(), "update".to_owned()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn self_test_refuses_a_failing_or_silent_probe() {
+        let dir = stage();
+        let exiting = probe_script(dir.path(), "exit 1");
+        assert!(
+            matches!(self_test(&exiting), Err(UpdateError::SelfTest(_))),
+            "non-zero exit must refuse"
+        );
+        let silent = probe_script(dir.path(), "echo 'not json'");
+        assert!(
+            matches!(self_test(&silent), Err(UpdateError::SelfTest(_))),
+            "unparsable output must refuse"
+        );
+        // Not executable: the spawn itself fails, still refuse-closed.
+        let dead = dir.path().join("not-executable");
+        std::fs::write(&dead, b"#!/bin/sh\n").expect("write dead probe");
+        assert!(
+            matches!(self_test(&dead), Err(UpdateError::SelfTest(_))),
+            "a non-executable candidate must refuse"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confirm_features_gates_on_feature_coverage() {
+        let dir = stage();
+        let current = FeatureSet {
+            version: "0.0.1".to_owned(),
+            features: vec!["hosts".to_owned(), "web".to_owned()],
+        };
+        let superset = probe_script(
+            dir.path(),
+            "echo '{\"version\":\"0.0.2\",\"features\":[\"hosts\",\"web\",\"update\"]}'",
+        );
+        assert!(
+            confirm_features(&superset, &current).is_ok(),
+            "superset admits"
+        );
+        let shrink = probe_script(
+            dir.path(),
+            "echo '{\"version\":\"0.0.2\",\"features\":[\"hosts\"]}'",
+        );
+        assert!(
+            matches!(
+                confirm_features(&shrink, &current),
+                Err(UpdateError::FeatureShrink)
+            ),
+            "a feature-shrinking candidate must refuse"
+        );
     }
 }
