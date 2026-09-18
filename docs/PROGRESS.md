@@ -22,23 +22,23 @@ Coverage gap closed test-only: eager (non-short-circuit) write-failure asserts +
 
 ---
 
-## Where things stand — 2026-09-18 (deps `48d3389` + `0add9a6` on top of `907316e`)
+## Where things stand — 2026-09-18 (updater `44618d0` + `f344203` on top of `0add9a6`)
 
-**Phase 6 (ACME) done. Phase 7 waves 1–2 done (8/8 modules). Supply-chain allow + cooled web pins landed — 2 signed commits.**
+**Phase 6 (ACME) done. Phase 7 waves 1–2 done (8/8 modules). Supply-chain allow + cooled web pins + updater (`detent-update` verifier, CLI wiring, 95.20% coverage) landed — 4 signed commits.**
 
-Branch: `main` @ `0add9a6`. Working tree clean. Everything below verified,
+Branch: `main` @ `f344203`. Working tree clean. Everything below verified,
 not assumed.
 |---|---|---|
-| Rust tests | `cargo test --workspace --all-features` | 1424 pass, 0 fail, 6 ignored |
+| Rust tests | `cargo test --workspace --all-features` | 1488 pass, 0 fail, 6 ignored |
 | Clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean |
 | Format | `cargo fmt --all --check` | clean |
-| Rust coverage | `cargo llvm-cov --workspace --all-features --lcov --output-path /tmp/w.info` + `scripts/coverage-merge.sh --verbose --output /tmp/merged.info /tmp/w.info` | PASS: detent-core 100% (1006/1006), modules 100% (9848/9848) |
+| Rust coverage | `cargo llvm-cov --workspace --all-features --lcov --output-path /tmp/w.info` + `scripts/coverage-merge.sh --verbose --output /tmp/merged.info /tmp/w.info` | PASS: detent 95.20% (5592/5874), detent-core 100% (1006/1006), modules 100% (9848/9848) |
 | Web tests | `cd web && bun run test` | 430 pass, 53 files (`bun test`) |
 | Web lint | `cd web && bun run lint` | clean (biome) |
 | Web types | `cd web && bun run typecheck` | clean |
 | Web i18n | `cd web && bun run i18n:check` | 257 ids, all referenced, all resolved |
 
-Committed: `detent-module-dhcp` (dnsmasq + Kea v4/v6) + `detent-module-network`
+Committed: updater (`detent-update` Sigstore verifier per ADR-014: `bundle`/`fetch`/`policy`/`trust`/`update`/`verify` + fixtures + trust roots; CLI `--self-test` gating + usage rejection, `run_update` seam, `help.txt` + `cli.ftl`; test-only coverage to 95.20%) as `44618d0` (signed, `git commit -S -s`), plus `detent-module-dhcp` (dnsmasq + Kea v4/v6) + `detent-module-network`
 (systemd-networkd, NetworkManager, ifupdown, netplan) with
 `crates/detent-modules` registry wiring (`dhcp()`, `network()`), 26+ Fluent
 ids each in `core.ftl`, `upstream.toml` + fixtures + fuzz targets + corpus
