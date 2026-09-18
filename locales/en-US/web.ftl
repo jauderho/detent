@@ -70,6 +70,7 @@ web-auth-user-name-invalid = that user name is not usable; use 1 to 32 of `a-z`,
 web-auth-user-unknown = there is no user by that name.
 web-denied-scope = this credential does not carry the scope that action needs.
 web-engine-stopped = the operations engine is no longer running; retry once the service is back.
+web-update-check-failed = the update check could not reach the release server; try again later.
 web-request-malformed = the request body is not the shape this endpoint expects.
 web-request-too-deep = the request body is nested too deeply.
 
@@ -155,6 +156,12 @@ dashboard-modules-count = {$count ->
 }
 dashboard-audit-panel = recent activity
 dashboard-view-all = view all
+dashboard-update-panel = update
+dashboard-update-current = running version
+dashboard-update-published = published
+dashboard-update-up-to-date = no newer release is offered for this build.
+dashboard-update-available = release {$tag} is available for this build.
+dashboard-update-security = this release is flagged as a security update; it bypasses the age gate.
 
 ## Modules
 modules-panel-label = installed modules
@@ -273,6 +280,7 @@ audit-op-service-action = act on service
 audit-op-host-profile = read host profile
 audit-op-audit-query = read audit log
 audit-op-cert-status = read certificate status
+audit-op-update-status = read update status
 audit-op-cert-renew = renew certificate
 
 ## Schema-driven module forms

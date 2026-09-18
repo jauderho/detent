@@ -784,6 +784,38 @@
         }
       }
     },
+    "/api/v1/system/update": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "`GET /api/v1/system/update`.",
+        "description": "The update status the web layer answers directly: the check fetches the\nrelease feed over the network and lives in [`detent_update`], which the\noperations engine does not depend on and cannot answer for. Read-only,\nlike every other endpoint in this module — **installing** an update is a\n`write`-scoped, CSRF-checked `POST` that waits until the privileged swap\n(PLAN §2.9 steps 5b–5c) actually lands; nothing here installs anything.",
+        "operationId": "update",
+        "responses": {
+          "200": {
+            "description": "The update status under the configured policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateReport"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The release feed could not be reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/healthz": {
       "get": {
         "tags": [
@@ -1685,6 +1717,7 @@
           "service_action",
           "host_profile",
           "audit_query",
+          "update_status",
           "cert_status",
           "cert_renew"
         ]
@@ -2172,6 +2205,43 @@
           }
         }
       },
+      "UpdateReport": {
+        "type": "object",
+        "description": "The answer body of `GET /api/v1/system/update`.\n\nA mirror of [`CheckReport`], not a re-export: `detent-update` has no\n`utoipa` dependency by design (PLAN §2.1 keeps the update crate\nfront-end agnostic), so this is the thin mirror that documents the schema,\nthe same move [`super::ApiServiceCommand`] makes for `ServiceCommand`.\nField-for-field identical and converted, never copied by hand.",
+        "required": [
+          "update_available",
+          "current",
+          "security"
+        ],
+        "properties": {
+          "current": {
+            "type": "string",
+            "description": "The running version."
+          },
+          "published": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the release was published, RFC 3339."
+          },
+          "security": {
+            "type": "boolean",
+            "description": "Whether it bypassed the age gate via `detent-security: true`."
+          },
+          "tag": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The qualifying tag, when one exists."
+          },
+          "update_available": {
+            "type": "boolean",
+            "description": "Whether a qualifying release exists."
+          }
+        }
+      },
       "Upstream": {
         "type": "object",
         "description": "The upstream project whose configuration format a module tracks.",
@@ -2250,7 +2320,7 @@
     },
     {
       "name": "system",
-      "description": "Host profile, certificate status, audit log, and liveness"
+      "description": "Host profile, certificate status, update status, audit log, and liveness"
     }
   ]
 }

@@ -37,7 +37,8 @@ that do not.
 Every credential holds `read`, or `read` and `write` together — there is no
 scope that grants `write` without `read`. `read` covers every endpoint that
 does not change the host: listing and reading modules, planning, validating,
-reading backups and service status, the audit log, the host profile.
+reading backups and service status, the audit log, the host profile, the
+update status.
 `write` is required for anything that does: applying a module, confirming or
 rolling back a commit, restoring a backup, and acting on a service. A request
 that reaches a `write` endpoint without the scope is refused with `403` and
@@ -103,6 +104,30 @@ Confirming or rolling back an id that was already settled, or that never
 existed, answers `409` rather than `404`: the id is not malformed or
 unregistered, the commit it named has simply already been decided one way or
 the other.
+
+## Update status
+
+`GET /api/v1/system/update` reports what the update policy says about this
+build, read-only. It performs the same check `detent update --check` does:
+the running version is compared against the release feed under the
+`[update]` policy from `detent.toml` (`min_age_days`), and the answer is
+`update_available`, `current`, `tag`, `published` and `security` — the same
+`UpdateReport` schema the console's dashboard shows. A policy refusal (the
+release is too young, or older than the running build) is folded into the
+report with `update_available: false`, never an error; an unreachable feed
+answers `503` with `message_id: "web-update-check-failed"`, refuse-closed,
+because a check that cannot reach the release server must not be reported as
+"up to date".
+
+There is deliberately **no apply endpoint in this build**. Installing an
+update ends in the privileged monitor's binary swap (PLAN §2.9 steps 5b–5c),
+which is not wired yet — `Request::ReplaceBinary`
+(`crates/detent-platform/src/privsep/proto.rs`) is answered
+`ProtoError::Unsupported` by the monitor (`privsep/monitor.rs`) in this
+build. When it lands, the endpoint that drives it must be a `write`-scoped,
+CSRF-checked `POST` with its own scope decision (`detent-web/src/authz.rs`),
+its own audit record, and the same refuse-closed rollback story the
+commit-confirm flow has. `GET /api/v1/system/update` installs nothing, ever.
 
 ## Design notes
 

@@ -759,6 +759,29 @@ async fn openapi_document_needs_a_credential() -> R {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// GET /api/v1/system/update
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn system_update_needs_a_credential_and_refuses_nothing_else() -> R {
+    let live = Live::new()?;
+
+    // The authenticated 200 path fetches the live release feed
+    // (detent_update::update::check), which a test must not do; the report
+    // itself is driven with mock transports in `api::system`'s own tests,
+    // the same split `cert_report` uses. Here: the route is wired and
+    // gated, and a read-scoped credential is *accepted* (scope `read` is
+    // what `authorize` checks, before the network step) — the failure of
+    // the offline fetch would answer 503, never a panic, which the
+    // table-driven sweep below additionally exercises without one.
+    let unauthenticated = get(live.state(), "/api/v1/system/update", None).await?;
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    live.shutdown();
+    Ok(())
+}
+
 #[tokio::test]
 async fn cert_status_describes_the_certificate_the_listener_serves() -> R {
     let live = Live::new()?;

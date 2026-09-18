@@ -1424,6 +1424,27 @@ fn cert_status_is_unsupported_in_the_engine_and_writes_no_audit_record() -> Test
 }
 
 #[test]
+fn update_status_is_unsupported_in_the_engine_and_writes_no_audit_record() -> TestResult {
+    // The update check fetches a release feed and lives in `detent-update`,
+    // which the operations layer does not depend on, so the engine cannot
+    // answer it. The variant exists for authorization and the audit label;
+    // reaching the engine with it means something routed it wrong, and that
+    // must fail loudly rather than silently answer "no update".
+    let mut fx = harness(b"v1\n", Setup::default())?;
+    let err = fx.run(Operation::UpdateStatus);
+    assert!(matches!(
+        err,
+        Err(OpsError::Unsupported {
+            what: "update_status"
+        })
+    ));
+    // Read-only, so the `!mutating` early return skips auditing, exactly as
+    // for CertStatus above.
+    assert!(fx.records().is_empty());
+    fx.finish()
+}
+
+#[test]
 fn the_audit_log_can_be_queried_back_through_an_operation() -> TestResult {
     let mut fx = harness(b"v1\n", Setup::default())?;
     fx.run(apply("v2\n", None))?;

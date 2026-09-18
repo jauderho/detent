@@ -303,6 +303,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/system/update": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/system/update`.
+         * @description The update status the web layer answers directly: the check fetches the
+         *     release feed over the network and lives in [`detent_update`], which the
+         *     operations engine does not depend on and cannot answer for. Read-only,
+         *     like every other endpoint in this module — **installing** an update is a
+         *     `write`-scoped, CSRF-checked `POST` that waits until the privileged swap
+         *     (PLAN §2.9 steps 5b–5c) actually lands; nothing here installs anything.
+         */
+        get: operations["update"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/healthz": {
         parameters: {
             query?: never;
@@ -735,7 +760,7 @@ export interface components {
          *     file bodies.
          * @enum {string}
          */
-        OpKind: "list_modules" | "get_module" | "validate" | "plan" | "apply" | "confirm_commit" | "rollback_commit" | "list_backups" | "restore" | "service_status" | "service_action" | "host_profile" | "audit_query" | "cert_status" | "cert_renew";
+        OpKind: "list_modules" | "get_module" | "validate" | "plan" | "apply" | "confirm_commit" | "rollback_commit" | "list_backups" | "restore" | "service_status" | "service_action" | "host_profile" | "audit_query" | "update_status" | "cert_status" | "cert_renew";
         /**
          * @description The operating system family of the host being configured.
          * @enum {string}
@@ -978,6 +1003,27 @@ export interface components {
             openrc: string[];
             /** @description systemd unit names. */
             systemd: string[];
+        };
+        /**
+         * @description The answer body of `GET /api/v1/system/update`.
+         *
+         *     A mirror of [`CheckReport`], not a re-export: `detent-update` has no
+         *     `utoipa` dependency by design (PLAN §2.1 keeps the update crate
+         *     front-end agnostic), so this is the thin mirror that documents the schema,
+         *     the same move [`super::ApiServiceCommand`] makes for `ServiceCommand`.
+         *     Field-for-field identical and converted, never copied by hand.
+         */
+        UpdateReport: {
+            /** @description The running version. */
+            current: string;
+            /** @description When the release was published, RFC 3339. */
+            published?: string | null;
+            /** @description Whether it bypassed the age gate via `detent-security: true`. */
+            security: boolean;
+            /** @description The qualifying tag, when one exists. */
+            tag?: string | null;
+            /** @description Whether a qualifying release exists. */
+            update_available: boolean;
         };
         /** @description The upstream project whose configuration format a module tracks. */
         Upstream: {
@@ -1588,6 +1634,35 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HostReport"];
+                };
+            };
+        };
+    };
+    update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The update status under the configured policy */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpdateReport"];
+                };
+            };
+            /** @description The release feed could not be reached */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
         };
