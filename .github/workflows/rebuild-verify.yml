@@ -1,0 +1,150 @@
+# Rebuild Verify — weekly supply-chain tripwire.
+#
+# Rebuilds the latest `v*` release from its exact source with the SAME
+# reproducible flags as release.yml and compares the resulting binaries,
+# hash-for-hash, against the published release assets. Also re-verifies the
+# sigstore attestation on each published binary. Any drift (tampered asset,
+# non-reproducible build, renamed asset) fails the job.
+#
+# Asset-name contract (MUST match release.yml):
+#   detent-<triple>             release binary (copied from target/<triple>/release/detent)
+#   detent-<triple>.sigstore.json
+#   SHA256SUMS                  top-level; covers all detent-<triple> binaries
+#   SBOM.cyclonedx.json
+# where <triple> ∈ {x86_64-unknown-linux-musl, aarch64-unknown-linux-musl}.
+#
+# Attestation identity (ADR-005): the published bundles must have been signed
+# by the release workflow, SAN
+#   https://github.com/jauderho/detent/.github/workflows/release.yml@refs/tags/<tag>
+# with issuer https://token.actions.githubusercontent.com.
+
+name: Rebuild Verify
+
+on:
+  schedule:
+    # Weekly, Mondays 09:00 UTC.
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+# Read-only job: checkouts, builds, `gh release download`, and
+# `gh attestation verify` need nothing beyond read access. `attestations:
+# read` is the minimum permission the attestation API accepts for
+# `gh attestation verify`; contents:read covers everything else.
+permissions:
+  contents: read
+  attestations: read
+
+env:
+  # Same toolchain pin as ci.yml (dtolnay/rust-toolchain requires a value).
+  RUST_TOOLCHAIN: "1.98.0"
+
+jobs:
+  rebuild-verify:
+    name: Rebuild ${{ matrix.target }} vs published release
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      # Full history so every `v*` tag is available for resolution.
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # Reproducible builds — same env as release.yml's build job: the epoch
+      # is the tag commit's time (not wall clock) and absolute paths are
+      # remapped out of the binary. Written to GITHUB_ENV because env values
+      # can't run shell expansions inline. The tag must be checked out first
+      # so git log -1 reads the released tree, not main.
+      - name: Resolve latest v* tag and check it out
+        run: |
+          set -euo pipefail
+          TAG=$(git tag --list 'v*' --sort=-v:refname | head -n 1)
+          if [[ -z "$TAG" ]]; then
+            echo "no v* tags found; nothing to verify" >&2
+            exit 1
+          fi
+          git checkout "$TAG"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          {
+            echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)"
+            echo "RUSTFLAGS=--remap-path-prefix=$PWD=/src --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+          } >> "$GITHUB_ENV"
+          echo "verifying $TAG (epoch $SOURCE_DATE_EPOCH)"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # One cache per target; the matrix job would otherwise thrash a
+          # single shared cache with two different target dirs.
+          key: ${{ matrix.target }}
+
+      # Same cross-build toolchain as release.yml (and ci.yml's size job;
+      # docs/spikes/00-cross-build.md is the reference).
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: "0.16.0"
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --version 0.23.2 --locked
+
+      # cargo auditable wraps any cargo build subcommand (zigbuild included)
+      # and embeds the dependency list into the binary, so `cargo audit bin`
+      # works against released artifacts.
+      - name: Install cargo-auditable
+        run: cargo install cargo-auditable --version 0.7.5 --locked
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      # The ui feature rust-embeds web/dist, so the SPA has to exist before
+      # cargo runs (an empty web/dist would compile a binary with no console).
+      - name: Build the SPA
+        working-directory: web
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          bun run build
+
+      # Identical command to release.yml's build step — a reviewer diffs these
+      # two lines; any drift breaks byte-reproducibility.
+      - name: Rebuild detent (release, ${{ matrix.target }})
+        run: cargo auditable zigbuild --release --locked -p detent --target ${{ matrix.target }} --features ui
+
+      - name: Download published release assets
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" -R jauderho/detent \
+            --pattern "detent-${{ matrix.target }}" \
+            --pattern "SHA256SUMS" \
+            --clobber
+          ls -l
+
+      # sha256sum exits non-zero on any mismatch or missing entry, so a
+      # tampered or replaced asset fails the job here.
+      - name: Compare hashes against SHA256SUMS
+        run: |
+          set -euo pipefail
+          # SHA256SUMS covers every binary; --ignore-missing checks only this
+          # matrix leg's asset (the other legs verify in their own jobs).
+          sha256sum --check --ignore-missing SHA256SUMS
+
+      - name: Verify release attestation
+        run: gh attestation verify "detent-${{ matrix.target }}" -R jauderho/detent
