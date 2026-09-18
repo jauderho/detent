@@ -1,0 +1,5 @@
+[global]
+   workgroup = MYGROUP
+
+   log file = /usr/local/samba/var/log.%m
+

@@ -593,6 +593,14 @@ version = "0.0.1"
 [[package]]
 name = "detent-module-chrony"
 version = "0.0.1"
+dependencies = [
+ "arbitrary",
+ "detent-core",
+ "proptest",
+ "schemars",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "detent-module-dhcp"
@@ -613,6 +621,14 @@ dependencies = [
 [[package]]
 name = "detent-module-mounts"
 version = "0.0.1"
+dependencies = [
+ "arbitrary",
+ "detent-core",
+ "proptest",
+ "schemars",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "detent-module-network"
@@ -621,6 +637,14 @@ version = "0.0.1"
 [[package]]
 name = "detent-module-nfs"
 version = "0.0.1"
+dependencies = [
+ "arbitrary",
+ "detent-core",
+ "proptest",
+ "schemars",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "detent-module-resolver"
@@ -637,6 +661,14 @@ dependencies = [
 [[package]]
 name = "detent-module-samba"
 version = "0.0.1"
+dependencies = [
+ "arbitrary",
+ "detent-core",
+ "proptest",
+ "schemars",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "detent-modules"

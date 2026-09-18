@@ -1,0 +1,9 @@
+# header
+; alternative
+
+[homes]
+   comment = Home Directories
+   writable = yes
+
+[printers]
+   guest ok = no

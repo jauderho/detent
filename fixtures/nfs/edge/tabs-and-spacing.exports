@@ -1,0 +1,4 @@
+# aligned by hand, do not reformat
+/srv/data	file-a.lan(rw,sync)
+/srv/db     db1.lan(rw,sync)	db2.lan(ro,no_subtree_check)
+/srv/tmp	tmp.lan()
