@@ -61,6 +61,9 @@ web = ["dep:detent-web", "dep:tokio"]
 ui = ["web", "detent-web/ui"]
 
 acme-dns01 = ["dep:detent-acme"]
+## The networked dns-01 providers. Inert until detent-acme links an HTTPS
+## client and an HMAC crate (ADR-011 cooldown), so not in `default`.
+acme-dns-providers = ["acme-dns01", "detent-acme/dns-providers"]
 acme-attest = ["acme-dns01"]
 
 update = ["dep:detent-update"]

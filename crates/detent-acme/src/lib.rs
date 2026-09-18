@@ -16,20 +16,21 @@
 //!                                        responder (challtestsrv) to serve
 //! ```
 
-use std::fmt;
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::{fs, io};
 
 pub mod attest;
 pub mod order;
+#[cfg(feature = "dns-providers")]
 pub mod providers;
 pub mod schedule;
 
-pub use attest::{Attestor, TestAttestor};
+pub use attest::Attestor;
 pub use order::{
     account_and_order, finalize, present_attest_challenges, present_challenges, wait_ready,
 };
+#[cfg(feature = "dns-providers")]
 pub use providers::{AcmeDnsProvider, CloudflareProvider, DeSecProvider, Rfc2136Provider};
 pub use schedule::{Warning, percent_used, should_renew, should_renew_in_window, warning_for};
 
@@ -217,12 +218,6 @@ impl HookProvider {
         }
     }
 
-    /// The directory challenge files are written to.
-    #[must_use]
-    pub fn state_dir(&self) -> &Path {
-        &self.state_dir
-    }
-
     /// Path of the challenge file for `record`.
     fn challenge_path(&self, record: &DnsRecord) -> PathBuf {
         // The fqdn is validated to `[A-Za-z0-9.-]`, so it is a safe single
@@ -240,12 +235,6 @@ impl HookProvider {
     }
 }
 
-impl fmt::Display for HookProvider {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "hook({})", self.state_dir.display())
-    }
-}
-
 impl DnsProvider for HookProvider {
     fn present(&self, record: &DnsRecord) -> Result<(), AcmeError> {
         use std::io::Write as _;
@@ -259,10 +248,16 @@ impl DnsProvider for HookProvider {
             .state_dir
             .join(format!("{}.{}.tmp", record.fqdn(), std::process::id()));
         let write_tmp = || -> Result<(), AcmeError> {
+            // `create_new`, not `create`: `mode` applies only at creation, so
+            // reopening a leftover temp file — a crash plus PID reuse — would
+            // write the challenge through whatever mode that file already
+            // carries. A stale one is removed first so a retry still works.
+            if tmp.exists() {
+                fs::remove_file(&tmp)?;
+            }
             let mut f = fs::OpenOptions::new()
                 .write(true)
-                .create(true)
-                .truncate(true)
+                .create_new(true)
                 .mode(HOOK_MODE)
                 .open(&tmp)?;
             f.write_all(record.value().as_bytes())?;
@@ -336,7 +331,13 @@ mod tests {
     }
 
     fn provider(dir: &TempDir) -> HookProvider {
-        HookProvider::new(dir.path().join("challenges"))
+        HookProvider::new(state_dir(dir))
+    }
+
+    /// The directory a [`provider`]-built `HookProvider` writes challenges
+    /// under, computed independently of the type under test.
+    fn state_dir(dir: &TempDir) -> std::path::PathBuf {
+        dir.path().join("challenges")
     }
 
     fn rejects_value(value: &str) -> bool {
@@ -376,7 +377,7 @@ mod tests {
         let dir = TempDir::new()?;
         let hook = provider(&dir);
         hook.present(&record()?)?;
-        let mode = std::fs::metadata(hook.state_dir())?.permissions().mode() & 0o777;
+        let mode = std::fs::metadata(state_dir(&dir))?.permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);
         Ok(())
     }
@@ -396,6 +397,34 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_temp_file_does_not_leak_its_permissions() -> R {
+        // A crash plus PID reuse can leave `<fqdn>.<pid>.tmp` behind. `mode`
+        // is applied only when a file is *created*, so reopening that file
+        // with `create(true)` would write the challenge digest through
+        // whatever mode it already carries — 0666 here. `create_new` plus a
+        // removal of the stale file keeps the write at 0600.
+        let dir = TempDir::new()?;
+        let hook = provider(&dir);
+        std::fs::create_dir_all(state_dir(&dir))?;
+        let stale =
+            state_dir(&dir).join(format!("{}.{}.tmp", record()?.fqdn(), std::process::id()));
+        std::fs::write(&stale, "leftover")?;
+        std::fs::set_permissions(&stale, fs::Permissions::from_mode(0o666))?;
+
+        hook.present(&record()?)?;
+
+        let path = hook.challenge_path(&record()?);
+        assert_eq!(
+            std::fs::metadata(&path)?.permissions().mode() & 0o777,
+            0o600,
+            "the challenge must not inherit the stale file's mode"
+        );
+        assert_eq!(std::fs::read_to_string(&path)?, "digest-value-42");
+        assert!(!stale.exists(), "the temp file is consumed by the rename");
+        Ok(())
+    }
+
+    #[test]
     fn delete_of_a_missing_record_succeeds() -> R {
         let dir = TempDir::new()?;
         provider(&dir).delete(&record()?)?;
@@ -408,7 +437,7 @@ mod tests {
         let hook = provider(&dir);
         // A directory in the challenge file's place: remove_file fails with
         // something other than NotFound, and delete must not swallow it.
-        std::fs::create_dir(hook.state_dir())?;
+        std::fs::create_dir(state_dir(&dir))?;
         std::fs::create_dir(hook.challenge_path(&record()?))?;
         assert!(matches!(hook.delete(&record()?), Err(AcmeError::Io(_))));
         Ok(())
@@ -479,17 +508,9 @@ mod tests {
         let hook = provider(&dir);
         // A directory occupying the challenge file's name makes the write
         // fail with EISDIR, deterministically.
-        std::fs::create_dir(hook.state_dir())?;
+        std::fs::create_dir(state_dir(&dir))?;
         std::fs::create_dir(hook.challenge_path(&record()?))?;
         assert!(matches!(hook.present(&record()?), Err(AcmeError::Io(_))));
-        Ok(())
-    }
-
-    #[test]
-    fn display_names_the_state_dir() -> R {
-        let dir = TempDir::new()?;
-        let text = provider(&dir).to_string();
-        assert!(text.contains("challenges"), "{text}");
         Ok(())
     }
 }
