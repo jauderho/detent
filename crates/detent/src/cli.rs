@@ -42,6 +42,7 @@ writes JSON to stdout under --json.";
     after_help = AFTER_HELP,
     disable_help_subcommand = true
 )]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Cli {
     /// Print what would happen without making changes.
     #[arg(long, global = true)]
@@ -67,9 +68,17 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     pub state_root: Option<PathBuf>,
 
-    /// What to do.
+    /// Print the running version and compiled feature set, then exit. This is
+    /// how the updater health-checks a freshly staged binary before swapping
+    /// it in (PLAN §2.9 step 5, `detent --self-test --json`).
+    /// It is the whole command: `dispatch` rejects it alongside a subcommand
+    /// so the probe can never be silently ignored.
+    #[arg(long)]
+    pub self_test: bool,
+
+    /// What to do. Optional only so [`Cli::self_test`] can stand alone.
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 /// Top-level subcommands (PLAN §2.6).
@@ -109,6 +118,11 @@ pub enum Command {
     Audit(AuditArgs),
     /// Report the detected host profile and facts.
     Host,
+    /// Check for a newer release of detent, or apply one (PLAN §2.9, ADR-005,
+    /// ADR-014). Every install passes the Sigstore verification of
+    /// `detent-update`; a build that cannot verify refuses closed.
+    #[cfg(feature = "update")]
+    Update(UpdateArgs),
     /// Check this host for common misconfigurations.
     Doctor,
     /// First-run bootstrap: create the initial administrator account.
@@ -295,6 +309,18 @@ pub struct AuditArgs {
     pub limit: Option<usize>,
 }
 
+/// `detent update …` (PLAN §2.9).
+#[derive(Debug, Default, Args)]
+pub struct UpdateArgs {
+    /// Report only: resolve the policy against GitHub and print the outcome.
+    /// Never downloads; friendly to the daily cron check (PLAN §2.9 step 6).
+    #[arg(long)]
+    pub check: bool,
+    /// Accept a candidate older than the running version. Default refuses.
+    #[arg(long)]
+    pub allow_downgrade: bool,
+}
+
 /// `--service` on `config apply`: a service command, or explicitly nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "lower")]
@@ -392,32 +418,27 @@ mod tests {
         // `help.txt` was captured with the `web` feature on (the default): it
         // lists `setup`/`user`/`token`, which only exist in that build. A
         // `--no-default-features` build has no use for a second snapshot of
-        // its own, so it skips the one comparison that would depend on it.
-        for (argv, snapshot, file, needs_web) in [
-            (
-                vec!["detent", "--help"],
-                include_str!("../tests/snapshots/help.txt"),
-                "help.txt",
-                true,
-            ),
-            (
-                vec!["detent", "config", "hosts", "apply", "--help"],
-                include_str!("../tests/snapshots/help-config-apply.txt"),
-                "help-config-apply.txt",
-                false,
-            ),
-        ] {
-            if needs_web && !cfg!(feature = "web") {
-                continue;
-            }
-            let rendered = Cli::try_parse_from(argv)
+        // its own, so it checks only the feature-free help there.
+        let help_config_apply =
+            Cli::try_parse_from(["detent", "config", "hosts", "apply", "--help"])
+                .err()
+                .map(|error| error.to_string())
+                .ok_or("--help must stop parsing")?;
+        assert_eq!(
+            help_config_apply.trim_end(),
+            include_str!("../tests/snapshots/help-config-apply.txt").trim_end(),
+            "help changed; regenerate crates/detent/tests/snapshots/help-config-apply.txt"
+        );
+        #[cfg(feature = "web")]
+        {
+            let help = Cli::try_parse_from(["detent", "--help"])
                 .err()
                 .map(|error| error.to_string())
                 .ok_or("--help must stop parsing")?;
             assert_eq!(
-                rendered.trim_end(),
-                snapshot.trim_end(),
-                "help changed; regenerate crates/detent/tests/snapshots/{file}"
+                help.trim_end(),
+                include_str!("../tests/snapshots/help.txt").trim_end(),
+                "help changed; regenerate crates/detent/tests/snapshots/help.txt"
             );
         }
         Ok(())
@@ -448,7 +469,7 @@ mod tests {
             cli.state_root.as_deref(),
             Some(std::path::Path::new("/tmp/state"))
         );
-        assert!(matches!(cli.command, Command::Host));
+        assert!(matches!(cli.command, Some(Command::Host)));
         Ok(())
     }
 
@@ -456,31 +477,31 @@ mod tests {
     fn every_subcommand_parses() -> R {
         assert!(matches!(
             Cli::try_parse_from(["detent", "serve"])?.command,
-            Command::Serve
+            Some(Command::Serve),
         ));
         assert!(matches!(
             Cli::try_parse_from(["detent", "doctor"])?.command,
-            Command::Doctor
+            Some(Command::Doctor),
         ));
         assert!(matches!(
             Cli::try_parse_from(["detent", "host"])?.command,
-            Command::Host
+            Some(Command::Host),
         ));
         assert!(matches!(
             Cli::try_parse_from(["detent", "completions", "zsh"])?.command,
-            Command::Completions { shell: Shell::Zsh }
+            Some(Command::Completions { shell: Shell::Zsh }),
         ));
         assert!(matches!(
             Cli::try_parse_from(["detent", "commit", "confirm", "7"])?.command,
-            Command::Commit {
+            Some(Command::Commit {
                 action: CommitAction::Confirm { id: 7 }
-            }
+            }),
         ));
         assert!(matches!(
             Cli::try_parse_from(["detent", "commit", "rollback", "7"])?.command,
-            Command::Commit {
+            Some(Command::Commit {
                 action: CommitAction::Rollback { id: 7 }
-            }
+            }),
         ));
         Ok(())
     }
@@ -488,7 +509,7 @@ mod tests {
     /// The module and action of a `config` command, or `None` for any other.
     fn config_of(cli: Cli) -> Option<(String, ConfigAction)> {
         match cli.command {
-            Command::Config { module, action } => Some((module, action)),
+            Some(Command::Config { module, action }) => Some((module, action)),
             _ => None,
         }
     }
@@ -515,7 +536,7 @@ mod tests {
     /// The action of a `backup` command, or `None` for any other.
     fn backup_of(cli: Cli) -> Option<super::BackupAction> {
         match cli.command {
-            Command::Backup { action } => Some(action),
+            Some(Command::Backup { action }) => Some(action),
             _ => None,
         }
     }
@@ -523,7 +544,7 @@ mod tests {
     /// The arguments of an `audit` command, or `None` for any other.
     fn audit_of(cli: Cli) -> Option<super::AuditArgs> {
         match cli.command {
-            Command::Audit(args) => Some(args),
+            Some(Command::Audit(args)) => Some(args),
             _ => None,
         }
     }
@@ -531,7 +552,7 @@ mod tests {
     /// The module and action of a `service` command, or `None` for any other.
     fn service_of(cli: Cli) -> Option<(String, ServiceSubcommand)> {
         match cli.command {
-            Command::Service { module, action } => Some((module, action)),
+            Some(Command::Service { module, action }) => Some((module, action)),
             _ => None,
         }
     }
@@ -648,9 +669,13 @@ mod tests {
     }
 
     #[test]
-    fn bad_input_is_a_usage_error() {
+    fn bad_input_is_a_usage_error() -> R {
+        // Bare `detent` (and `detent --self-test`) parse: `command` is
+        // `Option` so the probe can stand alone. Dispatch turns a missing
+        // command into `cli-no-command` usage downstream; clap cannot.
+        let bare = Cli::try_parse_from(["detent"])?;
+        assert!(bare.command.is_none() && !bare.self_test);
         for argv in [
-            vec!["detent"],
             vec!["detent", "nope"],
             vec!["detent", "config", "hosts"],
             vec!["detent", "config", "hosts", "nope"],
@@ -668,6 +693,7 @@ mod tests {
                 "{argv:?} must not parse"
             );
         }
+        Ok(())
     }
 
     #[test]

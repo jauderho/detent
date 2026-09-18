@@ -66,7 +66,9 @@ arbitrary = { version = "1.4.2", features = ["derive"] }
 proptest = "1.11.0"
 rustix = { version = "1.1.4", default-features = false, features = ["fs", "process", "std"] }
 sha2 = "0.10.9"
-time = { version = "0.3", default-features = false, features = ["std", "formatting", "macros"] }
+# `parsing`: detent-update reads RFC 3339 timestamps out of GitHub release
+# metadata (`published_at`); formatting alone cannot round-trip them.
+time = { version = "0.3", default-features = false, features = ["std", "formatting", "macros", "parsing"] }
 xattr = "1.6.1"
 tempfile = "3.27.0"
 tracing = "0.1.44"
@@ -136,6 +138,37 @@ tower-http = { version = "0.7.0", features = ["timeout"] }
 # pulled in on top of it (routes are still registered by hand).
 utoipa = { version = "5.5.0", features = ["axum_extras"] }
 zeroize = "1.9.0"
+
+# Self-update verifier (PLAN §2.9, ADR-014). Everything here already exists in
+# the lock via other crates except `p256`/`webpki-roots`; no new HTTP stack
+# (ADR-009), no `sigstore` crate (spike 01).
+# `p256`'s `ecdsa` feature lands on `ecdsa`/`digest` 0.16/0.10 — the same
+# `digest` 0.10 generation as the workspace `sha2`, so no hash-stack split.
+p256 = { version = "0.13.2", features = ["ecdsa"] }
+# Leaf SAN and Fulcio OIDC-issuer-extension extraction; the chain verification
+# itself is `webpki` (package `rustls-webpki`, ADR-014: rustls/webpki, already
+# in the tree).
+x509-parser = "0.18.1"
+webpki = { version = "0.103.15", package = "rustls-webpki", default-features = false, features = [
+    "std",
+    "aws-lc-rs",
+] }
+# Certificate DER types shared with rustls (`webpki`'s public API is typed in
+# them); already in the lock via rustls.
+rustls-pki-types = "1.15.1"
+# GitHub API + binary download over the workspace TLS 1.3 stack. No `tls12`,
+# matching the shipped client posture (§2.7); no native-certs, no
+# platform-verifier: the update path trusts only webpki-roots at build time.
+http-body-util = "0.1.5"
+hyper-rustls = { version = "0.27.9", default-features = false, features = [
+    "http1",
+    "aws-lc-rs",
+] }
+webpki-roots = "1.0.4"
+# Release tag comparison (§2.9 step 2). Already in the lock transitively.
+semver = "1.0.28"
+# Bundle/base64 decoding. Already in the lock transitively.
+base64 = "0.22.1"
 
 [profile.release]
 opt-level = "z"

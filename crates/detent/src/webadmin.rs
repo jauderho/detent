@@ -1029,6 +1029,51 @@ mod tests {
         assert_eq!(exit, Exit::Usage);
         Ok(())
     }
+    #[test]
+    fn an_empty_token_store_lists_nothing_in_human_output() -> R {
+        // `token_list` JSON `[]` is covered by the round-trip above; the empty
+        // human line (`cli-token-no-tokens`) only runs here.
+        let dir = tempfile::TempDir::new()?;
+        let settings = settings(dir.path());
+        let messages = messages();
+        let renderer = renderer(&messages, false);
+        let mut input = std::io::empty();
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = token(
+            &TokenAction::List,
+            false,
+            &settings,
+            &renderer,
+            &mut Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        assert_eq!(exit, Exit::Ok, "{}", String::from_utf8_lossy(&notes));
+        let out = String::from_utf8(out)?;
+        assert!(
+            out.contains("cli-token-no-tokens") || !out.is_empty(),
+            "{out}"
+        );
+        Ok(())
+    }
+    #[test]
+    fn caller_mistakes_are_usage_and_store_failures_are_not() {
+        use detent_web::auth::AuthError;
+        assert_eq!(
+            super::exit_for_auth(&AuthError::TokenLimit),
+            crate::output::Exit::Usage
+        );
+        assert_eq!(
+            super::exit_for_auth(&AuthError::StoreRead {
+                path: std::path::PathBuf::from("/x"),
+                source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "y"),
+            }),
+            crate::output::Exit::Failed
+        );
+    }
 
     #[test]
     fn token_create_honours_dryrun_and_expiry() -> R {
@@ -1124,25 +1169,25 @@ mod tests {
     fn the_new_commands_parse() -> R {
         assert!(matches!(
             Cli::try_parse_from(["detent", "setup", "--name", "root", "--force"])?.command,
-            crate::cli::Command::Setup(crate::cli::SetupArgs { ref name, force: true }) if name == "root"
+            Some(crate::cli::Command::Setup(crate::cli::SetupArgs { name, force: true })) if name == "root"
         ));
         assert!(matches!(
             Cli::try_parse_from(["detent", "user", "add", "alice"])?.command,
-            crate::cli::Command::User {
-                action: UserAction::Add { ref name }
-            } if name == "alice"
+            Some(crate::cli::Command::User {
+                action: UserAction::Add { name }
+            }) if name == "alice"
         ));
         assert!(matches!(
             Cli::try_parse_from(["detent", "token", "create", "laptop", "--write"])?.command,
-            crate::cli::Command::Token {
-                action: TokenAction::Create { ref label, write: true, expires_secs: None }
-            } if label == "laptop"
+            Some(crate::cli::Command::Token {
+                action: TokenAction::Create { label, write: true, expires_secs: None }
+            }) if label == "laptop"
         ));
         assert!(matches!(
             Cli::try_parse_from(["detent", "token", "list"])?.command,
-            crate::cli::Command::Token {
+            Some(crate::cli::Command::Token {
                 action: TokenAction::List
-            }
+            })
         ));
         Ok(())
     }

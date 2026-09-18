@@ -916,6 +916,42 @@ mod web_tests {
         Ok(())
     }
 
+    /// `run_worker`'s early exit: a handshake that never completes (the
+    /// monitor end is dropped before `hello` round-trips) makes
+    /// `prepare_worker` return `None`, and `run_worker` reports failure (`1`)
+    /// without ever binding a listener — the status [`abort_child`] would
+    /// exit the worker with.
+    #[test]
+    fn run_worker_reports_a_failed_handshake_as_exit_one() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let (monitor_end, worker_end) = Channel::pair()?;
+        drop(monitor_end);
+        let client = Client::new(worker_end);
+        let config = cheap_web_config(dir.path());
+        let messages = Messages::new(Some("en-US"));
+        let renderer = renderer(&messages);
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let mut input = std::io::empty();
+        let status = super::run_worker(
+            client,
+            Detected::default(),
+            Vec::new(),
+            config,
+            &settings(dir.path(), dir.path().join("absent.toml")),
+            &renderer,
+            &mut crate::run::Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+        );
+        assert_eq!(status, 1);
+        assert!(out.is_empty());
+        assert!(!notes.is_empty());
+        Ok(())
+    }
+
     /// `prepare_worker`: the handshake, the engine, the account/token/session
     /// stores, the runtime, and a real bound listener — everything
     /// `run_worker` does short of the blocking `server.serve(..)` call. This
@@ -1111,6 +1147,45 @@ mod web_tests {
         )?;
         assert_eq!(exit, Exit::Failed);
         assert!(!notes.is_empty());
+        Ok(())
+    }
+}
+#[cfg(test)]
+mod dry_run_tests {
+    use super::run;
+    use crate::i18n::Messages;
+    use crate::output::{Exit, Renderer};
+    use crate::run::{Settings, Streams};
+    #[test]
+    fn a_dry_run_names_modules_targets_and_state() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::TempDir::new()?;
+        let root = dir.path().join("state");
+        std::fs::create_dir(&root)?;
+        let settings = Settings {
+            state_root: root.clone(),
+            config_path: dir.path().join("detent.toml"),
+        };
+        let messages = Messages::new(Some("en-US"));
+        let renderer = Renderer {
+            messages: &messages,
+            json: false,
+            verbose: false,
+        };
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = run(
+            true,
+            &settings,
+            &renderer,
+            &mut Streams {
+                input: &mut std::io::empty(),
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        assert_eq!(exit, Exit::Ok);
+        let text = String::from_utf8(out)?;
+        assert!(text.contains(&root.display().to_string()), "{text}");
         Ok(())
     }
 }

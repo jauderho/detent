@@ -193,7 +193,7 @@ mod tests {
         let command = crate::cli::Cli::command();
         let table = table(&command);
         let paths: Vec<&str> = table.iter().map(|(path, _)| path.as_str()).collect();
-        for expected in [
+        let mut expected = vec![
             "detent",
             "detent config",
             "detent config apply",
@@ -201,7 +201,12 @@ mod tests {
             "detent backup restore",
             "detent service status",
             "detent completions",
-        ] {
+            "detent host",
+            "detent audit",
+        ];
+        #[cfg(feature = "update")]
+        expected.push("detent update");
+        for expected in expected {
             assert!(
                 paths.contains(&expected),
                 "{expected} is missing: {paths:?}"
@@ -219,7 +224,10 @@ mod tests {
     fn every_shell_script_mentions_every_top_level_command() -> R {
         for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
             let text = script(shell)?;
-            for command in ["serve", "config", "doctor", "completions"] {
+            let mut commands = vec!["serve", "config", "doctor", "completions", "host", "audit"];
+            #[cfg(feature = "update")]
+            commands.push("update");
+            for command in commands {
                 assert!(text.contains(command), "{shell:?} omits {command}");
             }
             assert!(text.contains("detent"));
@@ -270,5 +278,8 @@ mod tests {
         for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
             assert!(write(&mut Broken, shell).is_err(), "{shell:?}");
         }
+        // `flush` is part of the writer contract: exercising it keeps the
+        // impl from drifting into a write-only stub.
+        assert!(std::io::Write::flush(&mut Broken).is_ok());
     }
 }

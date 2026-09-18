@@ -675,14 +675,14 @@ mod tests {
 
     #[test]
     fn a_plan_prints_the_diff_and_keeps_commentary_off_stdout() -> R {
-        let outcome = crate::tests_support::planned(true);
+        let outcome = OpOutcome::Planned(Box::new(crate::tests_support::planned(true)));
         let (out, notes) = render(&outcome, false)?;
         assert!(out.starts_with("--- "), "{out}");
         assert!(out.contains("+new\n"), "{out}");
         assert!(notes.contains("/nonexistent/check"), "{notes}");
         assert!(notes.contains("fake.service"), "{notes}");
 
-        let unchanged = crate::tests_support::planned(false);
+        let unchanged = OpOutcome::Planned(Box::new(crate::tests_support::planned(false)));
         let (out, notes) = render(&unchanged, false)?;
         assert!(out.is_empty(), "an unchanged plan prints no diff: {out}");
         assert!(!notes.is_empty());
@@ -915,22 +915,36 @@ mod tests {
         let messages = messages();
         let mut broken = Broken;
         assert!(std::io::Write::flush(&mut broken).is_ok());
+        // The skip-branch variants `every_outcome` never carries: no commit,
+        // no model, and an unchanged plan.
+        let outcomes = {
+            let mut outcomes = crate::tests_support::every_outcome();
+            outcomes.push(crate::tests_support::applied_without_commit());
+            outcomes.push(crate::tests_support::module_view(false));
+            outcomes.push(OpOutcome::Planned(Box::new(crate::tests_support::planned(
+                false,
+            ))));
+            outcomes
+        };
         // A writer that fails only part-way through reaches the second and
         // later `?` of a multi-line rendering.
-        for allow in 0..6_usize {
+        for allow in 0..20_usize {
             let renderer = renderer(&messages, false);
-            for outcome in crate::tests_support::every_outcome() {
+            for outcome in &outcomes {
                 let mut failing = crate::tests_support::FailAfter::new(allow);
                 let mut notes = crate::tests_support::FailAfter::new(allow);
-                let _ = renderer.outcome(&mut failing, &mut notes, &outcome);
+                let _ = renderer.outcome(&mut failing, &mut notes, outcome);
+            }
+            for report in [
+                crate::tests_support::dry_run(true),
+                crate::tests_support::dry_run(false),
+                crate::tests_support::dry_run_plan(crate::tests_support::planned(false)),
+            ] {
+                let mut failing = crate::tests_support::FailAfter::new(allow);
+                let mut notes = crate::tests_support::FailAfter::new(allow);
+                let _ = renderer.dry_run(&mut failing, &mut notes, &report);
             }
             let mut failing = crate::tests_support::FailAfter::new(allow);
-            let mut notes = crate::tests_support::FailAfter::new(allow);
-            let _ = renderer.dry_run(
-                &mut failing,
-                &mut notes,
-                &crate::tests_support::dry_run(true),
-            );
             let _ = renderer.error(
                 &mut failing,
                 &OpsError::Invalid {
@@ -944,21 +958,28 @@ mod tests {
                 },
                 ErrorContext::default(),
             );
+            // The host fixture carries no probed service versions, so its
+            // version line needs its own failing writer.
+            let mut profile = crate::tests_support::host_profile();
+            profile
+                .service_versions
+                .insert("chrony".to_owned(), "4.5".to_owned());
+            let mut failing = crate::tests_support::FailAfter::new(allow);
+            let _ = renderer.host(&mut failing, &profile);
         }
         for json in [false, true] {
             let renderer = renderer(&messages, json);
-            for outcome in crate::tests_support::every_outcome() {
+            for outcome in &outcomes {
                 // Either stream may be the one that fails: `Module` and `Host`
-                // write to both.
-                assert!(
-                    renderer
-                        .outcome(&mut broken, &mut std::io::sink(), &outcome)
-                        .is_err()
-                        || renderer
-                            .outcome(&mut std::io::sink(), &mut broken, &outcome)
-                            .is_err(),
-                    "{outcome:?} swallowed a write failure"
-                );
+                // write to both. Evaluate both sides before asserting, so a
+                // failure on the left cannot mask what the right would show.
+                let first = renderer
+                    .outcome(&mut broken, &mut std::io::sink(), outcome)
+                    .is_err();
+                let second = renderer
+                    .outcome(&mut std::io::sink(), &mut broken, outcome)
+                    .is_err();
+                assert!(first || second, "{outcome:?} swallowed a write failure");
             }
             assert!(
                 renderer
@@ -973,18 +994,36 @@ mod tests {
             );
             for with_plan in [false, true] {
                 let report = crate::tests_support::dry_run(with_plan);
+                let first = renderer
+                    .dry_run(&mut broken, &mut std::io::sink(), &report)
+                    .is_err();
+                let second = renderer
+                    .dry_run(&mut std::io::sink(), &mut broken, &report)
+                    .is_err();
                 assert!(
-                    renderer
-                        .dry_run(&mut broken, &mut std::io::sink(), &report)
-                        .is_err()
-                        || renderer
-                            .dry_run(&mut std::io::sink(), &mut broken, &report)
-                            .is_err(),
+                    first || second,
                     "a withheld mutation swallowed a write failure"
                 );
             }
         }
         assert!(write_json(&mut broken, &serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn an_apply_without_a_commit_armed_skips_the_commit_line() -> R {
+        // `every_outcome` always arms a commit, so 254-255 only run when one
+        // is absent — and 244 only runs when the previous write already
+        // failed (FailAfter), since `applied` is two lines, not one.
+        let messages = messages();
+        let outcome = crate::tests_support::applied_without_commit();
+        let (out, notes) = render(&outcome, false)?;
+        assert!(out.contains("fake"), "{out}{notes}");
+        for allow in 0..=1_usize {
+            let mut failing = crate::tests_support::FailAfter::new(allow);
+            let mut notes = Vec::new();
+            let _ = renderer(&messages, false).outcome(&mut failing, &mut notes, &outcome);
+        }
+        Ok(())
     }
 
     #[test]
@@ -1019,6 +1058,14 @@ mod tests {
         }
         Ok(())
     }
+    #[test]
+    fn an_applied_outcome_without_service_or_commit_skips_both_lines() -> R {
+        let (out, notes) = render(&crate::tests_support::applied_without_commit(), false)?;
+        assert!(out.contains("/etc/fake.conf"), "{out}{notes}");
+        assert!(!notes.contains("cli-commit-armed"), "{notes}");
+        assert!(!notes.contains("cli-serviced"), "{notes}");
+        Ok(())
+    }
 
     #[test]
     fn a_restored_outcome_names_the_target_and_the_digest() -> R {
@@ -1030,6 +1077,27 @@ mod tests {
             false,
         )?;
         assert!(out.contains(&Sha256Digest::of(b"x").to_string()), "{out}");
+        Ok(())
+    }
+    #[test]
+    fn a_plan_with_nothing_to_change_names_module_and_path() -> R {
+        let mut report = crate::tests_support::planned(true);
+        report.would_change = false;
+        report.unified_diff.clear();
+        let module = report.module.clone();
+        let path = report.path.clone();
+        let messages = messages();
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        renderer(&messages, false).dry_run(
+            &mut out,
+            &mut notes,
+            &crate::tests_support::dry_run_plan(report),
+        )?;
+        assert!(out.is_empty());
+        let notes = String::from_utf8(notes)?;
+        assert!(notes.contains(&module), "{notes}");
+        assert!(notes.contains(&path), "{notes}");
         Ok(())
     }
 }

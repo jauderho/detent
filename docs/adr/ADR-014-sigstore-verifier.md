@@ -1,5 +1,5 @@
 # ADR-014: In-tree Sigstore bundle verifier
-Status: Proposed (2026-09-18)
+Status: Accepted (2026-09-18)
 Deciders: project owner (per PLAN Phase 9 and spike 01)
 
 ## Context

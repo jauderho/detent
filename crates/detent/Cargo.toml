@@ -38,6 +38,10 @@ detent-platform = { path = "../detent-platform" }
 detent-web = { path = "../detent-web", optional = true }
 detent-acme = { path = "../detent-acme", optional = true }
 detent-update = { path = "../detent-update", optional = true }
+# `semver`/`time`: the running version and the age-gate clock, both only when
+# the self-update feature is compiled (PLAN §2.9).
+semver = { workspace = true, optional = true }
+time = { workspace = true, optional = true }
 detent-mcp = { path = "../detent-mcp", optional = true }
 
 [dev-dependencies]
@@ -66,7 +70,7 @@ acme-dns01 = ["dep:detent-acme"]
 acme-dns-providers = ["acme-dns01", "detent-acme/dns-providers"]
 acme-attest = ["acme-dns01"]
 
-update = ["dep:detent-update"]
+update = ["dep:detent-update", "dep:semver", "dep:time"]
 
 mcp = ["dep:detent-mcp"]
 

@@ -5,6 +5,21 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-18 - Updater
+
+ADR-014 (sigstore verifier) flipped to Accepted + indexed. `--self-test` features gated on cfg with pin test; `--self-test` with subcommand rejected as usage error. `run_update_on` seam extracted with hermetic tests; hermetic coverage tests for run/output/doctor added.
+
+| Check | Command | State |
+|---|---|---|
+| Rust tests | `cargo test --workspace --all-features` | 1488 pass, 0 fail, 6 ignored |
+| Clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean (fixed `unused_mut`/unused `notes` in `output.rs` error sweep) |
+| Format | `cargo fmt --all --check` | clean |
+| Rust coverage | `cargo llvm-cov --workspace --all-features --lcov` + `scripts/coverage-merge.sh --verbose` | PASS: detent 95.20% (5592/5874), core 100%, modules 100% |
+| Web tests | `cd web && bun run test` | 430 pass, 53 files |
+| Web lint/types | `cd web && bun run lint && bun run typecheck` | clean |
+
+Coverage gap closed test-only: eager (non-short-circuit) write-failure asserts + widened `FailAfter` sweep in `output.rs`, `planned`/`host_profile`/`applied_without_commit`/`dry_run_plan` fixtures in `tests_support.rs`, `run_worker` handshake-failure + dry-run tests in `serve.rs`. New `detent-update` verifier: `bundle`/`fetch`/`policy`/`trust`/`update`/`verify` + fixtures + trust roots (ADR-014). CLI: `--self-test` feature gating + usage rejection, `run_update` seam, `help.txt` + `cli.ftl` updates.
+
 ---
 
 ## Where things stand — 2026-09-18 (deps `48d3389` + `0add9a6` on top of `907316e`)

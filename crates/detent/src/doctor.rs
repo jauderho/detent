@@ -310,12 +310,31 @@ fn confinement_checks(
     };
     vec![Check::new("confinement", Status::Warn, detail)]
 }
+#[cfg(test)]
+mod confinement_tests {
+    use super::Status;
+    use super::confinement_checks;
+    #[test]
+    fn a_duplicate_module_id_warns_instead_of_panicking() -> Result<(), String> {
+        let descriptor = crate::tests_support::descriptor(std::path::Path::new("/etc/hosts"));
+        let checks = confinement_checks(
+            &[descriptor, descriptor],
+            std::path::Path::new("/tmp/detent-test"),
+        );
+        let [check] = checks.as_slice() else {
+            return Err(format!("one warning, got {checks:?}"));
+        };
+        assert_eq!(check.status, Status::Warn);
+        assert!(check.detail.contains("allow-list"));
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::{
         Check, ExitReason, MonitorError, Report, Status, config_check, directory_check,
-        mode_status, privsep_verdict, report,
+        mode_status, modules_check, privsep_verdict, report,
     };
     use crate::i18n::Messages;
     use crate::output::{Exit, Renderer};
@@ -342,16 +361,21 @@ mod tests {
         let mut input = std::io::empty();
         let mut out = Vec::new();
         let mut notes = Vec::new();
-        let exit = report(
-            settings,
-            &renderer,
-            &mut Streams {
-                input: &mut input,
-                out: &mut out,
-                notes: &mut notes,
-            },
-        )?;
+        let exit = report_io(settings, &renderer, &mut input, &mut out, &mut notes)?;
         Ok((exit, String::from_utf8(out)?))
+    }
+
+    /// The `Streams` assembly for [`report`], so the `?` on the report
+    /// call itself is reachable: tests feed a failing stream without
+    /// forking anything.
+    fn report_io(
+        settings: &Settings,
+        renderer: &Renderer<'_>,
+        input: &mut dyn std::io::Read,
+        out: &mut dyn std::io::Write,
+        notes: &mut dyn std::io::Write,
+    ) -> std::io::Result<Exit> {
+        report(settings, renderer, &mut Streams { input, out, notes })
     }
 
     #[test]
@@ -438,6 +462,9 @@ mod tests {
         assert_eq!(mode_status(0o750), Status::Warn);
         assert_eq!(mode_status(0o770), Status::Fail);
         assert_eq!(Status::Ok, Status::Ok);
+        // PLAN §2.2: a build with no modules compiled in warns, not passes.
+        let empty = modules_check(&[]);
+        assert_eq!(empty.status, Status::Warn);
     }
 
     #[test]
