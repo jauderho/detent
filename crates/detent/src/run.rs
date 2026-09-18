@@ -548,9 +548,9 @@ fn self_test(
 }
 
 /// `detent update …` (PLAN §2.9): `--check` reports; the bare form verifies,
-/// self-tests and then stops — the privileged swap is unwired, so it refuses
-/// after a fully verified and self-tested candidate rather than installing
-/// anything.
+/// self-tests and then swaps the candidate over this process's own
+/// executable, which is also where it stages the download so the swap's
+/// rename stays on one filesystem.
 #[cfg(feature = "update")]
 fn run_update(
     args: &crate::cli::UpdateArgs,
@@ -578,10 +578,18 @@ fn run_update(
             return failed(renderer, streams, &err.to_string());
         }
     };
-    let staging_parent = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
-        .unwrap_or_else(std::env::temp_dir);
+    // The running binary is both the swap's target and the staging dir's
+    // parent: without it there is nothing to install over, so refuse here
+    // rather than download into a directory the rename could not leave.
+    let target = match std::env::current_exe() {
+        Ok(target) => target,
+        Err(err) => {
+            return failed(renderer, streams, &err.to_string());
+        }
+    };
+    let staging_parent = target
+        .parent()
+        .map_or_else(std::env::temp_dir, std::path::Path::to_path_buf);
     run_update_on(
         &transport,
         &current,
@@ -594,6 +602,9 @@ fn run_update(
         args.check,
         &staging_parent,
         &|path| detent_update::update::confirm_features(path, &current_features()),
+        // The swap runs in this process, with whatever privileges the
+        // operator has (PLAN §2.9 step 5b); there is no privsep path.
+        &|candidate| detent_update::install::swap(candidate, &target),
         renderer,
         streams,
     )
@@ -617,6 +628,13 @@ fn current_features() -> detent_update::FeatureSet {
 type FeatureProbe =
     dyn Fn(&std::path::Path) -> Result<detent_update::FeatureSet, detent_update::UpdateError>;
 
+/// The atomic swap run on a probed candidate (PLAN §2.9 step 5b). A seam for
+/// the same reason as [`FeatureProbe`]: hermetic tests drive both outcomes
+/// without replacing the test runner's own executable.
+#[cfg(feature = "update")]
+type BinarySwap<'a> =
+    dyn Fn(&std::path::Path) -> Result<detent_update::Installed, detent_update::UpdateError> + 'a;
+
 /// The policy half of `run_update`, behind a `Transport` seam so tests run
 /// hermetic: pick `--check` vs bare-update without touching the network.
 /// The trust root and the candidate self-test probe are injected the same
@@ -633,6 +651,7 @@ fn run_update_on(
     check_only: bool,
     staging_parent: &std::path::Path,
     probe: &FeatureProbe,
+    swap: &BinarySwap<'_>,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
@@ -647,6 +666,7 @@ fn run_update_on(
         trust,
         staging_parent,
         probe,
+        swap,
         renderer,
         streams,
     )
@@ -708,8 +728,8 @@ fn render_available(
 }
 
 /// The bare-`update` half: verify into staging, run the candidate's own
-/// self-test probe (feature-checked), and only then refuse the unwired swap
-/// — the refusal states how far the flow got, never installs anything.
+/// self-test probe (feature-checked), and only then swap it over the running
+/// binary. Every earlier refusal leaves the binary untouched.
 #[cfg(feature = "update")]
 #[allow(clippy::too_many_arguments)]
 fn apply_update(
@@ -720,27 +740,44 @@ fn apply_update(
     trust: &detent_update::TrustRoot,
     staging_parent: &std::path::Path,
     probe: &FeatureProbe,
+    swap: &BinarySwap<'_>,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
     match detent_update::update::prepare(transport, current, policy, now, trust, staging_parent) {
         Ok(candidate) => {
             // §2.9 step 5's first half: the verified candidate must run and
-            // cover this build's feature set before the refusal may claim
-            // verification. The swap itself is still unwired, so even a
-            // passing candidate stays a failure — the staging dir is dropped
-            // untouched.
+            // cover this build's feature set before anything is installed.
             match probe(&candidate.binary_path) {
-                Ok(_) => {
-                    renderer.line(
-                        streams.notes,
-                        MessageId::new("cli-update-swap-unimplemented"),
-                        &[("tag", &candidate.tag)],
-                    )?;
-                    Ok(Exit::Failed)
-                }
+                Ok(_) => install_candidate(&candidate, swap, renderer, streams),
                 Err(err) => failed(renderer, streams, &err.to_string()),
             }
+        }
+        Err(err) => failed(renderer, streams, &err.to_string()),
+    }
+}
+
+/// §2.9 step 5b: the atomic swap, and the line naming what it kept. The
+/// restart and the `GET /healthz` window that would consume
+/// [`detent_update::Installed::rollback`] are the next step, not this one.
+#[cfg(feature = "update")]
+fn install_candidate(
+    candidate: &detent_update::StagedUpdate,
+    swap: &BinarySwap<'_>,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Exit> {
+    match swap(&candidate.binary_path) {
+        Ok(installed) => {
+            renderer.line(
+                streams.out,
+                MessageId::new("cli-update-installed"),
+                &[
+                    ("tag", &candidate.tag),
+                    ("previous", &installed.previous().display().to_string()),
+                ],
+            )?;
+            Ok(Exit::Ok)
         }
         Err(err) => failed(renderer, streams, &err.to_string()),
     }
@@ -1235,6 +1272,7 @@ mod tests {
         let trust = fixture_trust()?;
         // `--check` reports and succeeds without ever probing a candidate.
         let never = probe_log();
+        let never_swapped = probe_log();
         let feed = OneFeed {
             tag: "v0.0.2",
             body: "",
@@ -1246,25 +1284,30 @@ mod tests {
             &policy,
             &trust,
             &recording_ok_probe(&never, &[]),
+            &unreachable_swap(&never_swapped),
             true,
         )?;
         assert_eq!(run.exit, Exit::Ok);
         assert!(run.out.contains("v0.0.2"), "{}", run.out);
         assert!(never.borrow().is_empty(), "--check must not probe");
+        assert!(never_swapped.borrow().is_empty(), "--check must not swap");
         // The bare form lands on `failed` when the feed is unreachable.
         let never = probe_log();
+        let never_swapped = probe_log();
         let run = run_update_hermetic(
             &FailingFeed,
             &current,
             &policy,
             &trust,
             &recording_ok_probe(&never, &[]),
+            &unreachable_swap(&never_swapped),
             false,
         )?;
         assert_eq!(run.exit, Exit::Failed);
         assert!(run.out.is_empty());
         assert!(!run.notes.is_empty());
         assert!(never.borrow().is_empty());
+        assert!(never_swapped.borrow().is_empty());
         Ok(())
     }
     #[cfg(feature = "update")]
@@ -1281,6 +1324,7 @@ mod tests {
             &policy,
             &fixture_trust()?,
             &recording_ok_probe(&probe_log(), &[]),
+            &unreachable_swap(&probe_log()),
             true,
         )?;
         assert_eq!(run.exit, Exit::Failed);
@@ -1301,12 +1345,14 @@ mod tests {
             binary: binary_fixture()?,
         };
         let never = probe_log();
+        let never_swapped = probe_log();
         let run = run_update_hermetic(
             &feed,
             &current,
             &detent_update::Policy::default(),
             &trust,
             &recording_ok_probe(&never, &[]),
+            &unreachable_swap(&never_swapped),
             false,
         )?;
         assert_eq!(run.exit, Exit::Failed);
@@ -1316,6 +1362,7 @@ mod tests {
             never.borrow().is_empty(),
             "a downgrade must be refused before the probe runs"
         );
+        assert!(never_swapped.borrow().is_empty(), "nothing may be swapped");
         // With `--allow-downgrade` the gate opens and the flow moves on to
         // verification — which refuses the mis-tagged candidate.
         let run = run_update_hermetic(
@@ -1327,6 +1374,7 @@ mod tests {
             },
             &trust,
             &recording_ok_probe(&probe_log(), &[]),
+            &unreachable_swap(&probe_log()),
             false,
         )?;
         assert_eq!(run.exit, Exit::Failed);
@@ -1353,12 +1401,14 @@ mod tests {
             binary: binary_fixture()?,
         };
         let never = probe_log();
+        let never_swapped = probe_log();
         let run = run_update_hermetic(
             &young_feed,
             &current,
             &detent_update::Policy::default(),
             &trust,
             &recording_ok_probe(&never, &[]),
+            &unreachable_swap(&never_swapped),
             false,
         )?;
         assert_eq!(run.exit, Exit::Failed);
@@ -1367,40 +1417,47 @@ mod tests {
             never.borrow().is_empty(),
             "a too-young release must be refused before the probe"
         );
+        assert!(never_swapped.borrow().is_empty(), "nothing may be swapped");
         // The same release carrying `detent-security: true` bypasses the gate
-        // and drives the whole flow through verification to the probe.
+        // and drives the whole flow through verification and the probe into
+        // the swap.
         let security = VerifiableFeed {
             body: "detent-security: true".to_owned(),
             ..young_feed
         };
         let calls = probe_log();
+        let swaps = probe_log();
+        let (_home, target) = install_target()?;
         let run = run_update_hermetic(
             &security,
             &current,
             &detent_update::Policy::default(),
             &trust,
             &recording_ok_probe(&calls, &["hosts", "web", "update"]),
+            &recording_swap(&swaps, &target),
             false,
         )?;
-        assert_eq!(run.exit, Exit::Failed);
+        assert_eq!(run.exit, Exit::Ok);
         assert!(
-            run.notes.contains("swap is not implemented"),
-            "the bypassed release must reach the probe and the refusal: {}",
-            run.notes
+            run.out.contains("installed v0.0.2"),
+            "the bypassed release must reach the probe and the swap: {}",
+            run.out
         );
         assert_eq!(calls.borrow().len(), 1, "the self-test probe must run once");
+        assert_eq!(swaps.borrow().len(), 1, "the swap must run once");
         Ok(())
     }
 
     #[cfg(feature = "update")]
     #[test]
-    fn refusal_order_verify_then_self_test_then_refuse() -> R {
+    fn refusal_order_verify_then_self_test_then_swap() -> R {
         let current = semver::Version::new(0, 0, 1);
         let trust = fixture_trust()?;
         // Step 1: verification fails (the feed JSON is served as the SUMS
         // file), so the self-test probe must never run and nothing may be
-        // claimed verified.
+        // installed.
         let calls = probe_log();
+        let swaps = probe_log();
         let run = run_update_hermetic(
             &OneFeed {
                 tag: "v0.0.2",
@@ -1411,6 +1468,7 @@ mod tests {
             &detent_update::Policy::default(),
             &trust,
             &recording_ok_probe(&calls, &[]),
+            &unreachable_swap(&swaps),
             false,
         )?;
         assert_eq!(run.exit, Exit::Failed);
@@ -1419,19 +1477,21 @@ mod tests {
             "a failed verification must never run the probe"
         );
         assert!(
-            !run.notes.contains("swap is not implemented"),
-            "{}",
-            run.notes
+            swaps.borrow().is_empty(),
+            "a failed verification must never swap"
         );
+        assert!(run.out.is_empty(), "{}", run.out);
         // Step 2: on a fully verified candidate, a failing self-test refuses
-        // before the swap message is claimed.
+        // before the swap runs.
         let calls = probe_log();
+        let swaps = probe_log();
         let run = run_update_hermetic(
             &verified_feed()?,
             &current,
             &detent_update::Policy::default(),
             &trust,
             &recording_err_probe(&calls, make_self_test_failure),
+            &unreachable_swap(&swaps),
             false,
         )?;
         assert_eq!(run.exit, Exit::Failed);
@@ -1441,36 +1501,77 @@ mod tests {
             "the probe runs on a verified candidate"
         );
         assert!(
-            !run.notes.contains("swap is not implemented"),
-            "{}",
-            run.notes
+            swaps.borrow().is_empty(),
+            "a failed self-test must never swap"
         );
+        assert!(run.out.is_empty(), "{}", run.out);
         assert!(run.notes.contains("self-test"), "{}", run.notes);
         Ok(())
     }
 
     #[cfg(feature = "update")]
     #[test]
-    fn a_fully_verified_candidate_reaches_the_refusal() -> R {
+    fn a_failed_swap_is_a_localized_failure_and_installs_nothing() -> R {
+        // The swap points at a target that is not there: the flow gets all
+        // the way through the probe, then refuses, and `update` reports the
+        // failure rather than claiming an install.
+        let home = tempfile::TempDir::new()?;
+        let absent = home.path().join("detent");
+        let swaps = probe_log();
+        let run = run_update_hermetic(
+            &verified_feed()?,
+            &semver::Version::new(0, 0, 1),
+            &detent_update::Policy::default(),
+            &fixture_trust()?,
+            &recording_ok_probe(&probe_log(), &["hosts", "web", "update"]),
+            &recording_swap(&swaps, &absent),
+            false,
+        )?;
+        assert_eq!(run.exit, Exit::Failed);
+        assert_eq!(swaps.borrow().len(), 1, "the swap is attempted once");
+        assert!(run.out.is_empty(), "nothing may be claimed installed");
+        assert!(run.notes.contains("update failed"), "{}", run.notes);
+        assert!(!absent.exists(), "a failed swap must not create the target");
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn a_fully_verified_candidate_is_installed() -> R {
         // End to end over the synthetic-but-real Sigstore fixtures: policy
         // pass, SUMS match, bundle verifies, the candidate's own path is
-        // probed, and only then the (unwired) swap refusal is claimed.
+        // probed, and only then the real atomic swap runs.
         let calls = probe_log();
+        let swaps = probe_log();
+        let (_home, target) = install_target()?;
         let run = run_update_hermetic(
             &verified_feed()?,
             &semver::Version::new(0, 0, 1),
             &detent_update::Policy::default(),
             &fixture_trust()?,
             &recording_ok_probe(&calls, &["hosts", "web", "update"]),
+            &recording_swap(&swaps, &target),
             false,
         )?;
-        assert_eq!(run.exit, Exit::Failed);
+        assert_eq!(run.exit, Exit::Ok);
+        assert!(run.notes.is_empty(), "{}", run.notes);
+        assert!(run.out.contains("installed v0.0.2"), "{}", run.out);
+        let previous = target.with_file_name("detent.prev");
         assert!(
-            run.notes.contains("swap is not implemented"),
-            "{}",
-            run.notes
+            run.out.contains(&previous.display().to_string()),
+            "the line must name where the old binary is kept: {}",
+            run.out
         );
-        assert!(run.out.is_empty());
+        assert_eq!(
+            std::fs::read(&target)?,
+            binary_fixture()?,
+            "the target must hold the verified candidate"
+        );
+        assert_eq!(
+            std::fs::read(&previous)?,
+            RUNNING_BINARY,
+            "the replaced binary must be kept"
+        );
         let calls = calls.borrow();
         assert_eq!(calls.len(), 1, "the self-test probe must run exactly once");
         assert_eq!(
@@ -1480,6 +1581,11 @@ mod tests {
                 .and_then(|name| name.to_str()),
             Some(detent_update::fetch::asset_name().as_str()),
             "the probe must run on the staged candidate"
+        );
+        assert_eq!(
+            swaps.borrow().as_slice(),
+            calls.as_slice(),
+            "the swap must install exactly the binary that was probed"
         );
         Ok(())
     }
@@ -1577,6 +1683,48 @@ mod tests {
         }
     }
 
+    /// A stand-in for the installed binary: a file in a temp dir the real
+    /// swap can replace, so no test ever touches the runner's own executable.
+    #[cfg(feature = "update")]
+    fn install_target()
+    -> Result<(tempfile::TempDir, std::path::PathBuf), Box<dyn std::error::Error>> {
+        let home = tempfile::TempDir::new()?;
+        let target = home.path().join("detent");
+        std::fs::write(&target, RUNNING_BINARY)?;
+        Ok((home, target))
+    }
+
+    /// The bytes [`install_target`] starts with, so a test can tell the
+    /// replaced binary from the candidate.
+    #[cfg(feature = "update")]
+    const RUNNING_BINARY: &[u8] = b"the binary this test is replacing\n";
+
+    /// A swap seam that records each candidate it is handed and performs the
+    /// real atomic swap onto `target`.
+    #[cfg(feature = "update")]
+    fn recording_swap(
+        log: &ProbeLog,
+        target: &std::path::Path,
+    ) -> impl Fn(&std::path::Path) -> Result<detent_update::Installed, detent_update::UpdateError> + use<>
+    {
+        let log = log.clone();
+        let target = target.to_path_buf();
+        move |candidate| {
+            log.borrow_mut().push(candidate.to_owned());
+            detent_update::install::swap(candidate, &target)
+        }
+    }
+
+    /// A swap seam that must never run: it points at a path that is not
+    /// there, so a test that reaches it fails on the refusal too.
+    #[cfg(feature = "update")]
+    fn unreachable_swap(
+        log: &ProbeLog,
+    ) -> impl Fn(&std::path::Path) -> Result<detent_update::Installed, detent_update::UpdateError> + use<>
+    {
+        recording_swap(log, std::path::Path::new("/detent-must-not-be-swapped"))
+    }
+
     #[cfg(feature = "update")]
     fn make_self_test_failure() -> detent_update::UpdateError {
         detent_update::UpdateError::SelfTest("exit status: 1".to_owned())
@@ -1609,6 +1757,7 @@ mod tests {
         policy: &detent_update::Policy,
         trust: &detent_update::TrustRoot,
         probe: &super::FeatureProbe,
+        swap: &super::BinarySwap<'_>,
         check_only: bool,
     ) -> Result<BareRun, Box<dyn std::error::Error>> {
         let messages = crate::i18n::Messages::new(Some("en-US"));
@@ -1628,6 +1777,7 @@ mod tests {
             check_only,
             &std::env::temp_dir(),
             probe,
+            swap,
             &renderer,
             &mut Streams {
                 input: &mut std::io::empty(),

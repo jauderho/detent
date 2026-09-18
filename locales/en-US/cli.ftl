@@ -37,7 +37,7 @@ cli-update-available = update available: {$tag} published {$published}
 cli-update-security-available = security update available: {$tag} published {$published}
 cli-update-none = no update available (current {$current})
 cli-update-failed = update failed: {$reason}
-cli-update-swap-unimplemented = verified {$tag} but the binary swap is not implemented yet
+cli-update-installed = installed {$tag}; the binary it replaced is kept at {$previous}
 
 ## config
 cli-module-line = {$id}  {$name}
