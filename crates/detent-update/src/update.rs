@@ -1,15 +1,13 @@
 //! The update flow (PLAN §2.9): check, and the fetch-verify-selftest run
-//! that ends at the (still unwired) binary swap.
+//! that ends at the binary swap.
 //!
 //! The flow is refuse-closed end to end: any fetch, policy, or verification
 //! error aborts with the current binary untouched. After [`prepare`]
 //! verifies the candidate, [`confirm_features`] executes its `--self-test`
-//! probe and checks the feature set — only then may the caller admit how far
-//! the flow got. The final step — the privileged swap via the monitor's
-//! `ReplaceBinary` — is answered `Unsupported` by this build's monitor, so
-//! the caller refuses after a fully verified and self-tested candidate
-//! (steps 5b–5c of §2.9: atomic rename keeping `detent.prev`, restart,
-//! `GET /healthz` within 30 s or roll back).
+//! probe and checks the feature set — and only a candidate that passes both
+//! reaches [`crate::install::swap`], the atomic rename that keeps
+//! `detent.prev`. The rest of step 5 — restart, `GET /healthz` within 30 s,
+//! roll back on failure — is not wired yet.
 
 use std::path::PathBuf;
 
@@ -69,12 +67,28 @@ pub enum UpdateError {
     /// (PLAN §2.9 step 5: feature set must be a superset).
     #[error("staged binary would drop features the running build has")]
     FeatureShrink,
+    /// The install target is missing, or is not a regular file: the swap
+    /// replaces a binary, it never creates one.
+    #[error("install target {path} is not a regular file")]
+    BadTarget {
+        /// The target path, as it was given.
+        path: String,
+    },
+    /// A step of the atomic swap failed; the target still holds the binary
+    /// it held before (see [`crate::install::swap`]).
+    #[error("binary swap failed at {step}: {reason}")]
+    Install {
+        /// The step that failed.
+        step: &'static str,
+        /// The OS reason (no file contents).
+        reason: String,
+    },
     /// Nothing qualified, and nothing was installed.
     #[error("no update to install")]
     NoUpdate,
 }
 
-/// What `detent update` achieved before the (unwired) privileged swap.
+/// A verified release, staged and ready for the swap.
 #[derive(Debug)]
 pub struct Candidate {
     /// The release tag that was verified.
@@ -223,9 +237,8 @@ pub fn check(
 /// binary.
 ///
 /// The caller then runs [`confirm_features`] on
-/// [`Candidate::binary_path`] against the running feature set; the
-/// privileged swap (`ReplaceBinary`) is not implemented yet (see the module
-/// header).
+/// [`Candidate::binary_path`] against the running feature set, and only then
+/// [`crate::install::swap`].
 ///
 /// # Errors
 ///
@@ -296,6 +309,20 @@ pub fn prepare(
         url: release.binary_url.clone(),
         reason: format!("staging: {err}"),
     })?;
+    // `fs::write` creates 0644, and step 5 runs this file: `self_test` spawns
+    // it, so without the execute bit the whole flow refuses with EACCES one
+    // step before the swap. The staging dir is 0700, so 0755 here is not a
+    // window — nobody else can traverse into it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755)).map_err(
+            |err| fetch::FetchError::Unreachable {
+                url: release.binary_url.clone(),
+                reason: format!("staging: {err}"),
+            },
+        )?;
+    }
 
     Ok(Candidate {
         tag: chosen.tag,
