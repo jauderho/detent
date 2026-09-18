@@ -7,15 +7,13 @@ phase or a self-contained piece of work finishes.
 
 ---
 
-## Where things stand — 2026-09-18 (Phase 7 wave 2 staged, uncommitted)
+## Where things stand — 2026-09-18 (Phase 7 wave 2 committed as `907316e`)
 
 **Phase 6 (ACME) done. Phase 7 wave 1 done (resolver, chrony, mounts, nfs,
-samba). Wave 2 (dhcp, network) implemented + staged, not yet committed.**
+samba). Wave 2 (dhcp, network) committed — 61 files, signed.**
 
-Branch: `main` + staged wave-2 tree (60 files, `git status` clean apart from
-the stage). Everything below is verified on this tree, not assumed.
-
-| Check | Command | State |
+Branch: `main` @ `907316e`. Working tree clean. Everything below verified,
+not assumed.
 |---|---|---|
 | Rust tests | `cargo test --workspace --all-features` | 1424 pass, 0 fail, 6 ignored |
 | Clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean |
@@ -26,13 +24,14 @@ the stage). Everything below is verified on this tree, not assumed.
 | Web types | `cd web && bun run typecheck` | clean |
 | Web i18n | `cd web && bun run i18n:check` | 257 ids, all referenced, all resolved |
 
-Staged: `detent-module-dhcp` (dnsmasq + Kea v4/v6) + `detent-module-network`
+Committed: `detent-module-dhcp` (dnsmasq + Kea v4/v6) + `detent-module-network`
 (systemd-networkd, NetworkManager, ifupdown, netplan) with
 `crates/detent-modules` registry wiring (`dhcp()`, `network()`), 26+ Fluent
 ids each in `core.ftl`, `upstream.toml` + fixtures + fuzz targets + corpus
 for both, `Cargo.lock`/`fuzz/Cargo.lock` updated. Empty
 `conformance.proptest-regressions` removed before staging (0-byte artifact).
-Next: commit staged tree, then Phase 7 wave 3 or remaining PLAN §5 work.
+Committed as `907316e` (signed, `git commit -S -s`). Next: Phase 7 wave 3 or
+remaining PLAN §5 work.
 
 The six ignored Rust tests are deliberate: `write_openapi_json` regenerates a
 checked-in artefact, `crash_child_worker` is the child half of the
@@ -138,21 +137,19 @@ there and says so; seccomp and the capability drop are the confinement.
 
 ---
 ## Log
-### 2026-09-18 — Phase 7 wave 2 staged: dhcp, network land
-
+### 2026-09-18 — Phase 7 wave 2 committed: dhcp, network land (`907316e`)
 Two modules implemented via subagents (orchestrator wired registry/shared
 files, verified independently): `detent-module-dhcp` (dnsmasq + Kea v4/v6 —
 `sync_list_member` shared primitive, trailing-comma re-parse refusal test),
 `detent-module-network` (systemd-networkd, NetworkManager, ifupdown, netplan —
 double-`i += 1` fix in `build_model_from_lines`, dead-guard deletion net -86
-lines, NM route-drop by design). Registry: `dhcp()`, `network()` in
 `crates/detent-modules`; 8/8 modules registered. Fixtures + `upstream.toml` +
 fuzz targets + corpus for both. Gates: workspace 1424 pass / 0 fail /
 6 ignored; clippy/fmt clean; coverage-merge PASS (detent-core 100%
 1006/1006, modules 100% 9848/9848); web 430 pass, lint/typecheck/i18n clean.
-Staged (60 files), not yet committed. Empty
-`conformance.proptest-regressions` removed (0-byte artifact).
-
+60 files committed as `907316e` (signed
+`git commit -S -s "Add dhcp and network modules"`); empty
+`conformance.proptest-regressions` removed before staging (0-byte artifact).
 ### 2026-09-18 — Phase 7 wave 1 done: chrony, mounts, nfs, samba land
 
 Four modules landed via subagents (orchestrator wired shared files, verified
