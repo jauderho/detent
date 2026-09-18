@@ -65,7 +65,7 @@ schemars = "1.2.2"
 arbitrary = { version = "1.4.2", features = ["derive"] }
 proptest = "1.11.0"
 rustix = { version = "1.1.4", default-features = false, features = ["fs", "process", "std"] }
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 # `parsing`: detent-update reads RFC 3339 timestamps out of GitHub release
 # metadata (`published_at`); formatting alone cannot round-trip them.
 time = { version = "0.3", default-features = false, features = ["std", "formatting", "macros", "parsing"] }
