@@ -143,13 +143,15 @@ files, verified independently): `detent-module-dhcp` (dnsmasq + Kea v4/v6 —
 `sync_list_member` shared primitive, trailing-comma re-parse refusal test),
 `detent-module-network` (systemd-networkd, NetworkManager, ifupdown, netplan —
 double-`i += 1` fix in `build_model_from_lines`, dead-guard deletion net -86
+lines, NM route-drop by design). Registry: `dhcp()`, `network()` in
 `crates/detent-modules`; 8/8 modules registered. Fixtures + `upstream.toml` +
 fuzz targets + corpus for both. Gates: workspace 1424 pass / 0 fail /
 6 ignored; clippy/fmt clean; coverage-merge PASS (detent-core 100%
 1006/1006, modules 100% 9848/9848); web 430 pass, lint/typecheck/i18n clean.
-60 files committed as `907316e` (signed
+Committed: 61 files as `907316e` (signed
 `git commit -S -s "Add dhcp and network modules"`); empty
-`conformance.proptest-regressions` removed before staging (0-byte artifact).
+`conformance.proptest-regressions` removed before staging (0-byte artifact),
+working tree clean.
 ### 2026-09-18 — Phase 7 wave 1 done: chrony, mounts, nfs, samba land
 
 Four modules landed via subagents (orchestrator wired shared files, verified
