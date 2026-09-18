@@ -231,9 +231,11 @@ impl AuthAudit for FileAuthAudit {
 }
 
 /// A sink that discards everything, for tests that are not about auditing.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NullAuthAudit;
 
+#[cfg(test)]
 impl AuthAudit for NullAuthAudit {
     fn record(&self, _record: &AuthRecord) {}
 

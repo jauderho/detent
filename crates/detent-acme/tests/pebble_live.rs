@@ -143,12 +143,12 @@ fn pebble_dns01_issuance() -> Result<(), Box<dyn std::error::Error>> {
             return Err(detent_acme::AcmeError::InvalidOrder(status).into());
         }
 
-        let (cert_chain_pem, _private_key_pem) = finalize(&mut order, &policy).await?;
+        let issued = finalize(&mut order, &policy).await?;
         println!(
             "chain:   {} PEM block(s)",
-            cert_chain_pem.matches("BEGIN CERTIFICATE").count()
+            issued.chain_pem.matches("BEGIN CERTIFICATE").count()
         );
-        Ok::<String, Box<dyn std::error::Error>>(cert_chain_pem)
+        Ok::<String, Box<dyn std::error::Error>>(issued.chain_pem)
     })?;
 
     // Cleanup: withdraw the hook files and TXT records.

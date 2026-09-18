@@ -8,9 +8,8 @@
  */
 
 import { useLocalization } from '@fluent/react'
-import type { ReactNode } from 'react'
 import { useAuth } from './AuthProvider'
-import { hasScope, SCOPE_WRITE } from './scopes'
+import { SCOPE_WRITE } from './scopes'
 
 export type WriteGateState = {
   /** Whether the signed-in session carries the `write` scope. */
@@ -30,27 +29,8 @@ export function useWriteGate(): WriteGateState {
   if (status !== 'authenticated' || session === null) {
     return { canWrite: false, reason: l10n.getString('scope-gate-signed-out') }
   }
-  if (!hasScope(session.scopes, SCOPE_WRITE)) {
+  if (!session.scopes.includes(SCOPE_WRITE)) {
     return { canWrite: false, reason: l10n.getString('scope-gate-read-only') }
   }
   return { canWrite: true, reason: undefined }
-}
-
-/** The boolean alone, for a caller that has its own copy. */
-export function useCanWrite(): boolean {
-  return useWriteGate().canWrite
-}
-
-export type WriteGateProps = {
-  /**
-   * Render prop rather than plain children: a gated control has to *receive*
-   * the answer — as `disabled`, as a `title` — and hiding it instead would
-   * leave the operator wondering where the control went.
-   */
-  children: (state: WriteGateState) => ReactNode
-}
-
-export function WriteGate({ children }: WriteGateProps) {
-  const state = useWriteGate()
-  return <>{children(state)}</>
 }

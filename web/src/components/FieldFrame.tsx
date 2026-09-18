@@ -1,8 +1,8 @@
 import { useLocalization } from '@fluent/react'
+import { Tooltip as TooltipPrimitive } from 'radix-ui'
 import { type ReactNode, useId } from 'react'
 import { cn } from '@/lib/utils'
 import { Led } from './Led'
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip'
 
 /**
  * Shared chrome for the field primitives — AESTHETIC_CONTRACT.md §6. Every
@@ -84,9 +84,9 @@ export function FieldFrame({
           {label}
         </label>
         {tooltip === undefined ? null : (
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger asChild>
+          <TooltipPrimitive.Provider data-slot="tooltip-provider" delayDuration={0}>
+            <TooltipPrimitive.Root data-slot="tooltip">
+              <TooltipPrimitive.Trigger data-slot="tooltip-trigger" asChild>
                 <button
                   type="button"
                   className="tinybtn"
@@ -94,10 +94,19 @@ export function FieldFrame({
                 >
                   ?
                 </button>
-              </TooltipTrigger>
-              <TooltipContent>{tooltip}</TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
+              </TooltipPrimitive.Trigger>
+              <TooltipPrimitive.Portal>
+                <TooltipPrimitive.Content
+                  data-slot="tooltip-content"
+                  sideOffset={0}
+                  className="z-50 w-fit origin-(--radix-tooltip-content-transform-origin) animate-in rounded-md bg-foreground px-3 py-1.5 text-xs text-balance text-background fade-in-0 zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95"
+                >
+                  {tooltip}
+                  <TooltipPrimitive.Arrow className="z-50 size-2.5 translate-y-[calc(-50%_-_2px)] rotate-45 rounded-[2px] bg-foreground fill-foreground" />
+                </TooltipPrimitive.Content>
+              </TooltipPrimitive.Portal>
+            </TooltipPrimitive.Root>
+          </TooltipPrimitive.Provider>
         )}
       </div>
       {children}

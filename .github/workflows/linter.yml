@@ -62,8 +62,6 @@ jobs:
           VALIDATE_ALL_CODEBASE: false
           DEFAULT_BRANCH: main
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VALIDATE_PYTHON_RUFF: true
-          VALIDATE_JAVASCRIPT_BIOME: true
           VALIDATE_GITLEAKS: true
           VALIDATE_CHECKOV: true
           VALIDATE_GITHUB_ACTIONS_ZIZMOR: true

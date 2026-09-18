@@ -66,7 +66,7 @@ describe('listCoverableSrcFiles', () => {
 })
 
 describe('checkRows', () => {
-  it('flags shortfalls and files with no row, ignoring the excluded primitives', () => {
+  it('flags shortfalls and files with no row, with no exclusions', () => {
     const rows = [
       { file: 'src/App.tsx', linesPct: 100 },
       { file: 'src/api/client.ts', linesPct: 98.31 },
@@ -74,7 +74,10 @@ describe('checkRows', () => {
     ]
 
     expect(checkRows(rows, ['src/App.tsx', 'src/api/client.ts', 'src/api/auth.ts'])).toEqual({
-      short: [{ file: 'src/api/client.ts', linesPct: 98.31 }],
+      short: [
+        { file: 'src/api/client.ts', linesPct: 98.31 },
+        { file: 'src/components/ui/button.tsx', linesPct: 0 },
+      ],
       missing: ['src/api/auth.ts'],
     })
   })

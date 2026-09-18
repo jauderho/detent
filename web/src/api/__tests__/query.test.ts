@@ -6,7 +6,7 @@ import { describe, expect, it } from 'bun:test'
 import { createLocalization } from '@/i18n'
 import type { ApiError } from '../client'
 import { resolveApiError } from '../messages'
-import { ApiRequestError, statusOf, toApiError, unwrap } from '../query'
+import { ApiRequestError, toApiError, unwrap } from '../query'
 
 const l10n = createLocalization(['en-US'])
 
@@ -33,17 +33,6 @@ describe('toApiError', () => {
 
     expect(error).toEqual({ kind: 'malformed', status: 0 })
     expect(resolveApiError(l10n, error)).toContain('could not read')
-  })
-})
-
-describe('statusOf', () => {
-  it('returns the HTTP status for an http error', () => {
-    expect(statusOf(httpError('ops-unknown-module'))).toBe(400)
-  })
-
-  it('returns null for network and malformed errors', () => {
-    expect(statusOf({ kind: 'network' })).toBeNull()
-    expect(statusOf({ kind: 'malformed', status: 502 })).toBeNull()
   })
 })
 
