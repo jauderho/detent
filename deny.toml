@@ -15,6 +15,10 @@ allow = [
     "Unicode-3.0",
     "OpenSSL",
     "CC0-1.0",
+    # Mozilla's root-cert data (`webpki-root-certs`, via
+    # `rustls-platform-verifier` -> `instant-acme`): trust-anchor bytes, not
+    # code — no copyleft encumbrance on linking.
+    "CDLA-Permissive-2.0",
 ]
 
 [bans]
