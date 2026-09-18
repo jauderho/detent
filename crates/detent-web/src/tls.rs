@@ -177,7 +177,8 @@ fn provider() -> Result<Arc<CryptoProvider>, TlsError> {
 // A certificate and its key
 // ---------------------------------------------------------------------------
 
-/// One end-entity certificate and the private key that goes with it.
+/// One end-entity certificate, the intermediates that chain it to a root, and
+/// the private key that goes with it.
 ///
 /// Held as DER rather than as a parsed [`CertifiedKey`] so it can be written
 /// to disk, hashed for a fingerprint, and handed to whichever provider is
@@ -186,6 +187,9 @@ fn provider() -> Result<Arc<CryptoProvider>, TlsError> {
 pub struct CertifiedKeyPair {
     /// The end-entity certificate, DER.
     cert_der: Vec<u8>,
+    /// The CA certificates between the leaf and a trust anchor, DER, in the
+    /// order they must be sent. Empty for a self-signed bootstrap pair.
+    intermediates: Vec<Vec<u8>>,
     /// The private key, PKCS#8 DER.
     key_pkcs8_der: Vec<u8>,
 }
@@ -209,6 +213,7 @@ impl CertifiedKeyPair {
     pub const fn new(cert_der: Vec<u8>, key_pkcs8_der: Vec<u8>) -> Self {
         Self {
             cert_der,
+            intermediates: Vec::new(),
             key_pkcs8_der,
         }
     }
@@ -216,28 +221,50 @@ impl CertifiedKeyPair {
     /// Build a pair from what `instant-acme`'s `Order::finalize` returns: a
     /// PEM certificate chain and a PEM PKCS#8 private key.
     ///
-    /// Only the chain's leaf is kept — [`to_certified_key`](Self::to_certified_key)
-    /// serves a single end-entity certificate, and the intermediates travel
-    /// the API, not the handshake. The key must be `PRIVATE KEY` (PKCS#8, as
-    /// `finalize` generates); SEC1/EC `EC PRIVATE KEY` is refused rather
-    /// than converted.
+    /// The **whole** chain is kept, leaf first. RFC 8446 §4.4.2 requires the
+    /// server to send every certificate between its leaf and a trust anchor:
+    /// a public CA's intermediate is not in any trust store, so a leaf sent
+    /// alone fails path building on a client that has not cached it. The last
+    /// certificate is kept too — a self-signed root costs one extra send and
+    /// dropping it would mean parsing issuer/subject to tell a root from an
+    /// intermediate, which is a bigger risk than the byte count.
+    ///
+    /// The key must be `PRIVATE KEY` (PKCS#8, as `finalize` generates);
+    /// SEC1/EC `EC PRIVATE KEY` is refused rather than converted.
     ///
     /// # Errors
     ///
-    /// [`TlsError::Pem`] when either side is not PEM of the expected kind.
+    /// [`TlsError::Pem`] when the key is not PKCS#8 PEM, or when `chain_pem`
+    /// holds no `CERTIFICATE` section at all.
     pub fn from_acme_pem(chain_pem: &str, key_pem: &str) -> Result<Self, TlsError> {
         use rustls::pki_types::pem::PemObject as _;
-        let leaf =
-            CertificateDer::from_pem_slice(chain_pem.as_bytes()).map_err(|_| TlsError::Pem)?;
+        let mut chain = CertificateDer::pem_slice_iter(chain_pem.as_bytes())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| TlsError::Pem)?
+            .into_iter()
+            .map(|der| der.to_vec());
+        let leaf = chain.next().ok_or(TlsError::Pem)?;
+        let intermediates = chain.collect();
         let key =
             PrivatePkcs8KeyDer::from_pem_slice(key_pem.as_bytes()).map_err(|_| TlsError::Pem)?;
-        Ok(Self::new(leaf.to_vec(), key.secret_pkcs8_der().to_vec()))
+        Ok(Self {
+            cert_der: leaf,
+            intermediates,
+            key_pkcs8_der: key.secret_pkcs8_der().to_vec(),
+        })
     }
 
     /// The end-entity certificate, DER.
     #[must_use]
     pub fn cert_der(&self) -> &[u8] {
         &self.cert_der
+    }
+
+    /// The intermediates between the leaf and a trust anchor, DER, in send
+    /// order. Empty for a self-signed bootstrap pair.
+    #[must_use]
+    pub fn intermediates_der(&self) -> &[Vec<u8>] {
+        &self.intermediates
     }
 
     /// SHA-256 of the certificate, as printed for trust-on-first-use.
@@ -267,7 +294,15 @@ impl CertifiedKeyPair {
     /// does not match the certificate.
     pub fn to_certified_key(&self) -> Result<Arc<CertifiedKey>, TlsError> {
         let provider = provider()?;
-        let chain = vec![CertificateDer::from(self.cert_der.clone())];
+        // Leaf first, then the intermediates in issuance order: exactly the
+        // `certificate_list` a TLS 1.3 server sends (RFC 8446 §4.4.2).
+        let chain = std::iter::once(CertificateDer::from(self.cert_der.clone()))
+            .chain(
+                self.intermediates
+                    .iter()
+                    .map(|der| CertificateDer::from(der.clone())),
+            )
+            .collect();
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.key_pkcs8_der.clone()));
         CertifiedKey::from_der(chain, key, &provider)
             .map(Arc::new)
@@ -944,6 +979,58 @@ mod tests {
             Some(renewed.cert_der().to_vec())
         );
         Ok(())
+    }
+
+    #[test]
+    fn acme_pem_keeps_every_certificate_in_the_chain() -> R {
+        // A real CA answers `finalize` with leaf + intermediate(s). RFC 8446
+        // §4.4.2 requires the server to send all of them: a public CA's
+        // intermediate is in no trust store, so a leaf sent alone fails path
+        // building. Two PEM blocks in, two certificates out — in order.
+        use rcgen::generate_simple_self_signed;
+        let leaf = generate_simple_self_signed(["leaf.example".to_owned()])?;
+        let issuer = generate_simple_self_signed(["issuer.example".to_owned()])?;
+        let chain_pem = format!("{}{}", leaf.cert.pem(), issuer.cert.pem());
+
+        let served_pair =
+            CertifiedKeyPair::from_acme_pem(&chain_pem, &leaf.signing_key.serialize_pem())?;
+        assert_eq!(served_pair.cert_der(), leaf.cert.der().as_ref());
+        assert_eq!(
+            served_pair.intermediates_der(),
+            [issuer.cert.der().to_vec()],
+            "the intermediate must be carried, not dropped"
+        );
+
+        // What the handshake actually sends, in order.
+        let served = served_pair.to_certified_key()?;
+        assert_eq!(served.cert.len(), 2, "both certificates must be served");
+        assert_eq!(
+            served.cert.first().map(|c| c.to_vec()),
+            Some(leaf.cert.der().to_vec())
+        );
+        assert_eq!(
+            served.cert.get(1).map(|c| c.to_vec()),
+            Some(issuer.cert.der().to_vec())
+        );
+
+        // A bootstrap pair has no intermediates and still serves exactly one.
+        let bootstrap = pair()?;
+        assert!(bootstrap.intermediates_der().is_empty());
+        assert_eq!(bootstrap.to_certified_key()?.cert.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn acme_pem_rejects_a_chain_with_no_certificate() -> R {
+        let rendered = rcgen::generate_simple_self_signed(["k.example".to_owned()])?;
+        let key_pem = rendered.signing_key.serialize_pem();
+        // A syntactically fine PEM file that holds no CERTIFICATE section:
+        // there is no leaf to serve, so it is refused rather than silently
+        // producing a pair with an empty certificate.
+        match CertifiedKeyPair::from_acme_pem(&key_pem, &key_pem) {
+            Err(TlsError::Pem) => Ok(()),
+            other => Err(format!("expected a PEM error, got {other:?}").into()),
+        }
     }
 
     #[test]

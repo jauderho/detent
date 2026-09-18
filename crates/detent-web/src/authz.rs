@@ -153,6 +153,7 @@ impl ScopedAuthz {
             | Operation::ListBackups { .. }
             | Operation::ServiceStatus { .. }
             | Operation::HostProfile
+            | Operation::CertStatus
             | Operation::AuditQuery(_) => Scope::Read,
         }
     }

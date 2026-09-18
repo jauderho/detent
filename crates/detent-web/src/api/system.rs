@@ -74,16 +74,20 @@ pub(super) async fn cert(
     State(state): State<AppState>,
     caller: Caller,
 ) -> Result<Json<CertReport>, ApiError> {
-    // Read-only but still gated: the fingerprint answers "which cert is this
-    // serving", so the same policy as the host profile applies. No
-    // `Operation` crosses to the engine thread — this reads the live resolver
-    // `AppState` already holds, the same `Arc` handshakes answer from.
-    authorize(&caller, &Operation::HostProfile)?;
+    // Gated against this operation's own identity, not `HostProfile`'s: the
+    // two are separate entries in the policy and in the audit log, so a
+    // future policy that distinguishes them must see the right one here.
+    //
+    // No `Operation` crosses to the engine thread — this reads the live
+    // resolver `AppState` already holds, the same `Arc` handshakes answer
+    // from — so nothing is audited on success, exactly as every other
+    // read-only operation behaves (PLAN §2.5).
+    authorize(&caller, &Operation::CertStatus)?;
     Ok(Json(cert_report(&state)))
 }
 
 /// The certificate answer, pulled out of [`cert`] so tests need no caller.
-fn cert_report(state: &AppState) -> CertReport {
+pub(super) fn cert_report(state: &AppState) -> CertReport {
     use time::OffsetDateTime;
     let current = state.cert_store.current();
     let der: &[u8] = current.cert.first().map_or(&[], |c| c.as_ref());
