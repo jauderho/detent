@@ -2,6 +2,7 @@ import path from 'node:path'
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
+import { themeScriptPlugin } from './vite-plugin-theme-script.ts'
 
 /**
  * Build config for a bundle that ships *inside the Rust binary*.
@@ -17,7 +18,7 @@ import { defineConfig } from 'vite'
  * and re-checks the CSP hash the Rust side pins.
  */
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), themeScriptPlugin()],
   resolve: {
     alias: {
       '@': path.resolve(import.meta.dirname, './src'),

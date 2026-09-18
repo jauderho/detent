@@ -4,28 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>detent</title>
-    <!-- The body of this script must stay byte-identical to
-         src/theme-init.js: the CSP in detent-web/src/headers.rs pins its
-         SHA-256, and a `sha256-` hash covers the element's text content
-         exactly, indentation included. Hence the flush-left body, and the
-         test that fails when the two drift apart. -->
-    <script>;(() => {
-  let s
-  try {
-    s = localStorage.getItem('detent-theme')
-    if (s !== 'light' && s !== 'dark') {
-      // Dark is the documented default (AGENTS.md), not a fallback the OS gets
-      // a say in. This must agree with `readTheme()` in src/lib/theme.ts: this
-      // script paints the first frame and that function decides every frame
-      // after it, so a disagreement is a visible flash of the wrong theme.
-      s = 'dark'
-    }
-    document.documentElement.setAttribute('data-theme', s)
-  } catch {
-    document.documentElement.setAttribute('data-theme', 'dark')
-  }
-})()
-</script>
+    <!-- vite-plugin-theme-script.ts replaces the marker below with an inline
+         script element holding src/theme-init.js byte for byte. The CSP in
+         detent-web/src/headers.rs pins that file's SHA-256, and a `sha256-`
+         source covers the element's text exactly, so the two must not drift;
+         scripts/build-finish.ts re-hashes the built page and fails if they do.
+         Do not write a literal script tag in this comment: build-finish finds
+         the inline script by regex and would match the one in here first. -->
+    <!--THEME_INIT_SCRIPT-->
     <meta name="description" content="detent — config console" />
   </head>
   <body>
