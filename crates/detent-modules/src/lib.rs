@@ -101,19 +101,50 @@ fn samba() -> Vec<Box<dyn DynModule>> {
     Vec::new()
 }
 
-// `module-dhcp` and `module-network` are all wired as far as the feature flag
-// and the (currently empty) crate: see `crates/detent-modules/Cargo.toml`.
-// Neither has a constructor pair here yet because neither has a
-// `ConfigModule` impl yet (PLAN §2.3 Appendix A) — add one alongside its
-// module crate, following the `hosts()` shape above.
+/// The `dhcp` module, because `module-dhcp` is enabled.
+#[cfg(feature = "module-dhcp")]
+fn dhcp() -> Vec<Box<dyn DynModule>> {
+    vec![Box::new(detent_core::module::Dyn::<
+        detent_module_dhcp::DhcpModule,
+    >::new())]
+}
+
+/// Nothing, because `module-dhcp` is disabled.
+#[cfg(not(feature = "module-dhcp"))]
+fn dhcp() -> Vec<Box<dyn DynModule>> {
+    Vec::new()
+}
+
+/// The `network` module, because `module-network` is enabled.
+#[cfg(feature = "module-network")]
+fn network() -> Vec<Box<dyn DynModule>> {
+    vec![Box::new(detent_core::module::Dyn::<
+        detent_module_network::NetworkModule,
+    >::new())]
+}
+
+/// Nothing, because `module-network` is disabled.
+#[cfg(not(feature = "module-network"))]
+fn network() -> Vec<Box<dyn DynModule>> {
+    Vec::new()
+}
 
 /// The modules this build was compiled with, in registry order.
 #[must_use]
 pub fn modules() -> Vec<Box<dyn DynModule>> {
-    [hosts(), resolver(), chrony(), mounts(), nfs(), samba()]
-        .into_iter()
-        .flatten()
-        .collect()
+    [
+        hosts(),
+        resolver(),
+        chrony(),
+        mounts(),
+        nfs(),
+        samba(),
+        dhcp(),
+        network(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 #[cfg(test)]
@@ -263,6 +294,52 @@ mod tests {
                 .and_then(|v| v.pointer("/entries/1/key"))
                 .and_then(|v| v.as_str()),
             Some("guest ok")
+        );
+    }
+    #[cfg(feature = "module-dhcp")]
+    #[test]
+    fn dhcp_is_registered_and_speaks_json() {
+        let registry = modules();
+        let found = registry.iter().find(|m| m.id() == "dhcp");
+        assert!(
+            found.is_some(),
+            "module-dhcp is enabled but `dhcp` is not in the registry"
+        );
+        let Some(module) = found else { return };
+        assert_eq!(module.descriptor().id, "dhcp");
+        assert!(!module.schema_json().is_null());
+        assert_eq!(
+            module
+                .parse_to_model_json("domain-needed\ninterface=eth0\n")
+                .ok()
+                .as_ref()
+                .and_then(|v| v.pointer("/dnsmasq/0/key"))
+                .and_then(|v| v.as_str()),
+            Some("domain-needed")
+        );
+    }
+
+    #[cfg(feature = "module-network")]
+    #[allow(clippy::redundant_closure_for_method_calls)]
+    #[test]
+    fn network_is_registered_and_speaks_json() {
+        let registry = modules();
+        let found = registry.iter().find(|m| m.id() == "network");
+        assert!(
+            found.is_some(),
+            "module-network is enabled but `network` is not in the registry"
+        );
+        let Some(module) = found else { return };
+        assert_eq!(module.descriptor().id, "network");
+        assert!(!module.schema_json().is_null());
+        assert_eq!(
+            module
+                .parse_to_model_json("[Match]\nName=eth0\n\n[Network]\nDHCP=yes\n")
+                .ok()
+                .as_ref()
+                .and_then(|v| v.pointer("/interfaces/0/dhcp_v4"))
+                .and_then(|v| v.as_bool()),
+            Some(true)
         );
     }
 

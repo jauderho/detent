@@ -1,0 +1,25 @@
+# Upstream tracking for the `network` module (see docs/PLAN.md §2.3).
+# Kept in sync with `DESCRIPTOR.upstream` in src/lib.rs — the unit test
+# `upstream_toml_matches_the_descriptor` fails when the two disagree.
+# Verified live: `git ls-remote --tags https://github.com/systemd/systemd.git`
+# lists `v261.3` as the newest non-rc tag (2026-09-17).
+
+project = "systemd"
+repo_url = "https://github.com/systemd/systemd.git"
+tracked_version = "261.3"
+docs = [
+  "https://www.freedesktop.org/software/systemd/man/latest/systemd.network.html",
+  "https://networkmanager.dev/docs/api/latest/nm-settings-keyfile.html",
+  "https://manpages.debian.org/bookworm/ifupdown/interfaces.5.en.html",
+  "https://netplan.readthedocs.io/en/stable/netplan-yaml/",
+]
+release_feed = "https://github.com/systemd/systemd/releases.atom"
+
+[fixtures]
+# fixtures/network/<dir>/ — real samples this version's parser is held to.
+# `systemd-261` covers stock `systemd-networkd` `.network` files at systemd
+# 261.3; `network-manager-1.52` covers `NetworkManager` keyfiles;
+# `ifupdown-0.8` covers Debian `interfaces`; `netplan-1.1` covers netplan
+# YAML; `edge` holds hand-made adversarial cases (CRLF, no trailing newline,
+# tabs, unknown directives, YAML comments/anchors left opaque).
+dirs = ["systemd-261", "network-manager-1.52", "ifupdown-0.8", "netplan-1.1", "edge"]

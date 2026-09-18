@@ -364,8 +364,10 @@ dependencies = [
  "axum",
  "detent-core",
  "detent-module-chrony",
+ "detent-module-dhcp",
  "detent-module-hosts",
  "detent-module-mounts",
+ "detent-module-network",
  "detent-module-nfs",
  "detent-module-resolver",
  "detent-module-samba",
@@ -388,6 +390,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "detent-module-dhcp"
+version = "0.0.1"
+dependencies = [
+ "arbitrary",
+ "detent-core",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "detent-module-hosts"
 version = "0.0.1"
 dependencies = [
@@ -400,6 +413,17 @@ dependencies = [
 
 [[package]]
 name = "detent-module-mounts"
+version = "0.0.1"
+dependencies = [
+ "arbitrary",
+ "detent-core",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "detent-module-network"
 version = "0.0.1"
 dependencies = [
  "arbitrary",

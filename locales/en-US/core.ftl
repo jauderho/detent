@@ -22,6 +22,34 @@ chrony-missing-rtcsync = rtcsync is not set; the hardware clock will drift relat
 chrony-rec-nts = the pool {$pool} is used without the nts option; prefer nts-capable sources so time cannot be spoofed.
 chrony-cmdport-open = cmdport is {$port}; set cmdport 0 unless chronyc must reach this host over the network.
 
+## dhcp module — display name, security notes, schema tooltips
+dhcp-name = dhcp
+dhcp-note-commit-confirm = a bad DHCP change cuts every client, and you, off the network; check the diff carefully before confirming.
+dhcp-tip-dnsmasq = the `key=value` settings of /etc/dnsmasq.conf, in file order; comments and unknown lines are preserved untouched.
+dhcp-tip-kea-v4 = the managed subset of the Kea DHCPv4 server (`Dhcp4`); unknown Kea options are preserved untouched.
+dhcp-tip-kea-v6 = the managed subset of the Kea DHCPv6 server (`Dhcp6`); unknown Kea options are preserved untouched.
+dhcp-tip-key = the dnsmasq option name, one word, no whitespace.
+dhcp-tip-value = the value after `=`; a bare flag such as `domain-needed` has no value.
+dhcp-tip-interfaces = the interfaces the Kea server listens on; an empty list means the server answers on every interface.
+dhcp-tip-valid-lifetime = the default lease lifetime in seconds; 3600 is a sane default for most networks.
+dhcp-tip-subnets = the subnets the server assigns addresses from.
+dhcp-tip-id = Kea's stable subnet identifier; keep it stable across edits, leases are keyed by it.
+dhcp-tip-subnet = the subnet prefix in CIDR form, e.g. `192.168.1.0/24`.
+dhcp-tip-pools = the dynamic address pools of the subnet.
+dhcp-tip-routers = the routers (default gateway) option handed to clients.
+dhcp-tip-domain-servers = the DNS servers (`domain-name-servers`) handed to clients.
+dhcp-tip-pool = a pool as a range `192.168.1.100 - 192.168.1.200` or a prefix `192.168.1.0/24`.
+
+## dhcp module — validation diagnostics
+dhcp-empty-key = a dnsmasq setting has an empty option name.
+dhcp-invalid-key = `{$key}` is not a valid dnsmasq option name; it must be one word without whitespace, `=` or `#`.
+dhcp-malformed-cidr = `{$value}` is not a valid CIDR prefix, e.g. `192.168.1.0/24`.
+dhcp-malformed-pool = `{$value}` is not a valid pool; use a range like `192.168.1.100 - 192.168.1.200` or a CIDR prefix.
+dhcp-authoritative-set = `dhcp-authoritative` makes dnsmasq the sole DHCP server on the segment; only set it when no other DHCP server exists.
+dhcp-kea-interfaces-empty = {$server} has no interfaces configured and will listen on every interface; name the interfaces explicitly.
+dhcp-rec-rebind = domain-needed and bogus-priv are not both set; they filter rebind attacks and upstream A-for-private queries.
+dhcp-rec-lifetime = {$server} has valid-lifetime {$lifetime}; keep it between 300 and 86400 seconds so leases renew predictably.
+
 ## hosts module — display name, security notes, schema tooltips
 hosts-name = hosts
 hosts-note-spoofing = entries here override dns; a wrong or malicious entry silently redirects lookups.
@@ -64,6 +92,40 @@ mounts-missing-nofail = `{$mountpoint}` is removable media without `nofail`; the
 mounts-missing-guards = `{$mountpoint}` mounts user-writable data without `{$missing}`; add them.
 mounts-network-automount = `{$mountpoint}` is a network filesystem without `x-systemd.automount`; the boot waits for the network.
 mounts-noauto-without-user = `noauto` without `user`: only root can mount it, defeating the point.
+
+## network module — display name, security notes, schema tooltips
+network-name = network
+network-note-precedence = a bad network configuration can cut the admin off from this host; every change needs a second confirmation.
+network-tip-interfaces = the interfaces this host configures, in file order.
+network-tip-iface-name = the interface name, e.g. eth0.
+network-tip-iface-dhcp-v4 = whether this interface gets its IPv4 address via DHCP.
+network-tip-iface-dhcp-v6 = whether this interface gets its IPv6 address via DHCP.
+network-tip-iface-addresses = static addresses in CIDR notation, e.g. 192.168.1.10/24.
+network-tip-iface-gateway-v4 = the default gateway for IPv4, when statically addressed.
+network-tip-iface-gateway-v6 = the default gateway for IPv6, when statically addressed.
+network-tip-iface-dns = DNS servers for this interface.
+network-tip-iface-routes = static routes for this interface.
+network-tip-iface-vlan = VLAN settings for this interface, when it is a VLAN.
+network-tip-iface-bridge = bridge settings for this interface, when it is a bridge.
+network-tip-route-to = the destination CIDR or default.
+network-tip-route-via = the next-hop IP.
+network-tip-vlan-link = the parent link for this VLAN, e.g. eth0.
+network-tip-vlan-id = the VLAN id, 1–4094.
+network-tip-bridge-members = member interface names for this bridge.
+
+## network module — validation diagnostics
+network-invalid-cidr = `{$value}` is not a valid CIDR address.
+network-invalid-ip = `{$value}` is not a valid IP address.
+network-gateway-outside-subnet = gateway `{$gateway}` is outside this interface's subnets.
+network-vlan-range = VLAN id `{$id}` is outside 1–4094.
+network-duplicate-interface = interface `{$name}` appears more than once.
+network-injection = `{$value}` contains a line break or null byte.
+network-static-no-gateway = this statically addressed interface has no gateway.
+network-static-no-dns = this statically addressed interface has no DNS servers.
+network-dhcp-static-mixed = this interface has both DHCP and static addresses.
+network-rec-ipv6-privacy = enable IPv6 privacy extensions when DHCPv6 is on.
+network-rec-ra-accept = accept router advertisements only when DHCPv6 is explicitly managed.
+network-rec-no-promisc = this interface should not run in promiscuous mode.
 
 ## nfs module — display name, security notes, schema tooltips
 nfs-name = nfs

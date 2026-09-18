@@ -7,29 +7,32 @@ phase or a self-contained piece of work finishes.
 
 ---
 
-## Where things stand — 2026-09-18
+## Where things stand — 2026-09-18 (Phase 7 wave 2 staged, uncommitted)
 
-**Phase 6 (ACME) done — 6/6 slices landed (dns-01, profiles, PEM bridge, hot reload,
-serve handle, `AppState.cert_store`, providers, scheduler, attestor, read-only
-certificates page, `CertRenew` + half/quarter warnings). Phase 7 (Modules wave 1)
-done — resolver, chrony, mounts, nfs, samba landed.**
+**Phase 6 (ACME) done. Phase 7 wave 1 done (resolver, chrony, mounts, nfs,
+samba). Wave 2 (dhcp, network) implemented + staged, not yet committed.**
 
-Branch: `main`. Everything below is verified on this commit, not assumed.
+Branch: `main` + staged wave-2 tree (60 files, `git status` clean apart from
+the stage). Everything below is verified on this tree, not assumed.
 
 | Check | Command | State |
 |---|---|---|
-| Rust tests | `cargo test --workspace --all-features` | 1284 pass, 6 ignored |
+| Rust tests | `cargo test --workspace --all-features` | 1424 pass, 0 fail, 6 ignored |
 | Clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean |
 | Format | `cargo fmt --all --check` | clean |
-| Rust coverage | `cargo llvm-cov --workspace --all-features --lcov` + `scripts/coverage-merge.sh` | PASS: detent-core 100% (1006/1006), modules 100% (5335/5335) |
+| Rust coverage | `cargo llvm-cov --workspace --all-features --lcov --output-path /tmp/w.info` + `scripts/coverage-merge.sh --verbose --output /tmp/merged.info /tmp/w.info` | PASS: detent-core 100% (1006/1006), modules 100% (9848/9848) |
 | Web tests | `cd web && bun run test` | 430 pass, 53 files (`bun test`) |
-| Web coverage | `cd web && bun run coverage:check` | 73 in-scope files at 100% lines |
-| Browser e2e + axe | `cd web && bun run e2e` | 22 pass (Playwright, Chromium) |
 | Web lint | `cd web && bun run lint` | clean (biome) |
 | Web types | `cd web && bun run typecheck` | clean |
 | Web i18n | `cd web && bun run i18n:check` | 257 ids, all referenced, all resolved |
-| Responsive | `cd web && bun run shots` (`web/e2e-shots/m2shots.e2e.ts`, stills to `/tmp/detent-shots`) | 3 pass (390/768/1280, no horizontal scroll) |
-| CI | 9 jobs (incl. acme-pebble) + Codespell, Lint Code Base, Dependency Review, Scorecard | all green |
+
+Staged: `detent-module-dhcp` (dnsmasq + Kea v4/v6) + `detent-module-network`
+(systemd-networkd, NetworkManager, ifupdown, netplan) with
+`crates/detent-modules` registry wiring (`dhcp()`, `network()`), 26+ Fluent
+ids each in `core.ftl`, `upstream.toml` + fixtures + fuzz targets + corpus
+for both, `Cargo.lock`/`fuzz/Cargo.lock` updated. Empty
+`conformance.proptest-regressions` removed before staging (0-byte artifact).
+Next: commit staged tree, then Phase 7 wave 3 or remaining PLAN §5 work.
 
 The six ignored Rust tests are deliberate: `write_openapi_json` regenerates a
 checked-in artefact, `crash_child_worker` is the child half of the
@@ -43,7 +46,7 @@ Pebble + challtestsrv (Phase 6 spike, `docs/spikes/acme-le.md`).
 (Fluent), `detent-platform` (host detection, privsep monitor/worker, sandbox,
 service managers), `detent-ops` (the 14 operations, authz, audit),
 `detent-modules` (registry; `hosts`, `resolver`, `chrony`, `mounts`, `nfs`,
-`samba` implemented; `dhcp`, `network` still stubs), `detent-web` (axum,
+`samba`, `dhcp`, `network` implemented), `detent-web` (axum,
 rustls TLS 1.3 only, auth, CSRF, API, SPA serving), `detent` (clap CLI), plus
 `detent-acme` (`DnsProvider`/`HookProvider` + async `order.rs` on `instant-acme =0.8.5`, aws-lc-rs only, `cargo tree -i ring` empty), `detent-update`, `detent-mcp` skeletons. PEM-to-serve bridge landed (`b51aec8`): `CertifiedKeyPair::from_acme_pem` parses `finalize` output into the DER pair `CertStore::replace` swaps live.
 
@@ -135,6 +138,21 @@ there and says so; seccomp and the capability drop are the confinement.
 
 ---
 ## Log
+### 2026-09-18 — Phase 7 wave 2 staged: dhcp, network land
+
+Two modules implemented via subagents (orchestrator wired registry/shared
+files, verified independently): `detent-module-dhcp` (dnsmasq + Kea v4/v6 —
+`sync_list_member` shared primitive, trailing-comma re-parse refusal test),
+`detent-module-network` (systemd-networkd, NetworkManager, ifupdown, netplan —
+double-`i += 1` fix in `build_model_from_lines`, dead-guard deletion net -86
+lines, NM route-drop by design). Registry: `dhcp()`, `network()` in
+`crates/detent-modules`; 8/8 modules registered. Fixtures + `upstream.toml` +
+fuzz targets + corpus for both. Gates: workspace 1424 pass / 0 fail /
+6 ignored; clippy/fmt clean; coverage-merge PASS (detent-core 100%
+1006/1006, modules 100% 9848/9848); web 430 pass, lint/typecheck/i18n clean.
+Staged (60 files), not yet committed. Empty
+`conformance.proptest-regressions` removed (0-byte artifact).
+
 ### 2026-09-18 — Phase 7 wave 1 done: chrony, mounts, nfs, samba land
 
 Four modules landed via subagents (orchestrator wired shared files, verified
