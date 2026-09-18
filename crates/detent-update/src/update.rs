@@ -83,6 +83,15 @@ pub enum UpdateError {
         /// The OS reason (no file contents).
         reason: String,
     },
+    /// The restarted service did not answer `/healthz` in time, so the swap
+    /// must be rolled back (PLAN §2.9 step 5).
+    #[error("the restarted service was not healthy within {waited_secs}s: {reason}")]
+    Unhealthy {
+        /// How long it was given.
+        waited_secs: u64,
+        /// The last failure seen while polling.
+        reason: String,
+    },
     /// Nothing qualified, and nothing was installed.
     #[error("no update to install")]
     NoUpdate,
