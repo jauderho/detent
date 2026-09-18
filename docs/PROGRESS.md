@@ -5,6 +5,74 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-18 - NEXT: restart + healthz + rollback (PLAN §2.9 step 5c)
+
+**Status: designed, not yet implemented.** Written down before starting so it
+can be picked up cold. `Installed::rollback` exists and is tested but nothing
+calls it — a bad binary currently installs and stays. This is the second half
+of the M3 acceptance criterion.
+
+### The survey (already done, do not redo)
+
+| Need | Where it already is |
+|---|---|
+| Restart the service | `detent_platform::service::for_host(init)` → `ServiceManager::act(&UnitNames, ServiceAction::Restart)` |
+| Unit name | `packaging/systemd/detent.service` → unit is `detent`. `UnitNames` fields are `&'static [&'static str]`, so a `const DETENT_UNITS: UnitNames` works |
+| Health endpoint | `/healthz` in `detent-web/src/server.rs:113` — **unauthenticated**, constant body, so no credential is needed |
+| Listen address | `Config::load(path)?.listen.addr` (`detent-web/src/config.rs:214`) |
+| Cert to pin | `config.tls.cert_dir` + `detent_web::tls::BOOTSTRAP_CERT_FILE` (`bootstrap.cert.der`) |
+| SAN match | `tls::ALWAYS_SANS` = `localhost`, `127.0.0.1`, `::1` — connect to `localhost` and the bootstrap cert validates |
+| TLS client | `detent-update` **already** depends on `rustls`, `hyper`, `hyper-util`, `hyper-rustls`, `rustls-pki-types`. No new dependency, no ADR-011 cooldown |
+
+### The design
+
+Put the probe in **`detent-update`** (`src/health.rs`), not in `detent`: the
+HTTP/TLS dependencies are already there and `detent` has none of them. Keep it
+config-free — the CLI reads `detent.toml` and passes values in:
+
+```rust
+pub fn wait_healthy(
+    addr: SocketAddr,
+    pinned_cert_der: &[u8],
+    deadline: Duration,   // 30 s per PLAN §2.9
+) -> Result<(), UpdateError>;
+```
+
+Build a `rustls::ClientConfig` whose `RootCertStore` holds **only** the cert
+read off disk, connect to `https://localhost:<port>/healthz`, and poll every
+500 ms until HTTP 200 or the deadline. Pinning to the exact serving cert is
+both correct and simpler than trusting a CA set; do **not** disable
+verification. Refuse-closed: no cert on disk → no health check → treat as
+unhealthy.
+
+### The policy, in `run.rs` after a successful `swap`
+
+1. Restart via `ServiceManager::act(DETENT_UNITS, Restart)`.
+2. `wait_healthy(...)` with a 30 s deadline.
+3. On healthy → `Exit::Ok`, report the tag and `.prev` path.
+4. On unhealthy or a failed restart → `Installed::rollback()`, restart again,
+   report `Exit::Failed` naming what happened. If the *rollback* restart also
+   fails, say so loudly — the host is then in a state only a human can fix.
+
+**Both the restart and the health probe must be seams**, like the existing
+`FeatureProbe` and `BinarySwap` in `run.rs`, so the tests stay hermetic: no
+process spawn, no socket. Cover healthy, unhealthy→rolled-back, restart
+failure, and rollback-restart failure.
+
+### Two decisions already made, do not relitigate
+
+* **No init unit / no backend is not a rollback.** If `act` answers
+  `ServiceError::NoKnownUnit` or `Unavailable`, the binary is fine and simply
+  is not running as a service — someone invoked the CLI on a host where detent
+  is not installed as one. Report install-succeeded-but-not-restarted and exit
+  `Ok`. Rolling back a good binary because the host has no systemd would be
+  wrong.
+* **"Mark the release bad in state" is a separate commit.** Without it a bad
+  release is re-downloaded and re-rolled-back next run: annoying, not unsafe.
+  Land the safety loop first.
+
+---
+
 ## 2026-09-18 - Phase 9: the atomic swap lands
 
 `detent update` now installs. Five signed commits today, each verified to
