@@ -605,6 +605,14 @@ dependencies = [
 [[package]]
 name = "detent-module-dhcp"
 version = "0.0.1"
+dependencies = [
+ "arbitrary",
+ "detent-core",
+ "proptest",
+ "schemars",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "detent-module-hosts"
@@ -633,6 +641,14 @@ dependencies = [
 [[package]]
 name = "detent-module-network"
 version = "0.0.1"
+dependencies = [
+ "arbitrary",
+ "detent-core",
+ "proptest",
+ "schemars",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "detent-module-nfs"

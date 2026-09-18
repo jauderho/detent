@@ -1,0 +1,23 @@
+# Unknown sections/keys — must stay Unknown and never be modeled
+[Match]
+Name=eth0
+
+[UnknownSection]
+Foo=bar
+
+[Network]
+DHCP=yes
+UnknownKey=value
+
+[DHCP]
+RouteMetric=100
+
+# netplan unknown subtree left opaque
+network:
+  version: 2
+  ethernets:
+    eth0:
+      dhcp4: true
+      # YAML anchor left opaque
+      addresses: &anchor [192.168.1.10/24]
+      renderer: networkd

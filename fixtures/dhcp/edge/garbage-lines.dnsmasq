@@ -1,0 +1,8 @@
+# hand-made edge fixture: garbage that must stay Unknown
+this line is not a dnsmasq option at all
+no equals sign and two words
+=missing-key
+domain-needed
+conf-file=/etc/dnsmasq/includes.conf
+conf-dir=/etc/dnsmasq.d
+dhcp-authoritative

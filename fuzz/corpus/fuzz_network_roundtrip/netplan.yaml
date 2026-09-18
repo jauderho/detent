@@ -1,0 +1,16 @@
+# /etc/netplan/01-netcfg.yaml — netplan 1.1 stock example
+# See https://netplan.readthedocs.io/en/stable/netplan-yaml/
+# The modeled subset is network/ethernets/vlans/bridges with dhcp4/dhcp6/addresses/gateway4/gateway6/nameservers/routes/id/link/interfaces.
+network:
+  version: 2
+  ethernets:
+    eth0:
+      dhcp4: false
+      addresses:
+        - 192.168.1.10/24
+      gateway4: 192.168.1.1
+      nameservers:
+        addresses: [192.168.1.1, 8.8.8.8]
+      routes:
+        - to: 10.0.0.0/24
+          via: 192.168.1.1

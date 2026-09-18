@@ -1,0 +1,9 @@
+// hand-made edge fixture: Kea JSONC with no trailing newline and a bare flag-style value
+{ "Dhcp6": {
+    "interfaces-config": { "interfaces": [ "eth0" ] },
+    "valid-lifetime": 4000,
+    "subnet6": [
+      { "id": 1, "subnet": "2001:db8:1::/64",
+        "pools": [ { "pool": "2001:db8:1::/80" } ] }
+    ]
+} }

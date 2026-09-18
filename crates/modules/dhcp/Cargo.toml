@@ -1,3 +1,6 @@
+# The crate name is `detent-module-dhcp` where the module id is
+# `ConfigModule::ID` (PLAN §2.1); the feature that pulls it into the binary is
+# `module-dhcp` (PLAN §2.2). Nothing else in this file normally changes.
 [package]
 name = "detent-module-dhcp"
 version.workspace = true
@@ -7,7 +10,26 @@ repository.workspace = true
 description = "DHCP module: dnsmasq, Kea."
 publish = false
 
+# Required by Appendix A: every module crate inherits the workspace lint set
+# (`unsafe_code = forbid`, `missing_docs`, clippy pedantic/cargo, no unwrap,
+# no panic, no indexing). Never relax these per crate.
 [lints]
 workspace = true
 
 [dependencies]
+detent-core = { path = "../../detent-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+arbitrary = { workspace = true, optional = true }
+
+[dev-dependencies]
+# `module_conformance!` drives invariants 1–4 with proptest.
+proptest = { workspace = true }
+
+[features]
+default = []
+## Enables `arbitrary::Arbitrary` for the model types so the `cargo-fuzz`
+## targets in `fuzz/` can build structured edits. Mirrors `detent-core`'s
+## `fuzzing` feature; never enabled in a shipped build.
+fuzzing = ["dep:arbitrary", "detent-core/fuzzing"]

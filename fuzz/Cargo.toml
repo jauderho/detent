@@ -20,6 +20,8 @@ detent-module-chrony = { path = "../crates/modules/chrony", features = ["fuzzing
 detent-module-mounts = { path = "../crates/modules/mounts", features = ["fuzzing"] }
 detent-module-nfs = { path = "../crates/modules/nfs", features = ["fuzzing"] }
 detent-module-samba = { path = "../crates/modules/samba", features = ["fuzzing"] }
+detent-module-dhcp = { path = "../crates/modules/dhcp", features = ["fuzzing"] }
+detent-module-network = { path = "../crates/modules/network", features = ["fuzzing"] }
 detent-platform = { path = "../crates/detent-platform", features = ["fuzzing"] }
 detent-web = { path = "../crates/detent-web" }
 
@@ -169,6 +171,48 @@ bench = false
 [[bin]]
 name = "fuzz_samba_edit"
 path = "fuzz_targets/fuzz_samba_edit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_dhcp_parse"
+path = "fuzz_targets/fuzz_dhcp_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_dhcp_roundtrip"
+path = "fuzz_targets/fuzz_dhcp_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_dhcp_edit"
+path = "fuzz_targets/fuzz_dhcp_edit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_network_parse"
+path = "fuzz_targets/fuzz_network_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_network_roundtrip"
+path = "fuzz_targets/fuzz_network_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_network_edit"
+path = "fuzz_targets/fuzz_network_edit.rs"
 test = false
 doc = false
 bench = false

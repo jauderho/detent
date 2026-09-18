@@ -1,0 +1,13 @@
+# /etc/network/interfaces — Debian ifupdown 0.8 stock example
+# See interfaces(5). The modeled subset is auto/iface/source-directory stanzas.
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet static
+	address 192.168.1.10/24
+	gateway 192.168.1.1
+	dns-nameservers 192.168.1.1 8.8.8.8
+	up ip route add 10.0.0.0/24 via 192.168.1.1
+
+source-directory /etc/network/interfaces.d

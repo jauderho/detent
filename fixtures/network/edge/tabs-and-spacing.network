@@ -1,0 +1,11 @@
+[Match]
+Name=eth0
+
+[Network]
+DHCP=	yes
+
+[Address]
+Address=	192.168.1.10/24
+DNS=	192.168.1.1
+
+# VLAN with tab-indented options (netplan indent handled via spaces/tabs)

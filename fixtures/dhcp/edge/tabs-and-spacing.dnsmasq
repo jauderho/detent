@@ -1,0 +1,5 @@
+# hand-made edge fixture: tabs and odd spacing around '='
+domain-needed
+interface	=	eth0
+dhcp-leasefile=/var/lib/dnsmasq/dnsmasq.leases
+bind-interfaces

@@ -1,0 +1,17 @@
+# NetworkManager keyfile — stock NetworkManager 1.52 keyfile example
+# See https://networkmanager.dev/docs/api/latest/nm-settings-keyfile.html
+# The modeled subset is [connection]/[ethernet]/[ipv4]/[ipv6] with key=value.
+[connection]
+id=eth0
+type=ethernet
+interface-name=eth0
+
+[ethernet]
+
+[ipv4]
+method=manual
+addresses=192.168.1.10/24,192.168.1.1
+dns=192.168.1.1;8.8.8.8;
+
+[ipv6]
+method=auto

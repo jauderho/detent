@@ -1,0 +1,36 @@
+# Upstream tracking for the `dhcp` module (see docs/PLAN.md §2.3).
+# Kept in sync with `DESCRIPTOR.upstream` in src/lib.rs — the unit test
+# `upstream_toml_matches_the_descriptor` fails when the two disagree.
+#
+# Tracked upstream project: dnsmasq. The newest non-prerelease tag was
+# verified live on 2026-09-17 with:
+#   git ls-remote --tags https://thekelleys.org.uk/git/dnsmasq.git
+# which lists v2.93 as the newest tag that is neither an `rc` nor a `test`
+# snapshot (v2.93rc1–rc3 and v2.93test1–test10 are excluded by the non-rc
+# rule). Kea (https://gitlab.isc.org/isc-projects/kea.git) is a second
+# backend of this module but not the tracked project; its fixture samples
+# below were verified live against tag `Kea-3.2.0` (newest stable, even-minor
+# release; 3.3.x is the development branch).
+
+project = "dnsmasq"
+repo_url = "https://thekelleys.org.uk/git/dnsmasq.git"
+tracked_version = "2.93"
+docs = [
+    "https://thekelleys.org.uk/dnsmasq/docs/dnsmasq-man.html",
+    "https://kea.readthedocs.io/en/kea-3.2.0/",
+]
+
+# dnsmasq publishes no release atom feed; the upstream-watch workflow compares
+# `tracked_version` against the tags in `repo_url` instead.
+release_feed = ""
+
+[fixtures]
+# fixtures/dhcp/<dir>/ — real samples this version's parser is held to.
+# `dnsmasq-2.93` holds verbatim files from the dnsmasq v2.93 tag
+# (`dnsmasq.conf.example`, `trust-anchors.conf`) plus verbatim Kea DHCPv4/v6
+# samples from the isc-projects/kea `Kea-3.2.0` tag (`kea-dhcp4.conf`,
+# `kea-dhcp6.conf`, from doc/examples/kea4/single-subnet.json and
+# doc/examples/kea6/simple.json); `edge` holds the hand-made adversarial
+# cases (CRLF, no trailing newline, tabs, garbage lines, JSONC comment
+# styles).
+dirs = ["dnsmasq-2.93", "edge"]

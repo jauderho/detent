@@ -1,0 +1,4 @@
+# hand-made edge fixture: every line terminated with CRLF
+domain-needed
+bogus-priv
+dhcp-leasefile=/var/lib/dnsmasq/dnsmasq.leases
