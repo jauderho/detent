@@ -12,21 +12,22 @@ phase or a self-contained piece of work finishes.
 **Phase 6 (ACME) done — 6/6 slices landed (dns-01, profiles, PEM bridge, hot reload,
 serve handle, `AppState.cert_store`, providers, scheduler, attestor, read-only
 certificates page, `CertRenew` + half/quarter warnings). Phase 7 (Modules wave 1)
-in progress — resolver.**
+done — resolver, chrony, mounts, nfs, samba landed.**
 
 Branch: `main`. Everything below is verified on this commit, not assumed.
 
 | Check | Command | State |
 |---|---|---|
-| Rust tests | `cargo test --workspace --all-features` | 1070 pass, 6 ignored |
+| Rust tests | `cargo test --workspace --all-features` | 1284 pass, 6 ignored |
 | Clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean |
 | Format | `cargo fmt --all --check` | clean |
-| Web tests | `cd web && bun run test` | 431 pass, 53 files (`bun test`) |
-| Web coverage | `cd web && bun run coverage:check` | 72 in-scope files at 100% lines |
+| Rust coverage | `cargo llvm-cov --workspace --all-features --lcov` + `scripts/coverage-merge.sh` | PASS: detent-core 100% (1006/1006), modules 100% (5335/5335) |
+| Web tests | `cd web && bun run test` | 430 pass, 53 files (`bun test`) |
+| Web coverage | `cd web && bun run coverage:check` | 73 in-scope files at 100% lines |
 | Browser e2e + axe | `cd web && bun run e2e` | 22 pass (Playwright, Chromium) |
 | Web lint | `cd web && bun run lint` | clean (biome) |
 | Web types | `cd web && bun run typecheck` | clean |
-| Web i18n | `cd web && bun run i18n:check` | 256 ids, all referenced, all resolved |
+| Web i18n | `cd web && bun run i18n:check` | 257 ids, all referenced, all resolved |
 | Responsive | `cd web && bun run shots` (`web/e2e-shots/m2shots.e2e.ts`, stills to `/tmp/detent-shots`) | 3 pass (390/768/1280, no horizontal scroll) |
 | CI | 9 jobs (incl. acme-pebble) + Codespell, Lint Code Base, Dependency Review, Scorecard | all green |
 
@@ -41,7 +42,8 @@ Pebble + challtestsrv (Phase 6 spike, `docs/spikes/acme-le.md`).
 **Rust** — 19 crates. `detent-core` (CST, model, schema, diag), `detent-i18n`
 (Fluent), `detent-platform` (host detection, privsep monitor/worker, sandbox,
 service managers), `detent-ops` (the 14 operations, authz, audit),
-`detent-modules` (registry; only `hosts` is implemented), `detent-web` (axum,
+`detent-modules` (registry; `hosts`, `resolver`, `chrony`, `mounts`, `nfs`,
+`samba` implemented; `dhcp`, `network` still stubs), `detent-web` (axum,
 rustls TLS 1.3 only, auth, CSRF, API, SPA serving), `detent` (clap CLI), plus
 `detent-acme` (`DnsProvider`/`HookProvider` + async `order.rs` on `instant-acme =0.8.5`, aws-lc-rs only, `cargo tree -i ring` empty), `detent-update`, `detent-mcp` skeletons. PEM-to-serve bridge landed (`b51aec8`): `CertifiedKeyPair::from_acme_pem` parses `finalize` output into the DER pair `CertStore::replace` swaps live.
 
@@ -133,6 +135,24 @@ there and says so; seccomp and the capability drop are the confinement.
 
 ---
 ## Log
+### 2026-09-18 — Phase 7 wave 1 done: chrony, mounts, nfs, samba land
+
+Four modules landed via subagents (orchestrator wired shared files, verified
+independently): chrony 4.9 (GitLab canonical URL — tuxfamily defunct, HTTP 500),
+mounts util-linux 2.42.3 (commit_confirm true — bad fstab bricks boot),
+nfs nfs-utils 2.9.2 (`steved/nfs-utils.git` — both candidate URLs dead, tag list
+scraped), samba 4.24.7 (verbatim upstream smb.conf.default fixture).
+Gates: workspace 1284 pass / 0 fail / 6 ignored; clippy/fmt clean;
+coverage-merge PASS (detent-core 100% 1006/1006, modules 100% 5335/5335);
+web 430 pass, lint/typecheck clean; fuzz bins x12 compile (`fuzz/Cargo.toml`
+manifest check). Registry: hosts, resolver, chrony, mounts, nfs, samba;
+`dhcp`, `network` still stubs. Next: Phase 7 wave 2 (dhcp, network) per PLAN §5.
+Follow-ups on this tree: `core.ftl` samba block moved after resolver
+(alphabetized `nfs → resolver → samba`); `CertStatus` engine arm covered by
+`cert_status_is_unsupported_in_the_engine_and_writes_no_audit_record`
+(read-only ops return before auditing, so zero audit records — the `CertRenew`
+test is the mutating contrast). Web 430 pass (one fewer: KickerTag deleted).
+
 ### 2026-09-18 — Module handler tails + upstream tag fallback (`f23b867`)
 
 `EngineHandle::stubbed(outcome)` + 5 tests cover `api/modules.rs`
@@ -385,6 +405,155 @@ non-vacuous by removing the argument and watching it fail.
 
 `/healthz` stays open: a liveness probe has no credential to present and its
 body is a constant that leaks no version.
+
+### 2026-09-17 — Phase 6 adversarial review, fixes and coverage gate
+
+Reviewed `6adfb7e..8b3c5da` (the Phase 6 ACME range) for idiomatic Rust and
+test coverage. Four real defects found and fixed.
+
+**1. `CertifiedKeyPair::from_acme_pem` dropped the intermediate chain.**
+`CertificateDer::from_pem_slice` takes only the first PEM block, and
+`to_certified_key` served `vec![leaf]`. A public CA's intermediate is in no
+trust store, so a leaf sent alone fails path building on any client that has
+not cached it (RFC 8446 §4.4.2). The pair now carries `intermediates` and
+serves leaf-first. Latent — nothing called it yet — but it would have broken
+the first real certificate. `acme_pem_keeps_every_certificate_in_the_chain`
+pins it; proved non-vacuous by restoring the old one-cert behaviour.
+
+**2. `load_or_create_account` treated every read failure as "no account".**
+`if let Ok(json) = read_to_string(..)` meant EACCES/EIO on an existing
+credential file fell through to registering a **second** ACME account and
+renaming over the first one's credentials — silent identity rotation, old key
+destroyed. Extracted `read_credentials`, which propagates everything but
+`NotFound`. The read now happens *before* the `Account::builder()` call, so
+the failure is reported without a crypto provider having to exist — which is
+also why the test runs under `--workspace --all-features`, where both rustls
+providers are enabled and `builder()` panics on an ambiguous default.
+
+**3. `/api/v1/system/cert` authorized as `Operation::HostProfile`.** It
+borrowed another operation's identity for the policy decision and the audit
+label. Added `Operation::CertStatus` / `OpKind::CertStatus` (read scope, no
+module, `audit-op-cert-status`). Note the *narrower* finding: an unaudited
+success is not a defect — `engine.rs:158` returns before auditing for every
+read-only op by design (PLAN §2.5). An audit-on-refusal branch was written and
+then removed: `Scopes::allows(Scope::Read)` is unconditionally `true` and
+`ScopedAuthz` is the only `Authz` impl, so a read op cannot be denied and the
+branch was unreachable.
+
+**4. `zone_of` derived the RFC 2136 zone by stripping the first label.**
+`_acme-challenge.a.b.example.com` yielded `b.example.com`, which is not the
+SOA-bearing zone unless it happens to be — NOTAUTH from the primary. The zone
+is now a required `Rfc2136Provider::new` argument (a challenge name cannot
+identify its zone without an SOA lookup), and `zone_for` refuses a record
+outside it, including the `notexample.com` suffix trap.
+
+Also restored `assert_eq!(with_module, 8)` in `op.rs`, deleted rather than
+updated when `CertRenew` landed — the counter was still being summed and never
+checked.
+
+**Coverage.** `crates/detent-acme/` had **no `per_path` entry**, so Phase 6 was
+ungated. Now at 87 (measuring 87.85 on macOS; the one-point margin matches the
+Linux/macOS spread the note already records for detent-platform). `order.rs`
+went 28.70% → 49.44% and `providers.rs` 89.83% → 95.17%. The remaining
+`order.rs` gap is `present_challenges`, `present_attest_challenges`,
+`wait_ready` and `finalize`, which all need an `instant_acme::Order` that
+cannot be built without a live client — only `tests/pebble_live.rs` (`#[ignore]`)
+reaches them. `/api/v1/system/cert` had zero Rust tests and now has two.
+
+**PONYTAIL.** Applied the confirmed items (`ui/button.tsx` + the
+`class-variance-authority` dep, `ui/tooltip.tsx` inlined into `FieldFrame`,
+`KickerTag`, `SCOPE_READ`/`hasScope`, `WriteGate`/`useCanWrite`, `statusOf`,
+`NullAuthAudit` and `TestAttestor` behind `#[cfg(test)]`, `Display for
+HookProvider`, `HookProvider::state_dir`, `BoundWebServer`, two dead scripts,
+two linter.yml flags). Five of its claims were **wrong** and were left alone:
+`NoSandbox` has live callers (`doctor.rs:246`); `lib/storage.ts` has two
+consumers, not one; the ci.yml shell job is the repo's only bash lint
+(super-linter sets no `VALIDATE_BASH_*`); Checkov scans `docs/openapi.json`;
+zizmor is not covered by the pins job. See `docs/PONYTAIL.md` for the
+per-item verdicts.
+
+### 2026-09-17 — Phase 6 review findings 5-10
+
+The remaining six findings from the same review. 6, 7 and 8 landed with the
+first batch (the `with_module` assertion, `TestAttestor` behind `#[cfg(test)]`,
+`BoundWebServer` deleted); 5, 9 and 10 are this pass.
+
+**5. `providers.rs` compiled ~1200 lines that cannot reach a server.**
+`with_transport` is `#[cfg(test)]`, so every production `CloudflareProvider`,
+`AcmeDnsProvider` and `DeSecProvider` carries `send: None` and fails at the
+first wire call; `Rfc2136Provider` has no HMAC crate and refuses to send an
+unsigned UPDATE. `acme-dns01` is in `default`, so all of it shipped. The four
+networked providers now sit behind `detent-acme/dns-providers`, off by
+default, reached through a new `detent/acme-dns-providers` feature that is
+deliberately *not* in `default`. `HookProvider` is unaffected — it lives in
+`lib.rs`, it works, and it is what the Pebble spike used, so `acme-dns01`
+still means what it says. Turn the feature on with the transport.
+
+Also split `Rfc2136Provider::update`, which built the UPDATE message, threw it
+away with `let _ = message;` and returned `Err` unconditionally — a
+`Result<Vec<u8>, _>` that could never be `Ok`, which also made `present`'s
+`Ok(())` tail unreachable. Message building and the refusal to send are now
+separate functions, so both return types mean what they say, and
+`rfc2136_update_returns_the_built_message` pins it. The refusal names the
+server, key and algorithm it *would* have signed with (useful when debugging
+config) and never the key material; the redaction test covers that.
+
+**9. `finalize` returned `(String, String)`.** Two PEM strings of the same
+type, in the opposite order from how they were bound, so
+`let (key, chain) = finalize(..)` compiled and wrote the private key to the
+certificate's path. Now returns a named `Issued { chain_pem, key_pem }`.
+
+**10. Both atomic writes used `create(true)`.** `OpenOptionsExt::mode` applies
+only when a file is *created*, so a leftover `<name>.<pid>.tmp` — a crash plus
+PID reuse — was reopened and written through whatever mode it already carried.
+Both the ACME account credentials and the hook challenge file now remove a
+stale temp first and use `create_new(true)`. Proved with
+`a_stale_temp_file_does_not_leak_its_permissions`: against the old code the
+challenge lands at 0o666 instead of 0o600.
+
+**A stale floor, caught.** The 88 recorded in the previous section was measured
+*before* the async order tests were replaced with the sync `read_credentials`
+one, and coverage had actually fallen to 86.34 — the gate would have failed CI.
+Restored the lost ground with `account_and_order_refuses_before_it_builds_a_client`,
+which works only because `read_credentials` now runs ahead of
+`Account::builder()`; under `--all-features` both rustls providers are compiled
+in and `builder()` panics on the ambiguous default. Floor corrected to 87.
+
+1283 pass / 6 ignored. Clippy clean at `-D warnings` under both
+`--all-features` and default features.
+
+**PONYTAIL's last four, now verified.** One of the four held.
+
+`ProcessError` (`detent-platform/src/service/exec.rs`) **collapsed** from a
+single-variant `#[non_exhaustive]` enum to a plain struct. Only one site
+constructed it; the other fourteen references were signatures. `thiserror`
+**stays** — AGENTS.md mandates it for library errors and callers cross the
+`Result<_, ProcessError>` boundary with `?`, so the audit's "no thiserror" half
+was wrong. The doc now says why a struct is right: starting the child is the
+only failure that happens *before* there is an outcome; a non-zero exit, a
+timeout, or capped output are all successful runs with a bad result and live in
+`ProcessOutput`. -13 net.
+
+The other three were **rejected**, with the reasoning recorded per-entry in
+`docs/PONYTAIL.md`:
+
+* `Scopes` — 85 references over 8 files, and it owns the read/write policy.
+  `allows()` is called 10 times over 3 files and `names()` 5 times over 3
+  rendering the scope list for the API and the token store. A bare `bool`
+  scatters the policy and orphans `names()`. That
+  `allows(Scope::Read)` is unconditionally true is exactly why a read-scoped
+  operation cannot be denied — that rule wants one home, not ten.
+* `ValidationCtx` — a parameter of `ConfigModule::validate`, implemented by
+  every module: 60 references over 13 files including 7 modules and
+  `_template`. The wrapper is what keeps a field addition from re-touching all
+  13, and locale is a stated requirement, so the field is coming.
+* `SandboxError` — **the claim is factually wrong.** It carries no
+  `#[non_exhaustive]`; that is on `SpawnError`, a different type 11 lines below
+  it. `SandboxError` is already 3 lines, and the suggested `String` type alias
+  would drop the `Error` impl that `?` needs.
+
+That puts PONYTAIL's whole-repo audit at **8 of its ~20 findings wrong or
+overstated** once checked against the code.
 
 ### 2026-09-16 — first fully green CI
 
