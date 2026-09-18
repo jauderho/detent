@@ -5,7 +5,7 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
-## 2026-09-18 - Updater
+## 2026-09-18 - Updater (`44618d0`, signed)
 
 ADR-014 (sigstore verifier) flipped to Accepted + indexed. `--self-test` features gated on cfg with pin test; `--self-test` with subcommand rejected as usage error. `run_update_on` seam extracted with hermetic tests; hermetic coverage tests for run/output/doctor added.
 
