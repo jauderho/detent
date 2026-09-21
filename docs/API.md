@@ -119,15 +119,7 @@ answers `503` with `message_id: "web-update-check-failed"`, refuse-closed,
 because a check that cannot reach the release server must not be reported as
 "up to date".
 
-There is deliberately **no apply endpoint in this build**. Installing an
-update ends in the privileged monitor's binary swap (PLAN §2.9 steps 5b–5c),
-which is not wired yet — `Request::ReplaceBinary`
-(`crates/detent-platform/src/privsep/proto.rs`) is answered
-`ProtoError::Unsupported` by the monitor (`privsep/monitor.rs`) in this
-build. When it lands, the endpoint that drives it must be a `write`-scoped,
-CSRF-checked `POST` with its own scope decision (`detent-web/src/authz.rs`),
-its own audit record, and the same refuse-closed rollback story the
-commit-confirm flow has. `GET /api/v1/system/update` installs nothing, ever.
+`POST /api/v1/system/update` installs the named update. It takes a `write`-scoped, CSRF-checked `{"version": ...}` body (`UpdateApplyRequest`, `deny_unknown_fields`), authorizes against `Operation::UpdateApply` (`detent-web/src/authz.rs`), executes through the operations engine, and writes one audit record on success *and* on refusal (PLAN §2.5). The engine bridges the release tag to the content-addressed staged file (`<state_root>/update/staged/<hex sha256>`) and drives the privileged monitor's binary swap (`Request::ReplaceBinary` in `crates/detent-platform/src/privsep/proto.rs`, answered by `privsep/monitor.rs`), which keeps the previous binary at `<target>.prev`. `GET /api/v1/system/update` installs nothing, ever.
 
 ## Design notes
 

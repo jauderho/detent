@@ -332,7 +332,7 @@ fn prepare_worker(
     hostnames.push(host.profile.hostname.clone());
 
     let audit: Box<dyn AuditSink> = Box::new(FileAudit::under_state_root(&settings.state_root));
-    let engine = OpsEngine::new(
+    let mut engine = OpsEngine::new(
         registry,
         client,
         host,
@@ -340,6 +340,7 @@ fn prepare_worker(
         Box::new(AllowAll),
         service::for_host(init),
     );
+    engine.set_state_root(settings.state_root.clone());
     let (engine_handle, engine_thread) = detent_web::spawn_engine(engine);
 
     let auth_state = match detent_web::AuthState::open(&settings.state_root, &config.auth, ram_mib)

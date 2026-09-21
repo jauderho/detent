@@ -204,11 +204,11 @@ pub struct Policy {
 
 impl Policy {
     /// The monitor's policy: write access to every enabled target's parent
-    /// directory, each target's backup directory, and the state root
+    /// directory, each target's backup directory, the state root
     /// (`Allowlist::state_root`, which also covers the check-tmp and
-    /// pending-commit-marker paths); `CAP_DAC_OVERRIDE`/`CAP_CHOWN`/`CAP_FOWNER`
-    /// retained (PLAN §2.4's root-confined minimum — see the module docs for
-    /// why `CAP_SETUID`/`CAP_SETGID`/`CAP_KILL` are not part of this set).
+    /// pending-commit-marker paths), and the running binary's own directory
+    /// so `ReplaceBinary`'s `rename(staged → current_exe)` can succeed
+    /// under Landlock confinement.
     #[must_use]
     pub fn monitor(allowlist: &Allowlist) -> Self {
         let mut paths: BTreeSet<PathBuf> = BTreeSet::new();
@@ -219,6 +219,19 @@ impl Policy {
             paths.insert(target.backup_dir.clone());
         }
         paths.insert(allowlist.state_root().to_path_buf());
+        // The binary swap (PLAN §2.9 step 5b) renames the staged file over
+        // `current_exe`. Without its parent in the writable set the rename
+        // fails with EACCES once the Landlock ruleset is installed — and
+        // nothing in the test world exercises Landlock, so all tests still
+        // pass. The parent is derived from the real exe (engine tests point
+        // each monitor at its own temp target via `set_binary_override` and
+        // are not confined).
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(parent) = exe.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            paths.insert(parent.to_path_buf());
+        }
         Self {
             writable_paths: paths.into_iter().collect(),
             retained_caps: vec![
@@ -492,10 +505,19 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let root = Path::new("/tmp/detent-sandbox-test-empty");
         let allow = Allowlist::from_modules(&[], &Config::with_state_root(root))?;
-        assert_eq!(
-            Policy::monitor(&allow).writable_paths,
-            vec![root.to_path_buf()]
-        );
+        // Plus the running binary's own directory (PLAN §2.9 step 5b): the
+        // swap renames the staged file over `current_exe`, which Landlock
+        // would otherwise deny.
+        let mut expected = vec![root.to_path_buf()];
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(parent) = exe.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            expected.push(parent.to_path_buf());
+        }
+        expected.sort();
+        expected.dedup();
+        assert_eq!(Policy::monitor(&allow).writable_paths, expected);
         assert_eq!(
             Policy::worker(&allow).writable_paths,
             vec![root.to_path_buf()]

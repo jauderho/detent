@@ -5,6 +5,41 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-21 - Monitor ReplaceBinary lands (PLAN §2.9 step 5b)
+
+`monitor.rs` `dispatch` answers `ReplaceBinary` instead of `Unsupported`:
+staged-path len + digest checks, then `swap_running_binary` keeping
+`<target>.prev` (hard link, copy fallback). Same-filesystem staging:
+link-then-copy staged → pid-unique temp in the target's own dir (no second
+full write on the fast path; single copy attempt, error kind captured once),
+chmod to the target's mode there (temp removed on chmod failure), rename
+temp → target — a direct state-root → exe-dir rename fails EXDEV in
+production (`/var/lib/detent` vs `/usr/local/bin`); `detent-platform` cannot
+reuse `detent-update::install::swap` (update does not depend on platform —
+no cycle either way, but the monitor needs the privsep error type, so the
+convention is mirrored, not called). Staged file is consumed (removed)
+after the copy lands.
+Engine `update_apply` bridges tag → digest path atomically (`write_atomic`,
+`expected_prev: None` — a leftover digest file from a crashed run is
+legitimate to overwrite; the monitor re-hashes before swapping,
+`keep_backups: 0`); `is_staged_name` rejects dot-only names (`.`/`..`
+pass a char filter but join to the staged dir / its parent). Test override
+is a per-`Monitor` field (`set_binary_override`), set per-harness in the
+spawn closure — no global, parallel-safe (a global override let concurrent
+swap tests steer each other's monitor thread).
+Tests: tag bridge (digest path consumed, target holds new bytes, `.prev`
+holds original), dot-only refusal (audited) + `is_staged_name` unit test
+(`.`/`..`/`...`/traversal rejected, tag + digest accepted), stale-digest
+overwrite; monitor swap/mismatch/missing tests converted to `Result` + `?`
+(workspace denies `expect`/`panic` even under test). `#[cfg(unix)]` restored
+on the mode-assertion block. Sandbox `Policy::monitor` exe-parent block
+collapsed to let-chains; comment reworded off the deleted global.
+Open M3: staged producer, restart/healthz/rollback (CLI `restart_and_check`
+exists; monitor-side re-exec sequence still pending).
+Verify: `cargo test -p detent-ops -p detent-platform` 413 passed, 1 ignored;
+clippy clean; fmt clean.
+---
+
 ## 2026-09-21 - Mark the rolled-back release bad (PLAN §2.9 step 5c)
 
 Without this a bad release is re-downloaded and re-rolled-back next run:

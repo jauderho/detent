@@ -799,9 +799,9 @@ async fn system_apply_needs_write_and_reports_the_stub() -> R {
     assert_eq!(wrong_scope.status(), StatusCode::FORBIDDEN);
     assert_eq!(error_body(wrong_scope).await?.1, "web-denied-scope");
 
-    // The engine answers `UpdateApply` as `Unsupported` until the
-    // `ReplaceBinary` monitor wiring lands: 500 with the `ops-unsupported`
-    // id and a reason, never a silent no-op.
+    // Without a staged binary the engine answers `UpdateApply` as
+    // `Unsupported`: 500 with the `ops-unsupported` id and a reason, never
+    // a silent no-op.
     let stub = post(live.state(), "/api/v1/system/update", Some(&write), body).await?;
     assert_eq!(stub.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(error_body(stub).await?.1, "ops-unsupported");

@@ -197,6 +197,7 @@ const MONITOR: &[&str] = &[
     "pread64",
     "pwrite64",
     "renameat",
+    "linkat", // `swap_running_binary` hard-links the previous binary.
     "fsync",
     "unlinkat",
     "mkdirat",
@@ -395,6 +396,7 @@ const SYSCALL_NUMBERS: &[(&str, i64, i64)] = &[
     ("wait4", 61, 260),
     ("openat", 257, 56),
     ("renameat", 264, 38),
+    ("linkat", 265, 37),
     ("unlinkat", 263, 35),
     ("mkdirat", 258, 34),
     ("getdents64", 217, 61),
