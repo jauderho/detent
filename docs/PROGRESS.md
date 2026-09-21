@@ -18,14 +18,14 @@ comment says installing waits for "the privileged swap actually lands".
 
 | Need | Where it already is |
 |---|---|
-| Mutating POST shape | `commits.rs:90-105` (`WriteCaller`, `authorize`, `state.engine.execute`, `render_*` split for synthetic-outcome tests) |
-| Route table entry | `system.rs:45-70` (`Route { method, path, mutating }`) + `routes()` at 73-79 |
-| Authz scope | `Operation::UpdateStatus` → `Scope::Read` (`authz.rs:156-158`); install needs its own `write` operation |
-| Ops enum pattern | `Operation::CertRenew` (`op.rs:194-199`): variant exists with real shape, engine answers `Unsupported` until wiring lands |
-| Engine refusal | `Operation::UpdateStatus` → `Err(Unsupported)` (`engine.rs:251-253`) — same shape an install op takes until it can execute |
-| Privsep wire | `Request::ReplaceBinary { len, sha256 }` (`proto.rs:289-294`) exists but `monitor.rs:400-402` answers `Unsupported` |
+| Mutating POST shape | `commits.rs` `confirm` handler (`WriteCaller`, `authorize`, `state.engine.execute`, `render_*` split for synthetic-outcome tests) |
+| Route table entry | `system.rs` `table()` (`Route { method, path, mutating }`) + `routes()` |
+| Authz scope | `authz.rs`: `Operation::UpdateStatus` → `Scope::Read`; install needs its own `write` operation |
+| Ops enum pattern | `op.rs` `Operation::CertRenew`: variant exists with real shape, engine answers `Unsupported` until wiring lands |
+| Engine refusal | `engine.rs` `dispatch`: `UpdateStatus` → `Err(Unsupported)` — same shape an install op takes until it can execute |
+| Privsep wire | `proto.rs` `Request::ReplaceBinary { len, sha256 }` exists but `monitor.rs` `dispatch` answers `Unsupported` |
 | Request checklist | PLAN App. D: TLS → session/Bearer → CSRF triple → 256 KiB typed body → ids vs registry → `Operation` → authz → audit → no-store |
-| CLI half to reuse | `apply_update` (`run.rs:861-885`): prepare → probe → `install_candidate` (swap + restart + healthz + rollback) |
+| CLI half to reuse | `run.rs` `apply_update`: prepare → probe → `install_candidate` (swap + restart + healthz + rollback) |
 
 ### The design
 
@@ -36,8 +36,10 @@ execution path lands). New `POST /api/v1/system/update` (same path as GET,
 op, `state.engine.execute`, audit record on success *and* failure (PLAN §2.5:
 every mutating op writes exactly one), `render_*` split so tests need no
 network. Request body: `{"version": "<tag>"}` typed + `deny_unknown_fields`,
-≤ 256 KiB per App. D. Refuse-closed: no stamp with that tag, or feed
-unreachable from the worker, → 503/409, never "no update".
+≤ 256 KiB per App. D. When the execution path later lands, refuse-closed:
+no stamp with that tag, or feed unreachable from the worker, → 503/409,
+never "no update". In this slice the engine answers `Unsupported`, so the
+POST returns 409/503 with a reason and installs nothing (decision 1 below).
 
 ### Two decisions already made, do not relitigate
 
@@ -45,16 +47,27 @@ unreachable from the worker, → 503/409, never "no update".
 privilege-dropped (PLAN §2.4); the swap needs operator privileges (step 5b
 runs in the CLI process) and `Request::ReplaceBinary` is still `Unsupported`
 in the monitor. The POST therefore lands as: route + authz + audit + engine
-`Unsupported` → 409/503 with a reason, like `CertRenew` today. Wiring
-`ReplaceBinary` through monitor → worker → restart → healthz is its own
-later slice with a privsep answer (streaming the image over the channel,
-Landlock write scope for the binary dir, who restarts what).
+`Unsupported` → 409/503 with a reason, like `CertRenew` today. The later
+wiring slice uses the monitor path PLAN's privilege model was built for —
+**not** a queue-file-then-CLI-cron: the proto seam already exists
+(`proto.rs` calls `ReplaceBinary` the deliberate stub), and the root-confined
+monitor's Landlock ruleset already reserves write access to the binary's
+directory. Grain: worker does fetch+verify+self-test (network + CPU,
+unprivileged, reusing `detent-update`'s check/prepare/probe chain), streams
+the verified image over the channel, monitor does swap+restart. Two open
+pieces for that slice: (a) restart+healthz+rollback currently lives in
+CLI-side `restart_and_check` — the monitor IS the process being replaced, so
+it needs its own re-exec/healthz/rollback sequence, not a copy of the CLI's;
+(b) the mutating-install audit record is written worker-side by the engine
+(PLAN §2.5), since the monitor holds no audit store.
 * **Same path, different method.** `GET` stays read-only on the stamp;
-`POST` mutates. Axum routes by method on one path (`services.rs:54` does
+`POST` mutates. Axum routes by method on one path (`services.rs` does
 `get(status).post(action)`); `table()` carries both entries. The OpenAPI
 regen (`docs/openapi.json`) ships with the change, handler-doc delta only.
-
----
+* **Stale doc rides with the implementation.** `system.rs`'s handler doc
+still says "the check fetches the release feed over the network", which the
+interval-guard paragraph below it now contradicts — fix both paragraphs in
+the implementation commit, not here.
 
 ## 2026-09-20 - §2.9 step 6: interval-guarded check stamp lands
 
