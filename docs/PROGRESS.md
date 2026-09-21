@@ -16,10 +16,10 @@ entry's design is implemented as written: single `RestartCheck` seam in
 criterion's second half is met: a bad binary no longer installs and stays.
 
 Two fixes on top of the design:
-`* `update` now implies `web` in `crates/detent/Cargo.toml` — the restart
+- `update` now implies `web` in `crates/detent/Cargo.toml` — the restart
 check reads config and cert through `detent-web`, so an updater without it
 could not compile.
-`* `Unsupported` maps to `NotAService`, not `Unhealthy` — `NullManager` (no
+- `Unsupported` maps to `NotAService`, not `Unhealthy` — `NullManager` (no
 init system) and `LaunchdManager::act` (macOS status-only by design) mean no
 service to restart, and rolling back a good binary there would be wrong.
 
