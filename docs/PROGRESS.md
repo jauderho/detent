@@ -59,7 +59,7 @@ network. Request body: `{"version": "<tag>"}` typed + `deny_unknown_fields`,
 ≤ 256 KiB per App. D. When the execution path later lands, refuse-closed:
 no stamp with that tag, or feed unreachable from the worker, → 503/409,
 never "no update". In this slice the engine answers `Unsupported`, so the
-POST returns 409/503 with a reason and installs nothing (decision 1 below).
+POST returns 500 `ops-unsupported` with a reason and installs nothing (decision 1 below).
 
 ### Two decisions already made, do not relitigate
 
@@ -67,7 +67,7 @@ POST returns 409/503 with a reason and installs nothing (decision 1 below).
 privilege-dropped (PLAN §2.4); the swap needs operator privileges (step 5b
 runs in the CLI process) and `Request::ReplaceBinary` is still `Unsupported`
 in the monitor. The POST therefore lands as: route + authz + audit + engine
-`Unsupported` → 409/503 with a reason, like `CertRenew` today. The later
+`Unsupported` → 500 `ops-unsupported` with a reason, like `CertRenew` today. The later
 wiring slice uses the monitor path PLAN's privilege model was built for —
 **not** a queue-file-then-CLI-cron: the proto seam already exists
 (`proto.rs` calls `ReplaceBinary` the deliberate stub), and the root-confined
