@@ -169,11 +169,23 @@ pub(super) async fn update(
     // read-only operation writes no audit record on success (PLAN §2.5).
     authorize(&caller, &Operation::UpdateStatus)?;
     let stamp = state.update_stamp();
-    let cached = tokio::task::spawn_blocking(move || detent_update::update::read_cached(&stamp))
-        .await
-        .map_err(|_| update_check_failed())?;
+    let rejected = state.bad_stamp();
+    let (cached, bad) = tokio::task::spawn_blocking(move || {
+        let cached = detent_update::update::read_cached(&stamp);
+        let bad = detent_update::update::read_bad(&rejected);
+        (cached, bad)
+    })
+    .await
+    .map_err(|_| update_check_failed())?;
     if let Some(cached) = cached {
-        return Ok(Json(cached.report.into()));
+        let poisoned = cached
+            .report
+            .tag
+            .as_deref()
+            .is_some_and(|tag| bad.iter().any(|b| b == tag));
+        if !poisoned {
+            return Ok(Json(cached.report.into()));
+        }
     }
     let policy = Policy {
         min_age_days: u64::from(state.config.update.min_age_days),
@@ -184,7 +196,7 @@ pub(super) async fn update(
     let report = tokio::task::spawn_blocking(move || {
         let transport =
             detent_update::fetch::RealTransport::new().map_err(|_| update_check_failed())?;
-        update_report(&transport, &policy)
+        update_report(&transport, &policy, &bad)
     })
     .await
     .map_err(|_| update_check_failed())?;
@@ -304,10 +316,11 @@ impl From<CheckReport> for UpdateReport {
 pub(super) fn update_report(
     transport: &dyn Transport,
     policy: &Policy,
+    bad: &[String],
 ) -> Result<UpdateReport, ApiError> {
     let current =
         semver::Version::parse(env!("CARGO_PKG_VERSION")).map_err(|_| update_check_failed())?;
-    detent_update::update::check(transport, &current, policy, OffsetDateTime::now_utc())
+    detent_update::update::check(transport, &current, policy, OffsetDateTime::now_utc(), bad)
         .map(UpdateReport::from)
         .map_err(|_| update_check_failed())
 }
@@ -550,7 +563,7 @@ mod tests {
     #[test]
     fn update_report_maps_a_qualifying_release() -> R {
         let feed = feed("v0.0.2", "", r#""2026-01-01T00:00:00Z""#);
-        let report = update_report(&Feed(feed), &Policy::default())
+        let report = update_report(&Feed(feed), &Policy::default(), &[])
             .map_err(|_| "a newer, old-enough release should qualify")?;
         assert!(report.update_available);
         assert_eq!(report.tag.as_deref(), Some("v0.0.2"));
@@ -566,7 +579,7 @@ mod tests {
         // client can explain why it is not offered (detent-update's own
         // `DowngradeRefused` report).
         let older = feed("v0.0.0", "", r#""2026-01-01T00:00:00Z""#);
-        let report = update_report(&Feed(older), &Policy::default())
+        let report = update_report(&Feed(older), &Policy::default(), &[])
             .map_err(|_| "a refusal is a report, not an error")?;
         assert!(!report.update_available);
         assert_eq!(report.tag.as_deref(), Some("v0.0.0"));
@@ -574,7 +587,7 @@ mod tests {
         assert!(!report.security);
 
         // An empty feed has nothing at all: no tag, no date.
-        let report = update_report(&Feed("[]".to_owned()), &Policy::default())
+        let report = update_report(&Feed("[]".to_owned()), &Policy::default(), &[])
             .map_err(|_| "no candidates is a report, not an error")?;
         assert!(!report.update_available);
         assert_eq!(report.tag, None);
@@ -588,7 +601,7 @@ mod tests {
         // `detent-security: true` bypasses the age gate, so an unpublished
         // release still qualifies — and is reported as a security one.
         let feed = feed("v0.0.2", "detent-security: true", "null");
-        let report = update_report(&Feed(feed), &Policy::default())
+        let report = update_report(&Feed(feed), &Policy::default(), &[])
             .map_err(|_| "a security release should qualify")?;
         assert!(report.update_available);
         assert!(report.security);
@@ -597,7 +610,7 @@ mod tests {
 
     #[test]
     fn update_report_refuses_closed_when_the_feed_is_unreachable() -> R {
-        let error = match update_report(&Dead, &Policy::default()) {
+        let error = match update_report(&Dead, &Policy::default(), &[]) {
             Ok(report) => {
                 return Err(format!("an unreachable feed must not answer {report:?}").into());
             }
@@ -630,6 +643,20 @@ mod tests {
                 "security": true,
             })
         );
+        Ok(())
+    }
+
+    #[test]
+    fn update_report_skips_a_bad_tag() -> R {
+        let feed = feed("v0.0.2", "", r#""2026-01-01T00:00:00Z""#);
+        let bad = vec!["v0.0.2".to_owned()];
+        let report = update_report(&Feed(feed), &Policy::default(), &bad)
+            .map_err(|_| "a bad tag must not be offered")?;
+        assert!(
+            !report.update_available,
+            "bad tag is filtered before select"
+        );
+        assert_eq!(report.tag, None);
         Ok(())
     }
 
