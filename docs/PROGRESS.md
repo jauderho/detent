@@ -35,9 +35,10 @@ doc ("candidates" copy-paste → 24 h freshness window).
 
 Tests: 153 detent + 68 detent-update + 301 detent-web pass; cache round-trip /
 stale / skew / corrupt-miss / force-guard, CLI fresh-stamp short-circuit with
-a panicking transport, endpoint via existing integration tests. Clippy clean
-except pre-existing `too_many_lines` on the four-shapes test (untouched).
-`docs/openapi.json` regenerated (handler doc only).
+a panicking transport, endpoint via existing integration tests. Clippy emits
+one `too_many_lines` warning on the four-shapes test (also present on the
+stashed baseline; extraction deferred). `docs/openapi.json` regenerated
+(handler doc only).
 
 ## 2026-09-20 - Phase 9 done: restart + healthz + rollback lands (PLAN §2.9 step 5c)
 
