@@ -2218,10 +2218,11 @@ mod tests {
         }
     }
 
-    /// `(exit, stdout, notes)` from a `check_report` run.
+    /// `(exit, stdout, notes)` from a `check_report` run. Keeps the shape
+    /// tests under the line limit.
     #[cfg(feature = "update")]
     type CheckRun = Result<(Exit, Vec<u8>, Vec<u8>), Box<dyn std::error::Error>>;
-    /// `(exit, stdout, notes)`. Keeps the shape tests under the line limit.
+    /// Run `check_report` with a fresh per-call stamp dir.
     #[cfg(feature = "update")]
     #[allow(clippy::missing_errors_doc)]
     fn run_check(
