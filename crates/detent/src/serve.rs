@@ -377,6 +377,7 @@ fn prepare_worker(
         &hostnames,
         engine_handle,
         auth_state,
+        settings.state_root.clone(),
         renderer,
         streams,
     ))?;
@@ -400,6 +401,7 @@ async fn bind_web_server(
     hostnames: &[String],
     engine_handle: detent_web::EngineHandle,
     auth_state: detent_web::AuthState,
+    state_root: std::path::PathBuf,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> Option<detent_web::Server> {
@@ -454,6 +456,7 @@ async fn bind_web_server(
         config,
         origin,
         std::sync::Arc::clone(&store),
+        state_root,
     );
     let bind_config = std::sync::Arc::clone(&state.config);
     let router = detent_web::router(state);
@@ -765,6 +768,7 @@ mod web_tests {
             &["box.example".to_owned()],
             handle,
             auth_state,
+            dir.path().to_path_buf(),
             &renderer,
             &mut streams,
         )
@@ -812,6 +816,7 @@ mod web_tests {
             &["box.example".to_owned()],
             handle,
             auth_state,
+            dir.path().to_path_buf(),
             &renderer,
             &mut streams,
         )
@@ -855,6 +860,7 @@ mod web_tests {
             &["box.example".to_owned()],
             handle,
             auth_state,
+            dir.path().to_path_buf(),
             &renderer,
             &mut streams,
         )

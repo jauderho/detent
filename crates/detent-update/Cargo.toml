@@ -45,6 +45,7 @@ tokio = { workspace = true, features = ["rt", "net", "time"] }
 rcgen = { workspace = true, optional = true, features = ["pem"] }
 
 [dev-dependencies]
+rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 
 [[bin]]

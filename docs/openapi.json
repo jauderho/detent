@@ -790,7 +790,7 @@
           "system"
         ],
         "summary": "`GET /api/v1/system/update`.",
-        "description": "The update status the web layer answers directly: the check fetches the\nrelease feed over the network and lives in [`detent_update`], which the\noperations engine does not depend on and cannot answer for. Read-only,\nlike every other endpoint in this module — **installing** an update is a\n`write`-scoped, CSRF-checked `POST` that waits until the privileged swap\n(PLAN §2.9 steps 5b–5c) actually lands; nothing here installs anything.",
+        "description": "The update status the web layer answers directly: the check fetches the\nrelease feed over the network and lives in [`detent_update`], which the\noperations engine does not depend on and cannot answer for. Read-only,\nlike every other endpoint in this module — **installing** an update is a\n`write`-scoped, CSRF-checked `POST` that waits until the privileged swap\n(PLAN §2.9 steps 5b–5c) actually lands; nothing here installs anything.\n\nInterval-guarded (PLAN §2.9 steps 5a and 6): `detent update --check`\n(the daily cron) writes `<state_root>/update/check.json` at most once\nper 24 h; this handler prefers that stamp and only reaches the network\nwhen no stamp exists yet. A read-scoped caller can no longer make this\nhost poll GitHub in a loop.",
         "operationId": "update",
         "responses": {
           "200": {

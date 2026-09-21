@@ -140,6 +140,12 @@ pub(super) fn cert_report(state: &AppState) -> CertReport {
 /// like every other endpoint in this module — **installing** an update is a
 /// `write`-scoped, CSRF-checked `POST` that waits until the privileged swap
 /// (PLAN §2.9 steps 5b–5c) actually lands; nothing here installs anything.
+///
+/// Interval-guarded (PLAN §2.9 steps 5a and 6): `detent update --check`
+/// (the daily cron) writes `<state_root>/update/check.json` at most once
+/// per 24 h; this handler prefers that stamp and only reaches the network
+/// when no stamp exists yet. A read-scoped caller can no longer make this
+/// host poll GitHub in a loop.
 #[cfg_attr(test, utoipa::path(
     get,
     path = UPDATE_PATH,
@@ -159,22 +165,19 @@ pub(super) async fn update(
     // refusal must still be this endpoint's. No engine call happens, and a
     // read-only operation writes no audit record on success (PLAN §2.5).
     authorize(&caller, &Operation::UpdateStatus)?;
+    let stamp = state.update_stamp();
+    let cached = tokio::task::spawn_blocking(move || detent_update::update::read_cached(&stamp))
+        .await
+        .map_err(|_| update_check_failed())?;
+    if let Some(cached) = cached {
+        return Ok(Json(cached.report.into()));
+    }
     let policy = Policy {
         min_age_days: u64::from(state.config.update.min_age_days),
         allow_downgrade: false,
     };
-    // The fetch is synchronous network I/O with a 30 s cap per GET; keep it
-    // off the async workers.
-    //
-    // ponytail: uncached — every call reaches the release feed, so a
-    // read-scoped caller can make this host poll GitHub in a loop, holding one
-    // blocking thread per request. Deliberately not cached yet: the real
-    // mitigation is a check *period*, not a cache. Nothing about a release
-    // feed needs to be fresher than daily (PLAN §2.9 step 6's background
-    // check), so once that lands with its interval, the background result is
-    // what this endpoint should read and the network call disappears from the
-    // request path entirely. Add a cache only if that turns out not to cover
-    // it.
+    // No stamp yet: one live check. Off the async workers — synchronous
+    // network I/O with a 30 s cap per GET.
     let report = tokio::task::spawn_blocking(move || {
         let transport =
             detent_update::fetch::RealTransport::new().map_err(|_| update_check_failed())?;

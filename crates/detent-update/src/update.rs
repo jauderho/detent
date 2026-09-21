@@ -6,8 +6,9 @@
 //! verifies the candidate, [`confirm_features`] executes its `--self-test`
 //! probe and checks the feature set — and only a candidate that passes both
 //! reaches [`crate::install::swap`], the atomic rename that keeps
-//! `detent.prev`. The rest of step 5 — restart, `GET /healthz` within 30 s,
-//! roll back on failure — is not wired yet.
+//! `detent.prev`. Step 5's tail — restart, `GET /healthz` within 30 s,
+//! roll back on failure — is wired in the CLI via `restart_and_check`
+//! and [`crate::install::Installed::rollback`].
 
 use std::path::PathBuf;
 
@@ -341,6 +342,133 @@ pub fn prepare(
     })
 }
 
+/// Check cache for §2.9 steps 5a and 6: a dated [`CheckReport`] written and
+/// read from disk so stomping requests cannot make this host poll GitHub
+/// on every call. The interval is enforced by refusing to rewrite a stamp
+/// newer than 24 h unless the caller passes `force`; the request path only
+/// fetches fresh when no stamp exists yet.
+///
+/// Storage: `<state_root>/update/check.json`, atomic write, `0644`-alike via
+/// `write_atomic` (read-only state callers must be able to read it). Must
+/// not touch the network.
+mod cache {
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use serde::{Deserialize, Serialize};
+
+    use super::CheckReport;
+
+    /// How long a stamp stays fresh: 24 h (PLAN §2.9 step 6).
+    #[allow(clippy::duration_suboptimal_units)]
+    pub const CHECK_INTERVAL: Duration = Duration::from_secs(86_400);
+
+    /// Written beside the report so staleness is authoritative. `checked_at`
+    /// is stored as a Unix timestamp so the workspace's `time` crate (without
+    /// `serde`) can serialize it cheaply.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct CachedReport {
+        /// When the wrapped [`CheckReport`] was fetched.
+        #[serde(with = "ts_seconds")]
+        pub checked_at: time::OffsetDateTime,
+        /// The report that was fetched.
+        pub report: CheckReport,
+    }
+
+    mod ts_seconds {
+        use serde::{self, Deserialize, Deserializer, Serializer};
+
+        pub fn serialize<S>(value: &time::OffsetDateTime, s: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            s.serialize_i64(value.unix_timestamp())
+        }
+
+        pub fn deserialize<'de, D>(d: D) -> Result<time::OffsetDateTime, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            let secs = i64::deserialize(d)?;
+            time::OffsetDateTime::from_unix_timestamp(secs).map_err(serde::de::Error::custom)
+        }
+    }
+
+    /// The on-disk stamp for the interval-guarded check (PLAN §2.9 steps 5a
+    /// and 6): `<state_root>/update/check.json`.
+    #[must_use]
+    pub fn stamp_path(state_root: &Path) -> PathBuf {
+        state_root.join("update/check.json")
+    }
+
+    /// Read `<stamp>` if it exists and parses, else `None`. A corrupt file
+    /// is a miss, not an error — the next successful check overwrites it.
+    #[must_use]
+    pub fn read_cached(stamp: &Path) -> Option<CachedReport> {
+        let raw = std::fs::read(stamp).ok()?;
+        serde_json::from_slice(&raw).ok()
+    }
+
+    /// Whether `checked_at` is already fresh enough that the next check
+    /// should stay quiet unless forced. A `checked_at` in the future (clock
+    /// skew) is not fresh — treat it as stale so the next run corrects it.
+    #[must_use]
+    pub fn is_fresh(checked_at: time::OffsetDateTime, now: time::OffsetDateTime) -> bool {
+        #[allow(clippy::arithmetic_side_effects)]
+        {
+            checked_at <= now && (now - checked_at) < CHECK_INTERVAL
+        }
+    }
+
+    /// Atomic stamp write: `stamp` is `<state_root>/update/check.json`.
+    ///
+    /// Enforces the interval — returns `Ok(None)` when `stamp` is fresh and
+    /// `force` is false. Otherwise writes and returns `Ok(Some(stamp))`.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the filesystem reports when creating the parent directory or
+    /// writing the file.
+    pub fn write_cached(
+        stamp: &Path,
+        report: &CheckReport,
+        now: time::OffsetDateTime,
+        force: bool,
+    ) -> Result<Option<CachedReport>, std::io::Error> {
+        let cached = CachedReport {
+            checked_at: now,
+            report: report.clone(),
+        };
+        #[allow(clippy::collapsible_if)]
+        if !force {
+            if let Some(existing) = read_cached(stamp) {
+                if is_fresh(existing.checked_at, now) {
+                    return Ok(None);
+                }
+            }
+        }
+        if let Some(parent) = stamp.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let body = serde_json::to_vec_pretty(&cached)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        write_atomic(stamp, &body)?;
+        Ok(Some(cached))
+    }
+
+    fn write_atomic(path: &Path, body: &[u8]) -> std::io::Result<()> {
+        use std::io::Write as _;
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+        tmp.write_all(body)?;
+        tmp.as_file().sync_all()?;
+        tmp.persist(path).map_err(|e| e.error)?;
+        Ok(())
+    }
+}
+
+pub use cache::{CHECK_INTERVAL, CachedReport, is_fresh, read_cached, stamp_path, write_cached};
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
@@ -460,6 +588,51 @@ mod tests {
             check(&Failing, &current, &Policy::default(), now()),
             Err(UpdateError::Fetch(_))
         ));
+    }
+
+    #[test]
+    fn cached_report_round_trips_through_the_stamp() {
+        let dir = tempfile::TempDir::new().expect("stamp dir");
+        let stamp = stamp_path(dir.path());
+        let report = check(
+            &feed("v0.0.2", ""),
+            &semver::Version::new(0, 0, 1),
+            &Policy::default(),
+            now(),
+        )
+        .expect("canned report");
+        // ponytail: one focused test for round-trip, staleness, corrupt-miss, skew.
+        let written = write_cached(&stamp, &report, now(), false)
+            .expect("write")
+            .expect("fresh write");
+        assert_eq!(written.report, report);
+        let back = read_cached(&stamp).expect("read");
+        assert_eq!(back.report, report);
+        assert!(is_fresh(back.checked_at, now()));
+        // Stale: past the 24 h window.
+        #[allow(clippy::arithmetic_side_effects)]
+        let old = now() - std::time::Duration::from_secs(86_401);
+        assert!(!is_fresh(old, now()));
+        // Clock skew: checked_at in the future is stale, not fresh.
+        #[allow(clippy::arithmetic_side_effects)]
+        let future = now() + std::time::Duration::from_secs(60);
+        assert!(!is_fresh(future, now()));
+        // Corrupt file reads as a miss.
+        std::fs::write(&stamp, b"not json").expect("corrupt stamp");
+        assert!(read_cached(&stamp).is_none());
+        // Fresh stamp refuses a rewrite unless forced.
+        std::fs::remove_file(&stamp).expect("clear stamp");
+        write_cached(&stamp, &report, now(), false).expect("first write");
+        assert!(
+            write_cached(&stamp, &report, now(), false)
+                .expect("guarded")
+                .is_none()
+        );
+        assert!(
+            write_cached(&stamp, &report, now(), true)
+                .expect("forced")
+                .is_some()
+        );
     }
 
     /// Writes an executable `#!/bin/sh` script the probe can run.
