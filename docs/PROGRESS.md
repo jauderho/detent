@@ -5,6 +5,18 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-21 - detent-ffi C ABI lands (PLAN Phase 10)
+
+C ABI over ops (`crates/detent-ffi/src/lib.rs`, `deny(unwrap/expect/panic/unsafe)`):
+entry points return `Result` through field-wise header writes, no casts.
+`cbindgen.toml` pins the header contract, `include/detent.h` is checked in,
+`examples/ffi-c/main.c` exercises the surface (compiled outputs stay ignored:
+`.gitignore` keeps `main`/`main_dyn` out of the tree). `docs/FFI.md` records
+the contract and the open CI items (verify, semver, Miri, C-example run).
+Verify: `cargo test -p detent-ffi` 12 passed + C example `OK`; clippy clean;
+fmt clean.
+---
+
 ## 2026-09-21 - Monitor ReplaceBinary lands (PLAN §2.9 step 5b)
 
 `monitor.rs` `dispatch` answers `ReplaceBinary` instead of `Unsupported`:
