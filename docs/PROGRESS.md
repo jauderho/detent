@@ -15,8 +15,9 @@ lands), `UpdateApplyRequest` (`deny_unknown_fields`) + `UpdateAppliedView` +
 `render_applied` split, same-path GET+POST (`services.rs` precedent),
 `table()` 16→17, OpenAPI + `schema.d.ts` regen'd, stale GET doc fixed
 (first paragraph now defers to `apply_update`; redundant interval paragraph
-dropped when the regen churn surfaced it).
-
+dropped when the regen churn surfaced it). Audit UI trio included:
+`audit-op-update-apply` + `auditOpText` case + `OP_CASES` row, so the refusal
+records this slice writes render a caption, not an empty op cell.
 Tests: scope-mapping (write⇔mutating incl. new variant), engine refusal +
 one audit record, `render_applied` match/mismatch, body
 `deny_unknown_fields`, live 401/403/500 + `ops-unsupported` id, POST in

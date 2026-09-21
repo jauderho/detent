@@ -282,7 +282,7 @@ audit-op-audit-query = read audit log
 audit-op-cert-status = read certificate status
 audit-op-update-status = read update status
 audit-op-cert-renew = renew certificate
-
+audit-op-update-apply = install update
 ## Schema-driven module forms
 ## Chrome the form engine (web/src/forms) renders around a module's schema.
 ## Field captions come from the schema's own property names, and a field's
