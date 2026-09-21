@@ -7,7 +7,39 @@ repository.workspace = true
 description = "(Phase 10, optional) rmcp server over ops."
 publish = false
 
+[features]
+default = []
+mcp = [
+    "dep:detent-ops",
+    "dep:detent-platform",
+    "dep:schemars",
+    "dep:tokio",
+    "dep:rmcp",
+    "dep:http",
+    "dep:subtle",
+]
+
 [lints]
 workspace = true
 
 [dependencies]
+detent-core = { path = "../detent-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Everything MCP-specific is an optional dependency that only compiles when
+# the `mcp` feature is on. The default build keeps this crate as a stub that
+# re-exports `detent-ops` and nothing else, with no `rmcp` in its dep graph.
+detent-ops = { path = "../detent-ops", optional = true }
+detent-platform = { path = "../detent-platform", optional = true }
+schemars = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+rmcp = { version = "3.4.0", optional = true, features = [
+    "server",
+    "transport-io",
+    "transport-streamable-http-server",
+    "schemars",
+    "macros",
+] }
+http = { version = "1", optional = true }
+subtle = { workspace = true, optional = true }

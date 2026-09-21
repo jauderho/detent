@@ -147,3 +147,31 @@ because a check that cannot reach the release server must not be reported as
 - The one exception is `GET /api/v1/openapi.json`, described as a plain
   object: it returns this document, and naming its schema would mean carrying
   a copy of the OpenAPI meta-schema.
+
+## MCP surface
+
+The optional `mcp` feature ships an `rmcp` server (`crates/detent-mcp`)
+that exposes every `Operation` variant as one tool (`list_modules`,
+`get_module`, `validate`, `plan`, `apply`, `confirm_commit`,
+`rollback_commit`, `list_backups`, `restore`, `service_status`,
+`service_action`, `host_profile`, `audit_query`, `update_status`,
+`cert_status`, `cert_renew`, `update_apply`). Tool inputs mirror the REST
+request shapes above (`model`, `expected_hash` as 64 lowercase hex,
+`service_action`, `confirm_secs`, `commit_id`, `backup_id`, `audit_query`,
+`version`), so the JSON Schema an MCP client sees is the same JSON Schema
+a REST client sees; `Operation` is the shared truth and nothing here
+re-declares it. Auth is API-token only (`DETENT_MCP_TOKEN`), checked on
+every tool call alongside the same policy the REST layer enforces; a
+server built without a verifier fails closed. The server is
+transport-agnostic (stdio or streamable HTTP); the default build excludes
+it entirely (no `rmcp` in the graph).
+
+## OpenAPI <-> MCP schema parity
+
+Two tests pin the two surfaces together so neither drifts silently:
+`the_merged_table_registers_every_endpoint_and_no_get_mutates`
+(`crates/detent-web/src/api/mod.rs`) asserts the REST route table holds
+all 17 routes, and `every_operation_has_a_tool`
+(`crates/detent-mcp/src/mcp.rs`) asserts the MCP router holds all 17
+tools, one per `Operation` variant. A new `Operation` must add both a
+route and a tool or one of the two fails.
