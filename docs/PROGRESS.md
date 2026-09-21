@@ -5,6 +5,34 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-20 - Phase 9 done: restart + healthz + rollback lands (PLAN §2.9 step 5c)
+
+`detent update` now restarts, probes, and rolls back. The 2026-09-18 NEXT
+entry's design is implemented as written: single `RestartCheck` seam in
+`run.rs` (`Healthy`/`NotAService`/`Unhealthy`), `restart_and_check` reads
+`detent.toml` for the listen addr and pins `bootstrap.cert.der` via
+`wait_healthy` (`detent-update/src/health.rs`, committed `c79e508`), and
+`Unhealthy` calls `Installed::rollback()` then restarts again. M3 acceptance
+criterion's second half is met: a bad binary no longer installs and stays.
+
+Two fixes on top of the design:
+`* `update` now implies `web` in `crates/detent/Cargo.toml` — the restart
+check reads config and cert through `detent-web`, so an updater without it
+could not compile.
+`* `Unsupported` maps to `NotAService`, not `Unhealthy` — `NullManager` (no
+init system) and `LaunchdManager::act` (macOS status-only by design) mean no
+service to restart, and rolling back a good binary there would be wrong.
+
+Three hermetic tests in `run.rs` (`run_update_hermetic` + real atomic swap on
+a temp target, scripted restart seam): unhealthy→rolled-back with the
+previous binary restored and `.prev` consumed, rollback-restart failure
+saying the host needs attention, `NotAService` installing without rollback.
+Full `cargo test -p detent --features update`: 145 + 7 pass; clippy clean.
+
+**Open:** §2.9 step 6 background check (daily-ish interval; replaces the
+uncached-feed cache per the `ponytail:` note), `update --check --json`, the
+write-scoped install POST. "Mark the release bad" stays a separate commit.
+
 ## 2026-09-18 - NEXT: restart + healthz + rollback (PLAN §2.9 step 5c)
 
 **Status: designed, not yet implemented.** Written down before starting so it

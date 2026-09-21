@@ -554,7 +554,7 @@ fn self_test(
 #[cfg(feature = "update")]
 fn run_update(
     args: &crate::cli::UpdateArgs,
-    _cli: &Cli,
+    cli: &Cli,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
@@ -590,6 +590,7 @@ fn run_update(
     let staging_parent = target
         .parent()
         .map_or_else(std::env::temp_dir, std::path::Path::to_path_buf);
+    let config_path = Settings::from_cli(cli).config_path;
     run_update_on(
         &transport,
         &current,
@@ -605,9 +606,72 @@ fn run_update(
         // The swap runs in this process, with whatever privileges the
         // operator has (PLAN §2.9 step 5b); there is no privsep path.
         &|candidate| detent_update::install::swap(candidate, &target),
+        &|| restart_and_check(&config_path),
         renderer,
         streams,
     )
+}
+
+/// The systemd/OpenRC names detent's own service may carry. `packaging/`
+/// installs it as `detent`; the `.service` suffix is what `systemctl` prints,
+/// so both resolve.
+#[cfg(feature = "update")]
+const DETENT_UNITS: detent_core::descriptor::UnitNames = detent_core::descriptor::UnitNames {
+    systemd: &["detent.service", "detent"],
+    openrc: &["detent"],
+    bsdrc: &["detent"],
+};
+
+/// Restarts detent's own service and asks the listener whether it came back.
+///
+/// Reads `detent.toml` for the address to poll and the certificate to pin —
+/// the health check is the only reason this command needs the config at all,
+/// and a config it cannot read means a check it cannot make.
+#[cfg(feature = "update")]
+fn restart_and_check(config_path: &std::path::Path) -> RestartOutcome {
+    use detent_core::descriptor::ServiceAction;
+    use detent_platform::service::ServiceError;
+
+    let config = match detent_web::Config::load(config_path) {
+        Ok(config) => config,
+        Err(err) => return RestartOutcome::Unhealthy(err.to_string()),
+    };
+    let manager =
+        detent_platform::service::for_host(detent_platform::host::detect_real().profile.init);
+    match manager.act(&DETENT_UNITS, ServiceAction::Restart) {
+        Ok(_) => {}
+        // Nothing to restart: this host does not run detent as a service.
+        // The binary is installed and sound, so this is not a rollback.
+        // `Unsupported` is NullManager (no init system) and LaunchdManager
+        // (macOS is status-only by design): both mean no service to restart.
+        Err(
+            err @ (ServiceError::NoKnownUnit { .. }
+            | ServiceError::Unavailable(_)
+            | ServiceError::Unsupported(_)),
+        ) => {
+            return RestartOutcome::NotAService(err.to_string());
+        }
+        Err(err) => return RestartOutcome::Unhealthy(err.to_string()),
+    }
+
+    let cert_path = config
+        .tls
+        .cert_dir
+        .join(detent_web::tls::BOOTSTRAP_CERT_FILE);
+    let cert = match std::fs::read(&cert_path) {
+        Ok(cert) => cert,
+        Err(err) => {
+            return RestartOutcome::Unhealthy(format!("{}: {err}", cert_path.display()));
+        }
+    };
+    match detent_update::health::wait_healthy(
+        config.listen.addr,
+        &cert,
+        detent_update::health::DEADLINE,
+    ) {
+        Ok(()) => RestartOutcome::Healthy,
+        Err(err) => RestartOutcome::Unhealthy(err.to_string()),
+    }
 }
 
 /// The running build's own feature set, as the updater's `covers` check reads
@@ -635,6 +699,31 @@ type FeatureProbe =
 type BinarySwap<'a> =
     dyn Fn(&std::path::Path) -> Result<detent_update::Installed, detent_update::UpdateError> + 'a;
 
+/// Restarts the service and reports whether it came back serving.
+///
+/// One seam, not two: the restart and the health check are a single question
+/// — "is the new binary running and serving?" — and splitting them would let
+/// a test assert a restart that no health check followed, which is exactly
+/// the bug this step exists to prevent. Real implementation in
+/// [`restart_and_check`]; the tests substitute an answer.
+#[cfg(feature = "update")]
+type RestartCheck<'a> = dyn Fn() -> RestartOutcome + 'a;
+
+/// What restarting the service achieved.
+#[cfg(feature = "update")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestartOutcome {
+    /// Restarted, and `/healthz` answered in time.
+    Healthy,
+    /// This host does not run detent under its init system, so there was
+    /// nothing to restart. **Not** a rollback: the binary is sound, it simply
+    /// is not a managed service, and someone invoked the CLI by hand.
+    NotAService(String),
+    /// Restarted but never became healthy, or could not be restarted at all.
+    /// The swap must be undone.
+    Unhealthy(String),
+}
+
 /// The policy half of `run_update`, behind a `Transport` seam so tests run
 /// hermetic: pick `--check` vs bare-update without touching the network.
 /// The trust root and the candidate self-test probe are injected the same
@@ -652,6 +741,7 @@ fn run_update_on(
     staging_parent: &std::path::Path,
     probe: &FeatureProbe,
     swap: &BinarySwap<'_>,
+    restart: &RestartCheck<'_>,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
@@ -667,6 +757,7 @@ fn run_update_on(
         staging_parent,
         probe,
         swap,
+        restart,
         renderer,
         streams,
     )
@@ -741,6 +832,7 @@ fn apply_update(
     staging_parent: &std::path::Path,
     probe: &FeatureProbe,
     swap: &BinarySwap<'_>,
+    restart: &RestartCheck<'_>,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
@@ -749,7 +841,7 @@ fn apply_update(
             // §2.9 step 5's first half: the verified candidate must run and
             // cover this build's feature set before anything is installed.
             match probe(&candidate.binary_path) {
-                Ok(_) => install_candidate(&candidate, swap, renderer, streams),
+                Ok(_) => install_candidate(&candidate, swap, restart, renderer, streams),
                 Err(err) => failed(renderer, streams, &err.to_string()),
             }
         }
@@ -757,29 +849,90 @@ fn apply_update(
     }
 }
 
-/// §2.9 step 5b: the atomic swap, and the line naming what it kept. The
-/// restart and the `GET /healthz` window that would consume
-/// [`detent_update::Installed::rollback`] are the next step, not this one.
+/// §2.9 step 5b+5c: the atomic swap, then the restart-and-`GET /healthz`
+/// check. `Healthy` (or `NotAService`, where there is nothing to restart)
+/// keeps the install; `Unhealthy` rolls back via
+/// [`detent_update::Installed::rollback`] and restarts again.
 #[cfg(feature = "update")]
 fn install_candidate(
     candidate: &detent_update::StagedUpdate,
     swap: &BinarySwap<'_>,
+    restart: &RestartCheck<'_>,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
-    match swap(&candidate.binary_path) {
-        Ok(installed) => {
+    let installed = match swap(&candidate.binary_path) {
+        Ok(installed) => installed,
+        Err(err) => return failed(renderer, streams, &err.to_string()),
+    };
+    let previous = installed.previous().display().to_string();
+    let args = [
+        ("tag", candidate.tag.as_str()),
+        ("previous", previous.as_str()),
+    ];
+
+    match restart() {
+        RestartOutcome::Healthy => {
+            renderer.line(streams.out, MessageId::new("cli-update-installed"), &args)?;
+            Ok(Exit::Ok)
+        }
+        // The binary installed and is sound; this host just does not run it
+        // under an init system. Rolling back a good binary because the host
+        // has no systemd would be wrong, so this succeeds and says so.
+        RestartOutcome::NotAService(reason) => {
+            renderer.line(streams.out, MessageId::new("cli-update-installed"), &args)?;
             renderer.line(
-                streams.out,
-                MessageId::new("cli-update-installed"),
-                &[
-                    ("tag", &candidate.tag),
-                    ("previous", &installed.previous().display().to_string()),
-                ],
+                streams.notes,
+                MessageId::new("cli-update-not-restarted"),
+                &[("reason", &reason)],
             )?;
             Ok(Exit::Ok)
         }
-        Err(err) => failed(renderer, streams, &err.to_string()),
+        RestartOutcome::Unhealthy(reason) => {
+            roll_back(installed, &reason, restart, renderer, streams)
+        }
+    }
+}
+
+/// Puts the previous binary back and restarts again.
+///
+/// Two ways to fail, and they are not the same: a rollback that restores
+/// service leaves the host exactly as it started, which is a failed update; a
+/// rollback that cannot restore service leaves a host only a human can fix,
+/// and must say so rather than report a tidy failure.
+#[cfg(feature = "update")]
+fn roll_back(
+    installed: detent_update::Installed,
+    reason: &str,
+    restart: &RestartCheck<'_>,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Exit> {
+    if let Err(err) = installed.rollback() {
+        renderer.line(
+            streams.notes,
+            MessageId::new("cli-update-rollback-failed"),
+            &[("reason", reason), ("error", &err.to_string())],
+        )?;
+        return Ok(Exit::Failed);
+    }
+    match restart() {
+        RestartOutcome::Healthy | RestartOutcome::NotAService(_) => {
+            renderer.line(
+                streams.notes,
+                MessageId::new("cli-update-rolled-back"),
+                &[("reason", reason)],
+            )?;
+            Ok(Exit::Failed)
+        }
+        RestartOutcome::Unhealthy(after) => {
+            renderer.line(
+                streams.notes,
+                MessageId::new("cli-update-rollback-failed"),
+                &[("reason", reason), ("error", &after)],
+            )?;
+            Ok(Exit::Failed)
+        }
     }
 }
 
@@ -1285,6 +1438,7 @@ mod tests {
             &trust,
             &recording_ok_probe(&never, &[]),
             &unreachable_swap(&never_swapped),
+            &healthy_restart(),
             true,
         )?;
         assert_eq!(run.exit, Exit::Ok);
@@ -1301,6 +1455,7 @@ mod tests {
             &trust,
             &recording_ok_probe(&never, &[]),
             &unreachable_swap(&never_swapped),
+            &healthy_restart(),
             false,
         )?;
         assert_eq!(run.exit, Exit::Failed);
@@ -1325,6 +1480,7 @@ mod tests {
             &fixture_trust()?,
             &recording_ok_probe(&probe_log(), &[]),
             &unreachable_swap(&probe_log()),
+            &healthy_restart(),
             true,
         )?;
         assert_eq!(run.exit, Exit::Failed);
@@ -1353,6 +1509,7 @@ mod tests {
             &trust,
             &recording_ok_probe(&never, &[]),
             &unreachable_swap(&never_swapped),
+            &healthy_restart(),
             false,
         )?;
         assert_eq!(run.exit, Exit::Failed);
@@ -1375,6 +1532,7 @@ mod tests {
             &trust,
             &recording_ok_probe(&probe_log(), &[]),
             &unreachable_swap(&probe_log()),
+            &healthy_restart(),
             false,
         )?;
         assert_eq!(run.exit, Exit::Failed);
@@ -1409,6 +1567,7 @@ mod tests {
             &trust,
             &recording_ok_probe(&never, &[]),
             &unreachable_swap(&never_swapped),
+            &healthy_restart(),
             false,
         )?;
         assert_eq!(run.exit, Exit::Failed);
@@ -1435,6 +1594,7 @@ mod tests {
             &trust,
             &recording_ok_probe(&calls, &["hosts", "web", "update"]),
             &recording_swap(&swaps, &target),
+            &healthy_restart(),
             false,
         )?;
         assert_eq!(run.exit, Exit::Ok);
@@ -1469,6 +1629,7 @@ mod tests {
             &trust,
             &recording_ok_probe(&calls, &[]),
             &unreachable_swap(&swaps),
+            &healthy_restart(),
             false,
         )?;
         assert_eq!(run.exit, Exit::Failed);
@@ -1492,6 +1653,7 @@ mod tests {
             &trust,
             &recording_err_probe(&calls, make_self_test_failure),
             &unreachable_swap(&swaps),
+            &healthy_restart(),
             false,
         )?;
         assert_eq!(run.exit, Exit::Failed);
@@ -1525,6 +1687,7 @@ mod tests {
             &fixture_trust()?,
             &recording_ok_probe(&probe_log(), &["hosts", "web", "update"]),
             &recording_swap(&swaps, &absent),
+            &healthy_restart(),
             false,
         )?;
         assert_eq!(run.exit, Exit::Failed);
@@ -1551,6 +1714,7 @@ mod tests {
             &fixture_trust()?,
             &recording_ok_probe(&calls, &["hosts", "web", "update"]),
             &recording_swap(&swaps, &target),
+            &healthy_restart(),
             false,
         )?;
         assert_eq!(run.exit, Exit::Ok);
@@ -1586,6 +1750,111 @@ mod tests {
             swaps.borrow().as_slice(),
             calls.as_slice(),
             "the swap must install exactly the binary that was probed"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn an_unhealthy_restart_rolls_back_and_restores_the_previous_binary() -> R {
+        // Swap installs, the first restart reports an unhealthy listener, the
+        // rollback puts the previous binary back and the second restart is
+        // healthy: a failed update that leaves the host as it started.
+        let calls = probe_log();
+        let swaps = probe_log();
+        let (_home, target) = install_target()?;
+        let attempts = std::rc::Rc::new(std::cell::Cell::new(0));
+        let restart = {
+            let attempts = attempts.clone();
+            move || {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() == 1 {
+                    super::RestartOutcome::Unhealthy("listener never answered".to_owned())
+                } else {
+                    super::RestartOutcome::Healthy
+                }
+            }
+        };
+        let run = run_update_hermetic(
+            &verified_feed()?,
+            &semver::Version::new(0, 0, 1),
+            &detent_update::Policy::default(),
+            &fixture_trust()?,
+            &recording_ok_probe(&calls, &["hosts", "web", "update"]),
+            &recording_swap(&swaps, &target),
+            &restart,
+            false,
+        )?;
+        assert_eq!(run.exit, Exit::Failed);
+        assert!(run.notes.contains("rolled back"), "{}", run.notes);
+        assert_eq!(attempts.get(), 2, "the rollback must restart again");
+        assert_eq!(
+            std::fs::read(&target)?,
+            RUNNING_BINARY,
+            "the target must hold the previous binary again"
+        );
+        assert!(
+            !target.with_file_name("detent.prev").exists(),
+            "the rollback must consume the kept binary"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn a_rollback_that_cannot_restore_service_says_so_loudly() -> R {
+        // The post-rollback restart also fails: the binary is the original
+        // again, but the host is not serving, and only a human can fix that.
+        let calls = probe_log();
+        let swaps = probe_log();
+        let (_home, target) = install_target()?;
+        let restart = || super::RestartOutcome::Unhealthy("listener never answered".to_owned());
+        let run = run_update_hermetic(
+            &verified_feed()?,
+            &semver::Version::new(0, 0, 1),
+            &detent_update::Policy::default(),
+            &fixture_trust()?,
+            &recording_ok_probe(&calls, &["hosts", "web", "update"]),
+            &recording_swap(&swaps, &target),
+            &restart,
+            false,
+        )?;
+        assert_eq!(run.exit, Exit::Failed);
+        assert!(run.notes.contains("needs attention"), "{}", run.notes);
+        assert_eq!(
+            std::fs::read(&target)?,
+            RUNNING_BINARY,
+            "the rollback must still have restored the previous binary"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn no_service_manager_installs_without_rollback() -> R {
+        // Nothing to restart on this host: the installed binary is sound, so
+        // the flow succeeds and says the service was not restarted.
+        let calls = probe_log();
+        let swaps = probe_log();
+        let (_home, target) = install_target()?;
+        let restart = || super::RestartOutcome::NotAService("no init system".to_owned());
+        let run = run_update_hermetic(
+            &verified_feed()?,
+            &semver::Version::new(0, 0, 1),
+            &detent_update::Policy::default(),
+            &fixture_trust()?,
+            &recording_ok_probe(&calls, &["hosts", "web", "update"]),
+            &recording_swap(&swaps, &target),
+            &restart,
+            false,
+        )?;
+        assert_eq!(run.exit, Exit::Ok);
+        assert!(run.out.contains("installed v0.0.2"), "{}", run.out);
+        assert!(run.notes.contains("not restarted"), "{}", run.notes);
+        assert_eq!(
+            std::fs::read(&target)?,
+            binary_fixture()?,
+            "the install must stand: no rollback without a service"
         );
         Ok(())
     }
@@ -1741,6 +2010,13 @@ mod tests {
         })
     }
 
+    /// A restart that always reports a serving listener: the default for
+    /// tests about the steps *before* the restart.
+    #[cfg(feature = "update")]
+    fn healthy_restart() -> impl Fn() -> super::RestartOutcome {
+        || super::RestartOutcome::Healthy
+    }
+
     #[cfg(feature = "update")]
     struct BareRun {
         exit: Exit,
@@ -1758,6 +2034,7 @@ mod tests {
         trust: &detent_update::TrustRoot,
         probe: &super::FeatureProbe,
         swap: &super::BinarySwap<'_>,
+        restart: &super::RestartCheck<'_>,
         check_only: bool,
     ) -> Result<BareRun, Box<dyn std::error::Error>> {
         let messages = crate::i18n::Messages::new(Some("en-US"));
@@ -1778,6 +2055,7 @@ mod tests {
             &std::env::temp_dir(),
             probe,
             swap,
+            restart,
             &renderer,
             &mut Streams {
                 input: &mut std::io::empty(),

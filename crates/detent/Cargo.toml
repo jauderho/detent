@@ -70,7 +70,10 @@ acme-dns01 = ["dep:detent-acme"]
 acme-dns-providers = ["acme-dns01", "detent-acme/dns-providers"]
 acme-attest = ["acme-dns01"]
 
-update = ["dep:detent-update", "dep:semver", "dep:time"]
+## Implies `web`: the post-swap restart check reads `detent.toml` through
+## `detent-web`'s config and pins the listener's serving cert (`detent-web`
+## already owns both), so an updater without it could not verify the restart.
+update = ["dep:detent-update", "dep:semver", "dep:time", "web"]
 
 mcp = ["dep:detent-mcp"]
 
