@@ -29,3 +29,6 @@ docs/spikes/**/*.mov
 docs/spikes/**/*.webm
 /spikes/artifacts
 /spikes/**/target
+# Compiled C example outputs (PLAN Phase 10); the sources stay, binaries do not.
+examples/ffi-c/main
+examples/ffi-c/main_dyn

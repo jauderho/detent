@@ -613,6 +613,12 @@ dependencies = [
 [[package]]
 name = "detent-ffi"
 version = "0.0.1"
+dependencies = [
+ "detent-core",
+ "detent-modules",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "detent-i18n"

@@ -32,3 +32,20 @@ arithmetic_side_effects = "warn"
 multiple_crate_versions = "allow"
 
 [dependencies]
+detent-core = { path = "../detent-core" }
+detent-modules = { path = "../detent-modules" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+## Forwarded to `detent-modules` so the FFI can resolve this module's id
+## without taking a dependency on the module crate directly.
+default = ["module-hosts"]
+module-hosts = ["detent-modules/module-hosts"]
+module-resolver = ["detent-modules/module-resolver"]
+module-chrony = ["detent-modules/module-chrony"]
+module-mounts = ["detent-modules/module-mounts"]
+module-nfs = ["detent-modules/module-nfs"]
+module-samba = ["detent-modules/module-samba"]
+module-dhcp = ["detent-modules/module-dhcp"]
+module-network = ["detent-modules/module-network"]
