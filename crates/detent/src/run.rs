@@ -2218,6 +2218,39 @@ mod tests {
         }
     }
 
+    /// `(exit, stdout, notes)` from a `check_report` run.
+    #[cfg(feature = "update")]
+    type CheckRun = Result<(Exit, Vec<u8>, Vec<u8>), Box<dyn std::error::Error>>;
+    /// `(exit, stdout, notes)`. Keeps the shape tests under the line limit.
+    #[cfg(feature = "update")]
+    #[allow(clippy::missing_errors_doc)]
+    fn run_check(
+        feed: &dyn detent_update::fetch::Transport,
+        current: &semver::Version,
+        policy: &detent_update::Policy,
+        now: time::OffsetDateTime,
+        renderer: &crate::output::Renderer<'_>,
+    ) -> CheckRun {
+        let tmp = tempfile::TempDir::new()?;
+        let stamp = detent_update::update::stamp_path(tmp.path());
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = super::check_report(
+            feed,
+            current,
+            policy,
+            now,
+            &stamp,
+            false,
+            renderer,
+            &mut Streams {
+                input: &mut std::io::empty(),
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        Ok((exit, out, notes))
+    }
     #[cfg(feature = "update")]
     #[test]
     fn update_check_report_renders_all_four_shapes() -> R {
@@ -2245,24 +2278,7 @@ mod tests {
             let report: CheckReport = detent_update::update::check(&feed, &current, &policy, now)?;
             assert_eq!(report.update_available, available, "{tag} {body}");
             assert_eq!(report.security, security);
-            let tmp = tempfile::TempDir::new()?;
-            let stamp = detent_update::update::stamp_path(tmp.path());
-            let mut out = Vec::new();
-            let mut notes = Vec::new();
-            let exit = super::check_report(
-                &feed,
-                &current,
-                &policy,
-                now,
-                &stamp,
-                false,
-                &renderer,
-                &mut Streams {
-                    input: &mut std::io::empty(),
-                    out: &mut out,
-                    notes: &mut notes,
-                },
-            )?;
+            let (exit, out, _) = run_check(&feed, &current, &policy, now, &renderer)?;
             assert_eq!(exit, Exit::Ok);
             let text = String::from_utf8(out)?;
             if available {
@@ -2277,49 +2293,16 @@ mod tests {
             json: true,
             verbose: false,
         };
-        let tmp = tempfile::TempDir::new()?;
-        let stamp = detent_update::update::stamp_path(tmp.path());
-        let mut out = Vec::new();
-        let mut notes = Vec::new();
-        let exit = super::check_report(
-            &OneFeed {
-                tag: "v0.0.2",
-                body: "",
-                when: when.to_owned(),
-            },
-            &current,
-            &policy,
-            now,
-            &stamp,
-            false,
-            &renderer_json,
-            &mut Streams {
-                input: &mut std::io::empty(),
-                out: &mut out,
-                notes: &mut notes,
-            },
-        )?;
+        let json_feed = OneFeed {
+            tag: "v0.0.2",
+            body: "",
+            when: when.to_owned(),
+        };
+        let (exit, out, _) = run_check(&json_feed, &current, &policy, now, &renderer_json)?;
         assert_eq!(exit, Exit::Ok);
         let parsed: serde_json::Value = serde_json::from_slice(&out)?;
         assert_eq!(parsed.get("tag"), Some(&serde_json::json!("v0.0.2")));
-        let tmp = tempfile::TempDir::new()?;
-        let stamp = detent_update::update::stamp_path(tmp.path());
-        let mut out = Vec::new();
-        let mut notes = Vec::new();
-        let exit = super::check_report(
-            &FailingFeed,
-            &current,
-            &policy,
-            now,
-            &stamp,
-            false,
-            &renderer,
-            &mut Streams {
-                input: &mut std::io::empty(),
-                out: &mut out,
-                notes: &mut notes,
-            },
-        )?;
+        let (exit, out, notes) = run_check(&FailingFeed, &current, &policy, now, &renderer)?;
         assert_eq!(exit, Exit::Failed);
         assert!(out.is_empty());
         assert!(!notes.is_empty());

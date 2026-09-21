@@ -35,10 +35,11 @@ doc ("candidates" copy-paste → 24 h freshness window).
 
 Tests: 153 detent + 68 detent-update + 301 detent-web pass; cache round-trip /
 stale / skew / corrupt-miss / force-guard, CLI fresh-stamp short-circuit with
-a panicking transport, endpoint via existing integration tests. Clippy emits
-one `too_many_lines` warning on the four-shapes test (also present on the
-stashed baseline; extraction deferred). `docs/openapi.json` regenerated
-(handler doc only).
+a panicking transport, endpoint via existing integration tests. The stamp
+setup pushed the four-shapes test over clippy's 100-line limit, so it now
+goes through a `run_check` helper (fresh stamp dir + Streams per call).
+Workspace clippy and `cargo fmt --check` clean. `docs/openapi.json`
+regenerated (handler doc only).
 
 ## 2026-09-20 - Phase 9 done: restart + healthz + rollback lands (PLAN §2.9 step 5c)
 
