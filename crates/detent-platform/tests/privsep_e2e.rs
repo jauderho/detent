@@ -358,7 +358,7 @@ fn run_check_and_service_report_unavailable_with_no_collaborators() -> TestResul
 // ---------------------------------------------------------------------------
 
 #[test]
-fn mount_and_replace_binary_answer_unsupported() -> TestResult {
+fn mount_still_answers_unsupported() -> TestResult {
     let fx = fixture(b"v1")?;
     let (mut client, handle) = spawn_client(fx.allow()?)?;
     let target = target_id(&client, &fx);
@@ -370,14 +370,24 @@ fn mount_and_replace_binary_answer_unsupported() -> TestResult {
         Response::Error(ProtoError::Unsupported(_))
     ));
 
+    client.shutdown()?;
+    join_shutdown(handle);
+    Ok(())
+}
+
+#[test]
+fn replace_binary_rejects_a_missing_staged_file() -> TestResult {
+    let fx = fixture(b"v1")?;
+    let (mut client, handle) = spawn_client(fx.allow()?)?;
+
     client.channel_mut().send(&Request::ReplaceBinary {
-        len: 4096,
+        len: 8,
         sha256: Sha256Digest::of(b"binary"),
     })?;
     let response: Response = client.channel_mut().recv()?;
     assert!(matches!(
         response,
-        Response::Error(ProtoError::Unsupported(_))
+        Response::Error(ProtoError::Io(message)) if message.contains("staged")
     ));
 
     client.shutdown()?;

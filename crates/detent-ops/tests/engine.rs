@@ -443,6 +443,11 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
     let allow = Allowlist::from_modules(&[allow_descriptor], &config)?;
 
     let (monitor_end, worker_end) = Channel::pair()?;
+    // Point the in-test swap at this harness's own temp target instead of the
+    // real test binary: the monitor swaps `current_exe` by default, and these
+    // tests run in parallel, so a global override would steer every monitor
+    // at once. A per-monitor field keeps each swap inside its own tempdir.
+    let binary_target = target.clone();
     let handle = thread::spawn(move || {
         let mut channel = monitor_end;
         let hooks = if setup.hooks {
@@ -453,7 +458,9 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
         } else {
             Hooks::default()
         };
-        Monitor::new(allow, hooks).serve(&mut channel)
+        let mut monitor = Monitor::new(allow, hooks);
+        monitor.set_binary_override(binary_target);
+        monitor.serve(&mut channel)
     });
 
     let mut client = Client::new(worker_end);
@@ -1444,8 +1451,7 @@ fn update_status_is_unsupported_in_the_engine_and_writes_no_audit_record() -> Te
     fx.finish()
 }
 #[test]
-fn update_apply_is_unsupported_until_monitor_wiring_lands_and_writes_one_audit_record() -> TestResult
-{
+fn update_apply_returns_unsupported_when_state_root_is_not_set() -> TestResult {
     let mut fx = harness(b"v1\n", Setup::default())?;
     let err = fx.run(Operation::UpdateApply {
         version: "v1.2.3".to_owned(),
@@ -1464,6 +1470,162 @@ fn update_apply_is_unsupported_until_monitor_wiring_lands_and_writes_one_audit_r
     assert_eq!(first.op, OpKind::UpdateApply);
     assert_eq!(first.result, AuditResult::Error);
     assert_eq!(first.error_id.as_deref(), Some("ops-unsupported"));
+    fx.finish()
+}
+
+#[test]
+fn update_apply_is_swapped_through_the_monitor_and_audited_once() -> TestResult {
+    let mut fx = harness(b"v1\n", Setup::default())?;
+    // The harness's tempdir is `_dir`; we need a state_root the engine can
+    // hand to the monitor via `set_state_root`. The harness already built a
+    // state root at `<root>/state`, which we now reuse.
+    let state_root = fx
+        .target
+        .parent()
+        .ok_or("harness missing parent")?
+        .join("state");
+    fx.engine.set_state_root(&state_root);
+
+    let bytes = b"updated-binary-bytes";
+    let digest = Sha256Digest::of(bytes);
+    let staged_dir = state_root.join("update").join("staged");
+    std::fs::create_dir_all(&staged_dir)?;
+    std::fs::write(staged_dir.join(digest.to_string()), bytes)?;
+
+    let outcome = fx.run(Operation::UpdateApply {
+        version: digest.to_string(),
+    })?;
+    let OpOutcome::UpdateApplied { version } = outcome else {
+        return Err("expected UpdateApplied outcome".into());
+    };
+    assert_eq!(version, digest.to_string());
+
+    let records = fx.records();
+    assert_eq!(records.len(), 1);
+    let first = records.first().ok_or("the success was audited")?;
+    assert_eq!(first.op, OpKind::UpdateApply);
+    assert_eq!(first.result, AuditResult::Ok);
+    fx.finish()
+}
+#[test]
+fn update_apply_refuses_a_path_traversal_version() -> TestResult {
+    let mut fx = harness(b"v1\n", Setup::default())?;
+    let state_root = fx
+        .target
+        .parent()
+        .ok_or("harness missing parent")?
+        .join("state");
+    fx.engine.set_state_root(&state_root);
+    // A caller-controlled `version` must never escape `update/staged`: the
+    // engine answers Unsupported instead of reading `../../…` as root.
+    let err = fx.run(Operation::UpdateApply {
+        version: "../../etc/shadow".to_owned(),
+    });
+    assert!(matches!(
+        err,
+        Err(OpsError::Unsupported {
+            what: "update_apply"
+        })
+    ));
+    // Mutating, so the refusal is audited exactly once.
+    assert_eq!(fx.records().len(), 1);
+    fx.finish()
+}
+
+#[test]
+fn update_apply_refuses_dot_only_versions() -> TestResult {
+    let mut fx = harness(b"v1\n", Setup::default())?;
+    let state_root = fx
+        .target
+        .parent()
+        .ok_or("harness missing parent")?
+        .join("state");
+    fx.engine.set_state_root(&state_root);
+    // "." and ".." pass a naive char filter but are never staged names;
+    // joined they resolve to the staged dir itself / its parent.
+    for version in [".", ".."] {
+        let err = fx.run(Operation::UpdateApply {
+            version: version.to_owned(),
+        });
+        assert!(
+            matches!(
+                err,
+                Err(OpsError::Unsupported {
+                    what: "update_apply"
+                })
+            ),
+            "dot-only version must be refused: {version}"
+        );
+    }
+    // Mutating, so each refusal is audited exactly once.
+    assert_eq!(fx.records().len(), 2);
+    fx.finish()
+}
+
+#[test]
+fn update_apply_bridges_a_tag_to_the_digest_path_atomically() -> TestResult {
+    let mut fx = harness(b"v1\n", Setup::default())?;
+    let state_root = fx
+        .target
+        .parent()
+        .ok_or("harness missing parent")?
+        .join("state");
+    fx.engine.set_state_root(&state_root);
+    // Producer stages under the release tag; the monitor only reads the
+    // digest-named path. The engine must materialise it.
+    let bytes = b"tag-bridged-binary";
+    let digest = Sha256Digest::of(bytes);
+    let staged_dir = state_root.join("update").join("staged");
+    std::fs::create_dir_all(&staged_dir)?;
+    std::fs::write(staged_dir.join("v9.9.9"), bytes)?;
+    // The harness already pointed this test's monitor at `fx.target`.
+    let outcome = fx.run(Operation::UpdateApply {
+        version: "v9.9.9".to_owned(),
+    })?;
+    let OpOutcome::UpdateApplied { version } = outcome else {
+        return Err("expected UpdateApplied outcome".into());
+    };
+    assert_eq!(version, "v9.9.9");
+    // The swap consumed the staged file: it was renamed over the target, so
+    // the digest path no longer exists. The previous target contents survive
+    // at `<target>.prev`.
+    assert!(!staged_dir.join(digest.to_string()).exists());
+    assert_eq!(std::fs::read(&fx.target)?, bytes);
+    let file_name = fx
+        .target
+        .file_name()
+        .map_or_else(|| "target".to_owned(), |n| n.to_string_lossy().into_owned());
+    let prev = fx.target.with_file_name(format!("{file_name}.prev"));
+    assert_eq!(std::fs::read(prev)?, b"v1\n");
+    fx.finish()
+}
+
+#[test]
+fn update_apply_overwrites_a_stale_digest_file() -> TestResult {
+    let mut fx = harness(b"v1\n", Setup::default())?;
+    let state_root = fx
+        .target
+        .parent()
+        .ok_or("harness missing parent")?
+        .join("state");
+    fx.engine.set_state_root(&state_root);
+    let bytes = b"fresh-binary-bytes";
+    let digest = Sha256Digest::of(bytes);
+    let staged_dir = state_root.join("update").join("staged");
+    std::fs::create_dir_all(&staged_dir)?;
+    std::fs::write(staged_dir.join("v9.9.10"), bytes)?;
+    // A leftover digest file from a crashed earlier run: legitimate to
+    // overwrite, not a conflict — the monitor re-hashes before swapping.
+    std::fs::write(staged_dir.join(digest.to_string()), b"stale-partial-bytes")?;
+    // The harness already pointed this test's monitor at `fx.target`.
+    let outcome = fx.run(Operation::UpdateApply {
+        version: "v9.9.10".to_owned(),
+    })?;
+    let OpOutcome::UpdateApplied { version } = outcome else {
+        return Err("expected UpdateApplied outcome".into());
+    };
+    assert_eq!(version, "v9.9.10");
+    assert_eq!(std::fs::read(&fx.target)?, bytes);
     fx.finish()
 }
 

@@ -204,11 +204,11 @@ pub(super) async fn update(
 }
 /// `POST /api/v1/system/update`.
 ///
-/// Installs the named update. Answered as `Unsupported` (`ops-unsupported`,
-/// 500 with a reason) until the `ReplaceBinary` monitor wiring lands — the
-/// worker cannot swap a binary it does not own, so nothing here installs
-/// anything yet. The route, authz (`write`), and audit record land now so
-/// the UI builds against the real shape.
+/// Installs the named update: the engine bridges the release tag to the
+/// content-addressed staged file and drives the monitor's `ReplaceBinary`
+/// swap. Refused as `Unsupported` (`ops-unsupported`, 500 with a reason)
+/// when the staged file is missing or the request is unsafe; the route,
+/// authz (`write`), and audit record are the stable shape the UI builds on.
 #[cfg_attr(test, utoipa::path(
     post,
     path = UPDATE_PATH,
@@ -216,7 +216,7 @@ pub(super) async fn update(
     request_body = UpdateApplyRequest,
     responses(
         (status = 200, description = "The update was installed", body = UpdateAppliedView),
-        (status = 500, description = "Install is not wired yet", body = crate::error::ErrorBody),
+        (status = 500, description = "No staged binary to install", body = crate::error::ErrorBody),
     ),
 ))]
 pub(super) async fn apply_update(
@@ -254,9 +254,7 @@ pub struct UpdateAppliedView {
 }
 
 /// The `OpOutcome::UpdateApplied` branch, pulled out of [`apply_update`] so
-/// the mismatch arm can be exercised with a synthetic outcome: the engine
-/// answers `Unsupported` until the monitor wiring lands, so a real outcome
-/// never reaches [`apply_update`] itself.
+/// the mismatch arm can be exercised with a synthetic outcome.
 fn render_applied(outcome: OpOutcome) -> Result<Json<UpdateAppliedView>, ApiError> {
     match outcome {
         OpOutcome::UpdateApplied { version } => Ok(Json(UpdateAppliedView { version })),

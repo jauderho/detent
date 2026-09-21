@@ -518,6 +518,14 @@ pub enum Response {
         /// How many targets were actually restored.
         restored: u16,
     },
+    /// Answer to [`Request::ReplaceBinary`].
+    ///
+    /// Appended after [`Response::RolledBack`] so every prior discriminant
+    /// keeps its value; [`PROTO_VERSION`] stays `1` because the two ends of
+    Replaced {
+        /// The version that was installed (hex sha256 of the staged image).
+        version: String,
+    },
 }
 
 // ---------------------------------------------------------------------------

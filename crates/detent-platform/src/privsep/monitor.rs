@@ -24,14 +24,11 @@
 //! timeout while a commit is pending. There is no timer thread, so there is no
 //! shared mutable state and no lock ordering to get wrong.
 //!
-//! # Not implemented here
-//!
 //! Running external validators and driving service managers are separate Phase
 //! 2 subtasks. They enter through [`CheckRunner`] and [`ServiceControl`]; the
 //! default [`NoChecks`]/[`NoServices`] implementations answer
-//! [`ProtoError::Unavailable`]. `Mount` and `ReplaceBinary` answer
-//! [`ProtoError::Unsupported`] until the `module-mounts` and `update` features
-//! exist.
+//! [`ProtoError::Unavailable`]. `Mount` answers [`ProtoError::Unsupported`]
+//! until the `module-mounts` feature exists.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -275,6 +272,10 @@ pub struct Monitor<'a> {
     greeted: bool,
     journal: Vec<RollbackEntry>,
     pending: Option<Pending>,
+    /// Test-only swap target. `None` (production) swaps `current_exe()`; the
+    /// engine tests point it at their temp target instead. A field — not a
+    /// global — so parallel tests cannot steer each other's monitor thread.
+    binary_override: Option<PathBuf>,
 }
 
 impl<'a> Monitor<'a> {
@@ -287,7 +288,17 @@ impl<'a> Monitor<'a> {
             greeted: false,
             journal: Vec::new(),
             pending: None,
+            binary_override: None,
         }
+    }
+
+    /// Point the binary swap at `path` instead of `current_exe()`. Test-only:
+    /// keeps the `update_apply` engine tests from swapping their own test
+    /// executable. Unconditional (not `#[cfg(test)]`): `cfg(test)` is false
+    /// when `detent-ops`' integration test links against this crate, so the
+    /// gate would hide it exactly where it is needed.
+    pub fn set_binary_override(&mut self, path: PathBuf) {
+        self.binary_override = Some(path);
     }
 
     /// The allow-list this monitor serves.
@@ -397,11 +408,50 @@ impl<'a> Monitor<'a> {
             Request::Mount { .. } => Response::Error(ProtoError::Unsupported(
                 "mount requires the module-mounts feature".to_owned(),
             )),
-            Request::ReplaceBinary { .. } => Response::Error(ProtoError::Unsupported(
-                "binary replacement requires the update feature".to_owned(),
-            )),
+            Request::ReplaceBinary { len, sha256 } => self.replace_binary(len, sha256),
             Request::Shutdown => Response::ShuttingDown,
         })
+    }
+
+    /// Verify the staged binary and atomically swap it over the running one.
+    ///
+    /// `staged_path` is `<state_root>/update/staged/<hex sha256>`. The file
+    /// must exist, the on-disk length must match `len`, and the on-disk
+    /// digest must match `sha256`; otherwise the request is rejected before
+    /// any rename. The swap itself happens through [`swap_running_binary`]
+    /// and keeps the previous binary at `<target>.prev`, same convention
+    /// `detent-update::install::swap` uses.
+    fn replace_binary(&self, len: u64, sha256: crate::fs::atomic::Sha256Digest) -> Response {
+        let staged = staged_path(self.allow.state_root(), sha256);
+        let actual_len = match staged_path_len(&staged) {
+            Ok(len) => len,
+            Err(err) => return Response::Error(err),
+        };
+        if actual_len != len {
+            return Response::Error(ProtoError::Io(
+                "staged binary size does not match the request".to_owned(),
+            ));
+        }
+        let actual_digest = match staged_path_digest(&staged) {
+            Ok(digest) => digest,
+            Err(err) => return Response::Error(err),
+        };
+        if actual_digest != sha256 {
+            return Response::Error(ProtoError::Conflict {
+                expected: sha256,
+                actual: Some(actual_digest),
+            });
+        }
+        let target = self
+            .binary_override
+            .clone()
+            .unwrap_or_else(current_exe_path);
+        match swap_running_binary(&staged, &target) {
+            Ok(()) => Response::Replaced {
+                version: sha256.to_string(),
+            },
+            Err(err) => Response::Error(err),
+        }
     }
 
     // -- request handlers ---------------------------------------------------
@@ -863,6 +913,169 @@ fn unix_millis() -> u128 {
         .unwrap_or_default()
 }
 
+// ---------------------------------------------------------------------------
+// ReplaceBinary (PLAN §2.9 step 5's binary swap)
+// ---------------------------------------------------------------------------
+
+/// Directory under the state root where the verifier drops the staged image.
+pub(crate) const STAGED_DIR: &str = "update/staged";
+/// Suffix the replaced binary is kept under, next to the target.
+pub(crate) const PREVIOUS_SUFFIX: &str = ".prev";
+
+/// `<state_root>/update/staged/<hex sha256>`.
+fn staged_path(state_root: &Path, sha256: crate::fs::atomic::Sha256Digest) -> PathBuf {
+    state_root.join(STAGED_DIR).join(sha256.to_string())
+}
+
+fn staged_path_len(path: &Path) -> Result<u64, ProtoError> {
+    match std::fs::metadata(path) {
+        Ok(meta) => Ok(meta.len()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Err(ProtoError::Io("staged binary is missing".to_owned()))
+        }
+        Err(err) => Err(ProtoError::Io(format!(
+            "read staged metadata: {}",
+            err.kind()
+        ))),
+    }
+}
+
+fn staged_path_digest(path: &Path) -> Result<crate::fs::atomic::Sha256Digest, ProtoError> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ProtoError::Io("staged binary is missing".to_owned()));
+        }
+        Err(err) => {
+            return Err(ProtoError::Io(format!(
+                "read staged binary: {}",
+                err.kind()
+            )));
+        }
+    };
+    Ok(crate::fs::atomic::Sha256Digest::of(&bytes))
+}
+
+/// Target of the binary swap in production: the running executable.
+fn current_exe_path() -> PathBuf {
+    std::env::current_exe().unwrap_or_else(|_| PathBuf::from("detent"))
+}
+
+/// Atomically swap `staged` over `target`, keeping the previous binary at
+/// `<target>.prev`.
+///
+/// Renames on POSIX are atomic on the same filesystem, and we keep the temp
+/// file in the target's own directory to honor that. A hard link keeps the
+/// previous binary as a cheap second name; on a filesystem that disallows
+/// links the swap falls back to copying the bytes.
+fn swap_running_binary(staged: &Path, target: &Path) -> Result<(), ProtoError> {
+    let previous = target.with_file_name({
+        let mut name = std::ffi::OsString::from(target.file_name().map_or_else(
+            || "detent".to_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        ));
+        name.push(PREVIOUS_SUFFIX);
+        name
+    });
+
+    // `symlink_metadata` so a symlinked target is refused rather than quietly
+    // replaced: the running binary is always a regular file in production.
+    let target_meta = match std::fs::symlink_metadata(target) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ProtoError::Io("running binary is missing".to_owned()));
+        }
+        Err(err) => {
+            return Err(ProtoError::Io(format!(
+                "stat running binary: {}",
+                err.kind()
+            )));
+        }
+    };
+    if !target_meta.is_file() {
+        return Err(ProtoError::Io(
+            "running binary is not a regular file".to_owned(),
+        ));
+    }
+
+    if let Err(err) = std::fs::remove_file(&previous)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(ProtoError::Io(format!(
+            "unlink previous binary: {}",
+            err.kind()
+        )));
+    }
+    if let Err(err) = std::fs::hard_link(target, &previous)
+        && let Err(copy_err) = std::fs::copy(target, &previous)
+    {
+        return Err(ProtoError::Io(format!(
+            "keep previous binary: {} (fallback copy: {})",
+            err.kind(),
+            copy_err.kind()
+        )));
+    }
+
+    // Stage into the target's own directory first: `staged` lives under the
+    // state root (e.g. `/var/lib/detent`), while `target` is the running
+    // binary (e.g. `/usr/local/bin`) — a cross-filesystem `rename` would fail
+    // with EXDEV in production. Link-then-copy onto that filesystem, chmod
+    // there, then rename; same convention as `detent_update::install::stage`.
+    let target_dir = target.parent().map_or_else(
+        || std::path::PathBuf::from("/"),
+        std::path::Path::to_path_buf,
+    );
+    let staged_name = staged.file_name().map_or_else(
+        || std::ffi::OsString::from("detent-staged"),
+        std::ffi::OsString::from,
+    );
+    let mut tmp_name = staged_name;
+    // Pid-unique: two concurrent swaps on the same target must not share a
+    // temp name. No partial write to leak on the link path; on the copy
+    // path a crash leaves at most one orphaned `.tmp.<pid>` beside target.
+    tmp_name.push(format!(".tmp.{}", std::process::id()));
+    let tmp = target_dir.join(tmp_name);
+    let _ = std::fs::remove_file(&tmp);
+    // Link-then-copy onto the target's filesystem: no second full write of
+    // a multi-MB binary on the fast path, same failure-atomicity as
+    // `keep_previous` above.
+    if std::fs::hard_link(staged, &tmp).is_err()
+        && let Err(err) = std::fs::copy(staged, &tmp)
+    {
+        return Err(ProtoError::Io(format!(
+            "stage binary in target dir: {}",
+            err.kind()
+        )));
+    }
+    // The installed binary must keep the *target's* mode, not the staged
+    // file's — otherwise the swap installs a non-executable binary and the
+    // next `--self-test` fails with EACCES (a58f89c / stage_exec.rs).
+    if let Err(err) = std::fs::set_permissions(&tmp, target_meta.permissions()) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(ProtoError::Io(format!(
+            "chmod staged binary: {}",
+            err.kind()
+        )));
+    }
+    if let Err(err) = std::fs::set_permissions(&tmp, target_meta.permissions()) {
+        return Err(ProtoError::Io(format!(
+            "chmod staged binary: {}",
+            err.kind()
+        )));
+    }
+
+    if let Err(err) = std::fs::rename(&tmp, target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(ProtoError::Io(format!(
+            "rename staged binary over target: {}",
+            err.kind()
+        )));
+    }
+    // Staged file consumed: the copy in the target dir is the new binary.
+    let _ = std::fs::remove_file(staged);
+    Ok(())
+}
+
 /// A failed send is only a monitor error when it is not simply the peer going
 /// away underneath us.
 fn finish_send_error(err: ChannelError) -> Result<ExitReason, MonitorError> {
@@ -881,9 +1094,9 @@ fn finish_send_error(err: ChannelError) -> Result<ExitReason, MonitorError> {
 mod tests {
     use super::{
         CheckRunner, ExitReason, HookError, Hooks, MAX_CONFIRM_TIMEOUT_S, Monitor,
-        PENDING_COMMIT_MARKER, ServiceControl, finish_send_error,
+        PENDING_COMMIT_MARKER, PREVIOUS_SUFFIX, STAGED_DIR, ServiceControl, finish_send_error,
     };
-    use crate::fs::atomic::AtomicError;
+    use crate::fs::atomic::{AtomicError, Sha256Digest};
     use crate::privsep::allowlist::{Allowlist, AllowlistError, Config};
     use crate::privsep::proto::{
         BackupId, BindingId, CheckId, CheckOutcome, CommitId, IdKind, ModuleId, PROTO_VERSION,
@@ -2076,6 +2289,131 @@ mod tests {
         assert!(outcome.detail.len() <= 512);
         assert!(outcome.detail.len() > 512 - 3);
         assert!(outcome.detail.is_char_boundary(outcome.detail.len()));
+        Ok(())
+    }
+
+    // -- ReplaceBinary ------------------------------------------------------
+
+    /// A minimal target: a small "binary" the swap aims at. Lives outside
+    /// the state root so the staged-path lookup stays independent of it.
+    fn swap_target(dir: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, std::io::Error> {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+        Ok(path)
+    }
+
+    /// Plant `bytes` at `<state_root>/update/staged/<hex sha256>` so the
+    /// monitor's staged-path lookup finds it.
+    fn plant_staged(state_root: &Path, bytes: &[u8]) -> Result<Sha256Digest, std::io::Error> {
+        let digest = Sha256Digest::of(bytes);
+        let dir = state_root.join(STAGED_DIR);
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join(digest.to_string()), bytes)?;
+        Ok(digest)
+    }
+
+    #[test]
+    fn replace_binary_swaps_when_digest_and_size_match() -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let state_root = work.path().join("state");
+        std::fs::create_dir_all(&state_root)?;
+        let target = swap_target(work.path(), "detent-old", b"old-binary")?;
+        let staged_bytes = b"new-binary-contents";
+        let digest = plant_staged(&state_root, staged_bytes)?;
+
+        let config = Config::with_state_root(&state_root);
+        let mut monitor = Monitor::new(Allowlist::from_modules(&[], &config)?, Hooks::default());
+        monitor.set_binary_override(target.clone());
+        let _ = monitor.dispatch(Request::Hello {
+            proto: PROTO_VERSION,
+        });
+        let response = monitor.dispatch(Request::ReplaceBinary {
+            len: staged_bytes.len() as u64,
+            sha256: digest,
+        })?;
+
+        let Response::Replaced { version } = response else {
+            return Err(format!("expected Replaced, got {response:?}").into());
+        };
+        assert_eq!(version, digest.to_string());
+        let on_disk = std::fs::read(&target)?;
+        assert_eq!(on_disk, staged_bytes);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&target)?.permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o755,
+                "swapped binary must keep the target's mode, not the staged file's 0644 (a58f89c)"
+            );
+        }
+        let prev_path = target.with_file_name(format!("detent-old{PREVIOUS_SUFFIX}"));
+        assert_eq!(std::fs::read(prev_path)?, b"old-binary");
+        Ok(())
+    }
+
+    #[test]
+    fn replace_binary_rejects_a_staged_file_with_a_wrong_digest()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let state_root = work.path().join("state");
+        std::fs::create_dir_all(&state_root)?;
+        let target = swap_target(work.path(), "detent-digest", b"old-binary")?;
+        let staged_bytes = b"new-binary-contents";
+        let claimed = Sha256Digest::of(b"a-totally-different-binary");
+        // Plant at the *claimed* path so the monitor finds the file; the
+        // on-disk digest will then disagree with what the request named.
+        let dir = state_root.join(STAGED_DIR);
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join(claimed.to_string()), staged_bytes)?;
+
+        let config = Config::with_state_root(&state_root);
+        let mut monitor = Monitor::new(Allowlist::from_modules(&[], &config)?, Hooks::default());
+        monitor.set_binary_override(target.clone());
+        let _ = monitor.dispatch(Request::Hello {
+            proto: PROTO_VERSION,
+        });
+        let response = monitor.dispatch(Request::ReplaceBinary {
+            len: staged_bytes.len() as u64,
+            sha256: claimed,
+        })?;
+
+        let Response::Error(ProtoError::Conflict { expected, .. }) = response else {
+            return Err(format!("expected Conflict, got {response:?}").into());
+        };
+        assert_eq!(expected, claimed);
+        assert_eq!(std::fs::read(&target)?, b"old-binary");
+        let prev_path = target.with_file_name(format!("detent-digest{PREVIOUS_SUFFIX}"));
+        assert!(prev_path.is_file() || !prev_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn replace_binary_reports_a_missing_staged_file() -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let state_root = work.path().join("state");
+        std::fs::create_dir_all(&state_root)?;
+        let target = swap_target(work.path(), "detent-missing", b"old-binary")?;
+        // Note: no plant_staged call -- the staged file is deliberately absent.
+        let claimed = Sha256Digest::of(b"new-binary-contents");
+
+        let config = Config::with_state_root(&state_root);
+        let mut monitor = Monitor::new(Allowlist::from_modules(&[], &config)?, Hooks::default());
+        monitor.set_binary_override(target.clone());
+        let _ = monitor.dispatch(Request::Hello {
+            proto: PROTO_VERSION,
+        });
+        let response = monitor.dispatch(Request::ReplaceBinary {
+            len: b"new-binary-contents".len() as u64,
+            sha256: claimed,
+        })?;
+
+        let Response::Error(ProtoError::Io(message)) = response else {
+            return Err(format!("expected Io, got {response:?}").into());
+        };
+        assert!(message.contains("staged"), "io message: {message}");
+        assert_eq!(std::fs::read(&target)?, b"old-binary");
         Ok(())
     }
 

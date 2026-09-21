@@ -27,11 +27,12 @@
 //! commit still rolls back on its own deadline whether or not anything ever
 //! calls [`Operation::RollbackCommit`].
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use detent_core::descriptor::{ModuleDescriptor, ValidationCtx};
 use detent_core::module::{DynModule, ParseError};
-use detent_platform::fs::atomic::Sha256Digest;
+use detent_platform::fs::atomic::{Sha256Digest, WriteRequest, write_atomic};
 use detent_platform::host::Detected;
 use detent_platform::privsep::proto::{
     BackupId, BindingId, CheckId, CommitId, ProtoError, ServiceAction as WireServiceAction,
@@ -79,6 +80,11 @@ pub struct OpsEngine {
     audit: Box<dyn AuditSink>,
     authz: Box<dyn Authz>,
     services: Box<dyn ServiceManager>,
+    /// Root of the monitor's mutable state. `None` means the engine cannot
+    /// derive paths the request asks for (e.g. `UpdateApply`'s staged
+    /// binary) — set via [`OpsEngine::set_state_root`] from the binary's
+    /// settings before issuing those operations.
+    state_root: Option<PathBuf>,
     next_commit: u32,
 }
 
@@ -113,8 +119,19 @@ impl OpsEngine {
             audit,
             authz,
             services,
+            state_root: None,
             next_commit: 1,
         }
+    }
+
+    /// Tell the engine where the monitor's state directory lives.
+    ///
+    /// `UpdateApply` reads `<state_root>/update/staged/<hex sha256>` to
+    /// compute the `(len, sha256)` it sends to the monitor via
+    /// [`Client::replace_binary`]; without this set, the operation is
+    /// refused up front as `Unsupported`.
+    pub fn set_state_root(&mut self, state_root: impl Into<PathBuf>) {
+        self.state_root = Some(state_root.into());
     }
 
     /// What was detected about this host.
@@ -252,12 +269,12 @@ impl OpsEngine {
                 what: "update_status",
             }),
             Operation::CertRenew => Err(OpsError::Unsupported { what: "cert_renew" }),
-            // No `ReplaceBinary` monitor wiring yet: the worker cannot swap a
-            // binary it does not own. Answered as `Unsupported`
-            // (`ops-unsupported`) like `CertRenew` until that slice lands.
-            Operation::UpdateApply { .. } => Err(OpsError::Unsupported {
-                what: "update_apply",
-            }),
+            // The worker cannot swap a binary it does not own, so this goes
+            // through the monitor's `ReplaceBinary` (`ops-unsupported` when
+            // the staged file is missing or refused, like `CertRenew`).
+            Operation::UpdateApply { version } => self
+                .update_apply(&version)
+                .map(|()| OpOutcome::UpdateApplied { version }),
         }
     }
 
@@ -293,6 +310,73 @@ impl OpsEngine {
             current_hash,
             diagnostics,
         })))
+    }
+
+    /// Walk the staged-path layout the verifier writes and ask the monitor to
+    /// swap the file at `<state_root>/update/staged/<hex sha256>` over the
+    /// running binary. The verifier has already done the SHA-256 and
+    /// signature checks; the engine only re-hashes the bytes the monitor
+    /// will see and forwards `(len, sha256)` so the monitor can refuse any
+    /// mismatch independently.
+    ///
+    /// The path used here must match the monitor's [`staged_path`] helper.
+    /// The `version` argument is the release tag (e.g. `v1.2.3`); the file
+    /// the verifier staged under that tag is read, its digest computed, and
+    /// the bytes are materialised at the digest-named path the monitor
+    /// expects. This bridges the tag-based API and the content-addressed
+    /// staging layout without changing the API shape; tests that pass the
+    /// digest hex as `version` still work because the same bytes end up at
+    /// the digest path either way.
+    fn update_apply(&mut self, version: &str) -> Result<(), OpsError> {
+        let Some(state_root) = self.state_root.as_ref() else {
+            return Err(OpsError::Unsupported {
+                what: "update_apply",
+            });
+        };
+        // `version` comes from the API caller (`POST /api/v1/system/update`
+        // `{"version": ...}`), so it must never reach `Path::join` raw: a
+        // body like `../../etc/shadow` would make this (root, unconfined)
+        // process read an arbitrary file. Only a release tag or a hex
+        // digest is ever valid here.
+        if !is_staged_name(version) {
+            tracing::warn!("staged version refused");
+            return Err(OpsError::Unsupported {
+                what: "update_apply",
+            });
+        }
+        let staged_dir = state_root.join("update").join("staged");
+        let tag_path = staged_dir.join(version);
+        let bytes = std::fs::read(&tag_path).map_err(|err| {
+            tracing::warn!(path = %tag_path.display(), error = %err, "staged binary missing");
+            OpsError::Unsupported {
+                what: "update_apply",
+            }
+        })?;
+        let len = bytes.len() as u64;
+        let sha256 = Sha256Digest::of(&bytes);
+        // Materialise the digest-named file the monitor's `staged_path` will
+        // look up. If the caller already passed a digest hex as `version`,
+        // `tag_path == digest_path` and there is nothing to do. Otherwise
+        // copy the tag-named staging file into the content-addressed
+        // location — atomically (temp + rename), so a crash never leaves a
+        // partial file behind that a later run would read as corrupt.
+        let digest_path = staged_dir.join(sha256.to_string());
+        if tag_path != digest_path {
+            let _ = std::fs::create_dir_all(&staged_dir);
+            let mut req = WriteRequest::new(&digest_path, &bytes, &staged_dir);
+            // No optimistic-concurrency gate: a leftover digest file from a
+            // crashed earlier run is legitimate content to overwrite, and the
+            // monitor re-reads + re-hashes before swapping anyway.
+            req.expected_prev = None;
+            req.keep_backups = 0;
+            write_atomic(&req).map_err(|_| OpsError::Unsupported {
+                what: "update_apply",
+            })?;
+        }
+        self.client
+            .replace_binary(len, sha256)
+            .map_err(map_client)?;
+        Ok(())
     }
 
     fn plan(&mut self, id: &str, model: &Value) -> Result<PlanReport, OpsError> {
@@ -508,6 +592,17 @@ impl OpsEngine {
     }
 }
 
+/// True when `name` is a safe single path component for the staged layout:
+/// a release tag (`v1.2.3`) or a hex digest — never a path.
+fn is_staged_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && !name.bytes().all(|b| b == b'.')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+}
+
 /// Look one module up in the injected registry.
 fn find_module<'a>(
     modules: &'a [Box<dyn DynModule>],
@@ -658,7 +753,7 @@ fn deadline_rfc3339(timeout_s: u16) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Hashes, command, deadline_rfc3339, decode, map_client};
+    use super::{Hashes, command, deadline_rfc3339, decode, is_staged_name, map_client};
     use crate::op::ServiceCommand;
     use detent_platform::fs::atomic::Sha256Digest;
     use detent_platform::privsep::proto::{IdKind, ProtoError, ServiceAction as WireServiceAction};
@@ -737,5 +832,19 @@ mod tests {
         assert_eq!(hashes.prev, None);
         assert_eq!(hashes.new, None);
         assert!(format!("{hashes:?}").contains("Hashes"));
+    }
+
+    #[test]
+    fn staged_names_are_single_components_never_dots() {
+        assert!(is_staged_name("v1.2.3"));
+        assert!(is_staged_name(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        ));
+        assert!(!is_staged_name(""));
+        assert!(!is_staged_name("."));
+        assert!(!is_staged_name(".."));
+        assert!(!is_staged_name("..."));
+        assert!(!is_staged_name("../../etc/shadow"));
+        assert!(!is_staged_name("v1.2.3/.."));
     }
 }

@@ -279,10 +279,7 @@ pub enum OpOutcome {
     Host(Box<HostReport>),
     /// Answer to `AuditQuery`.
     Audit(Vec<AuditRecord>),
-    /// Answer to `UpdateApply`.
-    ///
-    /// Never produced until the `ReplaceBinary` monitor wiring lands; exists
-    /// now so the API builds against the real shape instead of a stub.
+    /// Answer to `UpdateApply`: the monitor's `ReplaceBinary` swap landed.
     UpdateApplied {
         /// The version that was installed.
         version: String,
