@@ -5,6 +5,57 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-20 - NEXT: write-scoped install POST (PLAN §2.9 steps 5b/6)
+
+**Status: designed, not yet implemented.** Written down before starting so it
+can be picked up cold. The CLI half (`detent update`, steps 5a–5c: check →
+prepare → self-test → swap → restart → healthz → rollback) is fully wired in
+`run.rs` (`apply_update` → `install_candidate`); nothing calls it from the
+web side — `GET /api/v1/system/update` is read-only and the `system.rs:140`
+comment says installing waits for "the privileged swap actually lands".
+
+### The survey (already done, do not redo)
+
+| Need | Where it already is |
+|---|---|
+| Mutating POST shape | `commits.rs:90-105` (`WriteCaller`, `authorize`, `state.engine.execute`, `render_*` split for synthetic-outcome tests) |
+| Route table entry | `system.rs:45-70` (`Route { method, path, mutating }`) + `routes()` at 73-79 |
+| Authz scope | `Operation::UpdateStatus` → `Scope::Read` (`authz.rs:156-158`); install needs its own `write` operation |
+| Ops enum pattern | `Operation::CertRenew` (`op.rs:194-199`): variant exists with real shape, engine answers `Unsupported` until wiring lands |
+| Engine refusal | `Operation::UpdateStatus` → `Err(Unsupported)` (`engine.rs:251-253`) — same shape an install op takes until it can execute |
+| Privsep wire | `Request::ReplaceBinary { len, sha256 }` (`proto.rs:289-294`) exists but `monitor.rs:400-402` answers `Unsupported` |
+| Request checklist | PLAN App. D: TLS → session/Bearer → CSRF triple → 256 KiB typed body → ids vs registry → `Operation` → authz → audit → no-store |
+| CLI half to reuse | `apply_update` (`run.rs:861-885`): prepare → probe → `install_candidate` (swap + restart + healthz + rollback) |
+
+### The design
+
+New `Operation::UpdateApply { version: String }` (like `CertRenew`: real
+shape now, engine answers `Unsupported{ what: "update_apply" }` until the
+execution path lands). New `POST /api/v1/system/update` (same path as GET,
+`mutating: true` in `table()`), `WriteCaller`, `authorize` against the new
+op, `state.engine.execute`, audit record on success *and* failure (PLAN §2.5:
+every mutating op writes exactly one), `render_*` split so tests need no
+network. Request body: `{"version": "<tag>"}` typed + `deny_unknown_fields`,
+≤ 256 KiB per App. D. Refuse-closed: no stamp with that tag, or feed
+unreachable from the worker, → 503/409, never "no update".
+
+### Two decisions already made, do not relitigate
+
+* **No install from the worker in this slice.** The worker is
+privilege-dropped (PLAN §2.4); the swap needs operator privileges (step 5b
+runs in the CLI process) and `Request::ReplaceBinary` is still `Unsupported`
+in the monitor. The POST therefore lands as: route + authz + audit + engine
+`Unsupported` → 409/503 with a reason, like `CertRenew` today. Wiring
+`ReplaceBinary` through monitor → worker → restart → healthz is its own
+later slice with a privsep answer (streaming the image over the channel,
+Landlock write scope for the binary dir, who restarts what).
+* **Same path, different method.** `GET` stays read-only on the stamp;
+`POST` mutates. Axum routes by method on one path (`services.rs:54` does
+`get(status).post(action)`); `table()` carries both entries. The OpenAPI
+regen (`docs/openapi.json`) ships with the change, handler-doc delta only.
+
+---
+
 ## 2026-09-20 - §2.9 step 6: interval-guarded check stamp lands
 
 `detent update --check` writes `<state_root>/update/check.json` (`CachedReport`
