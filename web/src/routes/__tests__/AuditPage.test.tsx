@@ -123,6 +123,7 @@ describe('AuditPage — populated table', () => {
     ['cert_status', 'read certificate status'],
     ['update_status', 'read update status'],
     ['cert_renew', 'renew certificate'],
+    ['update_apply', 'install update'],
   ]
 
   it.each(OP_CASES)('renders a caption for op %s, not the raw value', async (op, caption) => {
