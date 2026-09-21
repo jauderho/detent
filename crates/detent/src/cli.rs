@@ -319,6 +319,10 @@ pub struct UpdateArgs {
     /// Accept a candidate older than the running version. Default refuses.
     #[arg(long)]
     pub allow_downgrade: bool,
+    /// Ignore the 24 h check interval and force a fresh fetch even when the
+    /// on-disk stamp is still fresh. Only meaningful with `--check`.
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// `--service` on `config apply`: a service command, or explicitly nothing.

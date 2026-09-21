@@ -22,7 +22,7 @@
 //! * **The `Debug` prints no secret and no name**, because every component's
 //!   own `Debug` is written that way.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::auth::AuthError;
@@ -114,6 +114,11 @@ pub struct AppState {
     pub origin: Arc<Origin>,
     /// The resolver the listener answers from; `CertStore::replace` swaps it live.
     pub cert_store: Arc<CertStore>,
+    /// Root of `detent`'s mutable state (PLAN §2.10), so the update-status
+    /// endpoint can read the interval-guarded stamp written by `detent
+    /// update --check` without reaching the network on the request path
+    /// (PLAN §2.9 steps 5a and 6).
+    pub state_root: Arc<PathBuf>,
 }
 
 impl AppState {
@@ -125,6 +130,7 @@ impl AppState {
         config: Config,
         origin: Origin,
         cert_store: Arc<CertStore>,
+        state_root: PathBuf,
     ) -> Self {
         Self {
             engine,
@@ -132,7 +138,16 @@ impl AppState {
             config: Arc::new(config),
             origin: Arc::new(origin),
             cert_store,
+            state_root: Arc::new(state_root),
         }
+    }
+
+    /// The interval-guarded update stamp (PLAN §2.9 step 6): the on-disk
+    /// `CachedReport` the read-only `GET /api/v1/system/update` prefers over
+    /// reaching the release feed on every request.
+    #[must_use]
+    pub fn update_stamp(&self) -> std::path::PathBuf {
+        detent_update::update::stamp_path(&self.state_root)
     }
 }
 
@@ -199,6 +214,7 @@ pub(crate) fn test_state() -> Result<TestState, Box<dyn std::error::Error>> {
         Origin::for_config(&config),
         // ponytail: throwaway bootstrap cert; tests never handshake through it.
         test_cert_store()?,
+        dir.path().to_path_buf(),
     );
     Ok(TestState { state, audit, dir })
 }
@@ -317,7 +333,6 @@ mod tests {
         assert!(std::fs::read_to_string(&log)?.contains("login_failed"));
         assert!(!state.totp_required);
         assert!(state.users.is_empty());
-
         // And it plugs into an `AppState` unchanged.
         let config = Config::default();
         let app = AppState::new(
@@ -326,6 +341,7 @@ mod tests {
             config.clone(),
             Origin::for_config(&config),
             test_cert_store()?,
+            dir.path().to_path_buf(),
         );
         assert!(app.auth.tokens.list().is_empty());
         Ok(())

@@ -5,6 +5,40 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-20 - §2.9 step 6: interval-guarded check stamp lands
+
+`detent update --check` writes `<state_root>/update/check.json` (`CachedReport`
++ `checked_at`, atomic, best-effort) and serves a fresh stamp without touching
+the network; `--force` bypasses the 24 h guard. `GET /api/v1/system/update`
+prefers the stamp and fetches live only when none exists yet — the `ponytail:`
+note's per-request poll loop is gone. `AppState` carries `state_root`
+(`update_stamp()` helper) so the endpoint never reconstructs paths per request.
+`--check` JSON shape is unchanged (global `--json` flag already serializes
+`CheckReport`), so (b) needed zero new code.
+
+Deviation note: the worker only *notifies* — no `auto_install` from the
+serving path. The swap runs with operator privileges in the CLI (step 5b);
+the privilege-dropped worker cannot install, so a set `auto_install` surfaces
+via endpoint/UI rather than executing there. PLAN's "opt-in auto_install"
+wording predates the 5b privsep shape.
+
+Design choice over a background ticker: the CLI cron is the designated
+refresher; the endpoint serves the stamp however old and fetches live only on
+cold start (preserving the 503 on unreachable feed). A read-scoped caller can
+never force network I/O. No install POST in this slice — worker-side install
+has no execution path and deserves its own design + privsep answer.
+
+Pre-existing repairs in this diff: `rcgen` added to `[dev-dependencies]`
+(health.rs tests use it un-gated; `cargo test -p detent-update` never compiled
+on default features), stale step-5 doc in update.rs head, `CHECK_INTERVAL`
+doc ("candidates" copy-paste → 24 h freshness window).
+
+Tests: 153 detent + 68 detent-update + 301 detent-web pass; cache round-trip /
+stale / skew / corrupt-miss / force-guard, CLI fresh-stamp short-circuit with
+a panicking transport, endpoint via existing integration tests. Clippy clean
+except pre-existing `too_many_lines` on the four-shapes test (untouched).
+`docs/openapi.json` regenerated (handler doc only).
+
 ## 2026-09-20 - Phase 9 done: restart + healthz + rollback lands (PLAN §2.9 step 5c)
 
 `detent update` now restarts, probes, and rolls back. The 2026-09-18 NEXT

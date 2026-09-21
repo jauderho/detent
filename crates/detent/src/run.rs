@@ -587,10 +587,14 @@ fn run_update(
             return failed(renderer, streams, &err.to_string());
         }
     };
+    let settings = Settings::from_cli(cli);
+    let config_path = settings.config_path.clone();
     let staging_parent = target
         .parent()
         .map_or_else(std::env::temp_dir, std::path::Path::to_path_buf);
-    let config_path = Settings::from_cli(cli).config_path;
+    let stamp = detent_update::update::stamp_path(&settings.state_root);
+    let check_only = args.check;
+    let force = args.force;
     run_update_on(
         &transport,
         &current,
@@ -600,7 +604,9 @@ fn run_update(
         },
         time::OffsetDateTime::now_utc(),
         &trust,
-        args.check,
+        check_only,
+        &stamp,
+        force,
         &staging_parent,
         &|path| detent_update::update::confirm_features(path, &current_features()),
         // The swap runs in this process, with whatever privileges the
@@ -738,6 +744,8 @@ fn run_update_on(
     now: time::OffsetDateTime,
     trust: &detent_update::TrustRoot,
     check_only: bool,
+    stamp: &std::path::Path,
+    force: bool,
     staging_parent: &std::path::Path,
     probe: &FeatureProbe,
     swap: &BinarySwap<'_>,
@@ -746,7 +754,9 @@ fn run_update_on(
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
     if check_only {
-        return check_report(transport, current, policy, now, renderer, streams);
+        return check_report(
+            transport, current, policy, now, stamp, force, renderer, streams,
+        );
     }
     apply_update(
         transport,
@@ -764,26 +774,51 @@ fn run_update_on(
 }
 
 /// The `--check` half of `run_update`: resolve the policy, print the report.
+///
+/// Interval-guarded (PLAN §2.9 step 6): a fresh on-disk stamp is returned
+/// without touching the network, so a daily cron and a busy UI cannot make
+/// this host poll GitHub on every invocation. `force` bypasses the guard.
 #[cfg(feature = "update")]
+#[allow(clippy::too_many_arguments)]
 fn check_report(
     transport: &dyn detent_update::fetch::Transport,
     current: &semver::Version,
     policy: &detent_update::Policy,
     now: time::OffsetDateTime,
+    stamp: &std::path::Path,
+    force: bool,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
+    if !force
+        && let Some(cached) = detent_update::update::read_cached(stamp)
+        && detent_update::update::is_fresh(cached.checked_at, now)
+    {
+        return render_check_report(&cached.report, renderer, streams);
+    }
     let report = match detent_update::update::check(transport, current, policy, now) {
         Ok(report) => report,
         Err(err) => {
             return failed(renderer, streams, &err.to_string());
         }
     };
+    // Best-effort stamp: a failed write must not turn a successful check
+    // into a failure — the report is still shown.
+    let _ = detent_update::update::write_cached(stamp, &report, now, force);
+    render_check_report(&report, renderer, streams)
+}
+
+#[cfg(feature = "update")]
+fn render_check_report(
+    report: &detent_update::CheckReport,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Exit> {
     if renderer.json {
-        let text = serde_json::to_string_pretty(&report).map_err(std::io::Error::other)?;
+        let text = serde_json::to_string_pretty(report).map_err(std::io::Error::other)?;
         writeln!(streams.out, "{text}")?;
     } else if report.update_available {
-        render_available(&report, renderer, streams)?;
+        render_available(report, renderer, streams)?;
     } else {
         renderer.line(
             streams.out,
@@ -2045,6 +2080,10 @@ mod tests {
         };
         let mut out = Vec::new();
         let mut notes = Vec::new();
+        // Fresh stamp dir per hermetic run: every `check` in these tests is
+        // expected to reach the feed, not a prior cached result.
+        let tmp = tempfile::TempDir::new()?;
+        let stamp = detent_update::update::stamp_path(tmp.path());
         let exit = super::run_update_on(
             feed,
             current,
@@ -2052,6 +2091,8 @@ mod tests {
             fixed_now()?,
             trust,
             check_only,
+            &stamp,
+            false,
             &std::env::temp_dir(),
             probe,
             swap,
@@ -2069,7 +2110,6 @@ mod tests {
             notes: String::from_utf8(notes)?,
         })
     }
-
     /// A feed whose assets verify end to end: the fixture binary bytes with a
     /// minted SUMS line and the fixture Sigstore bundle, one URL route each.
     #[cfg(feature = "update")]
@@ -2205,6 +2245,8 @@ mod tests {
             let report: CheckReport = detent_update::update::check(&feed, &current, &policy, now)?;
             assert_eq!(report.update_available, available, "{tag} {body}");
             assert_eq!(report.security, security);
+            let tmp = tempfile::TempDir::new()?;
+            let stamp = detent_update::update::stamp_path(tmp.path());
             let mut out = Vec::new();
             let mut notes = Vec::new();
             let exit = super::check_report(
@@ -2212,6 +2254,8 @@ mod tests {
                 &current,
                 &policy,
                 now,
+                &stamp,
+                false,
                 &renderer,
                 &mut Streams {
                     input: &mut std::io::empty(),
@@ -2233,6 +2277,8 @@ mod tests {
             json: true,
             verbose: false,
         };
+        let tmp = tempfile::TempDir::new()?;
+        let stamp = detent_update::update::stamp_path(tmp.path());
         let mut out = Vec::new();
         let mut notes = Vec::new();
         let exit = super::check_report(
@@ -2244,6 +2290,8 @@ mod tests {
             &current,
             &policy,
             now,
+            &stamp,
+            false,
             &renderer_json,
             &mut Streams {
                 input: &mut std::io::empty(),
@@ -2254,6 +2302,8 @@ mod tests {
         assert_eq!(exit, Exit::Ok);
         let parsed: serde_json::Value = serde_json::from_slice(&out)?;
         assert_eq!(parsed.get("tag"), Some(&serde_json::json!("v0.0.2")));
+        let tmp = tempfile::TempDir::new()?;
+        let stamp = detent_update::update::stamp_path(tmp.path());
         let mut out = Vec::new();
         let mut notes = Vec::new();
         let exit = super::check_report(
@@ -2261,6 +2311,8 @@ mod tests {
             &current,
             &policy,
             now,
+            &stamp,
+            false,
             &renderer,
             &mut Streams {
                 input: &mut std::io::empty(),
@@ -2273,8 +2325,64 @@ mod tests {
         assert!(!notes.is_empty());
         Ok(())
     }
-
+    /// A fresh stamp short-circuits the fetch: a transport that panics
+    /// proves `check_report` never touches the network, and `--force`
+    /// bypasses the guard.
     #[cfg(feature = "update")]
+    #[test]
+    #[allow(clippy::panic)]
+    fn update_check_prefers_a_fresh_stamp_unless_forced() -> R {
+        struct Panics;
+        impl detent_update::fetch::Transport for Panics {
+            fn get(
+                &self,
+                _u: &str,
+                _c: u64,
+                _s: &mut dyn std::io::Write,
+            ) -> Result<u64, detent_update::fetch::FetchError> {
+                panic!("network must not be touched with a fresh stamp");
+            }
+        }
+        let messages = crate::i18n::Messages::new(Some("en-US"));
+        let renderer = crate::output::Renderer {
+            messages: &messages,
+            json: false,
+            verbose: false,
+        };
+        let current = semver::Version::new(0, 0, 1);
+        let policy = detent_update::Policy::default();
+        let now = time::OffsetDateTime::now_utc();
+        let tmp = tempfile::TempDir::new()?;
+        let stamp = detent_update::update::stamp_path(tmp.path());
+        let report = detent_update::CheckReport {
+            update_available: false,
+            current: "0.0.1".to_owned(),
+            tag: None,
+            published: None,
+            security: false,
+        };
+        detent_update::update::write_cached(&stamp, &report, now, true)
+            .map_err(std::io::Error::other)?;
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = super::check_report(
+            &Panics,
+            &current,
+            &policy,
+            now,
+            &stamp,
+            false,
+            &renderer,
+            &mut Streams {
+                input: &mut std::io::empty(),
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        assert_eq!(exit, Exit::Ok);
+        assert!(String::from_utf8(out)?.contains("0.0.1"));
+        Ok(())
+    }
     #[test]
     fn failed_is_always_a_localized_failure_never_usage() -> R {
         let messages = crate::i18n::Messages::new(Some("en-US"));
@@ -2331,6 +2439,7 @@ mod tests {
             Err(detent_update::VerificationError::TrustRootUnavailable)
         ));
     }
+
     #[cfg(feature = "update")]
     #[test]
     fn update_check_none_renders_current_and_succeeds() -> R {
@@ -2348,6 +2457,8 @@ mod tests {
             body: "",
             when: "2020-01-01T00:00:00Z".to_owned(),
         };
+        let tmp = tempfile::TempDir::new()?;
+        let stamp = detent_update::update::stamp_path(tmp.path());
         let mut out = Vec::new();
         let mut notes = Vec::new();
         let exit = super::check_report(
@@ -2355,6 +2466,8 @@ mod tests {
             &current,
             &policy,
             now,
+            &stamp,
+            false,
             &renderer,
             &mut Streams {
                 input: &mut std::io::empty(),
@@ -2381,11 +2494,15 @@ mod tests {
         let now = time::OffsetDateTime::now_utc();
         let mut out = Vec::new();
         let mut notes = Vec::new();
+        let tmp = tempfile::TempDir::new()?;
+        let stamp = detent_update::update::stamp_path(tmp.path());
         let exit = super::check_report(
             &FailingFeed,
             &current,
             &policy,
             now,
+            &stamp,
+            false,
             &renderer,
             &mut Streams {
                 input: &mut std::io::empty(),
@@ -2398,8 +2515,6 @@ mod tests {
         assert!(!notes.is_empty());
         Ok(())
     }
-
-    #[cfg(feature = "update")]
     #[test]
     fn update_operation_maps_without_side_effects() -> R {
         let cli = parse(&["detent", "update", "--check"])?;
