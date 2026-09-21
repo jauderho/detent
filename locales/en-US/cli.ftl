@@ -38,6 +38,9 @@ cli-update-security-available = security update available: {$tag} published {$pu
 cli-update-none = no update available (current {$current})
 cli-update-failed = update failed: {$reason}
 cli-update-installed = installed {$tag}; the binary it replaced is kept at {$previous}
+cli-update-not-restarted = the service was not restarted, so the new binary is not running yet: {$reason}
+cli-update-rolled-back = rolled back: {$reason}
+cli-update-rollback-failed = the update failed ({$reason}) and the rollback also failed ({$error}); this host needs attention
 
 ## config
 cli-module-line = {$id}  {$name}
