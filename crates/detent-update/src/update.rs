@@ -601,7 +601,6 @@ mod tests {
             now(),
         )
         .expect("canned report");
-        // ponytail: one focused test for round-trip, staleness, corrupt-miss, skew.
         let written = write_cached(&stamp, &report, now(), false)
             .expect("write")
             .expect("fresh write");
