@@ -380,9 +380,10 @@ mod tests {
     fn the_merged_table_registers_every_endpoint_and_no_get_mutates() {
         // The 13 `Operation` endpoints PLAN Phase 4 lists, plus cert status
         // (read-only, served from the live `CertStore`), the update check
-        // (read-only, served from `detent-update`), and
+        // (read-only, served from `detent-update`), the update install
+        // (`POST`, `Unsupported` until the monitor wiring lands), and
         // `/api/v1/openapi.json` itself.
-        assert_eq!(table().len(), 16, "{:?}", table());
+        assert_eq!(table().len(), 17, "{:?}", table());
         assert!(
             table()
                 .iter()

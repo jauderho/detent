@@ -312,16 +312,29 @@ export interface paths {
         };
         /**
          * `GET /api/v1/system/update`.
-         * @description The update status the web layer answers directly: the check fetches the
-         *     release feed over the network and lives in [`detent_update`], which the
-         *     operations engine does not depend on and cannot answer for. Read-only,
-         *     like every other endpoint in this module — **installing** an update is a
-         *     `write`-scoped, CSRF-checked `POST` that waits until the privileged swap
-         *     (PLAN §2.9 steps 5b–5c) actually lands; nothing here installs anything.
+         * @description The update status the web layer answers directly: `detent-update` owns the
+         *     check (release feed over the network), which the operations engine does
+         *     not depend on and cannot answer for. Read-only — **installing** an update
+         *     is the `write`-scoped, CSRF-checked `POST` on this same path, answered by
+         *     [`apply_update`]; nothing here installs anything.
+         *
+         *     Interval-guarded (PLAN §2.9 steps 5a and 6): `detent update --check`
+         *     (the daily cron) writes `<state_root>/update/check.json` at most once
+         *     per 24 h; this handler prefers that stamp and only reaches the network
+         *     when no stamp exists yet. A read-scoped caller can no longer make this
+         *     host poll GitHub in a loop.
          */
         get: operations["update"];
         put?: never;
-        post?: never;
+        /**
+         * `POST /api/v1/system/update`.
+         * @description Installs the named update. Answered as `Unsupported` (`ops-unsupported`,
+         *     500 with a reason) until the `ReplaceBinary` monitor wiring lands — the
+         *     worker cannot swap a binary it does not own, so nothing here installs
+         *     anything yet. The route, authz (`write`), and audit record land now so
+         *     the UI builds against the real shape.
+         */
+        post: operations["apply_update"];
         delete?: never;
         options?: never;
         head?: never;
@@ -760,7 +773,7 @@ export interface components {
          *     file bodies.
          * @enum {string}
          */
-        OpKind: "list_modules" | "get_module" | "validate" | "plan" | "apply" | "confirm_commit" | "rollback_commit" | "list_backups" | "restore" | "service_status" | "service_action" | "host_profile" | "audit_query" | "update_status" | "cert_status" | "cert_renew";
+        OpKind: "list_modules" | "get_module" | "validate" | "plan" | "apply" | "confirm_commit" | "rollback_commit" | "list_backups" | "restore" | "service_status" | "service_action" | "host_profile" | "audit_query" | "update_status" | "cert_status" | "cert_renew" | "update_apply";
         /**
          * @description The operating system family of the host being configured.
          * @enum {string}
@@ -1003,6 +1016,16 @@ export interface components {
             openrc: string[];
             /** @description systemd unit names. */
             systemd: string[];
+        };
+        /** @description Answer to `UpdateApply`. */
+        UpdateAppliedView: {
+            /** @description The version that was installed. */
+            version: string;
+        };
+        /** @description The body of `POST /api/v1/system/update`. */
+        UpdateApplyRequest: {
+            /** @description The update version to install, e.g. `v1.2.3`. */
+            version: string;
         };
         /**
          * @description The answer body of `GET /api/v1/system/update`.
@@ -1658,6 +1681,39 @@ export interface operations {
             };
             /** @description The release feed could not be reached */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    apply_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateApplyRequest"];
+            };
+        };
+        responses: {
+            /** @description The update was installed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpdateAppliedView"];
+                };
+            };
+            /** @description Install is not wired yet */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };

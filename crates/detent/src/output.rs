@@ -214,6 +214,12 @@ impl Renderer<'_> {
             OpOutcome::Serviced(ref report) => self.serviced(out, report),
             OpOutcome::Host(ref host) => self.host_report(out, notes, host),
             OpOutcome::Audit(ref records) => self.audit(out, records),
+            // Unreachable: the engine answers `UpdateApply` as `Unsupported`
+            // until the `ReplaceBinary` monitor wiring lands, so this arm only
+            // exists to keep the match exhaustive.
+            OpOutcome::UpdateApplied { .. } => {
+                Err(std::io::Error::other("update install is not wired yet"))
+            }
         }
     }
 

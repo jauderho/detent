@@ -782,6 +782,34 @@ async fn system_update_needs_a_credential_and_refuses_nothing_else() -> R {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// POST /api/v1/system/update
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn system_apply_needs_write_and_reports_the_stub() -> R {
+    let live = Live::new()?;
+    let (read, write) = tokens(live.state())?;
+    let body = r#"{"version":"v9.9.9"}"#;
+
+    let unauthenticated = post(live.state(), "/api/v1/system/update", None, body).await?;
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    let wrong_scope = post(live.state(), "/api/v1/system/update", Some(&read), body).await?;
+    assert_eq!(wrong_scope.status(), StatusCode::FORBIDDEN);
+    assert_eq!(error_body(wrong_scope).await?.1, "web-denied-scope");
+
+    // The engine answers `UpdateApply` as `Unsupported` until the
+    // `ReplaceBinary` monitor wiring lands: 500 with the `ops-unsupported`
+    // id and a reason, never a silent no-op.
+    let stub = post(live.state(), "/api/v1/system/update", Some(&write), body).await?;
+    assert_eq!(stub.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(error_body(stub).await?.1, "ops-unsupported");
+
+    live.shutdown();
+    Ok(())
+}
+
 #[tokio::test]
 async fn cert_status_describes_the_certificate_the_listener_serves() -> R {
     let live = Live::new()?;
@@ -941,6 +969,7 @@ mod contract_fuzz {
         ("/api/v1/modules/hosts/plan", "read"),
         ("/api/v1/modules/hosts/apply", "write"),
         ("/api/v1/services/hosts", "write"),
+        ("/api/v1/system/update", "write"),
     ];
 
     /// A mix of pure noise (exercises `JsonRejection`'s syntax-error path),

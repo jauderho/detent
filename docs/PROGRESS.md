@@ -5,6 +5,25 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-21 - Phase 9 done: write-scoped install POST lands (PLAN §2.9 steps 5b/6)
+
+`POST /api/v1/system/update` exists: route + `write` authz + audit + engine
+`Unsupported{what:"update_apply"}` → 500 `ops-unsupported`, like `CertRenew`
+today. `Operation::UpdateApply{version}` + `OpKind::UpdateApply` +
+`OpOutcome::UpdateApplied{version}` (never produced until the monitor wiring
+lands), `UpdateApplyRequest` (`deny_unknown_fields`) + `UpdateAppliedView` +
+`render_applied` split, same-path GET+POST (`services.rs` precedent),
+`table()` 16→17, OpenAPI + `schema.d.ts` regen'd, stale GET doc fixed
+(first paragraph now defers to `apply_update`; redundant interval paragraph
+dropped when the regen churn surfaced it).
+
+Tests: scope-mapping (write⇔mutating incl. new variant), engine refusal +
+one audit record, `render_applied` match/mismatch, body
+`deny_unknown_fields`, live 401/403/500 + `ops-unsupported` id, POST in
+contract fuzz. Workspace clippy/fmt/tests green.
+
+---
+
 ## 2026-09-20 - NEXT: write-scoped install POST (PLAN §2.9 steps 5b/6)
 
 **Status: designed, not yet implemented.** Written down before starting so it

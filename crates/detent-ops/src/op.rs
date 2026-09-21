@@ -197,6 +197,16 @@ pub enum Operation {
     /// the module header): the variant exists so the API, authz, audit, and
     /// UI can be built against the real shape instead of a stub that drifts.
     CertRenew,
+    /// Install a verified update.
+    ///
+    /// Answered as [`OpsError::Unsupported`] until the `ReplaceBinary` monitor
+    /// wiring lands (see the module header): the variant exists so the API,
+    /// authz, audit, and UI can be built against the real shape instead of a
+    /// stub that drifts.
+    UpdateApply {
+        /// The update version to install, e.g. `v1.2.3`.
+        version: String,
+    },
 }
 
 /// The kind of an [`Operation`], with none of its payload.
@@ -240,6 +250,8 @@ pub enum OpKind {
     CertStatus,
     /// [`Operation::CertRenew`].
     CertRenew,
+    /// [`Operation::UpdateApply`].
+    UpdateApply,
 }
 
 impl Operation {
@@ -263,6 +275,7 @@ impl Operation {
             Self::UpdateStatus => OpKind::UpdateStatus,
             Self::CertStatus => OpKind::CertStatus,
             Self::CertRenew => OpKind::CertRenew,
+            Self::UpdateApply { .. } => OpKind::UpdateApply,
         }
     }
 
@@ -285,6 +298,7 @@ impl Operation {
             | Self::UpdateStatus
             | Self::CertStatus
             | Self::CertRenew
+            | Self::UpdateApply { .. }
             | Self::AuditQuery(_) => None,
         }
     }
@@ -304,6 +318,7 @@ impl Operation {
                 | Self::Restore { .. }
                 | Self::ServiceAction { .. }
                 | Self::CertRenew
+                | Self::UpdateApply { .. }
         )
     }
 }
@@ -364,6 +379,9 @@ mod tests {
             Operation::UpdateStatus,
             Operation::CertStatus,
             Operation::CertRenew,
+            Operation::UpdateApply {
+                version: "v1.2.3".to_owned(),
+            },
         ]
     }
 
@@ -377,7 +395,7 @@ mod tests {
             assert!(!format!("{op:?}").is_empty());
             assert_eq!(op.clone(), op);
         }
-        assert_eq!(kinds.len(), 16);
+        assert_eq!(kinds.len(), 17);
         let unique: std::collections::BTreeSet<_> =
             kinds.iter().map(|kind| format!("{kind:?}")).collect();
         assert_eq!(unique.len(), kinds.len());
@@ -396,10 +414,10 @@ mod tests {
                 with_module = with_module.saturating_add(1);
             }
         }
-        // Apply, ConfirmCommit, RollbackCommit, Restore, ServiceAction, CertRenew.
-        assert_eq!(mutating, 6);
+        // Apply, ConfirmCommit, RollbackCommit, Restore, ServiceAction, CertRenew, UpdateApply.
+        assert_eq!(mutating, 7);
         // Everything except ListModules, ConfirmCommit, RollbackCommit,
-        // HostProfile, UpdateStatus, CertStatus, CertRenew and AuditQuery.
+        // HostProfile, UpdateStatus, CertStatus, CertRenew, UpdateApply and AuditQuery.
         assert_eq!(with_module, 8);
         assert_eq!(
             Operation::GetModule {

@@ -1,10 +1,10 @@
-//! `/api/v1/system/profile`, `/api/v1/system/cert`, `/api/v1/system/update`,
-//! and `/api/v1/audit`: read-only host, certificate, update-status, and
-//! history views. None ever mutates.
+//! `/api/v1/system/profile`, `/api/v1/system/cert`, `/api/v1/system/update`
+//! (`GET` for status, `POST` to install), and `/api/v1/audit`: host,
+//! certificate, update, and history views. Only the update `POST` mutates.
 
 use axum::Json;
 use axum::Router;
-use axum::extract::rejection::QueryRejection;
+use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::routing::get;
@@ -18,11 +18,11 @@ use detent_update::update::CheckReport;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use crate::auth::extract::Caller;
+use crate::auth::extract::{Caller, WriteCaller};
 use crate::error::ApiError;
 use crate::state::AppState;
 
-use super::{authorize, bad_request, query_rejection, unexpected_outcome};
+use super::{authorize, bad_request, json_rejection, query_rejection, unexpected_outcome};
 use detent_ops::OpOutcome;
 
 /// `GET /api/v1/system/profile`.
@@ -62,6 +62,11 @@ pub fn table() -> Vec<crate::auth::routes::Route> {
             mutating: false,
         },
         Route {
+            method: Method::POST,
+            path: UPDATE_PATH,
+            mutating: true,
+        },
+        Route {
             method: Method::GET,
             path: AUDIT_PATH,
             mutating: false,
@@ -74,7 +79,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route(PROFILE_PATH, get(profile))
         .route(CERT_PATH, get(cert))
-        .route(UPDATE_PATH, get(update))
+        .route(UPDATE_PATH, get(update).post(apply_update))
         .route(AUDIT_PATH, get(audit))
 }
 
@@ -131,15 +136,13 @@ pub(super) fn cert_report(state: &AppState) -> CertReport {
         lifetime_used_percent,
     }
 }
-
 /// `GET /api/v1/system/update`.
 ///
-/// The update status the web layer answers directly: the check fetches the
-/// release feed over the network and lives in [`detent_update`], which the
-/// operations engine does not depend on and cannot answer for. Read-only,
-/// like every other endpoint in this module — **installing** an update is a
-/// `write`-scoped, CSRF-checked `POST` that waits until the privileged swap
-/// (PLAN §2.9 steps 5b–5c) actually lands; nothing here installs anything.
+/// The update status the web layer answers directly: `detent-update` owns the
+/// check (release feed over the network), which the operations engine does
+/// not depend on and cannot answer for. Read-only — **installing** an update
+/// is the `write`-scoped, CSRF-checked `POST` on this same path, answered by
+/// [`apply_update`]; nothing here installs anything.
 ///
 /// Interval-guarded (PLAN §2.9 steps 5a and 6): `detent update --check`
 /// (the daily cron) writes `<state_root>/update/check.json` at most once
@@ -186,6 +189,67 @@ pub(super) async fn update(
     .await
     .map_err(|_| update_check_failed())?;
     Ok(Json(report?))
+}
+/// `POST /api/v1/system/update`.
+///
+/// Installs the named update. Answered as `Unsupported` (`ops-unsupported`,
+/// 500 with a reason) until the `ReplaceBinary` monitor wiring lands — the
+/// worker cannot swap a binary it does not own, so nothing here installs
+/// anything yet. The route, authz (`write`), and audit record land now so
+/// the UI builds against the real shape.
+#[cfg_attr(test, utoipa::path(
+    post,
+    path = UPDATE_PATH,
+    tag = "system",
+    request_body = UpdateApplyRequest,
+    responses(
+        (status = 200, description = "The update was installed", body = UpdateAppliedView),
+        (status = 500, description = "Install is not wired yet", body = crate::error::ErrorBody),
+    ),
+))]
+pub(super) async fn apply_update(
+    State(state): State<AppState>,
+    caller: WriteCaller,
+    body: Result<Json<UpdateApplyRequest>, JsonRejection>,
+) -> Result<Json<UpdateAppliedView>, ApiError> {
+    let Json(request) = body.map_err(json_rejection)?;
+    let op = Operation::UpdateApply {
+        version: request.version,
+    };
+    authorize(caller.caller(), &op)?;
+    let outcome = state
+        .engine
+        .execute(op, caller.caller().identity().clone())
+        .await?;
+    render_applied(outcome)
+}
+
+/// The body of `POST /api/v1/system/update`.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct UpdateApplyRequest {
+    /// The update version to install, e.g. `v1.2.3`.
+    pub version: String,
+}
+
+/// Answer to `UpdateApply`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(utoipa::ToSchema))]
+pub struct UpdateAppliedView {
+    /// The version that was installed.
+    pub version: String,
+}
+
+/// The `OpOutcome::UpdateApplied` branch, pulled out of [`apply_update`] so
+/// the mismatch arm can be exercised with a synthetic outcome: the engine
+/// answers `Unsupported` until the monitor wiring lands, so a real outcome
+/// never reaches [`apply_update`] itself.
+fn render_applied(outcome: OpOutcome) -> Result<Json<UpdateAppliedView>, ApiError> {
+    match outcome {
+        OpOutcome::UpdateApplied { version } => Ok(Json(UpdateAppliedView { version })),
+        _ => Err(unexpected_outcome()),
+    }
 }
 
 /// `web-update-check-failed` — the release feed could not be reached.
@@ -345,8 +409,8 @@ fn render_audit(outcome: OpOutcome) -> Result<Json<Vec<AuditRecord>>, ApiError> 
 #[cfg(test)]
 mod tests {
     use super::{
-        AuditQueryParams, MAX_AUDIT_LIMIT, MAX_FILTER_LEN, UpdateReport, render_audit, render_host,
-        update_check_failed, update_report,
+        AuditQueryParams, MAX_AUDIT_LIMIT, MAX_FILTER_LEN, UpdateAppliedView, UpdateReport,
+        render_applied, render_audit, render_host, update_check_failed, update_report,
     };
     use detent_core::descriptor::HostProfile;
     use detent_ops::OpOutcome;
@@ -567,5 +631,34 @@ mod tests {
             })
         );
         Ok(())
+    }
+
+    // -- POST /api/v1/system/update ------------------------------------------
+
+    #[test]
+    fn render_applied_maps_the_matching_outcome_and_rejects_any_other() -> R {
+        let view = render_applied(OpOutcome::UpdateApplied {
+            version: "v1.2.3".to_owned(),
+        })
+        .map(|axum::Json(view)| view)
+        .map_err(|_| "matching outcome must render")?;
+        assert_eq!(view.version, "v1.2.3");
+        assert_eq!(
+            serde_json::to_value(UpdateAppliedView {
+                version: "v1.2.3".to_owned()
+            })?,
+            serde_json::json!({ "version": "v1.2.3" })
+        );
+        assert!(render_applied(wrong_outcome()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn the_apply_body_refuses_unknown_fields() {
+        use super::UpdateApplyRequest;
+        let bad = serde_json::json!({"version": "v1.2.3", "extra": 1});
+        assert!(serde_json::from_value::<UpdateApplyRequest>(bad).is_err());
+        let ok = serde_json::json!({"version": "v1.2.3"});
+        assert!(serde_json::from_value::<UpdateApplyRequest>(ok).is_ok());
     }
 }

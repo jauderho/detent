@@ -261,6 +261,7 @@ impl utoipa::Modify for SecurityAddon {
         super::system::profile,
         super::system::cert,
         super::system::update,
+        super::system::apply_update,
         super::system::audit,
         serve,
     ),
