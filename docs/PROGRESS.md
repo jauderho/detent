@@ -5,6 +5,33 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-21 - Phase 10 survey: FFI+MCP in tree, acceptance gaps inventoried
+
+`detent-ffi` (10 entry points, `deny(unwrap/expect/panic/unsafe)`, 12 Rust
+tests + C example `OK`, `cbindgen --verify` CLEAN) and `detent-mcp` (17
+tools, one per `Operation`, `every_operation_has_a_tool`, fails-closed
+token auth, transport-agnostic, default build excludes `rmcp`) both build
+and pass. Remaining for acceptance: CI jobs (`cbindgen --verify`, C
+example build/run, `cargo-semver-checks`, Miri, MCP smoke, FreeBSD runner),
+per-tool JSON Schema vs OpenAPI parity (only the 17-count invariant is
+pinned, in `docs/API.md#openapi--mcp-schema-parity`), and a `detent mcp`
+transport command (only a feature flag exists; `check_auth` reads
+`DETENT_MCP_TOKEN` from env, no CLI wiring). Hygiene landed with the
+survey: stale "not wired" docs fixed (`API.md` update section,
+`apply_update`/`render_applied`/`UpdateApplied`/`UpdateApply` comments,
+`table()` test comment, integration comment, utoipa 500 text),
+`docs/openapi.json` regen'd, new `API.md` MCP + parity sections (the anchor
+`mcp.rs` cites now exists), `FFI.md` CI section made honest (workspace
+`rust` job covers fmt/clippy/test; verify/semver/Miri/C-example listed as
+open). Not touched: `.mcp.json`/`.mcp.json.web`, `.gitignore` (compiled
+`examples/ffi-c/main*` still untracked in-tree; add the ignore at commit
+time), Landlock-confined ReplaceBinary e2e (still open).
+Verify: `cargo test -p detent-ffi -p detent-mcp --features
+detent-mcp/mcp` 18 passed; C example rebuilt to `/tmp` (`OK`); `cargo
+test -p detent-web api::` 65 passed; `cargo test -p detent-ops` 93 passed;
+clippy clean; fmt clean.
+---
+
 ## 2026-09-21 - detent-ffi C ABI lands (PLAN Phase 10)
 
 C ABI over ops (`crates/detent-ffi/src/lib.rs`, `deny(unwrap/expect/panic/unsafe)`):
