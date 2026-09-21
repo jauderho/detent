@@ -69,6 +69,8 @@ still says "the check fetches the release feed over the network", which the
 interval-guard paragraph below it now contradicts — fix both paragraphs in
 the implementation commit, not here.
 
+---
+
 ## 2026-09-20 - §2.9 step 6: interval-guarded check stamp lands
 
 `detent update --check` writes `<state_root>/update/check.json` (`CachedReport`
