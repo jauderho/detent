@@ -1443,6 +1443,29 @@ fn update_status_is_unsupported_in_the_engine_and_writes_no_audit_record() -> Te
     assert!(fx.records().is_empty());
     fx.finish()
 }
+#[test]
+fn update_apply_is_unsupported_until_monitor_wiring_lands_and_writes_one_audit_record() -> TestResult
+{
+    let mut fx = harness(b"v1\n", Setup::default())?;
+    let err = fx.run(Operation::UpdateApply {
+        version: "v1.2.3".to_owned(),
+    });
+    assert!(matches!(
+        err,
+        Err(OpsError::Unsupported {
+            what: "update_apply"
+        })
+    ));
+    // Mutating, so the failure is audited exactly once (PLAN §2.5) — the
+    // contrast to `UpdateStatus` above, which is read-only and skips audit.
+    let records = fx.records();
+    assert_eq!(records.len(), 1);
+    let first = records.first().ok_or("the failure was audited")?;
+    assert_eq!(first.op, OpKind::UpdateApply);
+    assert_eq!(first.result, AuditResult::Error);
+    assert_eq!(first.error_id.as_deref(), Some("ops-unsupported"));
+    fx.finish()
+}
 
 #[test]
 fn the_audit_log_can_be_queried_back_through_an_operation() -> TestResult {

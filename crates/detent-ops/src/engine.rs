@@ -252,6 +252,12 @@ impl OpsEngine {
                 what: "update_status",
             }),
             Operation::CertRenew => Err(OpsError::Unsupported { what: "cert_renew" }),
+            // No `ReplaceBinary` monitor wiring yet: the worker cannot swap a
+            // binary it does not own. Answered as `Unsupported`
+            // (`ops-unsupported`) like `CertRenew` until that slice lands.
+            Operation::UpdateApply { .. } => Err(OpsError::Unsupported {
+                what: "update_apply",
+            }),
         }
     }
 

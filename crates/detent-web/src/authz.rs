@@ -145,7 +145,8 @@ impl ScopedAuthz {
             | Operation::RollbackCommit { .. }
             | Operation::Restore { .. }
             | Operation::ServiceAction { .. }
-            | Operation::CertRenew => Scope::Write,
+            | Operation::CertRenew
+            | Operation::UpdateApply { .. } => Scope::Write,
             Operation::ListModules
             | Operation::GetModule { .. }
             | Operation::Validate { .. }
@@ -230,8 +231,13 @@ mod tests {
                 action: ServiceCommand::Restart,
             },
             Operation::HostProfile,
+            Operation::UpdateStatus,
+            Operation::CertStatus,
             Operation::AuditQuery(detent_ops::audit::AuditQuery::default()),
             Operation::CertRenew,
+            Operation::UpdateApply {
+                version: "v1.2.3".to_owned(),
+            },
         ]
     }
 

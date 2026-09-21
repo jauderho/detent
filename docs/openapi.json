@@ -790,7 +790,7 @@
           "system"
         ],
         "summary": "`GET /api/v1/system/update`.",
-        "description": "The update status the web layer answers directly: the check fetches the\nrelease feed over the network and lives in [`detent_update`], which the\noperations engine does not depend on and cannot answer for. Read-only,\nlike every other endpoint in this module — **installing** an update is a\n`write`-scoped, CSRF-checked `POST` that waits until the privileged swap\n(PLAN §2.9 steps 5b–5c) actually lands; nothing here installs anything.\n\nInterval-guarded (PLAN §2.9 steps 5a and 6): `detent update --check`\n(the daily cron) writes `<state_root>/update/check.json` at most once\nper 24 h; this handler prefers that stamp and only reaches the network\nwhen no stamp exists yet. A read-scoped caller can no longer make this\nhost poll GitHub in a loop.",
+        "description": "The update status the web layer answers directly: `detent-update` owns the\ncheck (release feed over the network), which the operations engine does\nnot depend on and cannot answer for. Read-only — **installing** an update\nis the `write`-scoped, CSRF-checked `POST` on this same path, answered by\n[`apply_update`]; nothing here installs anything.\n\nInterval-guarded (PLAN §2.9 steps 5a and 6): `detent update --check`\n(the daily cron) writes `<state_root>/update/check.json` at most once\nper 24 h; this handler prefers that stamp and only reaches the network\nwhen no stamp exists yet. A read-scoped caller can no longer make this\nhost poll GitHub in a loop.",
         "operationId": "update",
         "responses": {
           "200": {
@@ -805,6 +805,46 @@
           },
           "503": {
             "description": "The release feed could not be reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "`POST /api/v1/system/update`.",
+        "description": "Installs the named update. Answered as `Unsupported` (`ops-unsupported`,\n500 with a reason) until the `ReplaceBinary` monitor wiring lands — the\nworker cannot swap a binary it does not own, so nothing here installs\nanything yet. The route, authz (`write`), and audit record land now so\nthe UI builds against the real shape.",
+        "operationId": "apply_update",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateApplyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The update was installed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateAppliedView"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Install is not wired yet",
             "content": {
               "application/json": {
                 "schema": {
@@ -1719,7 +1759,8 @@
           "audit_query",
           "update_status",
           "cert_status",
-          "cert_renew"
+          "cert_renew",
+          "update_apply"
         ]
       },
       "Os": {
@@ -2204,6 +2245,33 @@
             "description": "systemd unit names."
           }
         }
+      },
+      "UpdateAppliedView": {
+        "type": "object",
+        "description": "Answer to `UpdateApply`.",
+        "required": [
+          "version"
+        ],
+        "properties": {
+          "version": {
+            "type": "string",
+            "description": "The version that was installed."
+          }
+        }
+      },
+      "UpdateApplyRequest": {
+        "type": "object",
+        "description": "The body of `POST /api/v1/system/update`.",
+        "required": [
+          "version"
+        ],
+        "properties": {
+          "version": {
+            "type": "string",
+            "description": "The update version to install, e.g. `v1.2.3`."
+          }
+        },
+        "additionalProperties": false
       },
       "UpdateReport": {
         "type": "object",
