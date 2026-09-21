@@ -5,6 +5,30 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-21 - Mark the rolled-back release bad (PLAN §2.9 step 5c)
+
+Without this a bad release is re-downloaded and re-rolled-back next run:
+annoying, not unsafe. `install_candidate` now calls
+`detent_update::update::mark_bad(bad, tag)` on the `Unhealthy` path before
+`roll_back`. Store is `<state_root>/update/bad.json` (bare array, deduped +
+sorted; missing/corrupt reads empty, never errors). `mark_bad` also deletes
+the sibling `check.json` so a cached report advertising that tag does not
+survive a full 24 h interval.
+`check`/`prepare` take `bad: &[String]` and filter before `policy::select`;
+`check_report` (CLI) and `GET /api/v1/system/update` (web) filter the cached
+report's tag at read time (`poisoned` → re-fetch, no network avoided) — GET
+stays read-scoped, no forced stamp overwrite on the request path.
+Tests: `bad_list_round_trips_dedups_and_invalidates_the_stamp`,
+`check_skips_a_bad_tag`, web `update_report_skips_a_bad_tag`, CLI
+`update_check_refetches_when_the_cached_tag_is_bad` (fresh stamp + bad tag →
+re-fetch → Failed), rollback test asserts `read_bad == ["v0.0.2"]`.
+Workspace clippy/fmt/tests green except 4 pre-existing `health::tests`
+rustls-provider failures under `--all-features` (verified on clean tree via
+stash: `detent-update --lib` alone passes 5/5 health tests; the 4 fail only
+when the workspace enables both aws-lc-rs and ring providers, untouched by
+this slice).
+---
+
 ## 2026-09-21 - Phase 9 done: write-scoped install POST lands (PLAN §2.9 steps 5b/6)
 
 `POST /api/v1/system/update` exists: route + `write` authz + audit + engine

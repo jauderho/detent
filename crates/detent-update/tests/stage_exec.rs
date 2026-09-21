@@ -83,6 +83,7 @@ fn prepare_stages_an_executable_binary() -> Result<(), Box<dyn std::error::Error
         )?,
         &trust,
         staging_parent.path(),
+        &[],
     )?;
 
     let mode = std::fs::metadata(&candidate.binary_path)?

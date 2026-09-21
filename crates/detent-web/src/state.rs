@@ -149,6 +149,13 @@ impl AppState {
     pub fn update_stamp(&self) -> std::path::PathBuf {
         detent_update::update::stamp_path(&self.state_root)
     }
+
+    /// The bad-release list (PLAN §2.9 step 5c): tags that failed health and
+    /// were rolled back, so the next check skips them.
+    #[must_use]
+    pub fn bad_stamp(&self) -> std::path::PathBuf {
+        detent_update::update::bad_path(&self.state_root)
+    }
 }
 
 /// A whole test fixture: the state, the capture sink behind its audit, and

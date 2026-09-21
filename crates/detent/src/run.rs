@@ -593,6 +593,7 @@ fn run_update(
         .parent()
         .map_or_else(std::env::temp_dir, std::path::Path::to_path_buf);
     let stamp = detent_update::update::stamp_path(&settings.state_root);
+    let bad = detent_update::update::bad_path(&settings.state_root);
     let check_only = args.check;
     let force = args.force;
     run_update_on(
@@ -606,6 +607,7 @@ fn run_update(
         &trust,
         check_only,
         &stamp,
+        &bad,
         force,
         &staging_parent,
         &|path| detent_update::update::confirm_features(path, &current_features()),
@@ -745,6 +747,7 @@ fn run_update_on(
     trust: &detent_update::TrustRoot,
     check_only: bool,
     stamp: &std::path::Path,
+    bad: &std::path::Path,
     force: bool,
     staging_parent: &std::path::Path,
     probe: &FeatureProbe,
@@ -755,7 +758,7 @@ fn run_update_on(
 ) -> std::io::Result<Exit> {
     if check_only {
         return check_report(
-            transport, current, policy, now, stamp, force, renderer, streams,
+            transport, current, policy, now, stamp, bad, force, renderer, streams,
         );
     }
     apply_update(
@@ -765,6 +768,7 @@ fn run_update_on(
         now,
         trust,
         staging_parent,
+        bad,
         probe,
         swap,
         restart,
@@ -786,17 +790,26 @@ fn check_report(
     policy: &detent_update::Policy,
     now: time::OffsetDateTime,
     stamp: &std::path::Path,
+    bad: &std::path::Path,
     force: bool,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
+    let bad_tags = detent_update::update::read_bad(bad);
     if !force
         && let Some(cached) = detent_update::update::read_cached(stamp)
         && detent_update::update::is_fresh(cached.checked_at, now)
     {
-        return render_check_report(&cached.report, renderer, streams);
+        let stale = cached
+            .report
+            .tag
+            .as_deref()
+            .is_some_and(|tag| bad_tags.iter().any(|b| b == tag));
+        if !stale {
+            return render_check_report(&cached.report, renderer, streams);
+        }
     }
-    let report = match detent_update::update::check(transport, current, policy, now) {
+    let report = match detent_update::update::check(transport, current, policy, now, &bad_tags) {
         Ok(report) => report,
         Err(err) => {
             return failed(renderer, streams, &err.to_string());
@@ -865,18 +878,28 @@ fn apply_update(
     now: time::OffsetDateTime,
     trust: &detent_update::TrustRoot,
     staging_parent: &std::path::Path,
+    bad: &std::path::Path,
     probe: &FeatureProbe,
     swap: &BinarySwap<'_>,
     restart: &RestartCheck<'_>,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
-    match detent_update::update::prepare(transport, current, policy, now, trust, staging_parent) {
+    let bad_tags = detent_update::update::read_bad(bad);
+    match detent_update::update::prepare(
+        transport,
+        current,
+        policy,
+        now,
+        trust,
+        staging_parent,
+        &bad_tags,
+    ) {
         Ok(candidate) => {
             // §2.9 step 5's first half: the verified candidate must run and
             // cover this build's feature set before anything is installed.
             match probe(&candidate.binary_path) {
-                Ok(_) => install_candidate(&candidate, swap, restart, renderer, streams),
+                Ok(_) => install_candidate(&candidate, bad, swap, restart, renderer, streams),
                 Err(err) => failed(renderer, streams, &err.to_string()),
             }
         }
@@ -891,6 +914,7 @@ fn apply_update(
 #[cfg(feature = "update")]
 fn install_candidate(
     candidate: &detent_update::StagedUpdate,
+    bad: &std::path::Path,
     swap: &BinarySwap<'_>,
     restart: &RestartCheck<'_>,
     renderer: &Renderer<'_>,
@@ -924,6 +948,7 @@ fn install_candidate(
             Ok(Exit::Ok)
         }
         RestartOutcome::Unhealthy(reason) => {
+            detent_update::update::mark_bad(bad, &candidate.tag);
             roll_back(installed, &reason, restart, renderer, streams)
         }
     }
@@ -1832,6 +1857,11 @@ mod tests {
             !target.with_file_name("detent.prev").exists(),
             "the rollback must consume the kept binary"
         );
+        assert_eq!(
+            detent_update::update::read_bad(&detent_update::update::bad_path(run.dir.path())),
+            vec!["v0.0.2".to_owned()],
+            "the rolled-back tag must be marked bad"
+        );
         Ok(())
     }
 
@@ -2057,6 +2087,9 @@ mod tests {
         exit: Exit,
         out: String,
         notes: String,
+        // ponytail: keep the hermetic stamp dir alive so mark_bad assertions
+        // can read the bad list the run wrote.
+        dir: tempfile::TempDir,
     }
 
     /// Runs the bare-`update` flow with a fixed clock and no subprocesses.
@@ -2084,6 +2117,7 @@ mod tests {
         // expected to reach the feed, not a prior cached result.
         let tmp = tempfile::TempDir::new()?;
         let stamp = detent_update::update::stamp_path(tmp.path());
+        let bad = detent_update::update::bad_path(tmp.path());
         let exit = super::run_update_on(
             feed,
             current,
@@ -2092,6 +2126,7 @@ mod tests {
             trust,
             check_only,
             &stamp,
+            &bad,
             false,
             &std::env::temp_dir(),
             probe,
@@ -2108,6 +2143,7 @@ mod tests {
             exit,
             out: String::from_utf8(out)?,
             notes: String::from_utf8(notes)?,
+            dir: tmp,
         })
     }
     /// A feed whose assets verify end to end: the fixture binary bytes with a
@@ -2234,6 +2270,7 @@ mod tests {
     ) -> CheckRun {
         let tmp = tempfile::TempDir::new()?;
         let stamp = detent_update::update::stamp_path(tmp.path());
+        let bad = detent_update::update::bad_path(tmp.path());
         let mut out = Vec::new();
         let mut notes = Vec::new();
         let exit = super::check_report(
@@ -2242,6 +2279,7 @@ mod tests {
             policy,
             now,
             &stamp,
+            &bad,
             false,
             renderer,
             &mut Streams {
@@ -2276,7 +2314,8 @@ mod tests {
                 body,
                 when: when.to_owned(),
             };
-            let report: CheckReport = detent_update::update::check(&feed, &current, &policy, now)?;
+            let report: CheckReport =
+                detent_update::update::check(&feed, &current, &policy, now, &[])?;
             assert_eq!(report.update_available, available, "{tag} {body}");
             assert_eq!(report.security, security);
             let (exit, out, _) = run_check(&feed, &current, &policy, now, &renderer)?;
@@ -2338,6 +2377,7 @@ mod tests {
         let now = time::OffsetDateTime::now_utc();
         let tmp = tempfile::TempDir::new()?;
         let stamp = detent_update::update::stamp_path(tmp.path());
+        let bad = detent_update::update::bad_path(tmp.path());
         let report = detent_update::CheckReport {
             update_available: false,
             current: "0.0.1".to_owned(),
@@ -2355,6 +2395,7 @@ mod tests {
             &policy,
             now,
             &stamp,
+            &bad,
             false,
             &renderer,
             &mut Streams {
@@ -2365,6 +2406,67 @@ mod tests {
         )?;
         assert_eq!(exit, Exit::Ok);
         assert!(String::from_utf8(out)?.contains("0.0.1"));
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn update_check_refetches_when_the_cached_tag_is_bad() -> R {
+        // FailingFeed refuses the list call: reaching it proves the fresh
+        // stamp was ignored, and check_report turns that into Failed.
+        let messages = crate::i18n::Messages::new(Some("en-US"));
+        let renderer = crate::output::Renderer {
+            messages: &messages,
+            json: false,
+            verbose: false,
+        };
+        let current = semver::Version::new(0, 0, 1);
+        let policy = detent_update::Policy::default();
+        let now = time::OffsetDateTime::now_utc();
+        let tmp = tempfile::TempDir::new()?;
+        let stamp = detent_update::update::stamp_path(tmp.path());
+        let bad = detent_update::update::bad_path(tmp.path());
+        let report = detent_update::CheckReport {
+            update_available: true,
+            current: "0.0.1".to_owned(),
+            tag: Some("v0.0.2".to_owned()),
+            published: None,
+            security: false,
+        };
+        // mark_bad deletes check.json, so mark a decoy first, then write the
+        // stale report naming v0.0.2 and mark it: the second mark deletes the
+        // stamp, so re-write after. The read-time filter (not the deletion)
+        // is what must force the re-fetch below.
+        detent_update::update::mark_bad(&bad, "v0.0.1");
+        detent_update::update::write_cached(&stamp, &report, now, true)
+            .map_err(std::io::Error::other)?;
+        detent_update::update::mark_bad(&bad, "v0.0.2");
+        detent_update::update::write_cached(&stamp, &report, now, true)
+            .map_err(std::io::Error::other)?;
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = super::check_report(
+            &FailingFeed,
+            &current,
+            &policy,
+            now,
+            &stamp,
+            &bad,
+            false,
+            &renderer,
+            &mut Streams {
+                input: &mut std::io::empty(),
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        assert_eq!(
+            exit,
+            Exit::Failed,
+            "bad cached tag must not serve the stamp"
+        );
+        assert!(out.is_empty());
+        assert!(!notes.is_empty());
         Ok(())
     }
     #[test]
@@ -2443,6 +2545,7 @@ mod tests {
         };
         let tmp = tempfile::TempDir::new()?;
         let stamp = detent_update::update::stamp_path(tmp.path());
+        let bad = detent_update::update::bad_path(tmp.path());
         let mut out = Vec::new();
         let mut notes = Vec::new();
         let exit = super::check_report(
@@ -2451,6 +2554,7 @@ mod tests {
             &policy,
             now,
             &stamp,
+            &bad,
             false,
             &renderer,
             &mut Streams {
@@ -2480,12 +2584,14 @@ mod tests {
         let mut notes = Vec::new();
         let tmp = tempfile::TempDir::new()?;
         let stamp = detent_update::update::stamp_path(tmp.path());
+        let bad = detent_update::update::bad_path(tmp.path());
         let exit = super::check_report(
             &FailingFeed,
             &current,
             &policy,
             now,
             &stamp,
+            &bad,
             false,
             &renderer,
             &mut Streams {

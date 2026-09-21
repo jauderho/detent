@@ -191,11 +191,13 @@ pub fn check(
     current: &Version,
     policy: &Policy,
     now: time::OffsetDateTime,
+    bad: &[String],
 ) -> Result<CheckReport, UpdateError> {
     let releases = fetch::list_releases(transport, &fetch::target_triple())?;
     let candidates: Vec<policy::Candidate> = releases
         .iter()
         .map(|release| release.candidate.clone())
+        .filter(|c| !bad.contains(&c.tag))
         .collect();
     Ok(match policy::select(&candidates, current, now, policy) {
         Ok(chosen) => {
@@ -261,11 +263,13 @@ pub fn prepare(
     now: time::OffsetDateTime,
     trust: &crate::trust::TrustRoot,
     staging_parent: &std::path::Path,
+    bad: &[String],
 ) -> Result<Candidate, UpdateError> {
     let releases = fetch::list_releases(transport, &fetch::target_triple())?;
     let candidates: Vec<policy::Candidate> = releases
         .iter()
         .map(|release| release.candidate.clone())
+        .filter(|c| !bad.contains(&c.tag))
         .collect();
     let chosen =
         policy::select(&candidates, current, now, policy).map_err(|_| UpdateError::NoUpdate)?;
@@ -352,6 +356,7 @@ pub fn prepare(
 /// `write_atomic` (read-only state callers must be able to read it). Must
 /// not touch the network.
 mod cache {
+    use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
@@ -401,12 +406,47 @@ mod cache {
         state_root.join("update/check.json")
     }
 
+    /// The on-disk bad-release list (PLAN §2.9 step 5c): `<state_root>/update/bad.json`.
+    /// Holds tags that failed health and were rolled back, so the next run
+    /// skips them instead of re-downloading and re-rolling-back.
+    #[must_use]
+    pub fn bad_path(state_root: &Path) -> PathBuf {
+        state_root.join("update/bad.json")
+    }
+
     /// Read `<stamp>` if it exists and parses, else `None`. A corrupt file
     /// is a miss, not an error — the next successful check overwrites it.
     #[must_use]
     pub fn read_cached(stamp: &Path) -> Option<CachedReport> {
         let raw = std::fs::read(stamp).ok()?;
         serde_json::from_slice(&raw).ok()
+    }
+
+    /// Read the bad-release list. Missing or corrupt is empty — never an error.
+    #[must_use]
+    pub fn read_bad(path: &Path) -> Vec<String> {
+        let Ok(raw) = std::fs::read(path) else {
+            return Vec::new();
+        };
+        // Accept either a bare array `["v0.1.1"]` or the older object shape
+        // if one ever existed; favour the simple array.
+        if let Ok(list) = serde_json::from_slice::<Vec<String>>(&raw) {
+            return dedup_sorted(list);
+        }
+        if let Ok(wrap) = serde_json::from_slice::<BadFile>(&raw) {
+            return dedup_sorted(wrap.bad);
+        }
+        Vec::new()
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct BadFile {
+        bad: Vec<String>,
+    }
+
+    fn dedup_sorted(mut tags: Vec<String>) -> Vec<String> {
+        let set: BTreeSet<String> = tags.drain(..).collect();
+        set.into_iter().collect()
     }
 
     /// Whether `checked_at` is already fresh enough that the next check
@@ -456,6 +496,34 @@ mod cache {
         Ok(Some(cached))
     }
 
+    /// Mark `tag` as bad (failed health, rolled back). Best-effort: a
+    /// filesystem error is ignored — the next run will retry the same tag,
+    /// which is annoying but safe. Also removes the sibling `check.json`
+    /// so a cached report advertising that tag does not survive for 24 h.
+    pub fn mark_bad(bad_path: &Path, tag: &str) {
+        let mut tags = read_bad(bad_path);
+        if tags.iter().any(|t| t == tag) {
+            return;
+        }
+        tags.push(tag.to_owned());
+        tags = dedup_sorted(tags);
+        let Ok(body) = serde_json::to_vec_pretty(&tags) else {
+            return;
+        };
+        if let Some(parent) = bad_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = write_atomic(bad_path, &body);
+        // Invalidate any cached check that still advertises this tag: the
+        // read path in `check_report` (CLI) and `system.rs` (web) also
+        // filters, but deleting avoids serving a stale report for a full
+        // interval when the cache is otherwise fresh.
+        if let Some(parent) = bad_path.parent() {
+            let stamp = parent.join("check.json");
+            let _ = std::fs::remove_file(stamp);
+        }
+    }
+
     fn write_atomic(path: &Path, body: &[u8]) -> std::io::Result<()> {
         use std::io::Write as _;
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
@@ -467,7 +535,10 @@ mod cache {
     }
 }
 
-pub use cache::{CHECK_INTERVAL, CachedReport, is_fresh, read_cached, stamp_path, write_cached};
+pub use cache::{
+    CHECK_INTERVAL, CachedReport, bad_path, is_fresh, mark_bad, read_bad, read_cached, stamp_path,
+    write_cached,
+};
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
@@ -536,7 +607,7 @@ mod tests {
     fn check_maps_policy_outcomes_to_reports() {
         let current = semver::Version::new(0, 0, 1);
         let policy = Policy::default();
-        let report = check(&feed("v0.0.2", ""), &current, &policy, now()).expect("newer");
+        let report = check(&feed("v0.0.2", ""), &current, &policy, now(), &[]).expect("newer");
         assert!(report.update_available);
         assert_eq!(report.tag.as_deref(), Some("v0.0.2"));
         assert!(!report.security);
@@ -545,12 +616,13 @@ mod tests {
             &current,
             &policy,
             now(),
+            &[],
         )
         .expect("security");
         assert!(report.update_available);
         assert!(report.security);
         let report =
-            check(&feed("v0.0.0", ""), &current, &policy, now()).expect("downgrade refused");
+            check(&feed("v0.0.0", ""), &current, &policy, now(), &[]).expect("downgrade refused");
         assert!(!report.update_available);
         assert_eq!(report.tag.as_deref(), Some("v0.0.0"));
         let report = check(
@@ -561,6 +633,7 @@ mod tests {
                 ..policy
             },
             now(),
+            &[],
         )
         .expect("too young");
         assert!(!report.update_available);
@@ -585,7 +658,7 @@ mod tests {
         }
         let current = semver::Version::new(0, 0, 1);
         assert!(matches!(
-            check(&Failing, &current, &Policy::default(), now()),
+            check(&Failing, &current, &Policy::default(), now(), &[]),
             Err(UpdateError::Fetch(_))
         ));
     }
@@ -599,6 +672,7 @@ mod tests {
             &semver::Version::new(0, 0, 1),
             &Policy::default(),
             now(),
+            &[],
         )
         .expect("canned report");
         let written = write_cached(&stamp, &report, now(), false)
@@ -632,6 +706,44 @@ mod tests {
                 .expect("forced")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn bad_list_round_trips_dedups_and_invalidates_the_stamp() {
+        let dir = tempfile::TempDir::new().expect("bad dir");
+        let bad = bad_path(dir.path());
+        assert!(read_bad(&bad).is_empty(), "missing file is empty");
+        mark_bad(&bad, "v0.0.2");
+        mark_bad(&bad, "v0.0.2");
+        mark_bad(&bad, "v0.0.1");
+        assert_eq!(read_bad(&bad), vec!["v0.0.1", "v0.0.2"]);
+        // A cached report advertising the bad tag does not survive the mark.
+        // (Use a fresh tag: v0.0.2 is already bad, and re-marking it returns
+        // early without touching the stamp.)
+        let stamp = stamp_path(dir.path());
+        let report = check(
+            &feed("v0.0.3", ""),
+            &semver::Version::new(0, 0, 1),
+            &Policy::default(),
+            now(),
+            &[],
+        )
+        .expect("canned report");
+        write_cached(&stamp, &report, now(), true).expect("write stamp");
+        mark_bad(&bad, "v0.0.3");
+        assert!(read_cached(&stamp).is_none(), "mark_bad deletes check.json");
+        std::fs::write(&bad, b"not json").expect("corrupt bad list");
+        assert!(read_bad(&bad).is_empty(), "corrupt file is empty");
+    }
+
+    #[test]
+    fn check_skips_a_bad_tag() {
+        let current = semver::Version::new(0, 0, 1);
+        let policy = Policy::default();
+        let bad = vec!["v0.0.2".to_owned()];
+        let report = check(&feed("v0.0.2", ""), &current, &policy, now(), &bad).expect("filtered");
+        assert!(!report.update_available, "a bad tag is not offered");
+        assert_eq!(report.tag, None);
     }
 
     /// Writes an executable `#!/bin/sh` script the probe can run.
