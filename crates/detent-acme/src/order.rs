@@ -318,14 +318,30 @@ async fn load_or_create_account(
     };
 
     if let Some(json) = cached {
-        let credentials: AccountCredentials = serde_json::from_str(&json)
-            .map_err(|e| AcmeError::Credentials(format!("deserialize: {e}")))?;
+        let credentials = parse_credentials(&json)?;
         return builder
             .from_credentials(credentials)
             .await
             .map_err(AcmeError::from);
     }
+    create_fresh(directory_url, builder, credentials_path).await
+}
 
+/// Parses cached account credentials: garbage must surface as
+/// [`AcmeError::Credentials`], never as a fresh account registration.
+///
+/// Split from [`load_or_create_account`] so the mapping tests without an
+/// ACME client or a network.
+fn parse_credentials(json: &str) -> Result<AccountCredentials, AcmeError> {
+    serde_json::from_str(json).map_err(|e| AcmeError::Credentials(format!("deserialize: {e}")))
+}
+
+/// Registers a fresh account and persists its credentials atomically.
+async fn create_fresh(
+    directory_url: &str,
+    builder: instant_acme::AccountBuilder,
+    credentials_path: &Path,
+) -> Result<Account, AcmeError> {
     let (account, credentials) = builder
         .create(
             &NewAccount {
@@ -541,6 +557,32 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn ari_identifier_rejects_a_chain_without_aki() -> Result<(), String> {
+        // Default rcgen writes no AKI unless asked: `find_map` reaches the
+        // `_ => None` arm, and the missing identifier is `Config`, never a
+        // silent fallback to the wrong renewal slot.
+        use rcgen::{CertificateParams, DnType, IsCa, KeyPair};
+        let mut params = CertificateParams::new(vec!["noaki.example".to_owned()])
+            .map_err(|e| format!("fixture params must build: {e}"))?;
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "noaki.example");
+        params.is_ca = IsCa::NoCa;
+        let key = KeyPair::generate().map_err(|e| format!("fixture key must generate: {e}"))?;
+        let cert = params
+            .self_signed(&key)
+            .map_err(|e| format!("fixture cert must sign: {e}"))?;
+        let err = ari_identifier(&cert.pem())
+            .err()
+            .ok_or("a chain without AKI must fail")?;
+        assert!(
+            matches!(&err, AcmeError::Config(m) if m.contains("no authority key identifier")),
+            "missing AKI must be Config, got {err:?}"
+        );
+        Ok(())
+    }
+
     /// A credential file that exists but cannot be read must not be mistaken
     /// for "no account yet".
     ///
@@ -576,14 +618,10 @@ mod tests {
     }
     #[test]
     fn corrupt_credential_json_maps_to_a_credentials_error() {
-        // `load_or_create_account` deserializes the cached JSON before any
-        // network: garbage must surface as `Credentials`, never as a fresh
-        // account registration. `serde_json` on `AccountCredentials` is the
-        // seam — no ACME client needed.
-        let bad: Result<AccountCredentials, _> = serde_json::from_str("{not json");
-        let err = bad
-            .map_err(|e| AcmeError::Credentials(format!("deserialize: {e}")))
-            .err();
+        // `parse_credentials` is the production mapping `load_or_create_account`
+        // runs before any network: garbage must surface as `Credentials`,
+        // never as a fresh account registration.
+        let err = parse_credentials("{not json").err();
         assert!(
             matches!(&err, Some(AcmeError::Credentials(m)) if m.starts_with("deserialize:")),
             "garbage credentials must map to Credentials, got {err:?}"
