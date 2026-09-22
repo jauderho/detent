@@ -55,6 +55,8 @@ mod cli;
 mod completions;
 mod doctor;
 mod i18n;
+#[cfg(feature = "mcp")]
+mod mcp;
 mod output;
 mod run;
 mod serve;

@@ -436,12 +436,13 @@ impl McpServer {
 
     /// Authn + authz in one place, called by every tool's `invoke`.
     ///
-    /// Streamable HTTP callers must wire the bearer token into the
-    /// `DETENT_MCP_TOKEN` env var before each request, or wrap
-    /// `StreamableHttpService` in middleware that pre-resolves the identity
-    /// and stashes it where `check_auth` can find it. The simplest deploy is
-    /// stdio: the operator sets `DETENT_MCP_TOKEN` and the server picks it
-    /// up.
+    /// The token comes from the `DETENT_MCP_TOKEN` env var, read fresh on
+    /// every call. The owning binary reads it once at startup into a
+    /// [`ConstantTimeTokenVerifier`] (stdio) and, for streamable HTTP,
+    /// additionally rejects requests whose bearer does not constant-time
+    /// match that same startup value in axum/tower middleware before the
+    /// Streamable HTTP service runs — never by mutating the process env per
+    /// request. Token rotation is a process restart.
     fn check_auth(&self, op: &Operation) -> Result<Identity, ErrorData> {
         let token = std::env::var("DETENT_MCP_TOKEN").ok();
         let who = match token {

@@ -27,8 +27,8 @@ unic-langid = { workspace = true }
 zeroize = { workspace = true }
 # Only ever built when `web` is: `serve` runs `detent-web`'s router on a
 # runtime built inside the worker (PLAN §2.6), never a process-wide one — a
-# one-shot command must not pay for a runtime it never starts.
 tokio = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
 
 detent-core = { path = "../detent-core" }
 detent-i18n = { path = "../detent-i18n" }
@@ -75,7 +75,7 @@ acme-attest = ["acme-dns01"]
 ## already owns both), so an updater without it could not verify the restart.
 update = ["dep:detent-update", "dep:semver", "dep:time", "web"]
 
-mcp = ["dep:detent-mcp"]
+mcp = ["dep:detent-mcp", "detent-mcp/mcp", "dep:detent-web", "dep:tokio", "dep:axum"]
 
 init-systemd = []
 init-openrc = []

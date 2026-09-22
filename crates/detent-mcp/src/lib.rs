@@ -58,3 +58,17 @@ pub use mcp::{
     AuthError, AuthOutcome, Authz, ConstantTimeTokenVerifier, EngineExecutor, LockedEngine,
     McpServer, RecordingExecutor, TokenVerifier, Transport,
 };
+
+/// What the owning binary needs to serve [`McpServer`] itself: `stdio` for
+/// the local transport, the `StreamableHttp*` pieces plus
+/// [`LocalSessionManager`] for the remote one, and [`ServiceExt`] (for
+/// `serve`) with [`RunningService`] (for `waiting`/`close`). Re-exported so
+/// the `rmcp` version is pinned in exactly one crate.
+#[cfg(feature = "mcp")]
+pub use rmcp::service::{RunningService, ServiceExt};
+#[cfg(feature = "mcp")]
+pub use rmcp::transport::io::stdio;
+#[cfg(feature = "mcp")]
+pub use rmcp::transport::streamable_http_server::{
+    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+};

@@ -94,8 +94,12 @@ cli-serve-auth-failed = the account, token and session store could not be opened
 cli-serve-tls-failed = the tls certificate could not be prepared: {$reason}
 cli-serve-cert-fingerprint = tls bootstrap certificate fingerprint (sha-256): {$fingerprint}
 cli-serve-web-failed = the web server could not start: {$reason}
-cli-serve-listening = listening on {$addr}
 cli-serve-web-stopped = the web server did not stop cleanly: {$reason}
+cli-serve-listening = listening on {$addr}
+cli-mcp-missing-token = {$var} is not set; mint one with `detent token create` and export it before starting the mcp server.
+cli-mcp-serve-failed = the mcp server could not start: {$reason}
+cli-mcp-listening = mcp serving {$transport}
+cli-dryrun-mcp = dry run: mcp would serve {$transport} on {$addr} with scope {$scope}.
 
 ## setup, user, token
 cli-setup-exists = a user named `{$name}` already exists on this host; pass --force to overwrite it.
