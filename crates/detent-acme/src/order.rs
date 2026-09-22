@@ -245,6 +245,18 @@ fn decide_renewal(
     ))
 }
 
+/// External Account Binding credentials (RFC 8555 §7.3.4): the CA-issued
+/// key id plus its base64-encoded HMAC key. The key is decoded (standard
+/// or URL-safe base64) only when registering a fresh account — a restored
+/// account from `credentials_path` never touches it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EabCredentials {
+    /// The CA-issued external account key id.
+    pub kid: String,
+    /// The base64-encoded HMAC key value (standard or URL-safe alphabet).
+    pub key_b64: String,
+}
+
 /// Creates (or restores) an ACME account and issues a new dns-01 order.
 ///
 /// The account credentials are serialized to `credentials_path` with `0600`
@@ -256,18 +268,25 @@ fn decide_renewal(
 /// profiles extension (Pebble). An unsupported profile fails the order with
 /// [`AcmeError::Acme`] — the caller picks the fallback, not this module.
 ///
+/// `contacts` holds `mailto:`/`tel:` URIs recorded on fresh registration;
+/// `eab` binds registration to a CA-issued external account. Both are
+/// ignored when `credentials_path` already holds an account.
+///
 /// # Errors
 ///
 /// [`AcmeError::Acme`] on API errors, [`AcmeError::Io`] on credential
-/// persistence failures.
+/// persistence failures, [`AcmeError::Config`] on a bad EAB key.
 pub async fn account_and_order(
     directory_url: &str,
     domains: &[&str],
     credentials_path: &Path,
     ca_root: Option<&Path>,
     profile: Option<&str>,
+    contacts: &[&str],
+    eab: Option<&EabCredentials>,
 ) -> Result<(Account, Order), AcmeError> {
-    let account = load_or_create_account(directory_url, credentials_path, ca_root).await?;
+    let account =
+        load_or_create_account(directory_url, credentials_path, ca_root, contacts, eab).await?;
     let identifiers: Vec<Identifier> = domains
         .iter()
         .map(|d| Identifier::Dns((*d).to_owned()))
@@ -281,6 +300,25 @@ pub async fn account_and_order(
         .await
         .map_err(AcmeError::from)?;
     Ok((account, order))
+}
+
+/// Builds the RFC 8555 external-account key, decoding `key_b64` first.
+fn eab_key(eab: &EabCredentials) -> Result<instant_acme::ExternalAccountKey, AcmeError> {
+    use base64::Engine as _;
+    if eab.kid.is_empty() {
+        return Err(AcmeError::Config("EAB key id must not be empty".into()));
+    }
+    // ponytail: try standard then URL-safe; CAs emit either alphabet.
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(eab.key_b64.as_bytes())
+        .or_else(|_| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(eab.key_b64.as_bytes())
+        })
+        .map_err(|e| AcmeError::Config(format!("EAB key is not base64: {e}")))?;
+    if raw.is_empty() {
+        return Err(AcmeError::Config("EAB key must not decode to empty".into()));
+    }
+    Ok(instant_acme::ExternalAccountKey::new(eab.kid.clone(), &raw))
 }
 
 /// The cached account credentials, or `None` when this host has no account
@@ -306,6 +344,8 @@ async fn load_or_create_account(
     directory_url: &str,
     credentials_path: &Path,
     ca_root: Option<&Path>,
+    contacts: &[&str],
+    eab: Option<&EabCredentials>,
 ) -> Result<Account, AcmeError> {
     // Read before building anything: a caller whose credential file is
     // unreadable gets that answer without a crypto provider or a network
@@ -324,7 +364,7 @@ async fn load_or_create_account(
             .await
             .map_err(AcmeError::from);
     }
-    create_fresh(directory_url, builder, credentials_path).await
+    create_fresh(directory_url, builder, credentials_path, contacts, eab).await
 }
 
 /// Parses cached account credentials: garbage must surface as
@@ -341,16 +381,19 @@ async fn create_fresh(
     directory_url: &str,
     builder: instant_acme::AccountBuilder,
     credentials_path: &Path,
+    contacts: &[&str],
+    eab: Option<&EabCredentials>,
 ) -> Result<Account, AcmeError> {
+    let key = eab.map(eab_key).transpose()?;
     let (account, credentials) = builder
         .create(
             &NewAccount {
-                contact: &[],
+                contact: contacts,
                 terms_of_service_agreed: true,
                 only_return_existing: false,
             },
             directory_url.to_owned(),
-            None,
+            key.as_ref(),
         )
         .await
         .map_err(AcmeError::from)?;
@@ -728,6 +771,8 @@ mod tests {
             &occupied,
             None,
             Some("shortlived"),
+            &[],
+            None,
         )
         .await
         .err()
@@ -739,6 +784,55 @@ mod tests {
         );
         assert!(occupied.is_dir(), "the existing path must be left alone");
         Ok(())
+    }
+
+    #[test]
+    fn eab_key_rejects_bad_inputs_before_any_network() {
+        // Empty kid: no key to bind to.
+        let err = eab_key(&EabCredentials {
+            kid: String::new(),
+            key_b64: "aGk=".into(),
+        })
+        .err();
+        assert!(
+            matches!(err, Some(AcmeError::Config(_))),
+            "empty kid must fail, got {err:?}"
+        );
+        // Not base64 at all.
+        let err = eab_key(&EabCredentials {
+            kid: "k".into(),
+            key_b64: "!!!".into(),
+        })
+        .err();
+        assert!(
+            matches!(&err, Some(AcmeError::Config(m)) if m.contains("not base64")),
+            "garbage key must fail, got {err:?}"
+        );
+        // Decodes to empty.
+        let err = eab_key(&EabCredentials {
+            kid: "k".into(),
+            key_b64: String::new(),
+        })
+        .err();
+        assert!(
+            matches!(err, Some(AcmeError::Config(_))),
+            "empty key must fail, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn eab_key_accepts_both_base64_alphabets() {
+        // 0xfb 0xff decodes with `+/` (standard) and `-_` (URL-safe).
+        for key_b64 in ["+//+", "-__-"] {
+            assert!(
+                eab_key(&EabCredentials {
+                    kid: "k".into(),
+                    key_b64: key_b64.into()
+                })
+                .is_ok(),
+                "{key_b64:?} must decode"
+            );
+        }
     }
 
     #[test]
