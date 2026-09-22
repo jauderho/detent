@@ -119,7 +119,7 @@ fn pebble_dns01_issuance() -> Result<(), Box<dyn std::error::Error>> {
     let creds_path = std::env::temp_dir().join("detent-pebble-spike-account.json");
     let _ = std::fs::remove_file(&creds_path); // fresh account per full run
 
-    let issued = runtime()?.block_on(async {
+    let (issued, ari) = runtime()?.block_on(async {
         let (account, mut order) =
             account_and_order(&directory, &[TEST_DOMAIN], &creds_path, ca.as_deref(), None).await?;
         println!("account: {}", account.id());
@@ -148,7 +148,28 @@ fn pebble_dns01_issuance() -> Result<(), Box<dyn std::error::Error>> {
             "chain:   {} PEM block(s)",
             issued.chain_pem.matches("BEGIN CERTIFICATE").count()
         );
-        Ok::<String, Box<dyn std::error::Error>>(issued.chain_pem)
+        // ARI while the account is still alive: identifier out of the fresh
+        // chain, suggested window back from Pebble, window-start sanity, and
+        // the lifetime helper agreeing with a brand-new certificate.
+        let id = detent_acme::ari_identifier(&issued.chain_pem)?;
+        let (info, _) = account
+            .renewal_info(&id)
+            .await
+            .map_err(detent_acme::AcmeError::from)?;
+        let start = info.suggested_window.start.unix_timestamp();
+        let end = info.suggested_window.end.unix_timestamp();
+        assert!(start < end, "ARI window must be non-empty: {start}..{end}");
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let fresh = detent_acme::should_renew_ari(
+            &account,
+            &issued.chain_pem,
+            now - 60,
+            now + 576_000,
+            now,
+        )
+        .await?;
+        assert!(!fresh, "a just-issued certificate must not renew yet");
+        Ok::<(String, (i64, i64)), Box<dyn std::error::Error>>((issued.chain_pem, (start, end)))
     })?;
 
     // Cleanup: withdraw the hook files and TXT records.
@@ -176,6 +197,7 @@ fn pebble_dns01_issuance() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!("done:    order valid, certificate downloaded");
+    println!("ari:     suggested window {}..{}", ari.0, ari.1);
     // Spike convenience: the chain on disk for out-of-band inspection
     // (openssl x509 -serial/-fingerprint for the transcript).
     if let Ok(out) = std::env::var("PEBBLE_CHAIN_OUT") {
