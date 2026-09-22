@@ -187,13 +187,19 @@ quietly into the tables above.
    pinned `v1` commit `ci.yml` does and asks for nightly by input, which is
    both reachable and stable.
 5. ~~**Every `dtolnay/rust-toolchain@…# v1` step in `ci.yml` omits the required
-   `toolchain` input.**~~ **Fixed.** The action declares `toolchain` as
+   `toolchain` input.**~~ **Fixed, then reworked 2026-09-22.** The action declares `toolchain` as
    `required: true` and hard-fails when it is empty, so *every* job in `ci.yml`
    would have failed at its first step — which is consistent with the workflow
-   never having run. All five steps now pass `${{ env.RUST_TOOLCHAIN }}`, a
-   single workflow-level variable, and a `Toolchain pin matches
-   rust-toolchain.toml` step fails the build if that variable and the toolchain
-   file ever disagree.
+   never having run. The first fix passed `${{ env.RUST_TOOLCHAIN }}` plus a
+   `Toolchain pin matches rust-toolchain.toml` step; that is now superseded.
+   Current controls: `ci.yml` sets workflow-wide `RUSTUP_TOOLCHAIN: stable`
+   (the ubuntu-26.04 image provisions only `stable-*` via `--default-toolchain=stable`,
+   so a versioned channel would download a second copy), the `rust`/`size` jobs
+   fail closed with a drift check that reads preinstalled stable from `$RUNNER_TEMP`
+   (outside the checkout, where neither the env override nor the pin file masks it),
+   `rust-macos` installs pinned `1.98.1` with a job-level override, and
+   `release.yml`/`rebuild-verify.yml` keep exact `RUST_TOOLCHAIN: "1.98.1"` via
+   `dtolnay` for hash-for-hash reproducibility (ADR-011).
 
    Neither of these had anything to do with the security controls this document
    covers, and both were found only because someone went looking for the

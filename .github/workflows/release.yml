@@ -17,9 +17,12 @@ permissions:
   contents: read
 
 env:
-  # Same pin as ci.yml; ci.yml's "toolchain pin matches" step keeps this in
-  # sync with rust-toolchain.toml.
-  RUST_TOOLCHAIN: "1.98.0"
+  # Exact pin, NOT stable: the published binaries' hashes must be
+  # reproducible (rebuild-verify.yml rebuilds hash-for-hash), so the
+  # toolchain cannot drift with the runner image. Bump deliberately
+  # together with rust-toolchain.toml. The `rust` job's drift step in
+  # ci.yml fails closed when preinstalled stable moves past the pin.
+  RUST_TOOLCHAIN: "1.98.1"
 
 jobs:
   build:
@@ -60,6 +63,10 @@ jobs:
             echo "RUSTFLAGS=--remap-path-prefix=$PWD=/src --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
           } >> "$GITHUB_ENV"
 
+      # `toolchain` is a required input for this action (it has no
+      # rust-toolchain.toml auto-detection of its own); pinned to match
+      # rust-toolchain.toml so the cross target lands on the same
+      # toolchain `cargo` actually uses.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
@@ -154,6 +161,8 @@ jobs:
           set -euo pipefail
           echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
 
+      # SBOM enumerates the dependency graph of the pinned toolchain's
+      # build; use the exact pin, not drifting stable.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:

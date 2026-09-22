@@ -175,10 +175,13 @@ The `rust` job in `.github/workflows/ci.yml` covers `cargo fmt --check`,
 `cargo test --workspace --all-features`, `cbindgen --verify` against
 `include/detent.h`, and building and running `examples/ffi-c/main.c` — all
 of which include `detent-ffi`. The `ffi-soundness` job runs
-`cargo miri test -p detent-ffi` on nightly. `cargo-semver-checks` is
-deliberately not wired: every crate sets `publish = false`, so there is no
-public API surface to check; the C ABI side is covered by
-`cbindgen --verify` instead.
+`cargo miri test -p detent-ffi` on nightly (invoked as
+`rustup run nightly cargo miri test -p detent-ffi` because
+`rust-toolchain.toml` pins stable 1.98.1). The `ffi-semver` job runs
+`cargo semver-checks check-release -p detent-ffi --baseline-rev
+origin/main` (`cargo-semver-checks 0.50.0`); unpublished crates need the
+explicit git baseline, and the check is advisory — `cbindgen --verify`
+remains the binding C ABI gate.
 
 The C example exercises every FFI entry point against the `hosts` module
 and a checked-in fixture, asserting that `detent_apply_json` on a model
