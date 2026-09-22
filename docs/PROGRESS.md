@@ -5,6 +5,13 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-22 - Local tool installs (this session)
+
+- `rustup toolchain install nightly-aarch64-apple-darwin` + `rustup component add --toolchain nightly-aarch64-apple-darwin miri` (nightly rustc 1.100.0, 2026-09-21) — for local Miri runs on `detent-ffi`.
+- `cargo install cargo-semver-checks --version 0.45.0 --locked` (~322 deps, 178 s) — trial for the Phase 10 deliverable; too old for this toolchain (emits rustdoc v60, tool reads ≤v56), replaced by 0.50.0.
+- `cargo install cargo-semver-checks --version 0.50.0 --locked` (~196 s) — `check-release -p detent-ffi --baseline-rev HEAD~5` green locally (17.7 s; "0 checks: 0 pass, 254 skip / no semver update required", expected: `publish = false` crate, internal API surface).
+- `cbindgen 0.29.4` used for `--verify` against `include/detent.h` (pre-existing install, not added this session).
+
 ## 2026-09-22 - Phase 10 FreeBSD slice scoped: deferred to Phase 11
 
 No FreeBSD CI job added. PLAN §1.6 puts FreeBSD in tier 3 (deferred: no CI, no artifacts, no phase work until a later pass) and Phase 11 (BSD tier 2, incl. the `vmactions/freebsd-vm` job) is parked — both outrank the Phase 10 deliverables line wanting the C example on FreeBSD CI. Jev-routed scope Choice (`defer_to_phase11`, confidence 0.85, p=0.93; VM-heavy Noul 0.77). Deferral is CI scope only, not code risk: `detent-ffi`'s transitive deps (`detent-core`, hosts module) are pure-Rust serde/serde_json/schemars with no `cfg(target_os)` gates, so nothing precludes the later pass. Revisit when Phase 11 unparks.
