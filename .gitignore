@@ -9,6 +9,9 @@ web/coverage
 *.profraw
 lcov.info
 merged.info
+lcov-*.info
+*.profdata
+coverage/
 locales/qps-ploc/
 .DS_Store
 # Spike evidence stays ephemeral: captures are reproduced with
@@ -32,3 +35,5 @@ docs/spikes/**/*.webm
 # Compiled C example outputs (PLAN Phase 10); the sources stay, binaries do not.
 examples/ffi-c/main
 examples/ffi-c/main_dyn
+
+.mcp.json*
