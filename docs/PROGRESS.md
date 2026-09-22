@@ -5,6 +5,14 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-22 - Phase 6 EAB slice: contacts + EAB through account creation
+
+`account_and_order` takes `contacts: &[&str]` and `eab: Option<&EabCredentials>` (`order.rs`); `create_fresh` passes contacts into `NewAccount` and the decoded `ExternalAccountKey` into `builder.create`. `eab_key` decodes standard-then-URL-safe base64, rejecting empty kid/empty key/garbage as `Config` before any network. New: `EabCredentials` type (re-exported); restored accounts skip EAB entirely. Tests: `eab_key_rejects_bad_inputs_before_any_network`, `eab_key_accepts_both_base64_alphabets`; restored `problem_fixture_parses` lost in an edit repair.
+
+Verify: `cargo test --workspace --all-features` exit 0 (all suites ok, incl. acme 59 passed); `clippy -p detent-acme --all-targets --all-features -D warnings` clean; fmt clean.
+
+Next-slice routing was Jev-routed (`jev-1.13.0` next_slice `provider_transport` conf 0.66, p=0.73 over renewal_driver 0.21); EAB built instead as the smaller unblocked seam (contacts/EAB fields exist in `instant-acme`, no new transport dependency). Seam design + verification by default model. Pebble caller updated (`&[]`, `None`); only caller is the live test.
+
 ## 2026-09-22 - GateGreen follow-up: credential/no-AKI coverage, clippy green
 
 `parse_credentials` extracted from `load_or_create_account` so the corrupt-JSON test drives the production mapping (not a local copy); `ari_identifier_rejects_a_chain_without_aki` covers the `_ => None` + missing-AKI `Config` arm with a default rcgen cert. Health test `server()` now calls `ensure_provider()` (config build panicked before any probe under unified features). Both `GenericArray::as_slice` deprecations fixed (`verify.rs`, `gen-fixtures.rs`) — generic-array 0.14.9 in lock since before `d80cfc0`, so a toolchain-lint surfacing, not lockfile drift.

@@ -120,8 +120,16 @@ fn pebble_dns01_issuance() -> Result<(), Box<dyn std::error::Error>> {
     let _ = std::fs::remove_file(&creds_path); // fresh account per full run
 
     let (issued, ari) = runtime()?.block_on(async {
-        let (account, mut order) =
-            account_and_order(&directory, &[TEST_DOMAIN], &creds_path, ca.as_deref(), None).await?;
+        let (account, mut order) = account_and_order(
+            &directory,
+            &[TEST_DOMAIN],
+            &creds_path,
+            ca.as_deref(),
+            None,
+            &[],
+            None,
+        )
+        .await?;
         println!("account: {}", account.id());
         println!("order:   {}", order.url());
 

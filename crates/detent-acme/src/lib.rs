@@ -30,8 +30,8 @@ pub use attest::Attestor;
 #[cfg(feature = "fuzzing")]
 pub use order::fuzz_acme_json;
 pub use order::{
-    account_and_order, ari_identifier, finalize, present_attest_challenges, present_challenges,
-    should_renew_ari, wait_ready,
+    EabCredentials, account_and_order, ari_identifier, finalize, present_attest_challenges,
+    present_challenges, should_renew_ari, wait_ready,
 };
 #[cfg(any(feature = "dns-providers", feature = "fuzzing"))]
 pub use providers::{
