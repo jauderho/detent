@@ -5,6 +5,12 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-22 - Phase 6 coverage follow-up: AKI happy path, fuzz lockfile
+
+`ari_identifier_reads_aki_and_serial_off_a_chain` builds an AKI-bearing chain in-test (`rcgen`, `use_authority_key_identifier_extension = true`, new dev-dep) and pins serial+AKI survive the bridge. Regenerated `fuzz/Cargo.lock` (routine bumps only, no target changes).
+
+Verify: `cargo test -p detent-acme --all-features` 53 passed, 1 ignored; clippy clean; fmt clean. Coverage honest state: `order.rs` 52.7% lines, crate 85.9% — still under the 87 floor; remainder is the network order flow, reachable only live (Pebble). Commit-risk Jev call blocked by automode classifier timeout; treated as routine test+lockfile commit.
+
 ## 2026-09-22 - Phase 6 ARI slice: identifier bridge, helper, live round-trip
 
 `ari_identifier` (`order.rs`) builds the ARI `CertificateIdentifier` from the issued chain's leaf (AKI octet string + DER serial via `x509-parser`; missing AKI is `Config`, not a silent fallback). `should_renew_ari` fetches the suggested window through `Account::renewal_info` (`instant-acme` `time` feature) and answers through `schedule::should_renew_in_window`; `Unsupported` falls back to the plain lifetime rule. `pebble_live` now asserts the window is non-empty from live Pebble and a fresh cert does not renew. Unit test covers garbage/wrong-armour chains.
