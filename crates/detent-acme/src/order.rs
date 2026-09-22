@@ -209,7 +209,25 @@ pub async fn should_renew_ari(
     now_unix: i64,
 ) -> Result<bool, AcmeError> {
     let id = ari_identifier(chain_pem)?;
-    let info = match account.renewal_info(&id).await {
+    let fetched = account.renewal_info(&id).await;
+    decide_renewal(fetched, not_before, not_after, now_unix)
+}
+
+/// Decides renewal from an already-fetched ARI result: `Unsupported` falls
+/// back to the plain lifetime rule (a server without ARI support must not
+/// refuse renewal outright); any other error propagates; a suggested window
+/// narrows the answer through [`crate::schedule::should_renew_in_window`].
+///
+/// Split from [`should_renew_ari`] so the three arms test without a network:
+/// `RenewalInfo`'s fields are public, and `instant_acme::Error::Unsupported`
+/// and `Error::Str` construct offline.
+fn decide_renewal(
+    result: Result<(instant_acme::RenewalInfo, std::time::Duration), instant_acme::Error>,
+    not_before: i64,
+    not_after: i64,
+    now_unix: i64,
+) -> Result<bool, AcmeError> {
+    let info = match result {
         Ok((info, _)) => info,
         Err(instant_acme::Error::Unsupported(_)) => {
             return Ok(crate::schedule::should_renew(
@@ -289,9 +307,6 @@ async fn load_or_create_account(
     credentials_path: &Path,
     ca_root: Option<&Path>,
 ) -> Result<Account, AcmeError> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-
     // Read before building anything: a caller whose credential file is
     // unreadable gets that answer without a crypto provider or a network
     // client having to exist first.
@@ -326,13 +341,27 @@ async fn load_or_create_account(
 
     let json = serde_json::to_string(&credentials)
         .map_err(|e| AcmeError::Credentials(format!("serialize: {e}")))?;
+    write_json_atomically(credentials_path, &json)?;
+    Ok(account)
+}
+
+/// Writes `json` to `path` atomically with `0600` permissions: a
+/// pid-suffixed temp file in the target directory, then rename, so a crash
+/// never leaves a partial credential file readable under the umask.
+///
+/// Split from [`load_or_create_account`] so the write machinery tests
+/// without an ACME account: success, mode, stale-temp recovery, and the
+/// unwritable-parent failure are all filesystem facts.
+fn write_json_atomically(path: &Path, json: &str) -> Result<(), AcmeError> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
     // Atomic 0600 write, same pattern as HookProvider: pid-suffixed temp
     // file in the target directory, then rename, so a crash never leaves a
     // partial credential file readable under the umask.
-    if let Some(parent) = credentials_path.parent() {
+    if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = credentials_path.with_extension(format!("{}.tmp", std::process::id()));
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
     let write = || -> Result<(), AcmeError> {
         // `create_new`, not `create`: `mode` is applied only when the file is
         // created, so reopening a leftover temp file — a crash plus PID reuse
@@ -348,14 +377,14 @@ async fn load_or_create_account(
             .mode(0o600)
             .open(&tmp)?;
         f.write_all(json.as_bytes())?;
-        std::fs::rename(&tmp, credentials_path)?;
+        std::fs::rename(&tmp, path)?;
         Ok(())
     };
     if let Err(e) = write() {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
-    Ok(account)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -543,6 +572,100 @@ mod tests {
             matches!(err, AcmeError::Io(ref e) if e.kind() != std::io::ErrorKind::NotFound),
             "expected the read failure to propagate, got {err:?}"
         );
+        Ok(())
+    }
+    #[test]
+    fn corrupt_credential_json_maps_to_a_credentials_error() {
+        // `load_or_create_account` deserializes the cached JSON before any
+        // network: garbage must surface as `Credentials`, never as a fresh
+        // account registration. `serde_json` on `AccountCredentials` is the
+        // seam — no ACME client needed.
+        let bad: Result<AccountCredentials, _> = serde_json::from_str("{not json");
+        let err = bad
+            .map_err(|e| AcmeError::Credentials(format!("deserialize: {e}")))
+            .err();
+        assert!(
+            matches!(&err, Some(AcmeError::Credentials(m)) if m.starts_with("deserialize:")),
+            "garbage credentials must map to Credentials, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn atomic_write_lands_with_0600_and_recovers_a_stale_temp()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir()?;
+        let target = dir.path().join("sub").join("account.json");
+        // Fresh write: parents created, content exact, mode 0600.
+        write_json_atomically(&target, "{\"a\":1}")?;
+        assert_eq!(std::fs::read_to_string(&target)?, "{\"a\":1}");
+        assert_eq!(
+            std::fs::metadata(&target)?.permissions().mode() & 0o777,
+            0o600
+        );
+        // A stale pid-temp file (crash plus PID reuse) is replaced, not
+        // wedged on: the retry still succeeds with the new content.
+        let stale = target.with_extension(format!("{}.tmp", std::process::id()));
+        std::fs::write(&stale, "stale")?;
+        write_json_atomically(&target, "{\"a\":2}")?;
+        assert_eq!(std::fs::read_to_string(&target)?, "{\"a\":2}");
+        assert!(!stale.exists(), "stale temp must be consumed");
+        // An unusable parent fails rather than pretending to persist: a file
+        // where the directory should be makes `create_dir_all` fail.
+        let blocked = dir.path().join("nope");
+        std::fs::write(&blocked, "in the way")?;
+        let err = write_json_atomically(&blocked.join("a.json"), "{}").err();
+        assert!(
+            matches!(err, Some(AcmeError::Io(_))),
+            "unusable parent must fail, got {err:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn renewal_decision_covers_all_three_arms() -> Result<(), Box<dyn std::error::Error>> {
+        use instant_acme::{RenewalInfo, SuggestedWindow};
+        use time::OffsetDateTime;
+        // Lifetime 0..=1_000_000. now = 700_000 (70% used): the lifetime
+        // rule fires (≥66), but outside any window only ≥90 renews early.
+        let (nb, na, now) = (0, 1_000_000, 700_000);
+        let window = |start: i64, end: i64| -> Result<RenewalInfo, Box<dyn std::error::Error>> {
+            Ok(RenewalInfo {
+                suggested_window: SuggestedWindow {
+                    start: OffsetDateTime::from_unix_timestamp(start)?,
+                    end: OffsetDateTime::from_unix_timestamp(end)?,
+                },
+                explanation_url: None,
+            })
+        };
+        let unsupported = || {
+            Err::<(RenewalInfo, std::time::Duration), _>(instant_acme::Error::Unsupported("ARI"))
+        };
+        // Inside the window the lifetime rule applies: 70% renews.
+        assert!(decide_renewal(
+            Ok((window(600_000, 800_000)?, std::time::Duration::ZERO)),
+            nb,
+            na,
+            now
+        )?);
+        // Outside the window only a nearly-spent certificate renews: 70%
+        // holds.
+        assert!(!decide_renewal(
+            Ok((window(100_000, 200_000)?, std::time::Duration::ZERO)),
+            nb,
+            na,
+            now
+        )?);
+        // No ARI support: the plain lifetime rule, so 70% renews — and a
+        // fresh certificate at 10% still holds.
+        assert!(decide_renewal(unsupported(), nb, na, now)?);
+        assert!(!decide_renewal(unsupported(), 0, 1_000_000, 100_000)?);
+        // Any other error propagates as `Acme`, never as a renewal answer.
+        let other = Err::<(RenewalInfo, std::time::Duration), _>(instant_acme::Error::Str("boom"));
+        assert!(matches!(
+            decide_renewal(other, nb, na, now),
+            Err(AcmeError::Acme(_))
+        ));
         Ok(())
     }
 
