@@ -24,6 +24,7 @@ detent-module-dhcp = { path = "../crates/modules/dhcp", features = ["fuzzing"] }
 detent-module-network = { path = "../crates/modules/network", features = ["fuzzing"] }
 detent-platform = { path = "../crates/detent-platform", features = ["fuzzing"] }
 detent-web = { path = "../crates/detent-web" }
+detent-acme = { path = "../crates/detent-acme", features = ["fuzzing"] }
 
 [profile.release]
 debug = 1
@@ -213,6 +214,20 @@ bench = false
 [[bin]]
 name = "fuzz_network_edit"
 path = "fuzz_targets/fuzz_network_edit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_acme_json"
+path = "fuzz_targets/fuzz_acme_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_dns_response"
+path = "fuzz_targets/fuzz_dns_response.rs"
 test = false
 doc = false
 bench = false

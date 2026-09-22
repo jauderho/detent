@@ -5,6 +5,14 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-22 - Phase 6 fuzz slice: ACME JSON + DNS provider response targets
+
+`detent-acme` `fuzzing` feature exposes `fuzz_acme_json` (`order.rs`: `OrderState`/`AuthorizationState`/`Problem` parses) and `fuzz_provider_response` (`providers.rs`: Cloudflare/deSEC list parsers + RFC 2136 builder). One feature, not per-parser cfgs. Targets `fuzz/fuzz_targets/fuzz_acme_json.rs` + `fuzz_dns_response.rs` with `[[bin]]` entries; `fuzz/Cargo.toml` adds `detent-acme{fuzzing}` alongside `detent-web` (restored after a full-build `unresolved detent_web` failure). Corpora seeded from unit fixtures (order/authz pending, CF list, deSEC rrset); fuzzer-generated corpus churn pruned, 2 seeds per dir.
+
+Slice routing was Jev-routed (Choice + destructive-risk Noul); seam design, gating, and verification by default model.
+
+Verify: `cargo test -p detent-acme` 29 passed, 1 ignored; clippy `--all-targets --all-features` clean; `fmt --check` clean; `cargo +nightly fuzz build --sanitizer=none fuzz_acme_json / fuzz_dns_response` both Finished; `fuzz run fuzz_acme_json -- -max_total_time=60` Done 710768 runs in 61s clean; `fuzz run fuzz_dns_response` Done 722341 runs in 61s clean.
+
 ## 2026-09-22 - Local tool installs (this session)
 
 - `rustup toolchain install nightly-aarch64-apple-darwin` + `rustup component add --toolchain nightly-aarch64-apple-darwin miri` (nightly rustc 1.100.0, 2026-09-21) — for local Miri runs on `detent-ffi`.

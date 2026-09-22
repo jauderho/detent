@@ -266,6 +266,22 @@ async fn load_or_create_account(
     Ok(account)
 }
 
+// ---------------------------------------------------------------------------
+// Fuzz entry points
+// ---------------------------------------------------------------------------
+
+/// Feeds arbitrary bytes through the ACME JSON response parsers.
+///
+/// `OrderState`, `AuthorizationState` and `Problem` all arrive from the CA
+/// over the network, so malformed JSON must map to `Err`, never to a panic.
+/// Only compiled with the `fuzzing` feature for `cargo-fuzz`.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_acme_json(data: &[u8]) {
+    let _ = serde_json::from_slice::<instant_acme::OrderState>(data);
+    let _ = serde_json::from_slice::<instant_acme::AuthorizationState>(data);
+    let _ = serde_json::from_slice::<instant_acme::Problem>(data);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

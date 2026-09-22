@@ -1,0 +1,10 @@
+{
+        "identifier": {"type": "dns", "value": "example.com"},
+        "status": "pending",
+        "challenges": [{
+            "type": "dns-01",
+            "url": "https://pebble/chall/1",
+            "token": "token-1",
+            "status": "pending"
+        }]
+    }

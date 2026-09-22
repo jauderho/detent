@@ -15,6 +15,8 @@ publish = false
 # turns on for that -- but compiling ~1200 lines that cannot reach a server
 # into the shipped binary is weight for nothing. Turn on with the transport.
 dns-providers = []
+# ponytail: one feature, not per-parser cfgs; the wrappers below are the whole seam.
+fuzzing = []
 
 [lints]
 workspace = true

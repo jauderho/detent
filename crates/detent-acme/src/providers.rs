@@ -751,6 +751,25 @@ impl fmt::Debug for Rfc2136Provider {
 }
 
 // ---------------------------------------------------------------------------
+// Fuzz entry points
+// ---------------------------------------------------------------------------
+
+/// Feeds arbitrary strings through the DNS provider response parsers and the
+/// RFC 2136 message builder.
+///
+/// List/RRset bodies arrive from provider APIs over the network, so malformed
+/// JSON must map to `Err`, never to a panic; the message builder must likewise
+/// refuse oversized labels with `Err`. Only compiled with the `fuzzing`
+/// feature for `cargo-fuzz`.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_provider_response(body: &str, value: &str) {
+    let _ = cf_txt_id(body, value);
+    let _ = rrset_contains(body, value);
+    let _ = update_message(body, value, Some(value));
+    let _ = update_message(body, value, None);
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
