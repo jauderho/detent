@@ -5,6 +5,12 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-22 - Phase 10 per-tool MCP/REST schema parity pin
+
+`tool_schemas_match_rest_shapes` (`crates/detent-mcp/src/mcp.rs`) compares each of the 17 tool input schemas live against the checked-in `docs/openapi.json` (path params plus body/query fields flattened, required included, `$ref`s resolved; `ApiServiceCommand` enum spellings too). Freshness of that document is forced by detent-web's `the_checked_in_document_matches_what_this_build_generates`, so either side drifting fails the test. Exceptions: commit tools rename REST path `id` to MCP `commit_id`; `cert_renew` stays pinned empty as the one MCP-only tool. Sliced first per Jev Choice (`schema_parity` 0.53 vs `ci_jobs` 0.47, Noul drift-risk 0.83); all reasoning on the default model, Jev decided only slice order.
+
+Verify: `cargo test -p detent-mcp --features mcp` 8 passed; clippy clean; fmt clean; default-build `cargo check -p detent-mcp` OK (no `rmcp`).
+
 ## 2026-09-22 - Phase 10 MCP transport + smoke pin land
 
 `detent mcp` serves every `Operation` as an MCP tool (`crates/detent/src/mcp.rs`,

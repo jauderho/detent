@@ -1037,6 +1037,211 @@ mod tests {
         assert!(names.contains(&"update_apply"));
         assert_eq!(tools.len(), 17);
     }
+    /// Field sets of a JSON Schema object: `(required, all properties)`.
+    type Fields = (
+        std::collections::BTreeSet<String>,
+        std::collections::BTreeSet<String>,
+    );
+
+    /// One parity row: MCP tool, REST `operationId`, param renames.
+    type Pair = (
+        &'static str,
+        &'static str,
+        &'static [(&'static str, &'static str)],
+    );
+
+    fn doc_missing(what: &str) -> Box<dyn std::error::Error> {
+        format!("docs/openapi.json missing {what}").into()
+    }
+
+    fn field_sets(node: &serde_json::Value) -> Fields {
+        use serde_json::Value;
+        let props = node
+            .get("properties")
+            .and_then(Value::as_object)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        let required = node
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        (required, props)
+    }
+
+    fn resolve_ref<'a>(
+        schemas: &'a serde_json::Map<String, serde_json::Value>,
+        node: &'a serde_json::Value,
+    ) -> Result<&'a serde_json::Value, Box<dyn std::error::Error>> {
+        match node.get("$ref").and_then(|v| v.as_str()) {
+            Some(r) => {
+                let name = r.rsplit('/').next().ok_or_else(|| doc_missing(r))?;
+                schemas.get(name).ok_or_else(|| doc_missing(name))
+            }
+            None => Ok(node),
+        }
+    }
+
+    fn check_pair(
+        ops: &std::collections::BTreeMap<&str, &serde_json::Value>,
+        schemas: &serde_json::Map<String, serde_json::Value>,
+        tools: &[Tool],
+        tool: &str,
+        op_id: &str,
+        renames: &[(&str, &str)],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::Value;
+        let op = ops
+            .get(op_id)
+            .ok_or_else(|| doc_missing(&format!("operation {op_id}")))?;
+        let mut rest_required = std::collections::BTreeSet::new();
+        let mut rest_props = std::collections::BTreeSet::new();
+        for p in op
+            .get("parameters")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let name = p
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| doc_missing(&format!("param name in {op_id}")))?;
+            let name = renames
+                .iter()
+                .find(|(from, _)| *from == name)
+                .map_or(name, |(_, to)| *to);
+            rest_props.insert(name.to_owned());
+            if p.get("required").and_then(Value::as_bool).unwrap_or(false) {
+                rest_required.insert(name.to_owned());
+            }
+        }
+        if let Some(body) = op.pointer("/requestBody/content/application~1json/schema") {
+            let (body_required, body_props) = field_sets(resolve_ref(schemas, body)?);
+            rest_required.extend(body_required);
+            rest_props.extend(body_props);
+        }
+        let mcp = tools
+            .iter()
+            .find(|t| t.name == tool)
+            .ok_or(format!("missing tool {tool}"))?;
+        let (mcp_required, mcp_props) =
+            field_sets(&Value::Object(mcp.input_schema.as_ref().clone()));
+        if mcp_required != rest_required || mcp_props != rest_props {
+            return Err(format!(
+                "parity drift on {tool} (REST op {op_id}): \
+                 tool required {mcp_required:?} props {mcp_props:?}; \
+                 REST required {rest_required:?} props {rest_props:?}"
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    // (MCP tool, REST operationId, param renames). The commit tools rename
+    // REST's path `id` to MCP's `commit_id`; `cert_renew` is MCP-only and
+    // asserted empty in the test.
+    const PAIRS: &[Pair] = &[
+        ("list_modules", "list_modules", &[]),
+        ("get_module", "get_one", &[]),
+        ("validate", "validate", &[]),
+        ("plan", "plan", &[]),
+        ("apply", "apply", &[]),
+        ("confirm_commit", "confirm", &[("id", "commit_id")]),
+        ("rollback_commit", "rollback", &[("id", "commit_id")]),
+        ("list_backups", "list_backups", &[]),
+        ("restore", "restore", &[]),
+        ("service_status", "status", &[]),
+        ("service_action", "action", &[]),
+        ("host_profile", "profile", &[]),
+        ("audit_query", "audit", &[]),
+        ("update_status", "update", &[]),
+        ("cert_status", "cert", &[]),
+        ("update_apply", "apply_update", &[]),
+    ];
+
+    #[test]
+    fn tool_schemas_match_rest_shapes() -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::Value;
+        use std::collections::{BTreeMap, BTreeSet};
+        // Parity pin (docs/API.md#openapi--mcp-schema-parity): each tool's
+        // input schema must match what the REST surface takes for the same
+        // operation — path params plus body/query fields flattened,
+        // required included — read live from the checked-in
+        // `docs/openapi.json`. Freshness of that file is already forced by
+        // detent-web's
+        // `the_checked_in_document_matches_what_this_build_generates`, so
+        // a REST-side addition, rename, or optionality flip regenerates
+        // the document and fails here with no table to keep fresh.
+        let doc: Value = serde_json::from_str(include_str!("../../../docs/openapi.json"))?;
+        let schemas = doc
+            .pointer("/components/schemas")
+            .and_then(Value::as_object)
+            .ok_or_else(|| doc_missing("components.schemas"))?;
+        let paths = doc
+            .get("paths")
+            .and_then(Value::as_object)
+            .ok_or_else(|| doc_missing("paths"))?;
+        let mut ops: BTreeMap<&str, &Value> = BTreeMap::new();
+        for item in paths.values() {
+            let methods = item.as_object().ok_or_else(|| doc_missing("path item"))?;
+            for op in methods.values() {
+                if let Some(id) = op.get("operationId").and_then(Value::as_str) {
+                    ops.insert(id, op);
+                }
+            }
+        }
+        let (server, _) = server();
+        let tools: Vec<Tool> = server.tool_router.list_all();
+        for (tool, op_id, renames) in PAIRS {
+            check_pair(&ops, schemas, &tools, tool, op_id, renames)?;
+        }
+        let renew = tools
+            .iter()
+            .find(|t| t.name == "cert_renew")
+            .ok_or("missing tool cert_renew")?;
+        let (renew_required, renew_props) =
+            field_sets(&Value::Object(renew.input_schema.as_ref().clone()));
+        if !renew_required.is_empty() || !renew_props.is_empty() {
+            return Err(format!(
+                "cert_renew must stay empty (MCP-only): \
+                 required {renew_required:?} props {renew_props:?}"
+            )
+            .into());
+        }
+        // `service_action`/`action` wire spelling must match REST's
+        // `ApiServiceCommand` enum, read from the same document.
+        let rest_enum: BTreeSet<String> = schemas
+            .get("ApiServiceCommand")
+            .and_then(|s| s.get("enum"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| doc_missing("ApiServiceCommand.enum"))?
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        let mut mcp_enum = BTreeSet::new();
+        for param in [
+            ServiceActionParam::Restart,
+            ServiceActionParam::Reload,
+            ServiceActionParam::Start,
+            ServiceActionParam::Stop,
+        ] {
+            let wire = serde_json::to_value(param)?;
+            let wire = wire
+                .as_str()
+                .ok_or_else(|| doc_missing("service action wire"))?;
+            mcp_enum.insert(wire.to_owned());
+        }
+        if mcp_enum != rest_enum {
+            return Err(
+                format!("service action drift: MCP {mcp_enum:?} vs REST {rest_enum:?}").into(),
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn smoke_lists_tools_and_executes_list_modules_and_get_module()

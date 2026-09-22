@@ -180,10 +180,20 @@ nothing.
 
 ## OpenAPI <-> MCP schema parity
 
-Two tests pin the two surfaces together so neither drifts silently:
+Three tests pin the two surfaces together so neither drifts silently:
 `the_merged_table_registers_every_endpoint_and_no_get_mutates`
 (`crates/detent-web/src/api/mod.rs`) asserts the REST route table holds
-all 17 routes, and `every_operation_has_a_tool`
+all 17 routes, `every_operation_has_a_tool`
 (`crates/detent-mcp/src/mcp.rs`) asserts the MCP router holds all 17
-tools, one per `Operation` variant. A new `Operation` must add both a
-route and a tool or one of the two fails.
+tools, one per `Operation` variant, and `tool_schemas_match_rest_shapes`
+(same file) compares each tool's input schema live against the checked-in
+`docs/openapi.json` — path params plus body/query fields flattened,
+required included, `$ref`s resolved — plus the `ApiServiceCommand` enum
+spellings. Freshness of that document is forced by detent-web's
+`the_checked_in_document_matches_what_this_build_generates`, so a
+REST-side addition, rename, or optionality flip regenerates the document
+and fails the parity test with no table to keep fresh. A new `Operation`
+must add both a route and a tool or one of the three fails. Two pinned
+exceptions: the commit tools rename REST's path `id` to MCP's
+`commit_id`, and `cert_renew` is MCP-only (renewal has no REST route) —
+its empty shape is asserted as-is.
