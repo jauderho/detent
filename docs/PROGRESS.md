@@ -5,6 +5,14 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-22 - GateGreen follow-up: credential/no-AKI coverage, clippy green
+
+`parse_credentials` extracted from `load_or_create_account` so the corrupt-JSON test drives the production mapping (not a local copy); `ari_identifier_rejects_a_chain_without_aki` covers the `_ => None` + missing-AKI `Config` arm with a default rcgen cert. Health test `server()` now calls `ensure_provider()` (config build panicked before any probe under unified features). Both `GenericArray::as_slice` deprecations fixed (`verify.rs`, `gen-fixtures.rs`) — generic-array 0.14.9 in lock since before `d80cfc0`, so a toolchain-lint surfacing, not lockfile drift.
+
+Verify: `cargo test --workspace --all-features` exit 0 (61 ok suites); acme 57 passed; update 55 passed; `clippy -p detent-update --all-targets --all-features -D warnings` clean; fmt clean.
+
+Jev (`jev-1.13.0`): push_ready noul 0.68; next_slice `push_and_watch_ci` conf 0.96 (probs push 0.97 / local-checks 0.03 / park 0.0). Complex reasoning by default model; Jev used only for push-readiness/next-step classification.
+
 ## 2026-09-22 - GateGreen: offline ARI/write helpers landed, fuzz revert parked
 
 `decide_renewal` extracted from `should_renew_ari` (`order.rs`); `renewal_decision_covers_all_three_arms` covers in-window/fallback/error arms offline (`RenewalInfo` fields pub, `Unsupported`/`Str` construct offline). `write_json_atomically` extracted from `load_or_create_account`; tests cover 0600 mode, stale-temp recovery, unusable-parent failure. `corrupt_credential_json_maps_to_a_credentials_error` covers the deserialize path. `ensure_provider` in `detent-update/src/health.rs` installs the rustls default once, fixing the 4 health tests under `cargo test --workspace --all-features` (CryptoProvider ambiguity when both providers compile in).
