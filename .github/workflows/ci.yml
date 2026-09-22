@@ -65,6 +65,23 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace --all-features
+      - name: Install cbindgen
+        uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # v2.87.11
+        with:
+          tool: cbindgen@0.29.4
+
+      - name: cbindgen --verify (include/detent.h matches detent-ffi)
+        run: cbindgen --config crates/detent-ffi/cbindgen.toml --crate detent-ffi --output include/detent.h --verify
+
+      - name: cargo build -p detent-ffi (staticlib for the C example)
+        run: cargo build -p detent-ffi
+
+      - name: Build and run the C example
+        run: |
+          set -euo pipefail
+          cc -I include examples/ffi-c/main.c target/debug/libdetent_ffi.a -o /tmp/ffi-c-main
+          /tmp/ffi-c-main
+
 
       - name: cargo build (feature set A - hosts, ring)
         run: cargo build -p detent --no-default-features --features "module-hosts,crypto-ring"

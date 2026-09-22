@@ -41,10 +41,12 @@ Every function is safe to call from any thread, with one rule:
   the handle from the same thread that created it. Concurrent
   `detent_free` on the same handle is racy.
 
-There are no internal mutexes apart from the document-handle table and
-the registry. Both are populated at first use and read-only after that,
-so contention is limited to the brief `Mutex::lock` on the global
-slot when the very first call happens.
+Internal locking is three mutexes: the document-handle table, the live
+hand-out set (every `detent_free` consults it before reading any tag
+header, so foreign and already-freed pointers are refused without
+touching memory), and the lazily-populated module registry (read-only
+after the first call). The last-error slot itself is lock-free
+thread-local storage.
 
 ---
 
@@ -57,10 +59,11 @@ slot when the very first call happens.
 | `detent_last_error_message` | borrowed `const char *`, valid until next FFI call on the same thread (the global slot may be overwritten) | copy if retained |
 
 `detent_free(NULL)` is a no-op. The library tags every heap allocation
-with a 4-byte magic prefix (`DETENT_TAG_STRING` or `DETENT_TAG_DOC`);
-foreign pointers are detected and left alone — the caller's pointer is
-not freed, but the library never corrupts memory outside its own
-allocations.
+with an `AllocHeader` (`MAGIC_STRING` or `MAGIC_DOC`) directly preceding
+the user-visible bytes; only pointers recorded in the live hand-out set
+are eligible for a header read, so foreign and already-freed pointers are
+refused before any memory is touched — the caller's pointer is not freed,
+but the library never corrupts memory outside its own allocations.
 
 Strings returned by the library are NUL-terminated; pass them to
 `strlen` and `printf("%s", ...)` directly. Length parameters
