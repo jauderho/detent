@@ -236,6 +236,8 @@ fn dispatch(
         Some(Command::Token { action }) => {
             crate::webadmin::token(action, cli.dryrun, &settings, renderer, streams)
         }
+        #[cfg(feature = "mcp")]
+        Some(Command::Mcp(args)) => crate::mcp::run(args, cli.dryrun, &settings, renderer, streams),
         #[cfg(feature = "update")]
         Some(Command::Update(args)) => run_update(args, cli, renderer, streams),
         Some(Command::Config {
@@ -1133,18 +1135,32 @@ impl Session {
     ///
     /// Whatever the operations layer reports.
     pub fn execute(&mut self, operation: Operation, dryrun: bool) -> Result<Executed, OpsError> {
+        self.execute_as(operation, dryrun, &caller())
+    }
+
+    /// Runs one operation as `who`, honouring `--dryrun`.
+    ///
+    /// [`execute`](Self::execute) is this with the local caller; the MCP
+    /// transport passes its token identity so the audit log names it.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the operations layer reports.
+    pub fn execute_as(
+        &mut self,
+        operation: Operation,
+        dryrun: bool,
+        who: &Identity,
+    ) -> Result<Executed, OpsError> {
         if !dryrun || !operation.is_mutating() {
-            return self.engine.execute(operation, &caller()).map(Executed::Ran);
+            return self.engine.execute(operation, who).map(Executed::Ran);
         }
         let kind = operation.kind();
         let module = operation.module().map(ToOwned::to_owned);
         // An apply still shows its diff: the plan it implies writes nothing.
         let plan = match operation {
             Operation::Apply { id, model, .. } => {
-                match self
-                    .engine
-                    .execute(Operation::Plan { id, model }, &caller())?
-                {
+                match self.engine.execute(Operation::Plan { id, model }, who)? {
                     OpOutcome::Planned(plan) => Some(*plan),
                     _ => None,
                 }

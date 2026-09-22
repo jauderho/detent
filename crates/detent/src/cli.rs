@@ -142,11 +142,39 @@ pub enum Command {
         #[command(subcommand)]
         action: TokenAction,
     },
+    /// Serve every `Operation` as an MCP tool, over stdio or streamable HTTP
+    /// (PLAN §2.6, Phase 10). Auth is API-token only: `DETENT_MCP_TOKEN` must
+    /// hold a token `token create` issued; rotation is a process restart.
+    #[cfg(feature = "mcp")]
+    Mcp(McpArgs),
     /// Print a shell completion script.
     Completions {
         /// Which shell to generate for.
         shell: Shell,
     },
+}
+
+/// `detent mcp`.
+#[cfg(feature = "mcp")]
+#[derive(Debug, Args)]
+pub struct McpArgs {
+    /// Which transport to serve.
+    #[arg(long, value_enum, default_value = "stdio")]
+    pub transport: McpTransport,
+    /// HTTP only: address to bind, e.g. `127.0.0.1:3334` (the default).
+    #[arg(long, value_name = "ADDR")]
+    pub bind: Option<std::net::SocketAddr>,
+}
+
+/// Transports [`Command::Mcp`] can serve.
+#[cfg(feature = "mcp")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "lower")]
+pub enum McpTransport {
+    /// Local clients over stdin/stdout.
+    Stdio,
+    /// Remote clients over streamable HTTP.
+    Http,
 }
 
 /// `detent setup`.
@@ -433,7 +461,7 @@ mod tests {
             include_str!("../tests/snapshots/help-config-apply.txt").trim_end(),
             "help changed; regenerate crates/detent/tests/snapshots/help-config-apply.txt"
         );
-        #[cfg(feature = "web")]
+        #[cfg(all(feature = "web", not(feature = "mcp")))]
         {
             let help = Cli::try_parse_from(["detent", "--help"])
                 .err()
@@ -474,6 +502,20 @@ mod tests {
             Some(std::path::Path::new("/tmp/state"))
         );
         assert!(matches!(cli.command, Some(Command::Host)));
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "mcp")]
+    fn mcp_subcommand_parses_with_transport_default() -> R {
+        assert!(matches!(
+            Cli::try_parse_from(["detent", "mcp"])?.command,
+            Some(Command::Mcp(_)),
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["detent", "mcp", "--transport", "http"])?.command,
+            Some(Command::Mcp(_)),
+        ));
         Ok(())
     }
 

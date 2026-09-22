@@ -166,6 +166,18 @@ server built without a verifier fails closed. The server is
 transport-agnostic (stdio or streamable HTTP); the default build excludes
 it entirely (no `rmcp` in the graph).
 
+`detent mcp` (behind the `mcp` feature, which implies `web` for the shared
+`TokenStore`/`ScopedAuthz`) serves it. The token is read once at startup
+from `DETENT_MCP_TOKEN` — minted via `detent token create`, resolved
+against the same `tokens.json` the REST API reads, so revocation and
+expiry apply — and rotation is a process restart. The default transport is
+stdio (local clients spawn the binary); `--transport http` binds
+streamable HTTP on `127.0.0.1:3334` unless `--bind` overrides, with an
+axum bearer gate returning 401 before MCP runs. A missing or unknown
+token, or an unreadable store, refuses startup with exit 1 before
+anything listens. `--dryrun` reports the resolved shape and starts
+nothing.
+
 ## OpenAPI <-> MCP schema parity
 
 Two tests pin the two surfaces together so neither drifts silently:
