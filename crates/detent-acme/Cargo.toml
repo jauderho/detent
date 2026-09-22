@@ -36,7 +36,9 @@ time = { workspace = true }
 x509-parser = { workspace = true }
 
 [dev-dependencies]
+# Only for unit fixtures (an AKI-bearing chain for `ari_identifier`) and the
+# #[ignore]d Pebble live test: a runtime to block on the async order flow.
+# detent-acme itself stays tokio-free and rcgen-free.
+rcgen = { workspace = true }
 tempfile = { workspace = true }
-# Only for the #[ignore]d Pebble live test: a runtime to block on the async
-# order flow. detent-acme itself stays tokio-free.
 tokio = { workspace = true, features = ["rt"] }
