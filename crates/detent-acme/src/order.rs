@@ -135,6 +135,98 @@ pub async fn finalize(order: &mut Order, policy: &RetryPolicy) -> Result<Issued,
     Ok(Issued { chain_pem, key_pem })
 }
 
+/// The ARI identifier for the leaf of `chain_pem`: the DER-encoded AKI
+/// `keyIdentifier` octet string and DER-encoded serial `instant-acme` needs
+/// for [`Account::renewal_info`](instant_acme::Account::renewal_info).
+///
+/// Pebble (like every CA) stamps an Authority Key Identifier, so a missing
+/// AKI is [`AcmeError::Config`] rather than a fallback — silently omitting
+/// the identifier would query the wrong renewal slot.
+///
+/// # Errors
+///
+/// [`AcmeError::Config`] when the chain does not parse or carries no AKI.
+pub fn ari_identifier(
+    chain_pem: &str,
+) -> Result<instant_acme::CertificateIdentifier<'static>, AcmeError> {
+    use x509_parser::prelude::FromDer as _;
+    let leaf_der = pem_block(chain_pem)
+        .ok_or_else(|| AcmeError::Config("ARI: certificate chain has no PEM block".into()))?;
+    let (_, cert) = x509_parser::certificate::X509Certificate::from_der(&leaf_der)
+        .map_err(|e| AcmeError::Config(format!("ARI: leaf certificate does not parse: {e}")))?;
+    let aki = cert
+        .iter_extensions()
+        .find_map(|ext| match ext.parsed_extension() {
+            x509_parser::extensions::ParsedExtension::AuthorityKeyIdentifier(aki) => {
+                aki.key_identifier.as_ref().map(|id| id.0.to_vec())
+            }
+            _ => None,
+        })
+        .ok_or_else(|| {
+            AcmeError::Config("ARI: leaf certificate has no authority key identifier".into())
+        })?;
+    let serial = cert.tbs_certificate.raw_serial().to_vec();
+    // The identifier wants the DER-encoded values: the AKI octet string
+    // contents and the serial INTEGER contents, not their big-int forms.
+    Ok(instant_acme::CertificateIdentifier::new(
+        rustls_pki_types::Der::from(aki),
+        rustls_pki_types::Der::from(serial),
+    )
+    .into_owned())
+}
+
+/// First PEM block of a chain as DER, std-only (same shape as the Pebble
+/// live test's helper, minus the test-only base64 decoder's lint allows).
+fn pem_block(chain_pem: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    let block = chain_pem
+        .split("-----END CERTIFICATE-----")
+        .find(|b| b.contains("BEGIN CERTIFICATE"))?;
+    let body: String = block.lines().filter(|l| !l.starts_with("-----")).collect();
+    base64::engine::general_purpose::STANDARD
+        .decode(body.as_bytes())
+        .ok()
+}
+
+/// Fetches the ARI suggested window for `chain_pem` and answers whether
+/// renewal should happen now: inside the window the lifetime rule applies,
+/// outside it only a nearly-spent certificate renews early.
+///
+/// `now_unix` and the window bounds are Unix seconds so the caller — not
+/// this helper — owns the clock. A server without ARI support
+/// ([`instant_acme::Error::Unsupported`]) falls back to the plain lifetime
+/// rule rather than refusing renewal outright.
+///
+/// # Errors
+///
+/// [`AcmeError::Acme`] on API errors; [`AcmeError::Config`] when the chain
+/// does not parse.
+pub async fn should_renew_ari(
+    account: &instant_acme::Account,
+    chain_pem: &str,
+    not_before: i64,
+    not_after: i64,
+    now_unix: i64,
+) -> Result<bool, AcmeError> {
+    let id = ari_identifier(chain_pem)?;
+    let info = match account.renewal_info(&id).await {
+        Ok((info, _)) => info,
+        Err(instant_acme::Error::Unsupported(_)) => {
+            return Ok(crate::schedule::should_renew(
+                not_before, not_after, now_unix,
+            ));
+        }
+        Err(e) => return Err(AcmeError::Acme(e)),
+    };
+    let window = Some((
+        info.suggested_window.start.unix_timestamp(),
+        info.suggested_window.end.unix_timestamp(),
+    ));
+    Ok(crate::schedule::should_renew_in_window(
+        not_before, not_after, now_unix, window,
+    ))
+}
+
 /// Creates (or restores) an ACME account and issues a new dns-01 order.
 ///
 /// The account credentials are serialized to `credentials_path` with `0600`
@@ -377,6 +469,19 @@ mod tests {
             .any(|c| matches!(c.r#type, ChallengeType::Dns01));
         assert!(!has_dns01);
         Ok(())
+    }
+
+    #[test]
+    fn ari_identifier_rejects_garbage_and_bare_chains() {
+        // No PEM block at all.
+        assert!(matches!(
+            ari_identifier("not a certificate"),
+            Err(AcmeError::Config(_))
+        ));
+        // A PEM block that is not a certificate (Pebble serves chains, not
+        // keys, so wrong-armour input is a caller bug worth refusing).
+        let key_pem = "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n";
+        assert!(matches!(ari_identifier(key_pem), Err(AcmeError::Config(_))));
     }
 
     /// A credential file that exists but cannot be read must not be mistaken

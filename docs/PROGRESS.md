@@ -5,6 +5,14 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-22 - Phase 6 ARI slice: identifier bridge, helper, live round-trip
+
+`ari_identifier` (`order.rs`) builds the ARI `CertificateIdentifier` from the issued chain's leaf (AKI octet string + DER serial via `x509-parser`; missing AKI is `Config`, not a silent fallback). `should_renew_ari` fetches the suggested window through `Account::renewal_info` (`instant-acme` `time` feature) and answers through `schedule::should_renew_in_window`; `Unsupported` falls back to the plain lifetime rule. `pebble_live` now asserts the window is non-empty from live Pebble and a fresh cert does not renew. Unit test covers garbage/wrong-armour chains.
+
+Slice routing was Jev-routed (`secrets_log_assertion` Choice, conf 0.87, p=0.90 — already covered by `debug_output_redacts_every_secret`; Noul 0.32); ARI was the nearest unverified acceptance item, seam work by default model. Live run against local Pebble (`pebble3`/`challtestsrv2`): 1 passed.
+
+Verify: `cargo test -p detent-acme --all-features` 52 passed, 1 ignored; clippy clean; fmt clean; `pebble_live -- --ignored --nocapture` 1 passed (3.34s).
+
 ## 2026-09-22 - Phase 6 fuzz slice: ACME JSON + DNS provider response targets
 
 `detent-acme` `fuzzing` feature exposes `fuzz_acme_json` (`order.rs`: `OrderState`/`AuthorizationState`/`Problem` parses) and `fuzz_provider_response` (`providers.rs`: Cloudflare/deSEC list parsers + RFC 2136 builder). One feature, not per-parser cfgs. Targets `fuzz/fuzz_targets/fuzz_acme_json.rs` + `fuzz_dns_response.rs` with `[[bin]]` entries; `fuzz/Cargo.toml` adds `detent-acme{fuzzing}` alongside `detent-web` (restored after a full-build `unresolved detent_web` failure). Corpora seeded from unit fixtures (order/authz pending, CF list, deSEC rrset); fuzzer-generated corpus churn pruned, 2 seeds per dir.
