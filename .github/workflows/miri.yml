@@ -1,0 +1,57 @@
+name: Miri
+
+on:
+  pull_request:
+    paths:
+      - "crates/detent-ffi/**"
+      - "examples/ffi-c/**"
+      - "include/detent.h"
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Checkout + nightly toolchain + cargo cache need nothing beyond read.
+permissions:
+  contents: read
+
+jobs:
+  miri:
+    name: Miri (nightly on detent-ffi)
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Nightly-only, like the fuzz job: Miri ships only on nightly.
+      # `components: miri` installs the interpreter alongside the toolchain.
+      - name: Install nightly Rust toolchain with Miri
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: nightly
+          components: miri
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # `rust-toolchain.toml` pins stable: rustup resolves plain `cargo` to
+      # the pinned stable (directory override outranks the action's `rustup
+      # default nightly`), where cargo-miri is not installed. Route through
+      # the nightly toolchain explicitly. No MIRIFLAGS needed: the suite
+      # passes under default isolation.
+      # Covers the live hand-out set gate (`detent_free`, `split_doc`) and
+      # the thread-local last-error slot — Miri caught a `ptr.sub` on
+      # foreign pointers and a Cell take/put-back use-after-free here.
+      - name: cargo miri test -p detent-ffi
+        run: rustup run nightly cargo miri test -p detent-ffi

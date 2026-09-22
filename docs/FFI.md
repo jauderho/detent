@@ -174,9 +174,9 @@ The `rust` job in `.github/workflows/ci.yml` covers `cargo fmt --check`,
 `cargo clippy --workspace --all-targets --all-features`,
 `cargo test --workspace --all-features`, `cbindgen --verify` against
 `include/detent.h`, and building and running `examples/ffi-c/main.c` — all
-of which include `detent-ffi`. The `ffi-soundness` job runs
-`cargo miri test -p detent-ffi` on nightly (invoked as
-`rustup run nightly cargo miri test -p detent-ffi` because
+of which include `detent-ffi`. The `miri` job in `.github/workflows/miri.yml`
+(a separate workflow: Miri needs nightly and runs only on runners) runs
+`rustup run nightly cargo miri test -p detent-ffi` (explicit nightly because
 `rust-toolchain.toml` pins stable 1.98.1). The `ffi-semver` job runs
 `cargo semver-checks check-release -p detent-ffi --baseline-rev
 origin/main` (`cargo-semver-checks 0.50.0`); unpublished crates need the
