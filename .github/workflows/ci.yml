@@ -19,11 +19,14 @@ permissions:
   contents: read
 
 env:
-  # `dtolnay/rust-toolchain` declares `toolchain` as a *required* input and
-  # hard-fails when it is empty, so every job has to name a version. Kept here
-  # rather than in seven `with:` blocks, and checked against
-  # rust-toolchain.toml by the "toolchain pin matches" step in the `rust` job.
-  RUST_TOOLCHAIN: "1.98.0"
+  # The ubuntu-26.04 image provisions only `stable-*` (install-rust.sh:
+  # `--default-toolchain=stable`); there is no versioned `1.98.1-*` dir,
+  # so a versioned channel would download on first use. RUSTUP_TOOLCHAIN
+  # outranks rust-toolchain.toml, forcing every cargo/rustc/rustup step
+  # onto the preinstalled default with no download. The pin file stays
+  # versioned for local dev; the `rust`/`size` drift steps fail closed
+  # when preinstalled stable moves past it.
+  RUSTUP_TOOLCHAIN: stable
 
 jobs:
   rust:
@@ -40,19 +43,27 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain (from rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-
-      - name: Toolchain pin matches rust-toolchain.toml
+      # ubuntu-26.04 provisions only `stable-*` (install-rust.sh:
+      # `--default-toolchain=stable`, plus clippy and rustfmt components),
+      # and `RUSTUP_TOOLCHAIN: stable` (workflow env) outranks
+      # rust-toolchain.toml so every step reuses it with no download. The
+      # pin file stays versioned for local dev; this step fails closed
+      # when preinstalled stable drifts past it. Read the default
+      # *outside* the checkout: the env override does not apply there.
+      - name: Preinstalled Rust matches rust-toolchain.toml
         run: |
           pinned=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
-          if [[ "$pinned" != "${RUST_TOOLCHAIN}" ]]; then
-            echo "rust-toolchain.toml pins ${pinned} but the workflow installs ${RUST_TOOLCHAIN}" >&2
+          actual=$(cd "$RUNNER_TEMP" && rustup run stable rustc --version | awk '{print $2}')
+          if [[ "$actual" != "$pinned" ]]; then
+            echo "::error::preinstalled stable is ${actual} but rust-toolchain.toml pins ${pinned}" >&2
             exit 1
           fi
-          echo "both pin ${pinned}"
+          echo "stable ${actual} matches pin"
+      # clippy/rustfmt are requested by rust-toolchain.toml but only rustfmt
+      # is listed under the image README's "Packages"; idempotent no-op when
+      # already present.
+      - name: rustup component add clippy rustfmt
+        run: rustup component add clippy rustfmt
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -130,8 +141,8 @@ jobs:
         with:
           persist-credentials: false
 
-      # Nightly, like the fuzz job: Miri is nightly-only, so the stable
-      # RUST_TOOLCHAIN pin cannot supply it. `components: miri` installs the
+      # Nightly, like the fuzz job: Miri is nightly-only, so the preinstalled
+      # stable cannot supply it. `components: miri` installs the
       # interpreter alongside the toolchain.
       - name: Install nightly Rust toolchain with Miri
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
@@ -142,17 +153,47 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      # No MIRIFLAGS needed: the suite passes under default isolation.
+      # `rust-toolchain.toml` pins stable: rustup resolves plain `cargo` to
+      # the pinned stable (directory override outranks the action's `rustup
+      # nightly`), where cargo-miri is not installed. Route through the
+      # nightly toolchain explicitly. No MIRIFLAGS needed: the suite passes
+      # under default isolation.
       # Covers the live hand-out set gate (`detent_free`, `split_doc`) and
       # the thread-local last-error slot — Miri caught a `ptr.sub` on
       # foreign pointers and a Cell take/put-back use-after-free here.
       - name: cargo miri test -p detent-ffi
-        run: cargo miri test -p detent-ffi
+        run: rustup run nightly cargo miri test -p detent-ffi
 
-      # PLAN §Phase-10 lists `cargo-semver-checks` on detent-ffi, but every
-      # crate in this workspace sets `publish = false`, so there is no public
-      # API surface to check for semver drift. Deliberately not wired; the C
-      # ABI side is covered by `cbindgen --verify` in the `rust` job instead.
+  ffi-semver:
+    name: FFI semver (cargo-semver-checks on detent-ffi)
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # v2.87.11
+        with:
+          tool: cargo-semver-checks@0.50.0
+
+      # Unpublished crates need an explicit git baseline (README FAQ "Does the
+      # crate I'm checking have to be published?"): `origin/main` is the base
+      # on PRs and identical to HEAD on main pushes (a no-op pass). The Rust
+      # API surface is internal (`publish = false`); the C ABI side stays
+      # covered by `cbindgen --verify` in the `rust` job.
+      - name: cargo semver-checks on detent-ffi vs origin/main
+        run: cargo semver-checks check-release -p detent-ffi --baseline-rev origin/main
 
   acme-pebble:
     name: ACME dns-01 (Pebble + challtestsrv)
@@ -168,10 +209,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain (from rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # Same preinstalled stable as `rust`; clippy is not listed in the
+      # image README, so ensure it before the Clippy step below.
+      - name: rustup component add clippy
+        run: rustup component add clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -241,6 +282,10 @@ jobs:
   rust-macos:
     name: Rust (build, test, clippy) on macOS
     runs-on: macos-latest
+    env:
+      # Override workflow-wide `stable`: this job installs the pinned
+      # toolchain (macOS images lag at 1.98.0) and must use it, not default.
+      RUSTUP_TOOLCHAIN: "1.98.1"
     steps:
       # step-security/harden-runner only supports Linux runners; omitted here.
       - name: Checkout Code
@@ -248,10 +293,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain (from rust-toolchain.toml)
+      # macOS images still ship 1.98.0 (Ubuntu 26.04 already has 1.98.1),
+      # so this one job installs the pinned toolchain instead of using
+      # the preinstalled copy. Revisit when the macOS image catches up.
+      - name: Install Rust toolchain (pinned to rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          toolchain: "1.98.1"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -278,11 +326,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
-      - name: Install Rust toolchain (from rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: cargo deny check
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
@@ -326,10 +369,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain (from rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # llvm-tools-preview backs `cargo llvm-cov` via rust-toolchain.toml
+      # but is not in the image README; idempotent no-op when present.
+      - name: rustup component add llvm-tools-preview
+        run: rustup component add llvm-tools-preview
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -490,15 +533,18 @@ jobs:
         with:
           persist-credentials: false
 
-      # `toolchain` is a required input for this action (it has no
-      # rust-toolchain.toml auto-detection of its own — verified against the
-      # pinned commit's action.yml); pinned to match rust-toolchain.toml so
-      # the cross target is added to the same toolchain `cargo` actually uses.
-      - name: Install Rust toolchain (pinned to rust-toolchain.toml, + aarch64-musl target)
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: aarch64-unknown-linux-musl
+      # Preinstalled stable (via workflow RUSTUP_TOOLCHAIN) plus the musl
+      # cross target — target add only, no second toolchain download.
+      # Same outside-checkout drift read as `rust`.
+      - name: rustup target add aarch64-unknown-linux-musl
+        run: |
+          pinned=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          actual=$(cd "$RUNNER_TEMP" && rustup run stable rustc --version | awk '{print $2}')
+          if [[ "$actual" != "$pinned" ]]; then
+            echo "::error::preinstalled stable is ${actual} but rust-toolchain.toml pins ${pinned}" >&2
+            exit 1
+          fi
+          rustup target add aarch64-unknown-linux-musl
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
