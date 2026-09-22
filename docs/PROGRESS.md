@@ -5,6 +5,16 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-22 - GateGreen: offline ARI/write helpers landed, fuzz revert parked
+
+`decide_renewal` extracted from `should_renew_ari` (`order.rs`); `renewal_decision_covers_all_three_arms` covers in-window/fallback/error arms offline (`RenewalInfo` fields pub, `Unsupported`/`Str` construct offline). `write_json_atomically` extracted from `load_or_create_account`; tests cover 0600 mode, stale-temp recovery, unusable-parent failure. `corrupt_credential_json_maps_to_a_credentials_error` covers the deserialize path. `ensure_provider` in `detent-update/src/health.rs` installs the rustls default once, fixing the 4 health tests under `cargo test --workspace --all-features` (CryptoProvider ambiguity when both providers compile in).
+
+Verify: `cargo test --workspace --all-features` green (exit 0); `cargo test -p detent-acme --all-features` 56 passed, 1 ignored; fmt clean; per-package update health 5 passed. Exact CI gate (`cargo llvm-cov --workspace --all-features --lcov` + `coverage-merge.sh --verbose`): acme 90.25% (floor 87, PASS). Gate still red on three unrelated paths: detent-ops 99.64% (min 100), detent-web 96.83% (min 97), detent/ 91.69% (min 95). Global 94.67%.
+
+Not in this diff (pre-existing): `cargo clippy -p detent-update --all-targets --all-features` fails on `verify.rs:282` deprecated `GenericArray::as_slice` (untouched file, `44618d0`).
+
+Parked (needs plain-message user auth; auto-mode gate rejects tool-executed revert): `fuzz/Cargo.lock` drift committed in `d80cfc0` (rustix 1.1.5/1.1.4, smallvec 1.16.1/1.16.0, syn 3.0.6/3.0.4, toml 1.1.6/1.1.5, unicode-ident 1.0.26/1.0.24, plus detent-acme dep refresh). Fix is `git checkout d80cfc0~1 -- fuzz/Cargo.lock` + corrective commit.
+
 ## 2026-09-22 - Phase 6 coverage follow-up: AKI happy path, fuzz lockfile
 
 `ari_identifier_reads_aki_and_serial_off_a_chain` builds an AKI-bearing chain in-test (`rcgen`, `use_authority_key_identifier_extension = true`, new dev-dep) and pins serial+AKI survive the bridge. Regenerated `fuzz/Cargo.lock` (routine bumps only, no target changes).

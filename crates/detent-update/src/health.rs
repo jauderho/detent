@@ -43,6 +43,7 @@ pub fn wait_healthy(
     pinned_cert_der: &[u8],
     deadline: Duration,
 ) -> Result<(), UpdateError> {
+    ensure_provider();
     let tls = client_config(pinned_cert_der)?;
     let started = Instant::now();
     // `>=` on the elapsed time, so a zero deadline still makes exactly one
@@ -79,6 +80,21 @@ fn client_config(pinned_cert_der: &[u8]) -> Result<Arc<rustls::ClientConfig>, Up
         .with_root_certificates(roots)
         .with_no_client_auth();
     Ok(Arc::new(config))
+}
+
+/// Install the process-wide rustls `CryptoProvider` once (first call wins).
+///
+/// `rustls::ClientConfig` needs a process default when both `aws-lc-rs` and
+/// `ring` are compiled in (`--all-features`); without one every health probe
+/// panics. `fetch.rs` builds its client with an explicit provider, so only
+/// this pinned-loopback path needs the default.
+fn ensure_provider() {
+    use std::sync::Once;
+    static PROVIDER: Once = Once::new();
+    PROVIDER.call_once(|| {
+        let provider = rustls::crypto::aws_lc_rs::default_provider();
+        let _ = provider.install_default();
+    });
 }
 
 /// One `GET /healthz`. `Ok(())` only on a 2xx.
