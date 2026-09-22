@@ -5,6 +5,12 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-22 - Phase 10 FreeBSD slice scoped: deferred to Phase 11
+
+No FreeBSD CI job added. PLAN §1.6 puts FreeBSD in tier 3 (deferred: no CI, no artifacts, no phase work until a later pass) and Phase 11 (BSD tier 2, incl. the `vmactions/freebsd-vm` job) is parked — both outrank the Phase 10 deliverables line wanting the C example on FreeBSD CI. Jev-routed scope Choice (`defer_to_phase11`, confidence 0.85, p=0.93; VM-heavy Noul 0.77). Deferral is CI scope only, not code risk: `detent-ffi`'s transitive deps (`detent-core`, hosts module) are pure-Rust serde/serde_json/schemars with no `cfg(target_os)` gates, so nothing precludes the later pass. Revisit when Phase 11 unparks.
+
+Verify: no code change; `yq eval` on `ci.yml` still clean from the Miri slice.
+
 ## 2026-09-22 - Phase 10 per-tool MCP/REST schema parity pin
 
 `tool_schemas_match_rest_shapes` (`crates/detent-mcp/src/mcp.rs`) compares each of the 17 tool input schemas live against the checked-in `docs/openapi.json` (path params plus body/query fields flattened, required included, `$ref`s resolved; `ApiServiceCommand` enum spellings too). Freshness of that document is forced by detent-web's `the_checked_in_document_matches_what_this_build_generates`, so either side drifting fails the test. Exceptions: commit tools rename REST path `id` to MCP `commit_id`; `cert_renew` stays pinned empty as the one MCP-only tool. Sliced first per Jev Choice (`schema_parity` 0.53 vs `ci_jobs` 0.47, Noul drift-risk 0.83); all reasoning on the default model, Jev decided only slice order.
