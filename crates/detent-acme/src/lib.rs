@@ -22,16 +22,20 @@ use std::{fs, io};
 
 pub mod attest;
 pub mod order;
-#[cfg(feature = "dns-providers")]
+#[cfg(any(feature = "dns-providers", feature = "fuzzing"))]
 pub mod providers;
 pub mod schedule;
 
 pub use attest::Attestor;
+#[cfg(feature = "fuzzing")]
+pub use order::fuzz_acme_json;
 pub use order::{
     account_and_order, finalize, present_attest_challenges, present_challenges, wait_ready,
 };
-#[cfg(feature = "dns-providers")]
-pub use providers::{AcmeDnsProvider, CloudflareProvider, DeSecProvider, Rfc2136Provider};
+#[cfg(any(feature = "dns-providers", feature = "fuzzing"))]
+pub use providers::{
+    AcmeDnsProvider, CloudflareProvider, DeSecProvider, Rfc2136Provider, fuzz_provider_response,
+};
 pub use schedule::{Warning, percent_used, should_renew, should_renew_in_window, warning_for};
 
 /// Mode of the challenge files and the state directory holding them:

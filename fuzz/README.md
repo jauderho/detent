@@ -55,6 +55,8 @@ Steps:
    `fixtures/<module>/`.
 4. Confirm locally: `cargo +nightly fuzz run fuzz_<id>_parse -- -max_total_time=60`
    is clean.
+Non-module surfaces (`fuzz_acme_json`, `fuzz_dns_response`) follow steps 2–4
+with `detent-acme`'s `fuzzing` feature exposing the parser entry points.
 
 ## Corpus location
 

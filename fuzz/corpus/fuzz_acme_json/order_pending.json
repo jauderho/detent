@@ -1,0 +1,6 @@
+{
+        "status": "pending",
+        "authorizations": [],
+        "finalize": "https://pebble/finalize/1",
+        "certificate": null
+    }
