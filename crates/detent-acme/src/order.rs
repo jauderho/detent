@@ -484,6 +484,34 @@ mod tests {
         assert!(matches!(ari_identifier(key_pem), Err(AcmeError::Config(_))));
     }
 
+    #[test]
+    fn ari_identifier_reads_aki_and_serial_off_a_chain() -> Result<(), String> {
+        // A real CA stamps an Authority Key Identifier; rcgen only writes
+        // one when asked, so flip the flag — the self-signed cert then
+        // carries the SKI-as-AKI shape `ari_identifier` parses.
+        use rcgen::{CertificateParams, DnType, IsCa, KeyPair};
+        let mut params = CertificateParams::new(vec!["ari.example".to_owned()])
+            .map_err(|e| format!("fixture params must build: {e}"))?;
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "ari.example");
+        params.is_ca = IsCa::NoCa;
+        params.use_authority_key_identifier_extension = true;
+        let key = KeyPair::generate().map_err(|e| format!("fixture key must generate: {e}"))?;
+        let cert = params
+            .self_signed(&key)
+            .map_err(|e| format!("fixture cert must sign: {e}"))?;
+        let chain_pem = cert.pem();
+        let id =
+            ari_identifier(&chain_pem).map_err(|e| format!("ARI identifier must parse: {e}"))?;
+        assert!(!id.serial.is_empty(), "serial must survive the bridge");
+        assert!(
+            !id.authority_key_identifier.is_empty(),
+            "AKI must survive the bridge"
+        );
+        Ok(())
+    }
+
     /// A credential file that exists but cannot be read must not be mistaken
     /// for "no account yet".
     ///
