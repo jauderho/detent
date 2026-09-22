@@ -144,6 +144,7 @@ mod tests {
     /// A self-signed `localhost` certificate, and a server that speaks TLS
     /// 1.3 on a loopback port and answers `status` once.
     fn server(status: &'static str) -> (SocketAddr, Vec<u8>, std::thread::JoinHandle<()>) {
+        ensure_provider();
         let cert = rcgen::generate_simple_self_signed([SERVER_NAME.to_owned()])
             .expect("self-signed fixture");
         let cert_der = cert.cert.der().to_vec();
