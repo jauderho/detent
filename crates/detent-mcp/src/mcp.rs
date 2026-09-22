@@ -445,8 +445,15 @@ impl McpServer {
     /// request. Token rotation is a process restart.
     fn check_auth(&self, op: &Operation) -> Result<Identity, ErrorData> {
         let token = std::env::var("DETENT_MCP_TOKEN").ok();
+        self.check_auth_with(token.as_deref(), op)
+    }
+
+    /// [`check_auth`] with the token passed explicitly, so a test can pin
+    /// the authn/authz decision without mutating the process env (which
+    /// would race parallel tests and needs `unsafe` under edition 2024).
+    fn check_auth_with(&self, token: Option<&str>, op: &Operation) -> Result<Identity, ErrorData> {
         let who = match token {
-            Some(ref t) => self.tokens.authenticate(t),
+            Some(t) => self.tokens.authenticate(t),
             None => AuthOutcome::Denied(AuthError::Missing),
         };
         let who = match who {
@@ -1029,6 +1036,45 @@ mod tests {
         assert!(names.contains(&"cert_renew"));
         assert!(names.contains(&"update_apply"));
         assert_eq!(tools.len(), 17);
+    }
+
+    #[test]
+    fn smoke_lists_tools_and_executes_list_modules_and_get_module()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Acceptance pin (PLAN Phase 10): the router lists all 17 tools, the
+        // known token authenticates while unknown/missing do not, and
+        // `ListModules`/`GetModule` execute through to the executor. Unit
+        // scope only: no transport, no I/O, no env mutation (auth takes the
+        // token explicitly so parallel tests never race on process env).
+        let (server, executor) = server();
+        let tools: Vec<Tool> = server.tool_router.list_all();
+        assert_eq!(tools.len(), 17);
+        assert!(tools.iter().any(|t| t.name == "list_modules"));
+        assert!(tools.iter().any(|t| t.name == "get_module"));
+        assert!(
+            server
+                .check_auth_with(Some("test-token"), &Operation::ListModules)
+                .is_ok()
+        );
+        assert!(
+            server
+                .check_auth_with(Some("wrong"), &Operation::ListModules)
+                .is_err()
+        );
+        assert!(
+            server
+                .check_auth_with(None, &Operation::ListModules)
+                .is_err()
+        );
+        assert!(matches!(
+            server.executor.execute(Operation::ListModules)?,
+            OpOutcome::Modules(_)
+        ));
+        server
+            .executor
+            .execute(Operation::GetModule { id: "hosts".into() })?;
+        assert_eq!(executor.recorded().len(), 2);
+        Ok(())
     }
 
     #[test]
