@@ -167,8 +167,8 @@ fn bundle_for(material: &Material, digest_hex: &str, mutate: &str) -> Value {
     });
 
     // Inclusion proof over a two-leaf tree: this entry and a fixed neighbor.
-    let log_key_id =
-        BASE64.encode(Sha256::digest(spki_pem(&material.rekor_key).as_bytes()).as_slice());
+    let log_key_digest = Sha256::digest(spki_pem(&material.rekor_key).as_bytes());
+    let log_key_id = BASE64.encode(&log_key_digest[..]);
     let entry = json!({
         "canonicalizedBody": BASE64.encode(body.to_string().as_bytes()),
         "integratedTime": INTEGRATED_TIME,

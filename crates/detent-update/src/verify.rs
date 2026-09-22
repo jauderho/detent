@@ -279,7 +279,8 @@ fn verify_inclusion(
     let checkpoint_root = BASE64
         .decode(checkpoint_root_line.as_bytes())
         .map_err(|_| VerificationError::SetInvalid)?;
-    if checkpoint_root.as_slice() != Sha256::digest(root).as_slice() {
+    let want = Sha256::digest(root);
+    if checkpoint_root.as_slice() != &want[..] {
         return Err(VerificationError::SetInvalid);
     }
 
