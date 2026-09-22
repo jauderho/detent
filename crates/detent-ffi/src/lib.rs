@@ -35,8 +35,9 @@
 #![warn(missing_docs)]
 
 use std::alloc::{Layout, alloc, dealloc};
-use std::cell::RefCell;
+use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -185,7 +186,9 @@ fn alloc_cstring(s: String) -> *mut c_char {
     unsafe {
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), raw, payload_len);
     }
-    raw.cast::<c_char>()
+    let out = raw.cast::<c_char>();
+    track(out);
+    out
 }
 
 // ------------------------------------------------------------- document handle
@@ -203,6 +206,38 @@ struct DocHandle {
     /// `\n`. Stored as `String` so it round-trips back into `render` byte for
     /// byte — that is what invariant 4 (`render(parse(s)) == s`) buys us.
     source: String,
+}
+
+/// Payload pointers this library handed to C and has not freed.
+///
+/// `detent_free` and `split_doc` consult this set *before* forming
+/// `ptr - HEADER_LEN`: reading a header through a foreign pointer is UB even
+/// when the magic then mismatches (Miri rejects the `sub` itself), so set
+/// membership — not the magic — is the foreign-pointer gate. The magic still
+/// discriminates string vs doc among members. Stored as `usize` addresses,
+/// only compared, never dereferenced; the original pointer (with its
+/// provenance) is what gets read after a membership hit.
+static LIVE: LazyLock<Mutex<HashSet<usize>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Records a payload pointer handed to C. Best-effort under lock poisoning:
+/// a missed insert risks a later spurious "unknown" refusal, never unsoundness.
+fn track(ptr: *mut c_char) {
+    if let Ok(mut live) = LIVE.lock() {
+        live.insert(ptr as usize);
+    }
+}
+
+/// Removes `ptr`, returning whether it was a live hand-out. Foreign pointers
+/// and double frees read `false` and must not be touched.
+fn untrack(ptr: *mut c_char) -> bool {
+    LIVE.lock()
+        .is_ok_and(|mut live| live.remove(&(ptr as usize)))
+}
+
+/// Whether `ptr` is a live hand-out, without removing it. For `split_doc`,
+/// which borrows rather than frees.
+fn is_live(ptr: *const c_char) -> bool {
+    LIVE.lock().is_ok_and(|live| live.contains(&(ptr as usize)))
 }
 
 /// Global table of live document handles. The `usize` keys are also written
@@ -257,31 +292,126 @@ fn lookup_module(id: &str) -> Option<Arc<dyn DynModule>> {
 // ------------------------------------------------------------- last-error slot
 
 thread_local! {
-    /// The most recent error message on this thread. The pointer returned by
-    /// `detent_last_error_message` is valid until the next FFI call on this
-    /// thread replaces the slot; copy if you need to keep it. Reusing one
-    /// `String` per thread avoids per-call allocation on the error path.
-    static LAST_ERROR: RefCell<String> = const { RefCell::new(String::new()) };
+    /// The most recent error message on this thread: a private tagged-block
+    /// hand-out plus its payload length, or `(null, 0)` when the last call
+    /// succeeded. `detent_last_error_message` returns a borrow of that
+    /// allocation, valid until the next FFI call on this thread replaces or
+    /// clears the slot; copy if you need to keep it. The buffer is
+    /// deliberately *not* in the `LIVE` hand-out set, so a caller that
+    /// (against the docs) passes it to `detent_free` is refused before any
+    /// header read and the slot never dangles. A raw pointer — not a
+    /// `Cell<Option<CString>>` — is the only thing that survives here: taking
+    /// the `CString` out and putting it back frees and re-protects the buffer
+    /// on `set`, which is exactly the use-after-free Miri caught
+    /// (`Cell::take` + `as_ptr` + `Cell::set` invalidates the tag the returned
+    /// pointer was derived from).
+    ///
+    /// `LastErrorSlot`'s `Drop` frees the buffer at thread exit, so no leak
+    /// is reported for threads that end with an error still set.
+    static LAST_ERROR: LastErrorSlot = const { LastErrorSlot::new() };
 }
 
+/// Owning holder for the thread-local last-error buffer (see `LAST_ERROR`).
+struct LastErrorSlot(Cell<(*const c_char, usize)>);
+
+impl LastErrorSlot {
+    const fn new() -> Self {
+        Self(Cell::new((std::ptr::null(), 0)))
+    }
+
+    fn replace(&self, ptr: *const c_char, len: usize) -> (*const c_char, usize) {
+        let old = self.0.get();
+        self.0.set((ptr, len));
+        old
+    }
+
+    fn get(&self) -> (*const c_char, usize) {
+        self.0.get()
+    }
+}
+
+#[allow(unsafe_code)]
+impl Drop for LastErrorSlot {
+    fn drop(&mut self) {
+        let (ptr, len) = self.0.get();
+        if !ptr.is_null() {
+            // SAFETY: `ptr`/`len` are exactly what an earlier `set_last_error`
+            // installed and were never handed out, so `free_slot_buffer`'s
+            // contract holds; `Drop` runs once at thread exit.
+            unsafe { free_slot_buffer(ptr, len) };
+        }
+    }
+}
+
+/// Frees a buffer previously installed in `LAST_ERROR` by `set_last_error`.
+///
+/// # Safety
+///
+/// `ptr`/`len` must be exactly what an earlier `set_last_error` installed:
+/// an `alloc_block` payload of `len` bytes, touched only by this slot (it is
+/// untracked, so `detent_free` refuses it), hence exclusive and correctly
+/// sized.
+#[allow(unsafe_code)]
+unsafe fn free_slot_buffer(ptr: *const c_char, len: usize) {
+    // SAFETY: by the `LAST_ERROR` ownership argument above.
+    unsafe {
+        if let Ok(layout) = alloc_layout(len) {
+            dealloc(ptr.cast_mut().cast::<u8>().sub(HEADER_LEN), layout);
+        }
+    }
+}
+
+/// Installs `msg` as the current thread's last error, NUL-terminated, freeing
+/// the previous buffer if any. Never fails: a message with an interior NUL
+/// falls back to a static, and an allocation failure keeps the previous
+/// message, so the error path itself cannot error or panic.
+#[allow(unsafe_code)]
 fn set_last_error(msg: impl Into<String>) {
     let s: String = msg.into();
-    LAST_ERROR.with(|slot| *slot.borrow_mut() = s);
+    let cstr = CString::new(s).unwrap_or(c"internal: error text had NUL".into());
+    let bytes = cstr.into_bytes_with_nul();
+    let payload_len = bytes.len();
+    // SAFETY: fresh `alloc_block` output; the payload region is writable and
+    // large enough for `bytes` by construction of the layout.
+    let Some(dst) = alloc_block(
+        payload_len,
+        AllocHeader {
+            magic: MAGIC_STRING,
+            index: 0,
+            len: payload_len.saturating_sub(1) as u64,
+        },
+    ) else {
+        return;
+    };
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, payload_len);
+    }
+    let ptr = dst.cast::<c_char>();
+    LAST_ERROR.with(|slot| {
+        let (old, old_len) = slot.replace(ptr.cast_const(), payload_len);
+        if !old.is_null() {
+            // SAFETY: `old` came from this slot, i.e. an earlier
+            // `alloc_block` of exactly `old_len` payload bytes; only this
+            // slot ever touches it (it is untracked, so `detent_free`
+            // refuses it) — exactly what `free_slot_buffer` requires.
+            unsafe { free_slot_buffer(old, old_len) };
+        }
+    });
 }
 
+#[allow(unsafe_code)]
 fn clear_last_error() {
-    LAST_ERROR.with(|slot| *slot.borrow_mut() = String::new());
+    LAST_ERROR.with(|slot| {
+        let (old, old_len) = slot.replace(std::ptr::null(), 0);
+        if !old.is_null() {
+            // SAFETY: same slot-owned hand-out argument as in `set_last_error`.
+            unsafe { free_slot_buffer(old, old_len) };
+        }
+    });
 }
 
 fn last_error_ptr() -> *const c_char {
-    LAST_ERROR.with(|slot| {
-        let s = slot.borrow();
-        if s.is_empty() {
-            std::ptr::null()
-        } else {
-            s.as_ptr().cast::<c_char>()
-        }
-    })
+    LAST_ERROR.with(|slot| slot.get().0)
 }
 
 // -------------------------------------------------------------------- helpers
@@ -426,7 +556,9 @@ pub extern "C" fn detent_parse(
         },
     );
     // SAFETY: `HEADER_LEN` is in range; the offset pointer is what C sees.
-    unsafe { raw.add(HEADER_LEN).cast::<c_char>() }
+    let out = unsafe { raw.add(HEADER_LEN).cast::<c_char>() };
+    track(out);
+    out
 }
 
 /// Renders a document back to text such that `render(parse(src)) == src`.
@@ -650,23 +782,35 @@ pub extern "C" fn detent_schema_json(module_id: *const c_char) -> *mut c_char {
 /// Frees any buffer or handle returned by this library. A `NULL` argument is
 /// a no-op (matching `free(3)`).
 ///
+/// Passing a foreign pointer is safe (untracked hand-outs are refused before
+/// any header read, and the pointer is left alone) but the buffer it points
+/// at will leak. Passing an already-freed pointer is likewise refused: the
+/// hand-out is removed from the set on free, so a second free reads `false`
+/// and touches nothing (the first free's memory may already be reused).
+///
 /// # Safety
 ///
 /// `ptr` must be either NULL or a pointer previously returned by a function
 /// in this library (one of `detent_module_list`, `detent_parse`,
 /// `detent_render`, `detent_to_model_json`, `detent_apply_json`,
 /// `detent_validate_json`, `detent_defaults_json`, `detent_schema_json`).
-/// Passing a foreign pointer is safe (the tag is detected and the pointer
-/// is left alone) but the buffer it points at will leak.
+/// Any other pointer is safely ignored but leaks relative to us.
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn detent_free(ptr: *mut c_char) {
     if ptr.is_null() {
         return;
     }
-    // SAFETY: the tag header is read; we dealloc only when the magic matches
-    // one we wrote, otherwise the caller-supplied pointer is left alone
-    // (leaked relative to us, but never corrupted).
+    // Membership in the hand-out set — not the magic — gates every header
+    // read below: `ptr.sub(HEADER_LEN)` on a foreign pointer is UB even when
+    // the magic would then mismatch, because Miri rejects the `sub` itself.
+    // The original pointer (with its provenance) is what gets read after a
+    // membership hit, so no integer-to-pointer round trip ever occurs.
+    if !untrack(ptr) {
+        return;
+    }
+    // SAFETY: `ptr` is a live hand-out of ours, so `HEADER_LEN` bytes before
+    // it are our readable header; we dealloc only after the magic matches.
     unsafe {
         let raw = ptr.sub(HEADER_LEN).cast::<u8>();
         let header = read_header(raw);
@@ -705,8 +849,12 @@ fn split_doc(doc: *mut c_char) -> Result<(Arc<dyn DynModule>, String), i32> {
         set_last_error("document handle is NULL".to_owned());
         return Err(DETENT_ERR_NULL_ARGUMENT);
     }
-    // SAFETY: caller promises the pointer was returned by `detent_parse`,
-    // whose header sits exactly `HEADER_LEN` bytes before the user pointer.
+    if !is_live(doc) {
+        set_last_error("document handle is unknown (foreign or already freed?)".to_owned());
+        return Err(DETENT_ERR_NULL_ARGUMENT);
+    }
+    // SAFETY: `doc` is a live hand-out from `detent_parse`, whose header sits
+    // exactly `HEADER_LEN` bytes before the user pointer.
     let header = unsafe { read_header(doc.sub(HEADER_LEN).cast::<u8>()) };
     if header.magic != MAGIC_DOC {
         set_last_error("document handle has the wrong tag".to_owned());

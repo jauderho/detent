@@ -141,13 +141,18 @@ char *detent_schema_json(const char *module_id);
  * Frees any buffer or handle returned by this library. A `NULL` argument is
  * a no-op (matching `free(3)`).
  *
+ * Passing a foreign pointer is safe (untracked hand-outs are refused before
+ * any header read, and the pointer is left alone) but the buffer it points
+ * at will leak. Passing an already-freed pointer is likewise refused: the
+ * hand-out is removed from the set on free, so a second free reads `false`
+ * and touches nothing (the first free's memory may already be reused).
+ *
  * # Safety
  *
  * `ptr` must be either NULL or a pointer previously returned by a function
  * in this library (one of `detent_module_list`, `detent_parse`,
  * `detent_render`, `detent_to_model_json`, `detent_apply_json`,
  * `detent_validate_json`, `detent_defaults_json`, `detent_schema_json`).
- * Passing a foreign pointer is safe (the tag is detected and the pointer
- * is left alone) but the buffer it points at will leak.
+ * Any other pointer is safely ignored but leaks relative to us.
  */
 void detent_free(char *ptr);
