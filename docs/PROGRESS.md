@@ -5,6 +5,32 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-22 - Phase 10 MCP transport + smoke pin land
+
+`detent mcp` serves every `Operation` as an MCP tool (`crates/detent/src/mcp.rs`,
+behind the `mcp` feature which implies `web`): stdio by default, streamable
+HTTP on `127.0.0.1:3334` via `--transport http`/`--bind`, token read once at
+startup from `DETENT_MCP_TOKEN` with an axum bearer gate returning 401 before
+MCP runs, authz via the web layer's `ScopedAuthz`, missing/unknown token or
+unreadable store refuses startup with exit 1. `Session::execute_as` lets tools
+run under the token identity. The transport slice was Jev-routed (Choice
+`mcp_smoke` over the four remaining acceptance slices, confidence 0.28 with
+`mcp_smoke:0.46` top; Noul destructive-risk 0.07) and the startup refusal was
+the Jev-flagged step (`// (Jev-routed)` on `resolve_identity`). Live docs read:
+llms index, HTTP API, confidence, intent-routing. HTTP verified live against a
+built binary (401 with no bearer on `/mcp`); stdio piping is unverified (a
+server binary pipe stayed silent, root cause unknown — likely framing, not
+asserted). The smoke pin is a unit test, not a wire test:
+`smoke_lists_tools_and_executes_list_modules_and_get_module` asserts 17 tools
+listed, known-token auth ok / unknown/missing refused, `ListModules`/`GetModule`
+execute through to the recorder. Auth decision extracted to `check_auth_with`
+so the test passes the token explicitly (no process-env mutation racing
+parallel tests). docs/API.md documents the command. Remaining acceptance (not
+in this slice): per-tool JSON Schema vs OpenAPI parity, cbindgen verify,
+C-example CI, Miri, semver-checks, FreeBSD runner.
+Verify: `cargo test -p detent-mcp --features mcp` 7 passed; `cargo test -p detent --features mcp -- --skip tests::cli_message_ids` 155 passed (locale test pre-existing failure); clippy clean on detent-mcp; fmt clean.
+---
+
 ## 2026-09-21 - Phase 10 survey: FFI+MCP in tree, acceptance gaps inventoried
 
 `detent-ffi` (10 entry points, `deny(unwrap/expect/panic/unsafe)`, 12 Rust
