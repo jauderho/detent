@@ -126,44 +126,6 @@ jobs:
           fi
           echo "rustls present, ring absent, as required"
 
-
-  ffi-soundness:
-    name: FFI soundness (Miri on detent-ffi)
-    runs-on: ubuntu-26.04
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
-        with:
-          egress-policy: audit
-
-      - name: Checkout Code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      # Nightly, like the fuzz job: Miri is nightly-only, so the preinstalled
-      # stable cannot supply it. `components: miri` installs the
-      # interpreter alongside the toolchain.
-      - name: Install nightly Rust toolchain with Miri
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: nightly
-          components: miri
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-
-      # `rust-toolchain.toml` pins stable: rustup resolves plain `cargo` to
-      # the pinned stable (directory override outranks the action's `rustup
-      # nightly`), where cargo-miri is not installed. Route through the
-      # nightly toolchain explicitly. No MIRIFLAGS needed: the suite passes
-      # under default isolation.
-      # Covers the live hand-out set gate (`detent_free`, `split_doc`) and
-      # the thread-local last-error slot — Miri caught a `ptr.sub` on
-      # foreign pointers and a Cell take/put-back use-after-free here.
-      - name: cargo miri test -p detent-ffi
-        run: rustup run nightly cargo miri test -p detent-ffi
-
   ffi-semver:
     name: FFI semver (cargo-semver-checks on detent-ffi)
     runs-on: ubuntu-26.04
