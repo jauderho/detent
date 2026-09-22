@@ -171,12 +171,14 @@ compiled binary and must not be committed.
 ## CI
 
 The `rust` job in `.github/workflows/ci.yml` covers `cargo fmt --check`,
-`cargo clippy --workspace --all-targets --all-features`, and
-`cargo test --workspace --all-features`, which include `detent-ffi`'s unit
-and integration tests. Not yet wired (open Phase 10 work):
-`cbindgen --verify` against `include/detent.h`, building and running
-`examples/ffi-c/main.c` in CI, `cargo-semver-checks` on the crate, and a
-Miri run on the FFI unit tests.
+`cargo clippy --workspace --all-targets --all-features`,
+`cargo test --workspace --all-features`, `cbindgen --verify` against
+`include/detent.h`, and building and running `examples/ffi-c/main.c` — all
+of which include `detent-ffi`. The `ffi-soundness` job runs
+`cargo miri test -p detent-ffi` on nightly. `cargo-semver-checks` is
+deliberately not wired: every crate sets `publish = false`, so there is no
+public API surface to check; the C ABI side is covered by
+`cbindgen --verify` instead.
 
 The C example exercises every FFI entry point against the `hosts` module
 and a checked-in fixture, asserting that `detent_apply_json` on a model
