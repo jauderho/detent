@@ -465,9 +465,10 @@ pub extern "C" fn detent_abi_version() -> u32 {
 /// Returns the message of the last error raised on this thread, or NULL when
 /// the most recent call on this thread succeeded.
 ///
-/// The pointer is valid for the contents of the current error slot; the next
-/// FFI call that sets `last_error` may free the underlying buffer. The C
-/// caller should copy if it needs to retain the string.
+/// The pointer is a borrow of the thread-local error slot: **any** later FFI
+/// call on this thread invalidates it — including successful calls, which
+/// clear the slot on entry — and may free the underlying buffer. Copy the
+/// string immediately if you need to retain it.
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn detent_last_error_message() -> *const c_char {
