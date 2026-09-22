@@ -152,9 +152,10 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      # Workflow env sets RUSTUP_TOOLCHAIN=stable and rust-toolchain.toml
-      # pins stable, so plain `cargo` resolves to stable where cargo-miri
-      # is not installed. Route through the nightly toolchain explicitly.
+      # Workflow env forces RUSTUP_TOOLCHAIN=stable (outranks the
+      # `rust-toolchain.toml` 1.98.1 pin), so plain `cargo` resolves to
+      # stable where cargo-miri is not installed. Route through the
+      # nightly toolchain explicitly.
       # No MIRIFLAGS needed: the suite passes under default isolation.
       # Covers the live hand-out set gate (`detent_free`, `split_doc`) and
       # the thread-local last-error slot — Miri caught a `ptr.sub` on
