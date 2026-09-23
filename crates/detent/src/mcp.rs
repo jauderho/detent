@@ -55,6 +55,7 @@ pub fn run(
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
+    crate::run::init_tracing();
     if matches!(args.transport, McpTransport::Http)
         && !http_transport_allowed(rustix::process::geteuid().is_root())
     {

@@ -72,6 +72,7 @@ time = { version = "0.3", default-features = false, features = ["std", "formatti
 xattr = "1.6.1"
 tempfile = "3.27.0"
 tracing = "0.1.44"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 unic-langid = "0.9.6"
 
 # Web front (PLAN §2.6, §2.7). Every entry here is pinned to the newest release
