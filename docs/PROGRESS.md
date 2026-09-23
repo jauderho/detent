@@ -5,6 +5,12 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-23 - STAGE3 H20 batch: clippy, Linux gate, coverage, fuzz
+
+H20-a (clippy): moved `shutdown_signal`, `transport_name`, `scope_name` above `mod tests` in `crates/detent/src/mcp.rs`; `headers()` fixture returns `Result` with `?`. Also split the `fuzz_provider_response` re-export behind `feature = "fuzzing"` (workspace `--all-features` exposed the ungated import). H20-b: gated `a_duplicate_module_id_warns_instead_of_panicking` to non-Linux, added `linux_confinement_reports_landlock_and_seccomp`. H20-c: restored a dropped `#[test]` on `backend_names_are_stable_for_every_variant`, extracted `warning_for_percent` with boundary tests (None/0/49/50/74/75/100), covered `update_apply` missing-file and bridge-copy-failure arms. H20-d: `cargo +nightly fuzz list/run` in `fuzz.yml`.
+
+Verify: `cargo fmt --all --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace --all-features` 1583 passed; ops coverage now misses only pre-existing gaps outside H20-c scope. Fuzz workflow triggered (run 35852335199), result pending.
+
 ## 2026-09-23 - Phase 6 failure UX: cert status gains expiry_warning
 
 Jev routing attempted but blocked (automode extension timed out both a curl and an eval-fetch to `api.typesafe.ai`); default model chose the slice instead. `CertReport.expiry_warning: Option<ExpiryWarning>` (`half` at 50 % used, `quarter` at 75 %) mirrors `detent-acme`'s `warning_for` thresholds without calling it, so `detent-web` gains no `detent-acme` dependency. Filled in `cert_report` from the existing lifetime percent. Test pins a fresh cert trips no warning; `docs/openapi.json` regenerated (`ExpiryWarning` schema).
