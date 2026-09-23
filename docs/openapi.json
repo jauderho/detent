@@ -1190,6 +1190,13 @@
             ],
             "format": "int64",
             "description": "Validity end, whole seconds since the Unix epoch, when parseable."
+          },
+          "renewal_due": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether two thirds of the lifetime is used (the renewal threshold).\n`None` when the validity window did not parse."
           }
         }
       },

@@ -5,6 +5,12 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-23 - Phase 6 renewal_loop half: cert status gains renewal_due
+
+Jev (`jev-1.13.0`) routed next_slice `renewal_loop` (conf 0.6, p=0.73 over cert_renew_wiring 0.18, attest 0.09; non-destructive noul 0.62). Smallest unblocked decision-half: `CertReport.renewal_due: Option<bool>` (`None` when validity does not parse), filled by `cert_report` from the existing `tls::renewal_due_at` two-thirds rule — the UI/poller can now read "renew now" without re-deriving lifetime math. Test: fresh bootstrap cert reports `renewal_due == false`; `docs/openapi.json` regenerated. The background poll + fetch/install half stays open (needs design, not scoping).
+
+Verify: `cargo test -p detent-ops --lib` 45 passed; `cargo test -p detent-web --lib` 301 passed; clippy clean; fmt clean.
+
 ## 2026-09-23 - ReplaceBinary trust boundary: staged bytes gated at the monitor
 
 Jev (`jev-1.13.0`) confirmed priv-esc (noul 0.96) and picked `root_ownership_gate` (conf 0.84, p=0.89 over in-monitor-sigstore 0.10, engine-side-verify 0.01); TOCTOU worth fixing (noul 0.87). `monitor.rs` opens the staged file `O_NOFOLLOW` via `rustix::fs::open`, requires ownership by the monitor's own euid (root in production, so a `detent`-planted file refuses; dev/test same-euid swaps keep running and exercising the gate), reads + hashes from the same fd (`take(u32::MAX)` cap), and `swap_running_binary` writes those verified bytes (no path re-read; duplicate `set_permissions` dropped). Until a privileged staged-producer lands, the worker-side `UpdateApply` materialize stays refused when privileged — fail-closed, documented at `update_apply`. Test: symlinked staged file refused, target untouched.

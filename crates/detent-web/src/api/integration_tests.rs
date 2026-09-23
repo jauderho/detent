@@ -847,6 +847,11 @@ async fn cert_status_describes_the_certificate_the_listener_serves() -> R {
         used <= 1,
         "a fresh certificate has spent ~0% of its life, got {used}"
     );
+    assert_eq!(
+        body.get("renewal_due").and_then(serde_json::Value::as_bool),
+        Some(false),
+        "a fresh certificate is nowhere near the two-thirds renewal threshold"
+    );
 
     live.shutdown();
     Ok(())

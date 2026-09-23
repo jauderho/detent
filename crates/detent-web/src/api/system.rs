@@ -112,7 +112,8 @@ pub(super) fn cert_report(state: &AppState) -> CertReport {
     let current = state.cert_store.current();
     let der: &[u8] = current.cert.first().map_or(&[], |c| c.as_ref());
     let fingerprint = crate::tls::fingerprint(der);
-    let (not_after_unix, lifetime_used_percent) = match crate::tls::validity_unix(der) {
+    let (not_after_unix, lifetime_used_percent, renewal_due) = match crate::tls::validity_unix(der)
+    {
         Some((not_before, not_after)) => {
             let now = OffsetDateTime::now_utc().unix_timestamp();
             // `not_after > not_before` is checked first, so the subtraction
@@ -126,14 +127,16 @@ pub(super) fn cert_report(state: &AppState) -> CertReport {
             } else {
                 None
             };
-            (Some(not_after), pct)
+            let due = crate::tls::renewal_due_at(not_before, not_after, now);
+            (Some(not_after), pct, Some(due))
         }
-        None => (None, None),
+        None => (None, None, None),
     };
     CertReport {
         fingerprint,
         not_after_unix,
         lifetime_used_percent,
+        renewal_due,
     }
 }
 /// `GET /api/v1/system/update`.
