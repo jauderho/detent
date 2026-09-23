@@ -128,14 +128,7 @@ pub(super) fn cert_report(state: &AppState) -> CertReport {
                     None
                 };
                 let due = crate::tls::renewal_due_at(not_before, not_after, now);
-                // Same 50 %/75 % thresholds as `detent-acme`'s `warning_for`,
-                // mirrored here (not called) so `detent-web` gains no
-                // `detent-acme` dependency for one comparison.
-                let warning = match pct {
-                    Some(p) if p >= 75 => Some(detent_ops::ExpiryWarning::Quarter),
-                    Some(p) if p >= 50 => Some(detent_ops::ExpiryWarning::Half),
-                    _ => None,
-                };
+                let warning = detent_ops::warning_for_percent(pct);
                 (Some(not_after), pct, Some(due), warning)
             }
             None => (None, None, None, None),

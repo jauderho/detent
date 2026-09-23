@@ -209,6 +209,19 @@ pub enum ExpiryWarning {
     Quarter,
 }
 
+/// Map a lifetime-used percent to its expiry warning: `half` at 50 %,
+/// `quarter` at 75 %. Same thresholds as `detent-acme`'s `warning_for`,
+/// kept here (not called there) so `detent-web` needs no `detent-acme`
+/// dependency for one comparison.
+#[must_use]
+pub const fn warning_for_percent(used_percent: Option<u8>) -> Option<ExpiryWarning> {
+    match used_percent {
+        Some(p) if p >= 75 => Some(ExpiryWarning::Quarter),
+        Some(p) if p >= 50 => Some(ExpiryWarning::Half),
+        _ => None,
+    }
+}
+
 /// The stable wire name of a network backend.
 const fn network_backend_name(backend: NetworkBackend) -> &'static str {
     match backend {
@@ -317,6 +330,29 @@ mod tests {
     use detent_platform::privsep::proto::{CommitId, TargetId};
 
     type R = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn expiry_warning_trips_at_half_and_quarter_life() {
+        assert_eq!(super::warning_for_percent(None), None);
+        assert_eq!(super::warning_for_percent(Some(0)), None);
+        assert_eq!(super::warning_for_percent(Some(49)), None);
+        assert_eq!(
+            super::warning_for_percent(Some(50)),
+            Some(super::ExpiryWarning::Half)
+        );
+        assert_eq!(
+            super::warning_for_percent(Some(74)),
+            Some(super::ExpiryWarning::Half)
+        );
+        assert_eq!(
+            super::warning_for_percent(Some(75)),
+            Some(super::ExpiryWarning::Quarter)
+        );
+        assert_eq!(
+            super::warning_for_percent(Some(100)),
+            Some(super::ExpiryWarning::Quarter)
+        );
+    }
 
     #[test]
     fn backend_names_are_stable_for_every_variant() {
