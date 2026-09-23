@@ -35,7 +35,7 @@ use detent_platform::privsep::allowlist::{Allowlist, Config};
 use detent_platform::privsep::monitor::{ExitReason, Hooks, Monitor};
 use detent_platform::privsep::spawn::{Role, SpawnConfig, SpawnError, abort_child, spawn_pair};
 use detent_platform::sandbox::{
-    Confinement, Hooks as SandboxHooks, LandlockOutcome, Outcome, Policy,
+    Confinement, Hooks as SandboxHooks, LandlockOutcome, LandlockStatus, Outcome, Policy,
 };
 use detent_platform::service::checks::ExternalCheckRunner;
 use detent_platform::service::{self, ServiceControlAdapter};
@@ -172,6 +172,7 @@ fn report_confinement(
             MessageId::new("cli-serve-confinement-degraded"),
             &[("detail", &note)],
         );
+        tracing::warn!(detail = %note, "confinement degraded");
     }
     let path = state_root.join("state/confinement.json");
     if let Some(parent) = path.parent() {
@@ -198,7 +199,11 @@ fn degradation_notes(confinement: &Confinement) -> Vec<String> {
         }
     }
     match &confinement.landlock {
-        LandlockOutcome::Applied { .. } => {}
+        LandlockOutcome::Applied { abi, status } => {
+            if *status != LandlockStatus::FullyEnforced {
+                notes.push(format!("landlock: abi {abi} status {status:?}"));
+            }
+        }
         LandlockOutcome::Unavailable { reason } | LandlockOutcome::Skipped { reason } => {
             notes.push(format!("landlock: {reason}"));
         }
@@ -645,10 +650,27 @@ mod tests {
             landlock: LandlockOutcome::Unavailable {
                 reason: "old kernel".to_owned(),
             },
-            ..full
+            ..full.clone()
         };
         let notes = degradation_notes(&degraded);
         assert_eq!(notes, vec!["landlock: old kernel".to_owned()]);
+        for status in [
+            detent_platform::sandbox::LandlockStatus::PartiallyEnforced,
+            detent_platform::sandbox::LandlockStatus::NotEnforced,
+        ] {
+            let partial = Confinement {
+                landlock: LandlockOutcome::Applied { abi: 1, status },
+                ..full.clone()
+            };
+            let notes = degradation_notes(&partial);
+            assert_eq!(notes.len(), 1, "status {status:?} must be reported");
+            assert!(
+                notes
+                    .first()
+                    .is_some_and(|note| note.starts_with("landlock:")),
+                "note: {notes:?}",
+            );
+        }
     }
 
     #[test]
