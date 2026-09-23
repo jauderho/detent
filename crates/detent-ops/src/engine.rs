@@ -319,6 +319,13 @@ impl OpsEngine {
     /// will see and forwards `(len, sha256)` so the monitor can refuse any
     /// mismatch independently.
     ///
+    /// Fail-closed until a privileged staged-producer lands: the monitor
+    /// only swaps files owned by its own euid, but this engine runs
+    /// worker-side, so the digest file materialised below is worker-owned.
+    /// A privileged monitor therefore refuses the web `UpdateApply` path
+    /// until staging moves root-side; unprivileged dev/test monitors (same
+    /// euid on both sides) still swap.
+    ///
     /// The path used here must match the monitor's [`staged_path`] helper.
     /// The `version` argument is the release tag (e.g. `v1.2.3`); the file
     /// the verifier staged under that tag is read, its digest computed, and
