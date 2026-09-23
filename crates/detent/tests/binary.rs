@@ -124,6 +124,8 @@ fn mcp_refused_startup_writes_nothing_to_stdout() -> TestResult {
         .output()?;
     assert_eq!(code(&output), Some(1));
     assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.contains("mcp startup refused"), "{stderr}");
     Ok(())
 }
 

@@ -153,6 +153,7 @@ fn resolve_identity(
     let presented = match std::env::var(TOKEN_ENV) {
         Ok(token) if !token.is_empty() => token,
         _ => {
+            tracing::warn!(var = TOKEN_ENV, "mcp startup refused: token missing");
             renderer.line(
                 streams.notes,
                 MessageId::new("cli-mcp-missing-token"),
@@ -164,6 +165,7 @@ fn resolve_identity(
     let store = match TokenStore::load(&settings.state_root) {
         Ok(store) => store,
         Err(err) => {
+            tracing::warn!(reason = %err, "mcp startup refused: credential store failed");
             renderer.line(
                 streams.notes,
                 MessageId::new("cli-credential-failed"),
@@ -175,6 +177,7 @@ fn resolve_identity(
     let identity = match store.authenticate(&presented, unix_now()) {
         Ok(found) => found,
         Err(err) => {
+            tracing::warn!(reason = %err, "mcp startup refused: credential failed");
             renderer.line(
                 streams.notes,
                 MessageId::new("cli-credential-failed"),
