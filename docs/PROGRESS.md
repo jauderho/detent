@@ -5,6 +5,14 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-23 - STAGE3 H11 re-run + C example green
+
+`mcp_stdio_answers_initialize` passes (1 passed, 8 filtered); C example per `docs/FFI.md:160` recipe (`cc -I include examples/ffi-c/main.c target/debug/libdetent_ffi.a`) prints `OK: parse + to_model_json + apply_json + validate_json + schema_json + defaults_json`. Jev routing only; complex reasoning by default model. L-BIN still undefined (no advisory text found in docs/spikes/CI) — awaiting owner definition.
+
+## 2026-09-23 - STAGE3 M13 completed: hostile-input no-panic guard across C ABI
+
+`60f5a7f` adds `hostile_inputs_never_panic_and_report_errors` (NULL on every pointer-taking entry, invalid UTF-8, use-after-free render + silent double-free): 13 FFI tests pass, clippy clean, `cbindgen --verify` clean. No `catch_unwind` per ADR-010 (lints+fuzz make panics structurally impossible; test pins observable half). Jev (`jev-1.13.0`, live POST) routing only: `next_slice` lbin (p=0.59, conf 0.39), destructive noul 0.17; complex reasoning by default model.
+
 ## 2026-09-23 - STAGE3 M12 companion pin: refused mcp startup traces on stderr
 
 `resolve_identity` refused paths now `tracing::warn!` (`mcp startup refused: token missing|credential store failed|credential failed`); `mcp_refused_startup_writes_nothing_to_stdout` asserts stdout empty AND stderr contains `mcp startup refused` (non-vacuous: fails pre-warn). Jev (`jev-1.13.0`, live POST) routing only: `next_slice` companion_pin (p=0.63, conf 0.45), destructive noul 0.29; complex reasoning by default model. M13 FFI guard next: ADR-010 already rejects `catch_unwind` (lints+fuzz), so the slice is a guard test, not new code.
