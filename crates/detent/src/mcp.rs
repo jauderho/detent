@@ -55,14 +55,32 @@ pub fn run(
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
+    if matches!(args.transport, McpTransport::Http)
+        && !http_transport_allowed(rustix::process::geteuid().is_root())
+    {
+        renderer.line(
+            streams.notes,
+            MessageId::new("cli-mcp-http-needs-privsep"),
+            &[],
+        )?;
+        return Ok(Exit::Privilege);
+    }
     let Some((presented, scopes, who)) = resolve_identity(settings, renderer, streams)? else {
         return Ok(Exit::Failed);
     };
     let Some(mut session) = start_session(settings, dryrun, renderer, streams)? else {
         return Ok(Exit::Failed);
     };
-
     let bind = args.bind.unwrap_or(DEFAULT_HTTP_ADDR);
+
+    if matches!(args.transport, McpTransport::Http) && !check_bind(bind) {
+        renderer.line(
+            streams.notes,
+            MessageId::new("cli-mcp-bind-not-loopback"),
+            &[],
+        )?;
+        return Ok(Exit::Usage);
+    }
     if dryrun {
         renderer.line(
             streams.out,
@@ -364,9 +382,20 @@ fn scope_name(scopes: detent_web::authz::Scopes) -> &'static str {
         "read"
     }
 }
+/// Whether an HTTP `--bind` may serve: loopback only, so the plaintext
+/// bearer never crosses the network (STAGE3 M11).
+fn check_bind(bind: std::net::SocketAddr) -> bool {
+    bind.ip().is_loopback()
+}
+/// Whether `--transport http` may start: never as root, where the network
+/// parser would run in the same process as the root monitor (STAGE3 H12).
+fn http_transport_allowed(euid_is_root: bool) -> bool {
+    !euid_is_root
+}
+
 #[cfg(test)]
 mod tests {
-    use super::bearer_of;
+    use super::{bearer_of, check_bind, http_transport_allowed};
     fn headers(
         value: Option<&str>,
     ) -> Result<axum::http::HeaderMap, axum::http::header::InvalidHeaderValue> {
@@ -387,5 +416,19 @@ mod tests {
         assert_eq!(bearer_of(&headers(Some("Bearer "))?), "");
         assert_eq!(bearer_of(&headers(Some("Bearer"))?), "");
         Ok(())
+    }
+    #[test]
+    fn http_transport_refused_for_root() {
+        assert!(http_transport_allowed(false));
+        assert!(!http_transport_allowed(true));
+    }
+    #[test]
+    fn bind_table_keeps_bearer_on_loopback() {
+        for ok in ["127.0.0.1:3334", "[::1]:3334"] {
+            assert!(check_bind(ok.parse().unwrap()), "{ok}");
+        }
+        for bad in ["0.0.0.0:3334", "192.168.1.10:3334", "[::]:3334"] {
+            assert!(!check_bind(bad.parse().unwrap()), "{bad}");
+        }
     }
 }
