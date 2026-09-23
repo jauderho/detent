@@ -352,3 +352,86 @@ async fn the_peer_address_reaches_the_handlers() -> TestResult {
     let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
     Ok(())
 }
+#[tokio::test]
+async fn an_idle_connection_does_not_hold_a_permit() -> TestResult {
+    install_crypto_provider();
+    let cert = bootstrap_self_signed(&[HOST.to_owned()])?;
+    let store = Arc::new(CertStore::new(&cert)?);
+    let tls = server_config_from_store(Arc::clone(&store), ALPN_H2_HTTP11)?;
+    let mut config = Config::default();
+    config.listen.addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+    config.listen.max_connections = 1;
+    config.validate()?;
+    let mut server = Server::bind(&config, tls, healthz()).await?;
+    server.header_read_timeout = Duration::from_millis(200);
+    server.max_connection_lifetime = Duration::from_millis(450);
+    let addr = server.local_addr();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        server
+            .serve(async move {
+                let _ = stopped.await;
+            })
+            .await;
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let client_cfg = client_config(&cert, &[&rustls::version::TLS13], &[b"http/1.1"])?;
+    let connector = TlsConnector::from(Arc::new(client_cfg.clone()));
+    let tcp = TcpStream::connect(addr).await?;
+    let server_name = ServerName::try_from(HOST.to_owned())?;
+    let idle = connector.connect(server_name.clone(), tcp).await?;
+    // Longer than header timeout, so the idle connection is closed and its permit freed.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let mut last_err: Option<String> = None;
+    let mut got_ok = false;
+    let mut last_response = String::new();
+    for _ in 0..15 {
+        match TcpStream::connect(addr).await {
+            Ok(tcp2) => match TlsConnector::from(Arc::new(client_cfg.clone()))
+                .connect(server_name.clone(), tcp2)
+                .await
+            {
+                Ok(mut stream2) => {
+                    if stream2
+                        .write_all(
+                            b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                        )
+                        .await
+                        .is_ok()
+                        && stream2.flush().await.is_ok()
+                    {
+                        let mut raw = Vec::new();
+                        let _ = tokio::time::timeout(
+                            Duration::from_secs(2),
+                            stream2.read_to_end(&mut raw),
+                        )
+                        .await;
+                        let response = String::from_utf8_lossy(&raw).into_owned();
+                        last_response = response.clone();
+                        if response.contains("200 OK") {
+                            got_ok = true;
+                            break;
+                        }
+                        last_err = Some(format!("non-200 response: {response}"));
+                    } else {
+                        last_err = Some("write failed".to_owned());
+                    }
+                }
+                Err(e) => last_err = Some(format!("tls connect failed: {e}")),
+            },
+            Err(e) => last_err = Some(format!("tcp connect failed: {e}")),
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if !got_ok {
+        return Err(format!(
+            "second client never got 200 after idle timeout: {} last response: {last_response}",
+            last_err.unwrap_or_else(|| "unknown".to_owned())
+        )
+        .into());
+    }
+    drop(idle);
+    drop(stop);
+    let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+    Ok(())
+}
