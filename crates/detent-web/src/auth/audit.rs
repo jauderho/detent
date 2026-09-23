@@ -49,6 +49,8 @@ use time::format_description::well_known::Rfc3339;
 /// directory.
 const AUDIT_FILE_MODE: u32 = 0o600;
 
+const ROTATE_AT: u64 = 16 * 1024 * 1024;
+
 /// Directory under the state root that holds the logs (PLAN §2.10).
 pub const AUDIT_SUBDIR: &str = "audit";
 
@@ -195,6 +197,12 @@ impl FileAuthAudit {
         line.push(b'\n');
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
+        }
+        // Rotate to `.1` above 16 MiB (M10): best-effort, metadata only on
+        // the fast path, keeps the same `0600` discipline.
+        if std::fs::metadata(&self.path).is_ok_and(|m| m.len() >= ROTATE_AT) {
+            let rotated = self.path.with_extension("jsonl.1");
+            let _ = std::fs::rename(&self.path, &rotated);
         }
         let mut file = OpenOptions::new()
             .create(true)
