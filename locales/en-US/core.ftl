@@ -141,6 +141,9 @@ nfs-rec-options = state rw/ro, sync/async, root_squash and subtree handling expl
 nfs-empty-path = an export point is empty.
 nfs-relative-path = `{$path}` is not absolute; an export point must start with `/`.
 nfs-empty-host = a client of `{$path}` has no host specification.
+nfs-bad-host = `{$host}` is not a valid client specification; it starts with `-` or contains syntax that would truncate the line.
+nfs-bad-path = `{$path}` contains syntax that would truncate the export line.
+nfs-bad-continuation = `{$path}` would end with a continuation backslash and fold the next line.
 nfs-invalid-option = `{$option}` is not a valid export option; options are bare tokens with no whitespace or parentheses.
 nfs-no-root-squash = `{$host}` mounts with no_root_squash and keeps root privileges on the export.
 nfs-sec-sys-only = `{$host}` negotiates only sec=sys; add krb5p for cryptographic protection.

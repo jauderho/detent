@@ -91,6 +91,16 @@ detent_core::module_conformance!(
         // refuse them too.
         host_probe("a b"),
         path_probe("a b"),
+        // H14 syntax probes: must fail before fix, pass after.
+        host_probe("-rw"),
+        host_probe("h\\"),
+        host_probe("h#"),
+        host_probe("h\""),
+        option_probe("rw#"),
+        option_probe("rw\\"),
+        path_probe("/a#b"),
+        path_probe("/a\"b"),
+        path_probe("/srv\\"),
     ],
 );
 
