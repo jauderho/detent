@@ -481,9 +481,6 @@ fn compiled_feature_ids() -> Vec<String> {
     if cfg!(feature = "acme-dns-providers") {
         features.push("acme-dns-providers".to_owned());
     }
-    if cfg!(feature = "acme-attest") {
-        features.push("acme-attest".to_owned());
-    }
     if cfg!(feature = "update") {
         features.push("update".to_owned());
     }
@@ -1441,6 +1438,22 @@ mod tests {
         assert_eq!(exit, Exit::Usage);
         Ok(())
     }
+    #[test]
+    fn acme_attest_is_not_advertised_without_an_attestor() -> R {
+        // No real attestor exists yet (PLAN Phase 6); the binary must not
+        // advertise the feature id even when the feature is enabled elsewhere.
+        let (exit, out, _) = run_with(&["detent", "--self-test", "--json"])?;
+        assert_eq!(exit, Exit::Ok);
+        let parsed: serde_json::Value = serde_json::from_str(&out)?;
+        let features: Vec<String> =
+            serde_json::from_value(parsed.get("features").cloned().unwrap_or_default())?;
+        assert!(
+            !features.iter().any(|feature| feature == "acme-attest"),
+            "acme-attest must not be advertised without an attestor, got {features:?}"
+        );
+        Ok(())
+    }
+
     #[cfg(feature = "web")]
     #[test]
     fn web_config_errors_report_the_path_and_fail() -> R {
