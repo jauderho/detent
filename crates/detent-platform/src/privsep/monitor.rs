@@ -957,14 +957,37 @@ fn read_staged_verified(
             "staged binary is not a regular file".to_owned(),
         ));
     }
+    // A hard link shares the owner's uid, so ownership alone cannot prove the
+    // worker did not link a root-owned file (an older signed build, `.prev`,
+    // `/bin/true`) into the staged path: refuse anything with two names.
+    if meta.nlink() != 1 {
+        tracing::warn!("staged binary refused: hard link");
+        return Err(ProtoError::Io("staged binary is not trusted".to_owned()));
+    }
+    // The staged directory itself must belong to whoever the monitor runs as
+    // and must not be group- or world-writable: otherwise the worker can
+    // rename its own file over the staged path between the check and the
+    // swap. `fstatat` on the parent runs before the child opens above.
+    let parent_meta = match std::fs::symlink_metadata(
+        path.parent()
+            .ok_or_else(|| ProtoError::Io("staged binary is not trusted".to_owned()))?,
+    ) {
+        Ok(meta) => meta,
+        Err(err) => {
+            return Err(ProtoError::Io(format!(
+                "stat staged directory: {}",
+                err.kind()
+            )));
+        }
+    };
     // The staged file must belong to whoever the monitor runs as: in
     // production that is root, so a `detent`-owned file the worker planted
     // refuses; in dev/test the monitor runs as the dev uid, so the same
     // comparison keeps the suite exercising the gate instead of skipping it.
-    // Until a privileged staged-producer lands, the web `UpdateApply` path
-    // (worker-side `write_atomic` of the digest file) stays refused when
-    // privileged — fail-closed, documented at `update_apply`.
-    if meta.uid() != rustix::process::geteuid().as_raw() {
+    if meta.uid() != rustix::process::geteuid().as_raw()
+        || parent_meta.uid() != rustix::process::geteuid().as_raw()
+        || parent_meta.mode() & 0o022 != 0
+    {
         tracing::warn!("staged binary refused: untrusted owner");
         return Err(ProtoError::Io("staged binary is not trusted".to_owned()));
     }
@@ -2494,6 +2517,37 @@ mod tests {
                 "symlink refusal must name the staged file: {message}"
             );
         }
+        Ok(())
+    }
+    #[test]
+    fn replace_binary_refuses_a_hard_linked_staged_file() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let work = TempDir::new()?;
+        let state_root = work.path().join("state");
+        std::fs::create_dir_all(&state_root)?;
+        let target = swap_target(work.path(), "detent-hardlink", b"old-binary")?;
+        let staged_bytes = b"new-binary-contents";
+        let digest = Sha256Digest::of(staged_bytes);
+        let dir = state_root.join(STAGED_DIR);
+        std::fs::create_dir_all(&dir)?;
+        let staged = dir.join(digest.to_string());
+        std::fs::write(&staged, staged_bytes)?;
+        std::fs::hard_link(&staged, dir.join("second-name"))?;
+        let config = Config::with_state_root(&state_root);
+        let mut monitor = Monitor::new(Allowlist::from_modules(&[], &config)?, Hooks::default());
+        monitor.set_binary_override(target.clone());
+        let _ = monitor.dispatch(Request::Hello {
+            proto: PROTO_VERSION,
+        });
+        let response = monitor.dispatch(Request::ReplaceBinary {
+            len: staged_bytes.len() as u64,
+            sha256: digest,
+        })?;
+        let Response::Error(ProtoError::Io(message)) = response else {
+            return Err(format!("expected Io, got {response:?}").into());
+        };
+        assert!(message.contains("staged"), "io message: {message}");
+        assert_eq!(std::fs::read(&target)?, b"old-binary");
         Ok(())
     }
 
