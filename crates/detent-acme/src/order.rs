@@ -249,12 +249,21 @@ fn decide_renewal(
 /// key id plus its base64-encoded HMAC key. The key is decoded (standard
 /// or URL-safe base64) only when registering a fresh account — a restored
 /// account from `credentials_path` never touches it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EabCredentials {
     /// The CA-issued external account key id.
     pub kid: String,
     /// The base64-encoded HMAC key value (standard or URL-safe alphabet).
     pub key_b64: String,
+}
+
+impl std::fmt::Debug for EabCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EabCredentials")
+            .field("kid", &self.kid)
+            .field("key_b64", &"[redacted]")
+            .finish()
+    }
 }
 
 /// Creates (or restores) an ACME account and issues a new dns-01 order.
@@ -351,6 +360,15 @@ async fn load_or_create_account(
     // unreadable gets that answer without a crypto provider or a network
     // client having to exist first.
     let cached = read_credentials(credentials_path)?;
+    // Decode before the builder too: a malformed EAB refuses before any
+    // client exists (under `--all-features` the builder itself panics on
+    // the ambiguous provider, so anything after it is untestable there).
+    // Skipped when a cached account exists — EAB only binds fresh
+    // registration, and a restored account never touches it.
+    let key = match cached {
+        Some(_) => None,
+        None => eab.map(eab_key).transpose()?,
+    };
 
     let builder = match ca_root {
         Some(pem) => Account::builder_with_root(pem).map_err(AcmeError::from)?,
@@ -364,7 +382,14 @@ async fn load_or_create_account(
             .await
             .map_err(AcmeError::from);
     }
-    create_fresh(directory_url, builder, credentials_path, contacts, eab).await
+    create_fresh(
+        directory_url,
+        builder,
+        credentials_path,
+        contacts,
+        key.as_ref(),
+    )
+    .await
 }
 
 /// Parses cached account credentials: garbage must surface as
@@ -382,9 +407,8 @@ async fn create_fresh(
     builder: instant_acme::AccountBuilder,
     credentials_path: &Path,
     contacts: &[&str],
-    eab: Option<&EabCredentials>,
+    eab: Option<&instant_acme::ExternalAccountKey>,
 ) -> Result<Account, AcmeError> {
-    let key = eab.map(eab_key).transpose()?;
     let (account, credentials) = builder
         .create(
             &NewAccount {
@@ -393,7 +417,7 @@ async fn create_fresh(
                 only_return_existing: false,
             },
             directory_url.to_owned(),
-            key.as_ref(),
+            eab,
         )
         .await
         .map_err(AcmeError::from)?;
@@ -818,6 +842,65 @@ mod tests {
             matches!(err, Some(AcmeError::Config(_))),
             "empty key must fail, got {err:?}"
         );
+    }
+
+    #[test]
+    fn eab_debug_redacts_the_key_but_names_the_kid() {
+        let creds = EabCredentials {
+            kid: "ca-kid-1".into(),
+            key_b64: "s3cr3t-key-material".into(),
+        };
+        let dump = format!("{creds:?}");
+        assert!(
+            dump.contains("ca-kid-1"),
+            "kid must stay visible, got {dump}"
+        );
+        assert!(
+            !dump.contains("s3cr3t-key-material"),
+            "raw key must not leak, got {dump}"
+        );
+        assert!(
+            dump.contains("[redacted]"),
+            "redaction marker missing, got {dump}"
+        );
+    }
+
+    /// A malformed EAB refuses before any client exists: `cached` is `None`
+    /// (missing file), so the decode runs before `Account::builder()` — under
+    /// `--all-features` the builder panics on the ambiguous provider, so
+    /// reaching this `Config` proves the ordering.
+    #[tokio::test]
+    async fn account_and_order_refuses_bad_eab_before_it_builds_a_client()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let missing = dir.path().join("no-account-yet.json");
+        let bad_eab = EabCredentials {
+            kid: "k".into(),
+            key_b64: "!!!".into(),
+        };
+
+        let err = account_and_order(
+            "https://acme.invalid/directory",
+            &["example.com"],
+            &missing,
+            None,
+            None,
+            &[],
+            Some(&bad_eab),
+        )
+        .await
+        .err()
+        .ok_or("a malformed EAB must fail the order")?;
+
+        assert!(
+            matches!(&err, AcmeError::Config(m) if m.contains("not base64")),
+            "expected the decode failure before any builder, got {err:?}"
+        );
+        assert!(
+            !missing.exists(),
+            "no credential file must be created on refusal"
+        );
+        Ok(())
     }
 
     #[test]
