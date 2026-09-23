@@ -58,7 +58,7 @@ jobs:
             echo "no fuzz targets yet"
             exit 0
           fi
-          targets="$(cargo fuzz list)"
+          targets="$(cargo +nightly fuzz list)"
           if [[ -z "${targets}" ]]; then
             echo "no fuzz targets yet"
             exit 0
@@ -67,7 +67,7 @@ jobs:
           while IFS= read -r target; do
             [[ -z "${target}" ]] && continue
             echo "::group::fuzz target: ${target}"
-            if ! cargo fuzz run "${target}" -- "-max_total_time=${MAX_TOTAL_TIME}"; then
+            if ! cargo +nightly fuzz run "${target}" -- "-max_total_time=${MAX_TOTAL_TIME}"; then
               status=1
             fi
             echo "::endgroup::"
