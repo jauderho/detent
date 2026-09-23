@@ -109,7 +109,7 @@ pub use state::{AppState, AuthState};
 pub use tls::{
     ACME_CERT_FILE, ACME_KEY_FILE, CertStore, CertifiedKeyPair, TlsError, bootstrap_self_signed,
     fingerprint, install_acme, install_crypto_provider, load_acme, load_or_bootstrap,
-    server_config, server_config_from_store, store_acme,
+    renewal_due_at, server_config, server_config_from_store, store_acme,
 };
 
 #[cfg(test)]
