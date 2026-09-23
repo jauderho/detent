@@ -1894,68 +1894,72 @@ impl ConfigModule for NetworkModule {
             }
         }
 
-        // Pass 2: minimal-edit — keep Unknown/Comment/Blank verbatim,
-        // replace the directive block with the rendered lines.
-        // Collect indices of directive lines.
-        let directive_indices: Vec<usize> = doc
+        // Pass 2: two-pass minimal edit — pair rendered directive lines with
+        // existing ones (like ChronyModule::apply). Keeps Unknown/Comment/Blank
+        // verbatim, never moves a header past its keys. New lines go after the
+        // last existing directive, not at EOF.
+        let planned_directives: Vec<String> = new_lines
+            .iter()
+            .filter(|l| is_directive_like(l))
+            .cloned()
+            .collect();
+        let directive_lines: Vec<String> = doc
             .lines()
             .iter()
-            .enumerate()
-            .filter(|(_, l)| l.kind() == LineKind::Directive)
-            .map(|(i, _)| i)
+            .filter(|l| l.kind() == LineKind::Directive)
+            .map(|l| l.raw().to_owned())
             .collect();
+        let mut planned: Vec<Option<String>> = Vec::with_capacity(planned_directives.len());
+        for (idx, raw) in directive_lines.iter().enumerate() {
+            let Some(wanted) = planned_directives.get(idx) else {
+                break;
+            };
+            let unchanged = raw == wanted;
+            planned.push(if unchanged {
+                None
+            } else {
+                Some(wanted.clone())
+            });
+        }
+        for wanted in planned_directives.iter().skip(planned.len()) {
+            planned.push(Some(wanted.clone()));
+        }
 
         // If the model round-trips to the same directive lines, keep them byte-identical.
-        let existing_directive_raws: Vec<String> = directive_indices
-            .iter()
-            .filter_map(|&i| doc.lines().get(i).map(|l| l.raw().to_owned()))
-            .collect();
-        // Heuristic for noop: rebuild model from existing raws and compare.
-        let existing_model = build_model_from_lines(&existing_directive_raws);
+        let existing_model = build_model_from_lines(&directive_lines);
         if &existing_model == model {
-            // Check if new_lines would be semantically equal — but we keep
-            // byte-identical existing lines, so no edit.
-            // However we must also ensure Unknown/Comment/Blank preservation is exact.
-            // If models equal, report no change.
             return Ok(EditReport::default());
         }
 
         let mut report = EditReport::default();
-        // Remove all directive lines, highest index first.
-        for &idx in directive_indices.iter().rev() {
-            doc.remove_line(idx)?;
-            report.removed = report.removed.saturating_add(1);
-        }
-        // Insert new lines after the last remaining directive position, or at end
-        // but before trailing comments.
-        let at = doc
-            .lines()
-            .iter()
-            .rposition(|l| l.kind() == LineKind::Directive)
-            .map_or_else(|| doc.len(), |i| i.saturating_add(1));
-        // Actually we removed all directives, so `at` is doc.len() — insert there.
-        // To keep trailing comments trailing, find first trailing comment block.
-        let insert_at = doc
-            .lines()
-            .iter()
-            .rposition(|l| l.kind() == LineKind::Comment || l.kind() == LineKind::Blank)
-            .map_or(at, |_| at);
-        let mut pos = insert_at;
-        for line in &new_lines {
-            // Skip empty directives? Keep blanks as they are.
-            if line.is_empty() {
-                // Don't insert empty Directive lines — but blanks are fine as separators.
-                // Insert as blank (Document will classify it as Blank).
-                doc.insert_line(pos, line.as_str())?;
-            } else {
-                doc.insert_line(pos, line.as_str())?;
+        let mut index = 0usize;
+        let mut matched = 0usize;
+        let mut after_last_directive: Option<usize> = None;
+        while index < doc.len() {
+            if doc.lines().get(index).map(detent_core::doc::Line::kind) != Some(LineKind::Directive)
+            {
+                index = index.saturating_add(1);
+                continue;
             }
-            pos += 1;
+            let Some(slot) = planned.get(matched) else {
+                doc.remove_line(index)?;
+                report.removed = report.removed.saturating_add(1);
+                continue;
+            };
+            if let Some(raw) = slot.as_deref() {
+                doc.replace_raw(index, raw)?;
+                report.changed_lines = report.changed_lines.saturating_add(1);
+            }
+            matched = matched.saturating_add(1);
+            index = index.saturating_add(1);
+            after_last_directive = Some(index);
+        }
+        let mut at = after_last_directive.unwrap_or_else(|| doc.len());
+        for raw in planned.iter().skip(matched).flatten() {
+            doc.insert_line(at, raw)?;
+            at = at.saturating_add(1);
             report.added = report.added.saturating_add(1);
         }
-        // Adjust report: removed counts directives, added counts new lines.
-        // For noop case we already returned; otherwise report as changed.
-        // If we removed N and added M, the net edit is those counts.
         Ok(report)
     }
 
