@@ -266,7 +266,11 @@ impl DnsProvider for HookProvider {
                 .mode(HOOK_MODE)
                 .open(&tmp)?;
             f.write_all(record.value().as_bytes())?;
+            f.sync_all()?;
             fs::rename(&tmp, &path)?;
+            if let Ok(dir) = fs::File::open(&self.state_dir) {
+                let _ = dir.sync_all();
+            }
             Ok(())
         };
         if let Err(e) = write_tmp() {
