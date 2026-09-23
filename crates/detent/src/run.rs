@@ -12,7 +12,9 @@
 //! on the worker side, and a compromise there must not become a compromise of
 //! `/etc`. A one-shot CLI has no network-facing side — its authority is already
 //! the uid that typed the command (`detent_ops::identity`), and it would fork to
-//! talk to a copy of itself with exactly the same privileges. What the monitor
+//! talk to a copy of itself with exactly the same privileges, except
+//! `detent mcp --transport http` (network-facing: refuses root per STAGE3 H12
+//! until it mirrors `serve`'s fork). What the monitor
 //! *does* still buy here is its allow-list discipline: the CLI can only name
 //! ids, so a module bug still cannot make it write a path no descriptor
 //! declared. `detent doctor` exercises the real fork, so the spawning path is
