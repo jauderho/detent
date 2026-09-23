@@ -51,12 +51,12 @@ use detent_core::descriptor::{ServiceAction as CoreServiceAction, TargetKind};
 /// worker from the monitor's own already-running image, so the two ends of
 /// one connection are always the same binary, and the one feature that could
 /// introduce a mismatched pair — replacing the running binary underneath a
-/// live monitor — is `Request::ReplaceBinary`, which this build still
-/// answers `ProtoError::Unsupported`. When binary replacement lands, that
-/// change is the right place to decide whether an in-flight connection needs
-/// draining before the swap and whether a version bump is warranted then;
-/// bumping it now would not protect anything, because there is no path to
-/// pairing two different binaries yet.
+/// live monitor — is `Request::ReplaceBinary`, which dispatches to the
+/// monitor's `replace_binary` path (staged-file verification and atomic swap).
+/// Whether an in-flight connection needs draining before the swap and whether
+/// a version bump is warranted is decided at that swap point; bumping it now
+/// would not protect anything, because there is no path to pairing two
+/// different binaries yet.
 pub const PROTO_VERSION: u16 = 1;
 
 /// Largest encoded message accepted in either direction, in bytes.
