@@ -1084,7 +1084,6 @@ fn swap_running_binary(bytes: &[u8], staged: &Path, target: &Path) -> Result<(),
             copy_err.kind()
         )));
     }
-
     // Stage into the target's own directory first: `staged` lives under the
     // state root (e.g. `/var/lib/detent`), while `target` is the running
     // binary (e.g. `/usr/local/bin`) — a cross-filesystem `rename` would fail
@@ -1105,11 +1104,46 @@ fn swap_running_binary(bytes: &[u8], staged: &Path, target: &Path) -> Result<(),
     tmp_name.push(format!(".tmp.{}", std::process::id()));
     let tmp = target_dir.join(tmp_name);
     let _ = std::fs::remove_file(&tmp);
+    write_temp_and_swap(
+        bytes,
+        staged,
+        target,
+        &target_dir,
+        &tmp,
+        &target_meta.permissions(),
+    )
+}
+
+/// Write verified `bytes` to `tmp` (`create_new`, fsynced), chmod to the
+/// target's mode, rename over `target`, and fsync the directory.
+fn write_temp_and_swap(
+    bytes: &[u8],
+    staged: &Path,
+    target: &Path,
+    target_dir: &Path,
+    tmp: &Path,
+    permissions: &std::fs::Permissions,
+) -> Result<(), ProtoError> {
+    use rustix::fs::{Mode, OFlags};
     // Write the verified bytes (not a link/copy of the staged path): the
     // staged file was hashed from an open fd, and re-reading the path here
-    // would re-open the worker's TOCTOU window.
-    if let Err(err) = std::fs::write(&tmp, bytes) {
-        let _ = std::fs::remove_file(&tmp);
+    // would re-open the worker's TOCTOU window. `EXCL` so a leftover temp
+    // from a crashed swap is never silently truncated; `sync_all` before
+    // the rename so a crash cannot leave a torn target behind.
+    let fd = match rustix::fs::open(
+        tmp,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC,
+        Mode::from_bits_truncate(0o700),
+    ) {
+        Ok(fd) => fd,
+        Err(err) => {
+            let _ = std::fs::remove_file(tmp);
+            return Err(ProtoError::Io(format!("stage binary in target dir: {err}")));
+        }
+    };
+    let tmp_file: std::fs::File = fd.into();
+    if let Err(err) = write_all_and_sync(&tmp_file, bytes) {
+        let _ = std::fs::remove_file(tmp);
         return Err(ProtoError::Io(format!(
             "stage binary in target dir: {}",
             err.kind()
@@ -1118,18 +1152,34 @@ fn swap_running_binary(bytes: &[u8], staged: &Path, target: &Path) -> Result<(),
     // The installed binary must keep the *target's* mode, not the staged
     // file's — otherwise the swap installs a non-executable binary and the
     // next `--self-test` fails with EACCES (a58f89c / stage_exec.rs).
-    if let Err(err) = std::fs::set_permissions(&tmp, target_meta.permissions()) {
-        let _ = std::fs::remove_file(&tmp);
+    if let Err(err) = tmp_file.set_permissions(permissions.clone()) {
+        let _ = std::fs::remove_file(tmp);
         return Err(ProtoError::Io(format!(
             "chmod staged binary: {}",
             err.kind()
         )));
     }
-
-    if let Err(err) = std::fs::rename(&tmp, target) {
-        let _ = std::fs::remove_file(&tmp);
+    if let Err(err) = tmp_file.sync_all() {
+        let _ = std::fs::remove_file(tmp);
+        return Err(ProtoError::Io(format!(
+            "sync staged binary: {}",
+            err.kind()
+        )));
+    }
+    drop(tmp_file);
+    if let Err(err) = std::fs::rename(tmp, target) {
+        let _ = std::fs::remove_file(tmp);
         return Err(ProtoError::Io(format!(
             "rename staged binary over target: {}",
+            err.kind()
+        )));
+    }
+    // Fsync the target directory so the rename itself is durable.
+    if let Ok(dir) = std::fs::File::open(target_dir)
+        && let Err(err) = dir.sync_all()
+    {
+        return Err(ProtoError::Io(format!(
+            "sync target directory: {}",
             err.kind()
         )));
     }
