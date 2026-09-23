@@ -326,16 +326,18 @@ impl Client {
     /// Atomically swap the staged replacement image over the running binary.
     ///
     /// `len` and `sha256` identify the verified staged file at
-    /// `<state_root>/update/staged/<hex sha256>`; the monitor refuses any
-    /// request whose file is missing, sized differently, or carries a
-    /// different digest.
+    /// `<state_root>/update/staged/<hex sha256>`; the monitor opens it
+    /// `O_NOFOLLOW`, requires ownership by its own euid, and refuses any
+    /// request whose file is missing, symlinked, untrusted, sized
+    /// differently, or carries a different digest.
     ///
     /// # Errors
     ///
     /// As [`Client::read_target`]; [`ProtoError::Io`] when the staged file
-    /// is missing or the size does not match, and [`ProtoError::Conflict`]
-    /// when the on-disk digest differs. The returned `String` is the
-    /// installed version (the hex sha256 of the staged image).
+    /// is missing, symlinked, untrusted, or the size does not match, and
+    /// [`ProtoError::Conflict`] when the on-disk digest differs. The
+    /// returned `String` is the installed version (the hex sha256 of the
+    /// staged image).
     pub fn replace_binary(
         &mut self,
         len: u64,
