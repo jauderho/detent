@@ -187,6 +187,9 @@ samba-rec-value = prefer an explicit hardened value over relying on upstream's c
 ## samba module — validation diagnostics
 samba-empty-key = a directive has no parameter name.
 samba-empty-section = a section header is empty.
+samba-bad-key = `{$key}` would be parsed as a section or comment, not as a directive key.
+samba-bad-value = `{$value}` ends with `\` and would swallow the next line.
+samba-bad-section = `{$section}` contains `[` or `]` or ends with `\` and would not round-trip.
 samba-guest-ok = `guest ok` is set to {$value}; unauthenticated clients can connect to every share that inherits it.
 samba-map-to-guest = `map to guest` is {$value}; anything but Never turns failed logins into guest sessions.
 samba-min-protocol = `server min protocol` is {$value}; set at least SMB3_00 and drop the SMB1-era protocol levels.

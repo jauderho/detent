@@ -15,9 +15,9 @@
 //! * a `[`-opening line that does not close its `]` (`[bad`), or one whose
 //!   section name is empty (`[]`);
 //! * a directive with no key (`= value`);
-//! * a bare word or a continuation line — smb.conf lets a long value wrap by
-//!   starting the next line with whitespace, and a line that carries no `=`
-//!   cannot stand on its own, so it is copied through byte for byte rather
+//! * a bare word or a backslash-continued line — a value ending in `\\`
+//!   folds the next line into it (smb.conf(5)), so a line ending in `\\`
+//!   cannot stand on its own and is copied through byte for byte rather
 //!   than guessed at;
 //! * plain garbage.
 //!
@@ -188,6 +188,9 @@ impl<'a> arbitrary::Arbitrary<'a> for Entry {
 /// the `nfs` module.
 fn parse_entry(raw: &str) -> Option<Entry> {
     let trimmed = raw.trim();
+    if trimmed.ends_with('\\') {
+        return None;
+    }
     if let Some(inner) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
         let name = inner.trim();
         if name.is_empty() {
@@ -245,6 +248,23 @@ fn classify(raw: &str) -> LineKind {
 /// name, a value that is not already trimmed, or a key carrying `=` (the
 /// rendered line would split at the wrong `=`).
 fn render_line(entry: &Entry) -> Result<String, EditError> {
+    if let Some(name) = &entry.section {
+        if name.contains('[') || name.contains(']') || name.contains('/') || name.ends_with('\\') {
+            return Err(EditError::Unsupported {
+                message: format!("section name would not round-trip: {name:?}"),
+            });
+        }
+    } else if entry.key.starts_with('[')
+        || entry.key.starts_with('/')
+        || entry.key.starts_with('#')
+        || entry.key.starts_with(';')
+        || entry.key.ends_with('\\')
+        || entry.value.ends_with('\\')
+    {
+        return Err(EditError::Unsupported {
+            message: format!("entry would not round-trip due to smb.conf syntax: {entry:?}"),
+        });
+    }
     let raw = if let Some(name) = &entry.section {
         format!("[{name}]")
     } else if entry.value.is_empty() {
@@ -414,6 +434,12 @@ fn schema_with_hints() -> serde_json::Value {
 const EMPTY_KEY: MessageId = MessageId::new("samba-empty-key");
 /// Fluent id: a section header is empty.
 const EMPTY_SECTION: MessageId = MessageId::new("samba-empty-section");
+/// Fluent id: a key carries syntax that would inject a section or comment.
+const BAD_KEY: MessageId = MessageId::new("samba-bad-key");
+/// Fluent id: a value ends with a backslash and would swallow the next line.
+const BAD_VALUE: MessageId = MessageId::new("samba-bad-value");
+/// Fluent id: a section name contains syntax that would not round-trip.
+const BAD_SECTION: MessageId = MessageId::new("samba-bad-section");
 /// Fluent id: `guest ok = yes` invites unauthenticated clients.
 const GUEST_OK: MessageId = MessageId::new("samba-guest-ok");
 /// Fluent id: `map to guest` is not `Never`.
@@ -442,12 +468,42 @@ fn validate_entry(entry: &Entry, index: usize, out: &mut Diagnostics) {
                 Diagnostic::new(Severity::Error, EMPTY_SECTION)
                     .with_field(FieldPath::new(format!("entries/{index}/section"))),
             );
+        } else if name.contains('[')
+            || name.contains(']')
+            || name.contains('/')
+            || name.ends_with('\\')
+        {
+            out.push(
+                Diagnostic::new(Severity::Error, BAD_SECTION)
+                    .with_field(FieldPath::new(format!("entries/{index}/section")))
+                    .with_arg("section", name.clone()),
+            );
         }
-    } else if entry.key.is_empty() {
-        out.push(
-            Diagnostic::new(Severity::Error, EMPTY_KEY)
-                .with_field(FieldPath::new(format!("entries/{index}/key"))),
-        );
+    } else {
+        if entry.key.is_empty() {
+            out.push(
+                Diagnostic::new(Severity::Error, EMPTY_KEY)
+                    .with_field(FieldPath::new(format!("entries/{index}/key"))),
+            );
+        } else if entry.key.starts_with('[')
+            || entry.key.starts_with('/')
+            || entry.key.starts_with('#')
+            || entry.key.starts_with(';')
+            || entry.key.ends_with('\\')
+        {
+            out.push(
+                Diagnostic::new(Severity::Error, BAD_KEY)
+                    .with_field(FieldPath::new(format!("entries/{index}/key")))
+                    .with_arg("key", entry.key.clone()),
+            );
+        }
+        if entry.value.ends_with('\\') {
+            out.push(
+                Diagnostic::new(Severity::Error, BAD_VALUE)
+                    .with_field(FieldPath::new(format!("entries/{index}/value")))
+                    .with_arg("value", entry.value.clone()),
+            );
+        }
     }
 }
 
@@ -726,10 +782,10 @@ impl ConfigModule for SambaModule {
 #[cfg(test)]
 mod tests {
     use super::{
-        EMPTY_KEY, EMPTY_SECTION, Entry, GUEST_OK, MAP_TO_GUEST, MIN_PROTOCOL, Model,
-        REC_INTERFACES, REC_LOAD_PRINTERS, REC_SERVER_SIGNING, RESTRICT_ANONYMOUS, SMB_ENCRYPT,
-        SambaModule, classify, entry, hardened_global, parse_entry, protocol_rank, render_line,
-        schema_with_hints, value_of,
+        BAD_KEY, BAD_SECTION, BAD_VALUE, EMPTY_KEY, EMPTY_SECTION, Entry, GUEST_OK, MAP_TO_GUEST,
+        MIN_PROTOCOL, Model, REC_INTERFACES, REC_LOAD_PRINTERS, REC_SERVER_SIGNING,
+        RESTRICT_ANONYMOUS, SMB_ENCRYPT, SambaModule, classify, entry, hardened_global,
+        parse_entry, protocol_rank, render_line, schema_with_hints, value_of,
     };
     use detent_core::descriptor::{
         ArgTemplate, CheckExpectation, ExternalCheck, HostProfile, InitSystem, Os, ValidationCtx,
@@ -935,6 +991,57 @@ mod tests {
     }
 
     #[test]
+    fn render_line_rejects_smb_conf_syntax() {
+        assert!(matches!(
+            render_line(&entry(None, "log file", "a\\")),
+            Err(EditError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            render_line(&entry(None, "key\\", "value")),
+            Err(EditError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            render_line(&entry(None, "[evil] x", "y")),
+            Err(EditError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            render_line(&entry(None, "/evil", "y")),
+            Err(EditError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            render_line(&entry(None, "; comment-in-key", "y")),
+            Err(EditError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            render_line(&entry(None, "# comment", "y")),
+            Err(EditError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            render_line(&entry(Some("bad]name"), "", "")),
+            Err(EditError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            render_line(&entry(Some("bad[name"), "", "")),
+            Err(EditError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            render_line(&entry(Some("bad/"), "", "")),
+            Err(EditError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            render_line(&entry(Some("trailing\\"), "", "")),
+            Err(EditError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_entry_returns_none_on_continued_lines() {
+        assert_eq!(parse_entry("a = b \\"), None);
+        assert_eq!(parse_entry("a = b\\"), None);
+        assert_eq!(parse_entry("[global] \\"), None);
+    }
+
+    #[test]
     fn render_line_rejects_values_that_would_not_round_trip() {
         for bad in [
             // Empty key: the rendered line would have no parameter name.
@@ -1071,6 +1178,35 @@ mod tests {
     }
 
     // ------------------------------------------------------------------ validate
+
+    #[test]
+    fn validate_flags_smb_conf_syntax_injection() {
+        assert!(has(
+            &model(vec![entry(None, "[evil] x", "y")]),
+            BAD_KEY,
+            Severity::Error
+        ));
+        assert!(has(
+            &model(vec![entry(None, "# comment", "y")]),
+            BAD_KEY,
+            Severity::Error
+        ));
+        assert!(has(
+            &model(vec![entry(None, "key", "value\\")]),
+            BAD_VALUE,
+            Severity::Error
+        ));
+        assert!(has(
+            &model(vec![entry(Some("bad]name"), "", "")]),
+            BAD_SECTION,
+            Severity::Error
+        ));
+        assert!(has(
+            &model(vec![entry(Some("bad/"), "", "")]),
+            BAD_SECTION,
+            Severity::Error
+        ));
+    }
 
     #[test]
     fn validate_flags_an_empty_key_and_an_empty_section() {

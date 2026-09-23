@@ -100,6 +100,17 @@ detent_core::module_conformance!(
         section_probe("a\nb"),
         section_probe("a\rb"),
         section_probe("a\0b"),
+        // H13 syntax probes: must fail before fix, pass after
+        value_probe("a\\"),
+        key_probe("[evil] x"),
+        key_probe("/evil"),
+        key_probe("# comment"),
+        key_probe("; comment"),
+        key_probe("a\\"),
+        section_probe("bad]name"),
+        section_probe("bad[name"),
+        section_probe("bad/name"),
+        section_probe("bad\\"),
     ],
 );
 
