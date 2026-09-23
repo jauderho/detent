@@ -35,7 +35,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use axum::routing::get;
 use detent_core::diag::MessageId;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
@@ -54,6 +54,21 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long in-flight connections have to finish after shutdown is asked for.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+
+/// How long a client may take to send request headers (H9, slowloris).
+pub const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// HTTP/2 keep-alive ping interval.
+pub const H2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// HTTP/2 keep-alive timeout.
+pub const H2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum concurrent HTTP/2 streams.
+pub const H2_MAX_CONCURRENT_STREAMS: u32 = 32;
+
+/// Maximum lifetime of a single connection.
+pub const MAX_CONNECTION_LIFETIME: Duration = Duration::from_secs(600);
 
 /// Header the per-request id is echoed in.
 pub const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
@@ -222,6 +237,16 @@ pub struct Server {
     router: Router,
     /// One permit per allowed concurrent connection.
     permits: Arc<Semaphore>,
+    /// Header read timeout (H9), configurable for tests.
+    pub header_read_timeout: Duration,
+    /// HTTP/2 keep-alive interval.
+    pub h2_keep_alive_interval: Duration,
+    /// HTTP/2 keep-alive timeout.
+    pub h2_keep_alive_timeout: Duration,
+    /// HTTP/2 max concurrent streams.
+    pub h2_max_concurrent_streams: u32,
+    /// Maximum connection lifetime.
+    pub max_connection_lifetime: Duration,
 }
 
 impl std::fmt::Debug for Server {
@@ -269,6 +294,11 @@ impl Server {
                 Duration::from_secs(config.listen.request_timeout_secs),
             ),
             permits: Arc::new(Semaphore::new(permits)),
+            header_read_timeout: HEADER_READ_TIMEOUT,
+            h2_keep_alive_interval: H2_KEEP_ALIVE_INTERVAL,
+            h2_keep_alive_timeout: H2_KEEP_ALIVE_TIMEOUT,
+            h2_max_concurrent_streams: H2_MAX_CONCURRENT_STREAMS,
+            max_connection_lifetime: MAX_CONNECTION_LIFETIME,
         })
     }
 
@@ -290,8 +320,23 @@ impl Server {
             acceptor,
             router,
             permits,
+            header_read_timeout,
+            h2_keep_alive_interval,
+            h2_keep_alive_timeout,
+            h2_max_concurrent_streams,
+            max_connection_lifetime,
         } = self;
-        let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+        let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+        builder
+            .http1()
+            .timer(TokioTimer::new())
+            .header_read_timeout(header_read_timeout);
+        builder
+            .http2()
+            .timer(TokioTimer::new())
+            .keep_alive_interval(Some(h2_keep_alive_interval))
+            .keep_alive_timeout(h2_keep_alive_timeout)
+            .max_concurrent_streams(Some(h2_max_concurrent_streams));
         let graceful = GracefulShutdown::new();
         let mut shutdown = std::pin::pin!(shutdown);
         debug!(%local_addr, "serving");
@@ -347,8 +392,11 @@ impl Server {
                 let connection = builder
                     .serve_connection(TokioIo::new(tls), service)
                     .into_owned();
-                if let Err(error) = watcher.watch(connection).await {
-                    debug!(%peer, ?error, "connection ended");
+                match tokio::time::timeout(max_connection_lifetime, watcher.watch(connection)).await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => debug!(%peer, ?error, "connection ended"),
+                    Err(_) => debug!(%peer, "connection lifetime exceeded"),
                 }
             });
         }
