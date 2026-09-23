@@ -71,6 +71,9 @@ pub enum OpsError {
     /// The audit log could not be read.
     #[error(transparent)]
     Audit(#[from] AuditError),
+    /// The audit log could not be written before the operation.
+    #[error("audit unavailable: {0}")]
+    AuditUnavailable(AuditError),
     /// The operation is defined but this build cannot perform it.
     #[error("unsupported operation: {what}")]
     Unsupported {
@@ -94,6 +97,7 @@ impl OpsError {
             Self::NoTarget { .. } => MessageId::new("ops-no-target"),
             Self::NoService { .. } => MessageId::new("ops-no-service"),
             Self::Audit(_) => MessageId::new("ops-audit-failed"),
+            Self::AuditUnavailable(_) => MessageId::new("ops-audit-unavailable"),
             Self::Unsupported { .. } => MessageId::new("ops-unsupported"),
         }
     }
@@ -176,13 +180,17 @@ mod tests {
                 "ops-audit-failed",
             ),
             (
+                OpsError::AuditUnavailable(AuditError::Encode("bad".to_owned())),
+                "ops-audit-unavailable",
+            ),
+            (
                 OpsError::Unsupported {
                     what: "rollback_commit",
                 },
                 "ops-unsupported",
             ),
         ];
-        assert_eq!(cases.len(), 11);
+        assert_eq!(cases.len(), 12);
         // The catalogue every localized build ships. Checking against the file
         // rather than a hand-kept list means adding a variant without its
         // message fails here instead of rendering a bare `[ops-...]` id at a

@@ -166,8 +166,16 @@ impl OpsEngine {
         if let Err(denied) = self.authz.permit(who, &op) {
             let record =
                 AuditRecord::new(who, kind, module, AuditResult::Denied).with_error(denied.id);
-            self.emit(&record);
+            // Best-effort: a denial must not be hidden by an audit write failure.
+            let _ = self.emit(&record);
             return Err(OpsError::Denied(denied));
+        }
+
+        if mutating {
+            let started = AuditRecord::new(who, kind, module.clone(), AuditResult::Started);
+            if let Err(err) = self.emit(&started) {
+                return Err(OpsError::AuditUnavailable(err));
+            }
         }
 
         let mut hashes = Hashes::default();
@@ -176,24 +184,30 @@ impl OpsEngine {
             return result;
         }
 
-        let outcome = match result {
+        let outcome = match &result {
             Ok(_) => AuditResult::Ok,
             Err(_) => AuditResult::Error,
         };
         let mut record =
             AuditRecord::new(who, kind, module, outcome).with_hashes(hashes.prev, hashes.new);
-        if let Err(ref err) = result {
+        if let Err(err) = &result {
             record = record.with_error(err.message_id());
         }
-        self.emit(&record);
+        // Outcome record is best-effort: the intent record already exists, so
+        // a failure here must not hide the operation's own result. `emit`
+        // logs the error at `error` level; journald (after M12) is the
+        // unrewritable copy.
+        let _ = self.emit(&record);
         result
     }
 
     /// Write one audit record to the sink and to `tracing`.
     ///
-    /// A sink failure is logged, not propagated: a file that has already been
-    /// written must not be reported to the caller as a failed operation.
-    fn emit(&self, record: &AuditRecord) {
+    /// Returns `Ok` when the record was persisted. On failure the error is
+    /// logged at `error` level and returned so the caller can decide whether
+    /// to fail the operation (intent record) or merely log (outcome record).
+    /// `tracing` is the unrewritable copy that reaches journald/syslog.
+    fn emit(&self, record: &AuditRecord) -> Result<(), crate::audit::AuditError> {
         tracing::info!(
             op = ?record.op,
             who = %record.who,
@@ -204,7 +218,9 @@ impl OpsEngine {
         );
         if let Err(err) = self.audit.record(record) {
             tracing::error!(error = %err, "the audit record could not be persisted");
+            return Err(err);
         }
+        Ok(())
     }
 
     /// Perform one operation, without auditing.

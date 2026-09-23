@@ -862,8 +862,12 @@ fn apply_writes_the_candidate_and_audits_exactly_once() -> TestResult {
     assert_eq!(report.commit, None);
 
     let records = fx.records();
-    assert_eq!(records.len(), 1);
-    let record = records.first().ok_or("one audit record was written")?;
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records.first().map(|r| r.result),
+        Some(AuditResult::Started)
+    );
+    let record = records.get(1).ok_or("one audit record was written")?;
     assert_eq!(record.op, OpKind::Apply);
     assert_eq!(record.result, AuditResult::Ok);
     assert_eq!(record.module.as_deref(), Some("fake"));
@@ -883,8 +887,12 @@ fn apply_refuses_a_candidate_with_an_error_diagnostic() -> TestResult {
     assert_eq!(fx.contents()?, "v1\n");
 
     let records = fx.records();
-    assert_eq!(records.len(), 1);
-    let record = records.first().ok_or("the refusal was audited")?;
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records.first().map(|r| r.result),
+        Some(AuditResult::Started)
+    );
+    let record = records.get(1).ok_or("the refusal was audited")?;
     assert_eq!(record.result, AuditResult::Error);
     assert_eq!(record.error_id.as_deref(), Some("ops-invalid-model"));
     // Nothing was read, so no digests were observed.
@@ -909,15 +917,19 @@ fn apply_refuses_a_stale_expected_hash() -> TestResult {
     assert_eq!(fx.contents()?, "v1\n");
 
     let records = fx.records();
-    assert_eq!(records.len(), 1);
+    assert_eq!(records.len(), 2);
     assert_eq!(
-        records.first().and_then(|r| r.error_id.clone()),
+        records.first().map(|r| r.result),
+        Some(AuditResult::Started)
+    );
+    assert_eq!(
+        records.get(1).and_then(|r| r.error_id.clone()),
         Some("ops-hash-conflict".to_owned())
     );
     // The digest that *was* on disk is recorded, which is what an operator
     // needs to reconcile the two edits.
     assert_eq!(
-        records.first().and_then(|r| r.prev_hash.clone()),
+        records.get(1).and_then(|r| r.prev_hash.clone()),
         Some(actual.to_string())
     );
     fx.finish()
@@ -932,7 +944,13 @@ fn apply_fails_when_the_target_cannot_be_read() -> TestResult {
         fx.run(apply("v2\n", None)),
         Err(OpsError::Privsep(_))
     ));
-    assert_eq!(fx.records().len(), 1);
+    let records = fx.records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records.first().map(|r| r.result),
+        Some(AuditResult::Started)
+    );
+    assert_eq!(records.get(1).map(|r| r.result), Some(AuditResult::Error));
     fx.finish()
 }
 
@@ -996,9 +1014,13 @@ fn apply_refuses_a_service_action_the_module_never_declared() -> TestResult {
     // The write happened before the service action, and is recorded.
     assert_eq!(fx.contents()?, "v2\n");
     let records = fx.records();
-    assert_eq!(records.len(), 1);
+    assert_eq!(records.len(), 2);
     assert_eq!(
-        records.first().and_then(|r| r.new_hash.clone()),
+        records.first().map(|r| r.result),
+        Some(AuditResult::Started)
+    );
+    assert_eq!(
+        records.get(1).and_then(|r| r.new_hash.clone()),
         Some(fx.digest()?.to_string())
     );
     fx.finish()
@@ -1017,7 +1039,12 @@ fn apply_refuses_a_service_action_when_the_module_declares_no_service() -> TestR
     assert!(matches!(err, Err(OpsError::NoService { .. })));
     // The refusal happens before the write, so nothing was half-applied.
     assert_eq!(fx.contents()?, "v1\n");
-    assert_eq!(fx.records().len(), 1);
+    let records = fx.records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records.first().map(|r| r.result),
+        Some(AuditResult::Started)
+    );
     fx.finish()
 }
 
@@ -1070,11 +1097,18 @@ fn a_commit_confirm_module_arms_a_window_that_confirm_closes() -> TestResult {
     std::thread::sleep(PAST_DEADLINE);
     assert_eq!(fx.contents()?, "v2\n");
 
-    // Apply and ConfirmCommit are both mutating, so both were audited.
+    // Apply and ConfirmCommit are both mutating, so both were audited. H7: Started+outcome each.
     let records = fx.records();
-    assert_eq!(records.len(), 2);
-    assert_eq!(records.get(1).map(|r| r.op), Some(OpKind::ConfirmCommit));
+    assert_eq!(records.len(), 4);
+    assert_eq!(
+        records.first().map(|r| r.result),
+        Some(AuditResult::Started)
+    ); // Apply Started
+    assert_eq!(records.get(1).map(|r| r.op), Some(OpKind::Apply));
     assert_eq!(records.get(1).map(|r| r.result), Some(AuditResult::Ok));
+    assert_eq!(records.get(2).map(|r| r.result), Some(AuditResult::Started)); // Confirm Started
+    assert_eq!(records.get(3).map(|r| r.op), Some(OpKind::ConfirmCommit));
+    assert_eq!(records.get(3).map(|r| r.result), Some(AuditResult::Ok));
     fx.finish()
 }
 
@@ -1112,9 +1146,16 @@ fn an_unconfirmed_commit_rolls_back_when_the_timer_fires() -> TestResult {
         )))
     ));
     let records = fx.records();
-    assert_eq!(records.len(), 2);
+    assert_eq!(records.len(), 4);
     assert_eq!(
-        records.get(1).and_then(|r| r.error_id.clone()),
+        records.first().map(|r| r.result),
+        Some(AuditResult::Started)
+    ); // Apply Started
+    assert_eq!(records.get(1).map(|r| r.result), Some(AuditResult::Ok));
+    assert_eq!(records.get(2).map(|r| r.result), Some(AuditResult::Started)); // Confirm Started
+    assert_eq!(records.get(3).map(|r| r.result), Some(AuditResult::Error));
+    assert_eq!(
+        records.get(3).and_then(|r| r.error_id.clone()),
         Some("ops-privsep-failed".to_owned())
     );
     fx.finish()
@@ -1183,15 +1224,23 @@ fn rollback_commit_restores_the_file_and_is_audited() -> TestResult {
     ));
 
     // Apply, the successful rollback, and the failed repeat are all
-    // mutating, so all three were audited.
+    // mutating, so all six (Started+outcome x3) were audited. H7.
     let records = fx.records();
-    assert_eq!(records.len(), 3);
-    assert_eq!(records.get(1).map(|r| r.op), Some(OpKind::RollbackCommit));
-    assert_eq!(records.get(1).map(|r| r.result), Some(AuditResult::Ok));
-    assert_eq!(records.get(2).map(|r| r.op), Some(OpKind::RollbackCommit));
-    assert_eq!(records.get(2).map(|r| r.result), Some(AuditResult::Error));
+    assert_eq!(records.len(), 6);
     assert_eq!(
-        records.get(2).and_then(|r| r.error_id.clone()),
+        records.first().map(|r| r.result),
+        Some(AuditResult::Started)
+    ); // Apply Started
+    assert_eq!(records.get(1).map(|r| r.result), Some(AuditResult::Ok)); // Apply Ok
+    assert_eq!(records.get(1).map(|r| r.op), Some(OpKind::Apply));
+    assert_eq!(records.get(2).map(|r| r.result), Some(AuditResult::Started)); // Rollback1 Started
+    assert_eq!(records.get(3).map(|r| r.op), Some(OpKind::RollbackCommit));
+    assert_eq!(records.get(3).map(|r| r.result), Some(AuditResult::Ok));
+    assert_eq!(records.get(4).map(|r| r.result), Some(AuditResult::Started)); // Rollback2 Started
+    assert_eq!(records.get(5).map(|r| r.op), Some(OpKind::RollbackCommit));
+    assert_eq!(records.get(5).map(|r| r.result), Some(AuditResult::Error));
+    assert_eq!(
+        records.get(5).and_then(|r| r.error_id.clone()),
         Some("ops-privsep-failed".to_owned())
     );
     fx.finish()
@@ -1210,10 +1259,14 @@ fn rollback_commit_rejects_an_id_that_was_never_armed() -> TestResult {
         )))
     ));
     let records = fx.records();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records.first().map(|r| r.op), Some(OpKind::RollbackCommit));
+    assert_eq!(records.len(), 2);
     assert_eq!(
-        records.first().and_then(|r| r.error_id.clone()),
+        records.first().map(|r| r.result),
+        Some(AuditResult::Started)
+    );
+    assert_eq!(records.get(1).map(|r| r.op), Some(OpKind::RollbackCommit));
+    assert_eq!(
+        records.get(1).and_then(|r| r.error_id.clone()),
         Some("ops-privsep-failed".to_owned())
     );
     fx.finish()
@@ -1248,12 +1301,19 @@ fn backups_are_listed_and_restored() -> TestResult {
     assert_eq!(fx.contents()?, "v1\n");
     assert_eq!(new_hash, fx.digest()?);
 
-    // Apply and Restore are mutating; ListBackups is not.
+    // Apply and Restore are mutating; ListBackups is not. H7: Started+outcome per op.
     let records = fx.records();
-    assert_eq!(records.len(), 2);
-    assert_eq!(records.get(1).map(|r| r.op), Some(OpKind::Restore));
+    assert_eq!(records.len(), 4);
     assert_eq!(
-        records.get(1).and_then(|r| r.new_hash.clone()),
+        records.first().map(|r| r.result),
+        Some(AuditResult::Started)
+    ); // Apply Started
+    assert_eq!(records.get(1).map(|r| r.op), Some(OpKind::Apply));
+    assert_eq!(records.get(1).map(|r| r.result), Some(AuditResult::Ok));
+    assert_eq!(records.get(2).map(|r| r.result), Some(AuditResult::Started)); // Restore Started
+    assert_eq!(records.get(3).map(|r| r.op), Some(OpKind::Restore));
+    assert_eq!(
+        records.get(3).and_then(|r| r.new_hash.clone()),
         Some(new_hash.to_string())
     );
     fx.finish()
@@ -1270,7 +1330,12 @@ fn restoring_an_id_that_does_not_exist_fails_and_is_audited() -> TestResult {
         Err(OpsError::Privsep(_))
     ));
     assert_eq!(fx.contents()?, "v1\n");
-    assert_eq!(fx.records().len(), 1);
+    let records = fx.records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records.first().map(|r| r.result),
+        Some(AuditResult::Started)
+    );
     fx.finish()
 }
 
@@ -1359,8 +1424,12 @@ fn a_service_action_goes_through_the_monitor_and_is_audited() -> TestResult {
     assert_eq!(report.unit, "fake.service");
     assert!(report.active);
     let records = fx.records();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records.first().map(|r| r.op), Some(OpKind::ServiceAction));
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records.first().map(|r| r.result),
+        Some(AuditResult::Started)
+    );
+    assert_eq!(records.get(1).map(|r| r.op), Some(OpKind::ServiceAction));
     fx.finish()
 }
 
@@ -1374,7 +1443,12 @@ fn a_service_action_needs_a_declared_service() -> TestResult {
         }),
         Err(OpsError::NoService { .. })
     ));
-    assert_eq!(fx.records().len(), 1);
+    let records = fx.records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records.first().map(|r| r.result),
+        Some(AuditResult::Started)
+    );
     fx.finish()
 }
 
@@ -1406,8 +1480,12 @@ fn cert_renew_is_unsupported_until_acme_lands_and_writes_one_audit_record() -> T
         Err(OpsError::Unsupported { what: "cert_renew" })
     ));
     let records = fx.records();
-    assert_eq!(records.len(), 1);
-    let first = records.first().ok_or("the failure was audited")?;
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records.first().map(|r| r.result),
+        Some(AuditResult::Started)
+    );
+    let first = records.get(1).ok_or("the failure was audited")?;
     assert_eq!(first.op, OpKind::CertRenew);
     assert_eq!(first.result, AuditResult::Error);
     assert_eq!(first.error_id.as_deref(), Some("ops-unsupported"));
@@ -1465,8 +1543,12 @@ fn update_apply_returns_unsupported_when_state_root_is_not_set() -> TestResult {
     // Mutating, so the failure is audited exactly once (PLAN §2.5) — the
     // contrast to `UpdateStatus` above, which is read-only and skips audit.
     let records = fx.records();
-    assert_eq!(records.len(), 1);
-    let first = records.first().ok_or("the failure was audited")?;
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records.first().map(|r| r.result),
+        Some(AuditResult::Started)
+    );
+    let first = records.get(1).ok_or("the failure was audited")?;
     assert_eq!(first.op, OpKind::UpdateApply);
     assert_eq!(first.result, AuditResult::Error);
     assert_eq!(first.error_id.as_deref(), Some("ops-unsupported"));
@@ -1501,8 +1583,12 @@ fn update_apply_is_swapped_through_the_monitor_and_audited_once() -> TestResult 
     assert_eq!(version, digest.to_string());
 
     let records = fx.records();
-    assert_eq!(records.len(), 1);
-    let first = records.first().ok_or("the success was audited")?;
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records.first().map(|r| r.result),
+        Some(AuditResult::Started)
+    );
+    let first = records.get(1).ok_or("the success was audited")?;
     assert_eq!(first.op, OpKind::UpdateApply);
     assert_eq!(first.result, AuditResult::Ok);
     fx.finish()
@@ -1528,7 +1614,12 @@ fn update_apply_refuses_a_path_traversal_version() -> TestResult {
         })
     ));
     // Mutating, so the refusal is audited exactly once.
-    assert_eq!(fx.records().len(), 1);
+    let records = fx.records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records.first().map(|r| r.result),
+        Some(AuditResult::Started)
+    );
     fx.finish()
 }
 
@@ -1552,7 +1643,12 @@ fn update_apply_refuses_a_valid_name_with_no_staged_file() -> TestResult {
             what: "update_apply"
         })
     ));
-    assert_eq!(fx.records().len(), 1);
+    let records = fx.records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records.first().map(|r| r.result),
+        Some(AuditResult::Started)
+    );
     fx.finish()
 }
 
@@ -1581,8 +1677,16 @@ fn update_apply_refuses_dot_only_versions() -> TestResult {
             "dot-only version must be refused: {version}"
         );
     }
-    // Mutating, so each refusal is audited exactly once.
-    assert_eq!(fx.records().len(), 2);
+    // Mutating, so each refusal is audited Started+Error. Two versions => 4 records. H7
+    let records = fx.records();
+    assert_eq!(records.len(), 4);
+    assert_eq!(
+        records.first().map(|r| r.result),
+        Some(AuditResult::Started)
+    );
+    assert_eq!(records.get(1).map(|r| r.result), Some(AuditResult::Error));
+    assert_eq!(records.get(2).map(|r| r.result), Some(AuditResult::Started));
+    assert_eq!(records.get(3).map(|r| r.result), Some(AuditResult::Error));
     fx.finish()
 }
 
@@ -1679,7 +1783,12 @@ fn update_apply_refuses_when_the_digest_file_cannot_be_written() -> TestResult {
             what: "update_apply"
         })
     ));
-    assert_eq!(fx.records().len(), 1);
+    let records = fx.records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records.first().map(|r| r.result),
+        Some(AuditResult::Started)
+    );
     fx.finish()
 }
 
@@ -1709,7 +1818,12 @@ fn update_apply_refuses_when_the_bridge_copy_fails() -> TestResult {
             what: "update_apply"
         })
     ));
-    assert_eq!(fx.records().len(), 1);
+    let records = fx.records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records.first().map(|r| r.result),
+        Some(AuditResult::Started)
+    );
     fx.finish()
 }
 
@@ -1814,7 +1928,7 @@ fn the_audit_log_never_contains_the_configuration_body() -> TestResult {
     let _ = engine.execute(apply("BAD\n", None), &who);
 
     let contents = std::fs::read_to_string(audit_file.path())?;
-    assert_eq!(contents.lines().count(), 2);
+    assert_eq!(contents.lines().count(), 4);
     assert!(
         !contents.contains(MARKER),
         "the audit log leaked the configuration body: {contents}"
@@ -1828,10 +1942,14 @@ fn the_audit_log_never_contains_the_configuration_body() -> TestResult {
     Ok(())
 }
 
-/// An audit sink that cannot persist must not turn a completed write into a
-/// reported failure: the file on disk has already changed.
+/// H7 reversal: a mutation whose intent record cannot be persisted must be
+/// refused without dispatch. Previously this was enforced as fail-open
+/// (`an_unwritable_audit_sink_does_not_fail_the_operation` asserted the write
+/// still landed as `v2`); that left writes unaudited and was reversed — an
+/// unwritable sink now returns `OpsError::AuditUnavailable` and the target
+/// stays at `v1`.
 #[test]
-fn an_unwritable_audit_sink_does_not_fail_the_operation() -> TestResult {
+fn an_unwritable_audit_sink_refuses_the_mutation() -> TestResult {
     let dir = TempDir::new()?;
     let root = dir.path().to_path_buf();
     let target = root.join("target.conf");
@@ -1859,8 +1977,16 @@ fn an_unwritable_audit_sink_does_not_fail_the_operation() -> TestResult {
         Box::new(AllowAll),
         fake_services(),
     );
-    engine.execute(apply("v2\n", None), &Identity::local("root"))?;
-    assert_eq!(std::fs::read_to_string(&target)?, "v2\n");
+    let Err(err) = engine.execute(apply("v2\n", None), &Identity::local("root")) else {
+        return Err("audit-unavailable must refuse the mutation".into());
+    };
+    assert!(
+        matches!(&err, OpsError::AuditUnavailable(_)),
+        "expected AuditUnavailable, got {err:?} ({})",
+        err.message_id().as_str()
+    );
+    assert_eq!(err.message_id().as_str(), "ops-audit-unavailable");
+    assert_eq!(std::fs::read_to_string(&target)?, "v1\n");
 
     engine.shutdown()?;
     let joined = handle.join().map_err(|_| "the monitor thread panicked")?;

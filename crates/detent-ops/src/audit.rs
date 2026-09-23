@@ -49,6 +49,12 @@ pub enum AuditResult {
     Denied,
     /// It was attempted and failed.
     Error,
+    /// Intent recorded before any side effect; a following Ok/Error completes it.
+    ///
+    /// Mutating operations first write this record; if it cannot be persisted
+    /// the operation is refused without dispatch. The outcome record (Ok or
+    /// Error) follows after dispatch. See `OpsEngine::execute`.
+    Started,
 }
 
 /// One line of the audit log.

@@ -221,6 +221,7 @@ ops-service-failed = the service action did not complete: {$reason}
 ops-no-target = `{$module}` manages no file on this host.
 ops-no-service = `{$module}` controls no service on this host, so it cannot be restarted.
 ops-audit-failed = the audit log could not be read: {$reason}
+ops-audit-unavailable = the audit log could not be written, so the operation was refused: {$reason}
 ops-unsupported = {$what} is not supported in this build.
 ops-denied = you are not permitted to do that.
 
