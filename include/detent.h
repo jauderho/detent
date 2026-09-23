@@ -83,6 +83,10 @@ char *detent_module_list(void);
  * Parses `src` with the module identified by `module_id` and returns a
  * document handle. The handle must be released with `detent_free`. Returns
  * NULL on error; the code is in `detent_last_error_message()`.
+ * # Safety
+ *
+ * `module_id` must point to a readable NUL-terminated C string;
+ * `src` must be readable for `src_len` bytes and `src_len <= isize::MAX`.
  */
 char *detent_parse(const char *module_id, const char *src, uintptr_t src_len);
 
@@ -91,18 +95,33 @@ char *detent_parse(const char *module_id, const char *src, uintptr_t src_len);
  *
  * Returns a malloced NUL-terminated buffer, or NULL on error. Release the
  * success return with `detent_free`.
+ * # Safety
+ *
+ * `doc` must be NULL or a live handle from `detent_parse`. Anything else
+ * is refused, but only live handles keep the no-UB guarantee auditable.
  */
 char *detent_render(char *doc);
 
 /**
  * Projects a document onto its typed model, returning the model as JSON.
  * Release the buffer with `detent_free`.
+ *
+ * # Safety
+ *
+ * `doc` must be NULL or a live handle from `detent_parse`.
  */
 char *detent_to_model_json(char *doc);
 
 /**
  * Applies `model_json` to `src` via the module and returns the rendered
  * text. Stateless: release every successful return with `detent_free`.
+ *
+ * # Safety
+ *
+ * `module_id` must point to a readable NUL-terminated C string;
+ * `src` must be readable for `src_len` bytes with `src_len <= isize::MAX`;
+ * `model_json` must be readable for `model_len` bytes with
+ * `model_len <= isize::MAX`.
  */
 char *detent_apply_json(const char *module_id,
                         const char *src,
@@ -115,6 +134,13 @@ char *detent_apply_json(const char *module_id,
  * `ConfigModule::validate` checks. Returns the diagnostics as a JSON array
  * (matching `detent_core::diag::Diagnostics`'s serialization). Release with
  * `detent_free`.
+ *
+ * # Safety
+ *
+ * `module_id` must point to a readable NUL-terminated C string;
+ * `model_json` must be readable for `model_len` bytes with
+ * `model_len <= isize::MAX`; `hostname` must be readable for
+ * `hostname_len` bytes with `hostname_len <= isize::MAX`.
  */
 char *detent_validate_json(const char *module_id,
                            const char *model_json,
@@ -129,12 +155,22 @@ char *detent_validate_json(const char *module_id,
  * Returns the module's host-appropriate defaults as a JSON value matching
  * its model schema. `profile_json` is a `HostProfile`-shaped JSON object;
  * fields fall back to `Default::default()` when omitted.
+ *
+ * # Safety
+ *
+ * `module_id` must point to a readable NUL-terminated C string;
+ * `profile_json` must be readable for `profile_len` bytes with
+ * `profile_len <= isize::MAX`.
  */
 char *detent_defaults_json(const char *module_id, const char *profile_json, uintptr_t profile_len);
 
 /**
  * Returns the module's model schema as a JSON Schema document, including
  * any `x-detent` UI hints the module attaches. Release with `detent_free`.
+ *
+ * # Safety
+ *
+ * `module_id` must point to a readable NUL-terminated C string.
  */
 char *detent_schema_json(const char *module_id);
 
@@ -144,9 +180,9 @@ char *detent_schema_json(const char *module_id);
  *
  * Passing a foreign pointer is safe (untracked hand-outs are refused before
  * any header read, and the pointer is left alone) but the buffer it points
- * at will leak. Passing an already-freed pointer is likewise refused: the
- * hand-out is removed from the set on free, so a second free reads `false`
- * and touches nothing (the first free's memory may already be reused).
+ * at will leak. Passing an already-freed pointer is likewise refused while
+ * its address is not reused by a later hand-out, so double-free detection
+ * is best-effort (the first free's memory may already be reused).
  *
  * # Safety
  *
