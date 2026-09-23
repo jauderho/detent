@@ -5,6 +5,24 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-23 - STAGE3 Batch1: C1-a, C1-d, H6, H12+M11, H23 docs, M1+M2
+
+C1-a (`8ae7979`): monitor refuses a hardlinked staged binary (fail closed on link count).
+Verify: spec test failed pre-fix, passes post-fix.
+C1-d (`c2033fc`): swap temp created `O_EXCL` (`create_new`, `0o700`), `sync_all` before rename, fsync of target dir after.
+Verify: spec test failed pre-fix, passes post-fix.
+H6 (`069c26d` + `45ad0a8`): MONITOR seccomp table gains process-spawn syscalls (`clone`/`clone3`/`execve`/`execveat`/`pipe2`/`dup3`/`kill`/`tgkill`, `nanosleep`/`clock_nanosleep`, `prlimit64`, `faccessat`, `rseq`/`set_robust_list`/`set_tid_address`, `sched_getaffinity`); `enforce_mode_monitor_can_spawn_a_validator` added.
+Verify: spec test failed pre-fix, passes post-fix; Linux docker `detent-platform --lib` 242 passed.
+H12+M11 (`124eac5` + `c3b1c13`): `mcp --transport http` refused as root (`Exit::Privilege`, `cli-mcp-http-needs-privsep`); non-loopback `--bind` refused (`Exit::Usage`, `cli-mcp-bind-not-loopback`); `run.rs` module doc corrected (one-shot CLI has no network side is false for `mcp`).
+Verify: helper/table unit tests pass; clippy clean after `c3b1c13`.
+H23 step 1 (`51794f8`, docs only): ADR-001 + SECURITY_HARDENING now state the real guarantee (worker confined to allow-listed files, but content there can execute as root).
+Verify: no code change; docs diff reviewed.
+M1+M2 (`665ba8e`): `Policy.require_caps` + `SandboxError::CapsRequired` + `caps_verdict` (fatal only when required); `degradation_notes(&Confinement)` reported at startup via `cli-serve-confinement-degraded` and persisted to `<state_root>/state/confinement.json`.
+Verify: `a_missing_landlock_is_reported_at_startup` passes; `cargo test -p detent serve` 18 passed; `--features mcp` 159 passed.
+Workspace verify: `cargo test --workspace --all-features` 1593 passed, 6 ignored; Linux docker platform 242 passed; `cargo clippy --all-targets` (`detent` + `detent-platform`) clean; `cargo fmt --all --check` clean.
+Jev (`jev-1.13.0`, live POST) used only for classification/routing; complex reasoning by default model. Recorded confidences: `next_slice` H12_finish 0.91; H23-vs-M1/M2 H23_docs 0.25 (low; proceeded, docs-only 9 lines); M1-vs-M2 M1_first 0.95; H23 true-guarantee noul 0.91, names-vectors 0.92; destructive checks 0.20-0.26; M2 shape `Vec<String>` 0.99; skip-`tracing::warn!` noul 0.38.
+Skips (open, not in this batch): H23 step 2 monitor re-validation + per-module exec deny-list (`write_target_refuses_new_root_exec_directives` unbuilt); H12 option A privsep fork (`spawn_pair` monitor/worker split for MCP HTTP); M2 `tracing::warn!` skipped (renderer note + persisted `confinement.json` carry the signal, no new dep).
+
 ## 2026-09-23 - STAGE3 H20 batch: clippy, Linux gate, coverage, fuzz
 
 H20-a (clippy): moved `shutdown_signal`, `transport_name`, `scope_name` above `mod tests` in `crates/detent/src/mcp.rs`; `headers()` fixture returns `Result` with `?`. Also split the `fuzz_provider_response` re-export behind `feature = "fuzzing"` (workspace `--all-features` exposed the ungated import). H20-b: gated `a_duplicate_module_id_warns_instead_of_panicking` to non-Linux, added `linux_confinement_reports_landlock_and_seccomp`. H20-c: restored a dropped `#[test]` on `backend_names_are_stable_for_every_variant`, extracted `warning_for_percent` with boundary tests (None/0/49/50/74/75/100), covered `update_apply` missing-file and bridge-copy-failure arms. H20-d: `cargo +nightly fuzz list/run` in `fuzz.yml`.
