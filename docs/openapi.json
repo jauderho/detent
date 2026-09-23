@@ -1170,6 +1170,17 @@
           "fingerprint"
         ],
         "properties": {
+          "expiry_warning": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExpiryWarning",
+                "description": "PLAN Phase 6 failure UX: `half` at 50 % of lifetime used, `quarter`\nat 75 % (25 % remains). `None` when the validity window did not\nparse or no threshold is reached yet."
+              }
+            ]
+          },
           "fingerprint": {
             "type": "string",
             "description": "Uppercase colon-separated SHA-256 of the DER, as printed at startup."
@@ -1426,6 +1437,14 @@
             "description": "The Fluent id a front end renders."
           }
         }
+      },
+      "ExpiryWarning": {
+        "type": "string",
+        "description": "Certificate expiry warning level (PLAN Phase 6 failure UX): never silent\nabout a dying certificate.",
+        "enum": [
+          "half",
+          "quarter"
+        ]
       },
       "ExternalCheck": {
         "type": "object",

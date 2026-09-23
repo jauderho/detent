@@ -5,6 +5,12 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-23 - Phase 6 failure UX: cert status gains expiry_warning
+
+Jev routing attempted but blocked (automode extension timed out both a curl and an eval-fetch to `api.typesafe.ai`); default model chose the slice instead. `CertReport.expiry_warning: Option<ExpiryWarning>` (`half` at 50 % used, `quarter` at 75 %) mirrors `detent-acme`'s `warning_for` thresholds without calling it, so `detent-web` gains no `detent-acme` dependency. Filled in `cert_report` from the existing lifetime percent. Test pins a fresh cert trips no warning; `docs/openapi.json` regenerated (`ExpiryWarning` schema).
+
+Verify: `cargo test -p detent-ops --lib` 45 passed; `cargo test -p detent-web --lib` 301 passed; openapi pin passes; clippy clean; fmt clean.
+
 ## 2026-09-23 - Phase 6 cert renewal signal: status gains renewal_due
 
 Jev (`jev-1.13.0`) routed next_slice `renewal_loop` (conf 0.6, p=0.73 over cert_renew_wiring 0.18, attest 0.09; non-destructive noul 0.62), but no background poll exists and poll + fetch/install needs design — so what landed is the unblocked prerequisite, not the loop: `CertReport.renewal_due: Option<bool>` (`None` when validity does not parse), filled by `cert_report` from the existing `tls::renewal_due_at` two-thirds rule. The UI/future poller can now read "renew now" without re-deriving lifetime math. The loop itself (poll + fetch/install) stays open.

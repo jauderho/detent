@@ -852,6 +852,12 @@ async fn cert_status_describes_the_certificate_the_listener_serves() -> R {
         Some(false),
         "a fresh certificate is nowhere near the two-thirds renewal threshold"
     );
+    assert!(
+        body.get("expiry_warning")
+            .is_none_or(serde_json::Value::is_null),
+        "a fresh certificate trips no expiry warning, got {:?}",
+        body.get("expiry_warning")
+    );
 
     live.shutdown();
     Ok(())

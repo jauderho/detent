@@ -191,6 +191,22 @@ pub struct CertReport {
     /// Whether two thirds of the lifetime is used (the renewal threshold).
     /// `None` when the validity window did not parse.
     pub renewal_due: Option<bool>,
+    /// PLAN Phase 6 failure UX: `half` at 50 % of lifetime used, `quarter`
+    /// at 75 % (25 % remains). `None` when the validity window did not
+    /// parse or no threshold is reached yet.
+    pub expiry_warning: Option<ExpiryWarning>,
+}
+
+/// Certificate expiry warning level (PLAN Phase 6 failure UX): never silent
+/// about a dying certificate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ExpiryWarning {
+    /// 50 % of the lifetime is used.
+    Half,
+    /// 75 % used — 25 % remains.
+    Quarter,
 }
 
 /// The stable wire name of a network backend.
