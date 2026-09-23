@@ -33,10 +33,10 @@ pub use order::{
     EabCredentials, account_and_order, ari_identifier, finalize, present_attest_challenges,
     present_challenges, should_renew_ari, wait_ready,
 };
+#[cfg(feature = "fuzzing")]
+pub use providers::fuzz_provider_response;
 #[cfg(any(feature = "dns-providers", feature = "fuzzing"))]
-pub use providers::{
-    AcmeDnsProvider, CloudflareProvider, DeSecProvider, Rfc2136Provider, fuzz_provider_response,
-};
+pub use providers::{AcmeDnsProvider, CloudflareProvider, DeSecProvider, Rfc2136Provider};
 pub use schedule::{Warning, percent_used, should_renew, should_renew_in_window, warning_for};
 
 /// Mode of the challenge files and the state directory holding them:
