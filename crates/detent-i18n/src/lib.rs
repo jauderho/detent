@@ -191,12 +191,43 @@ fn message_has_value(bundle: &FluentBundle<FluentResource>, id: &str) -> bool {
     bundle.get_message(id).and_then(|m| m.value()).is_some()
 }
 
+/// Sanitises a Fluent argument value for terminal/log output: strips C0/C1
+/// controls and Unicode bidi controls that could otherwise affect terminal
+/// rendering or enable visual spoofing. Fluent's own FSI/PDI (U+2068/U+2069)
+/// are stripped later by `strip_bidi_isolation`, but we also strip them here
+/// so the raw value never reaches the bundle.
+fn sanitize_arg_value(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| {
+            if c.is_control() {
+                return false;
+            }
+            !matches!(
+                *c,
+                '\u{061C}'
+                    | '\u{200E}'
+                    | '\u{200F}'
+                    | '\u{202A}'
+                    | '\u{202B}'
+                    | '\u{202C}'
+                    | '\u{202D}'
+                    | '\u{202E}'
+                    | '\u{2066}'
+                    | '\u{2067}'
+                    | '\u{2068}'
+                    | '\u{2069}'
+            )
+        })
+        .collect()
+}
+
 /// Builds an owned [`FluentArgs`] from a [`Diagnostic`]'s string-keyed, string-valued
 /// argument map.
 fn fluent_args(map: &BTreeMap<String, String>) -> FluentArgs<'static> {
     let mut args = FluentArgs::with_capacity(map.len());
     for (key, value) in map {
-        args.set(key.clone(), value.clone());
+        args.set(key.clone(), sanitize_arg_value(value));
     }
     args
 }
@@ -796,5 +827,29 @@ mod tests {
         let files = ["this is not = = valid ftl {{{"];
         // Must not panic; whatever it manages to salvage is fine.
         let _bundle = build_bundle("en-US", &files);
+    }
+
+    #[test]
+    fn render_neutralises_control_and_bidi_chars_in_args() {
+        let localizer = Localizer::en_us();
+        let evil_real = "\u{00}\u{01}\u{1F}\u{7F}\u{80}\u{9F}\u{061C}\u{200E}\u{200F}\u{202A}\u{202B}\u{202C}\u{202D}\u{202E}\u{2066}\u{2067}\u{2068}\u{2069}bad.host";
+        let diagnostic = Diagnostic::new(Severity::Error, MessageId::new("hosts-invalid-hostname"))
+            .with_arg("name", evil_real);
+        let text = localizer.render(&diagnostic);
+        for ch in [
+            '\u{00}', '\u{01}', '\u{1F}', '\u{7F}', '\u{80}', '\u{9F}', '\u{061C}', '\u{200E}',
+            '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}',
+            '\u{2067}', '\u{2068}', '\u{2069}',
+        ] {
+            assert!(
+                !text.contains(ch),
+                "render output still contains control/bidi char U+{:04X}",
+                ch as u32
+            );
+        }
+        assert!(
+            text.contains("bad.host"),
+            "sanitised output lost payload: {text:?}"
+        );
     }
 }
