@@ -1533,6 +1533,30 @@ fn update_apply_refuses_a_path_traversal_version() -> TestResult {
 }
 
 #[test]
+fn update_apply_refuses_a_valid_name_with_no_staged_file() -> TestResult {
+    let mut fx = harness(b"v1\n", Setup::default())?;
+    let state_root = fx
+        .target
+        .parent()
+        .ok_or("harness missing parent")?
+        .join("state");
+    fx.engine.set_state_root(&state_root);
+    // A well-formed tag with nothing staged under it must fail the same way
+    // as traversal: Unsupported, audited once, target untouched.
+    let err = fx.run(Operation::UpdateApply {
+        version: "v9.9.9".to_owned(),
+    });
+    assert!(matches!(
+        err,
+        Err(OpsError::Unsupported {
+            what: "update_apply"
+        })
+    ));
+    assert_eq!(fx.records().len(), 1);
+    fx.finish()
+}
+
+#[test]
 fn update_apply_refuses_dot_only_versions() -> TestResult {
     let mut fx = harness(b"v1\n", Setup::default())?;
     let state_root = fx
@@ -1630,8 +1654,69 @@ fn update_apply_overwrites_a_stale_digest_file() -> TestResult {
 }
 
 #[test]
+fn update_apply_refuses_when_the_digest_file_cannot_be_written() -> TestResult {
+    let mut fx = harness(b"v1\n", Setup::default())?;
+    let state_root = fx
+        .target
+        .parent()
+        .ok_or("harness missing parent")?
+        .join("state");
+    fx.engine.set_state_root(&state_root);
+    let bytes = b"unwritable-digest-bytes";
+    let staged_dir = state_root.join("update").join("staged");
+    std::fs::create_dir_all(&staged_dir)?;
+    std::fs::write(staged_dir.join("v9.9.11"), bytes)?;
+    // A regular file where the staged directory must be: the tag read fails,
+    // so the run refuses without reaching the monitor.
+    let _ = std::fs::remove_dir_all(&staged_dir);
+    std::fs::write(&staged_dir, b"not-a-directory")?;
+    let err = fx.run(Operation::UpdateApply {
+        version: "v9.9.11".to_owned(),
+    });
+    assert!(matches!(
+        err,
+        Err(OpsError::Unsupported {
+            what: "update_apply"
+        })
+    ));
+    assert_eq!(fx.records().len(), 1);
+    fx.finish()
+}
+
+#[test]
+fn update_apply_refuses_when_the_bridge_copy_fails() -> TestResult {
+    let mut fx = harness(b"v1\n", Setup::default())?;
+    let state_root = fx
+        .target
+        .parent()
+        .ok_or("harness missing parent")?
+        .join("state");
+    fx.engine.set_state_root(&state_root);
+    // Tag and digest differ (ASCII tag, hex digest), so the bridge copy runs.
+    // A directory where the digest file must be makes `write_atomic` fail.
+    let bytes = b"bridge-copy-fails";
+    let digest = Sha256Digest::of(bytes);
+    let staged_dir = state_root.join("update").join("staged");
+    std::fs::create_dir_all(&staged_dir)?;
+    std::fs::write(staged_dir.join("v9.9.12"), bytes)?;
+    std::fs::create_dir_all(staged_dir.join(digest.to_string()))?;
+    let err = fx.run(Operation::UpdateApply {
+        version: "v9.9.12".to_owned(),
+    });
+    assert!(matches!(
+        err,
+        Err(OpsError::Unsupported {
+            what: "update_apply"
+        })
+    ));
+    assert_eq!(fx.records().len(), 1);
+    fx.finish()
+}
+
+#[test]
 fn the_audit_log_can_be_queried_back_through_an_operation() -> TestResult {
     let mut fx = harness(b"v1\n", Setup::default())?;
+
     fx.run(apply("v2\n", None))?;
     fx.run(apply("v3\n", None))?;
 
