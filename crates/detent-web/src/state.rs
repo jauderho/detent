@@ -43,7 +43,7 @@ pub struct AuthState {
     /// Accounts and password hashes.
     pub users: UserStore,
     /// Live sessions. In memory: restart is logout.
-    pub sessions: SessionStore,
+    pub sessions: std::sync::Arc<SessionStore>,
     /// API tokens.
     pub tokens: TokenStore,
     /// Argon2id at the configured cost, with its dummy hash.
@@ -67,9 +67,12 @@ impl AuthState {
     /// cannot be confined, a credential file that cannot be read or parsed,
     /// or Argon2 parameters it will not accept.
     pub fn open(state_root: &Path, auth: &AuthConfig, ram_mib: u64) -> Result<Self, AuthError> {
+        let users = UserStore::load(state_root)?;
+        let sessions = std::sync::Arc::new(SessionStore::from_config(auth));
+        users.attach_sessions(std::sync::Arc::clone(&sessions));
         Ok(Self {
-            users: UserStore::load(state_root)?,
-            sessions: SessionStore::from_config(auth),
+            users,
+            sessions,
             tokens: TokenStore::load(state_root)?,
             hasher: Hasher::new(auth.argon2, ram_mib)?,
             limiter: RateLimiter::new(auth.max_failures),

@@ -40,8 +40,41 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use super::password::Hasher;
+use super::session::SessionStore;
 use super::totp::TotpSecret;
 use super::{AuthError, STATE_SUBDIR, confine_state_dir, write_credential_file};
+use std::sync::Arc;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Fingerprint {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime_ns: i128,
+}
+#[allow(clippy::arithmetic_side_effects)]
+fn fingerprint_of(m: &std::fs::Metadata) -> Fingerprint {
+    use std::os::unix::fs::MetadataExt as _;
+    Fingerprint {
+        dev: m.dev(),
+        ino: m.ino(),
+        len: m.len(),
+        mtime_ns: i128::from(m.mtime()) * 1_000_000_000 + i128::from(m.mtime_nsec()),
+    }
+}
+fn current_fingerprint(p: &std::path::Path) -> Result<Option<Fingerprint>, AuthError> {
+    match std::fs::metadata(p) {
+        Ok(m) => Ok(Some(fingerprint_of(&m))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(AuthError::StoreRead {
+            path: p.to_path_buf(),
+            source,
+        }),
+    }
+}
+struct UserInner {
+    users: Vec<UserRecord>,
+    fp: Option<Fingerprint>,
+}
 
 /// Envelope version this build reads and writes.
 pub const USERS_VERSION: u32 = 1;
@@ -177,12 +210,12 @@ struct UsersFile {
 
 /// The user store.
 pub struct UserStore {
-    /// `<state_root>/state/users.json`.
     path: PathBuf,
-    /// The records, guarded so handlers can share one store.
-    users: Mutex<Vec<UserRecord>>,
+    inner: Mutex<UserInner>,
+    sessions: Mutex<Option<Arc<SessionStore>>>,
 }
 
+#[allow(clippy::missing_fields_in_debug)]
 impl fmt::Debug for UserStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UserStore")
@@ -209,9 +242,9 @@ impl UserStore {
         let dir = state_root.join(STATE_SUBDIR);
         confine_state_dir(&dir)?;
         let path = dir.join(USERS_FILE);
-        let users = match std::fs::read(&path) {
-            Ok(raw) => Self::decode(&path, &raw)?,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        let (users, fp) = match std::fs::read(&path) {
+            Ok(raw) => (Self::decode(&path, &raw)?, current_fingerprint(&path)?),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => (Vec::new(), None),
             Err(source) => {
                 return Err(AuthError::StoreRead {
                     path: path.clone(),
@@ -221,7 +254,8 @@ impl UserStore {
         };
         Ok(Self {
             path,
-            users: Mutex::new(users),
+            inner: Mutex::new(UserInner { users, fp }),
+            sessions: Mutex::new(None),
         })
     }
 
@@ -284,6 +318,69 @@ impl UserStore {
         self.records().is_empty()
     }
 
+    /// Attach the session table for cross-store revocation (H10).
+    pub fn attach_sessions(&self, sessions: Arc<SessionStore>) {
+        if let Ok(mut g) = self.sessions.lock() {
+            *g = Some(sessions);
+        }
+    }
+    /// Re-read the file if its `(dev, ino, len, mtime_ns)` differs (NotFound=empty).
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::StoreRead`] when the file cannot be read or is malformed.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn refresh(&self) -> Result<(), AuthError> {
+        let sessions = self.sessions.lock().ok().and_then(|g| g.clone());
+        let mut guard = self.inner.lock().map_err(|_| AuthError::Hash)?;
+        Self::refresh_locked_with_sessions(&mut guard, &self.path, sessions)
+    }
+    #[allow(dead_code)]
+    fn refresh_locked(inner: &mut UserInner, path: &std::path::Path) -> Result<(), AuthError> {
+        Self::refresh_locked_with_sessions(inner, path, None)
+    }
+    fn refresh_locked_with_sessions(
+        inner: &mut UserInner,
+        path: &std::path::Path,
+        sessions: Option<Arc<SessionStore>>,
+    ) -> Result<(), AuthError> {
+        let cur = current_fingerprint(path)?;
+        if cur == inner.fp {
+            return Ok(());
+        }
+        let before: std::collections::HashMap<String, String> = inner
+            .users
+            .iter()
+            .map(|r| (r.name.clone(), r.phc.clone()))
+            .collect();
+        let users = match std::fs::read(path) {
+            Ok(raw) => Self::decode(path, &raw)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(source) => {
+                return Err(AuthError::StoreRead {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        inner.users = users;
+        inner.fp = cur;
+        if let Some(sessions) = sessions {
+            let after: std::collections::HashMap<String, String> = inner
+                .users
+                .iter()
+                .map(|r| (r.name.clone(), r.phc.clone()))
+                .collect();
+            for (name, old) in before {
+                match after.get(&name) {
+                    None => sessions.revoke_subject(&name),
+                    Some(n) if n != &old => sessions.revoke_subject(&name),
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
     /// Add a user.
     ///
     /// # Errors
@@ -331,6 +428,7 @@ impl UserStore {
         name: &str,
         password: &str,
     ) -> Result<VerifiedUser, AuthError> {
+        self.refresh()?;
         let record = self
             .records()
             .iter()
@@ -395,8 +493,18 @@ impl UserStore {
     ///
     /// [`AuthError::UnknownUser`], or a store variant.
     pub fn note_totp_counter(&self, name: &str, counter: u64) -> Result<(), AuthError> {
-        self.update(name, |record| {
-            record.totp_last_counter = Some(counter);
+        let now = now_rfc3339();
+        self.mutate(|users| {
+            let r = users
+                .iter_mut()
+                .find(|r| r.name == name)
+                .ok_or(AuthError::UnknownUser)?;
+            if r.totp_last_counter.is_some_and(|last| last >= counter) {
+                return Err(AuthError::InvalidCredentials);
+            }
+            r.totp_last_counter = Some(counter);
+            r.updated.clone_from(&now);
+            Ok(())
         })
     }
 
@@ -421,9 +529,9 @@ impl UserStore {
     /// store that answers "no users" refuses every login, which is the safe
     /// direction.
     fn records(&self) -> Vec<UserRecord> {
-        self.users
+        self.inner
             .lock()
-            .map(|users| users.clone())
+            .map(|g| g.users.clone())
             .unwrap_or_default()
     }
 
@@ -450,8 +558,10 @@ impl UserStore {
     where
         F: FnOnce(&mut Vec<UserRecord>) -> Result<(), AuthError>,
     {
-        let mut guard = self.users.lock().map_err(|_poisoned| AuthError::Hash)?;
-        let mut candidate = guard.clone();
+        let sessions = self.sessions.lock().ok().and_then(|g| g.clone());
+        let mut guard = self.inner.lock().map_err(|_poisoned| AuthError::Hash)?;
+        Self::refresh_locked_with_sessions(&mut guard, &self.path, sessions.clone())?;
+        let mut candidate = guard.users.clone();
         change(&mut candidate)?;
         let file = UsersFile {
             version: USERS_VERSION,
@@ -464,7 +574,8 @@ impl UserStore {
             })?;
         encoded.push(b'\n');
         write_credential_file(&self.path, &encoded)?;
-        *guard = candidate;
+        guard.users = candidate;
+        guard.fp = current_fingerprint(&self.path)?;
         Ok(())
     }
 }
@@ -794,6 +905,64 @@ mod tests {
     }
 
     #[test]
+    fn removed_user_neither_accepted_nor_resurrected() -> R {
+        let root = tempfile::tempdir()?;
+        let hasher = hasher()?;
+        let a = open(root.path())?;
+        a.create(&hasher, "alice", "hunter2", false)?;
+        a.create(&hasher, "bob", "hunter2", false)?;
+        let verified = a.verify_password(&hasher, "alice", "hunter2")?;
+        assert_eq!(verified.name, "alice");
+        let b = UserStore::load(root.path())?;
+        b.remove("alice")?;
+        match a.verify_password(&hasher, "alice", "hunter2") {
+            Err(AuthError::InvalidCredentials) => {}
+            other => return Err(format!("removed user still verified: {other:?}").into()),
+        }
+        assert!(a.list().iter().all(|u| u.name != "alice"));
+        a.create(&hasher, "carol", "hunter2", false)?;
+        let names: Vec<_> = a.list().into_iter().map(|u| u.name).collect();
+        assert!(names.contains(&"bob".to_owned()), "{names:?}");
+        assert!(names.contains(&"carol".to_owned()), "{names:?}");
+        assert!(!names.contains(&"alice".to_owned()), "{names:?}");
+        assert!(
+            UserStore::load(root.path())?
+                .verify_password(&hasher, "alice", "hunter2")
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn totp_counter_cannot_be_reused_or_go_backwards() -> R {
+        let root = tempfile::tempdir()?;
+        let hasher = hasher()?;
+        let store = open(root.path())?;
+        store.create(&hasher, "alice", "hunter2", false)?;
+        store.set_totp("alice", Some(&TotpSecret::generate()?))?;
+        store.note_totp_counter("alice", 10)?;
+        // Re-using the same counter is a replay.
+        match store.note_totp_counter("alice", 10) {
+            Err(AuthError::InvalidCredentials) => {}
+            other => return Err(format!("reused counter not rejected: {other:?}").into()),
+        }
+        // Going backwards is also a replay.
+        match store.note_totp_counter("alice", 9) {
+            Err(AuthError::InvalidCredentials) => {}
+            other => return Err(format!("backwards counter not rejected: {other:?}").into()),
+        }
+        // Advancing succeeds.
+        store.note_totp_counter("alice", 11)?;
+        assert_eq!(
+            store
+                .verify_password(&hasher, "alice", "hunter2")?
+                .totp_last_counter,
+            Some(11)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn a_failed_write_leaves_the_store_as_it_was() -> R {
         let root = tempfile::tempdir()?;
         let hasher = hasher()?;
@@ -805,7 +974,7 @@ mod tests {
         std::fs::remove_dir_all(root.path().join("state"))?;
         std::fs::write(root.path().join("state"), b"")?;
         match store.create(&hasher, "bob", "hunter2", false) {
-            Err(AuthError::StoreWrite { .. }) => {}
+            Err(AuthError::StoreWrite { .. } | AuthError::StoreRead { .. }) => {}
             other => return Err(format!("expected a write failure, got {other:?}").into()),
         }
         // The in-memory set is unchanged: `bob` was never added.

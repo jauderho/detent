@@ -336,6 +336,13 @@ impl SessionStore {
         Ok(Some((fresh, session)))
     }
 
+    /// Invalidate every session belonging to `subject`.
+    pub fn revoke_subject(&self, subject: &str) {
+        let Ok(mut entries) = self.entries.lock() else {
+            return;
+        };
+        entries.retain(|_, e| e.session.subject != subject);
+    }
     /// Invalidate a session. Answers whether one was actually removed.
     pub fn logout(&self, presented: &str) -> bool {
         let Ok(mut entries) = self.entries.lock() else {
