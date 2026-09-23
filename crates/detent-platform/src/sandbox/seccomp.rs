@@ -6,23 +6,23 @@
 //! The syscall names in [`syscalls_for`] were not guessed. They come from two
 //! sources, both grounded in this repository:
 //!
-//! 1. Reading `fs::atomic` (the monitor's only filesystem code path) and
-//!    `privsep::{transport, monitor, worker}` (the only IPC and timing code
-//!    path either role runs) to see exactly which `rustix`/`std` calls they
-//!    make — e.g. `Channel::send`/`recv` do plain `read`/`write` on a
-//!    connected [`std::os::unix::net::UnixStream`] (no `poll`, because the
-//!    timeout is a kernel-level `SO_RCVTIMEO`/`SO_SNDTIMEO` via `setsockopt`,
-//!    not userspace polling), and `Instant`/`SystemTime` map to
-//!    `clock_gettime`, not `nanosleep`.
+//! 1. Reading `fs::atomic` and `privsep::{transport, monitor, worker}` (the
+//!    monitor's IPC, filesystem, and timing code paths) to see exactly which
+//!    `rustix`/`std` calls they make — e.g. `Channel::send`/`recv` do plain
+//!    `read`/`write` on a connected
+//!    [`std::os::unix::net::UnixStream`] (no `poll`, because the timeout is
+//!    a kernel-level `SO_RCVTIMEO`/`SO_SNDTIMEO` via `setsockopt`, not
+//!    userspace polling), and `Instant`/`SystemTime` map to `clock_gettime`,
+//!    not `nanosleep`.
 //! 2. Running `cargo test -p detent-platform --all-features` under `strace
 //!    -f -c` inside `rust:1-bookworm` (`aarch64`, native under `OrbStack`, and
 //!    `x86_64` under `--platform linux/amd64` emulation) and cross-checking the
 //!    observed syscall names against (1) to separate real monitor/worker
-//!    behaviour from test-harness noise (thread spawn machinery the
-//!    single-threaded monitor never uses, `execve`/`clone` from the initial
-//!    process launch, `kill` from nowhere in this codebase — the monitor
-//!    tells the worker to stop over the protocol, not with a signal, and
-//!    never holds `CAP_KILL` past the fork per PLAN §2.4).
+//!    behaviour from test-harness noise. `execve`/`clone` from the initial
+//!    process launch stay excluded for that reason — but `clone`/`execve`
+//!    *after* confinement are real: the monitor spawns validators and
+//!    service commands via `service::exec` on every `RunCheck`/`Service`
+//!    request (STAGE3 H6), so they are allow-listed in the table below.
 //!
 //! `SYSCALL_NUMBERS` itself is not from memory either: both columns were
 //! read out of `<asm/unistd.h>` (via `gcc -E -dM -xc - < <(echo '#include
@@ -211,10 +211,30 @@ const MONITOR: &[&str] = &[
     "lgetxattr",
     "lsetxattr",
     "statfs",
-    "faccessat",
     // Reap the worker (`MonitorHandle::wait`, called from the same process
     // that ran `confine_monitor`).
     "wait4",
+    // Process creation (`service::exec::run_confined`, called live for every
+    // `RunCheck` and `Service` request): `Command::spawn` is `clone`/`clone3`
+    // + `execve`/`execveat` in the child, `pipe2`/`dup3` for the piped
+    // stdio, `kill`/`tgkill` for the timeout kill, `nanosleep` for the
+    // `try_wait` poll loop's sleep, and `rseq`/`set_robust_list`/
+    // `sched_getaffinity` for the two `spawn_capped_reader` threads glibc
+    // starts per child. Derived by reading `service/exec.rs`, not strace —
+    // no strace-capable host was available when this landed; re-derive on
+    // a009/k001 per STAGE3 H6 steps 1 and 4 before closing that item.
+    "clone",
+    "clone3",
+    "execve",
+    "execveat",
+    "pipe2",
+    "dup3",
+    "kill",
+    "tgkill",
+    "nanosleep",
+    "rseq",
+    "set_robust_list",
+    "sched_getaffinity",
 ];
 
 /// Syscalls the worker needs. Phase 4 gives the worker a real `detent-web`
@@ -426,6 +446,14 @@ const SYSCALL_NUMBERS: &[(&str, i64, i64)] = &[
     ("getsockname", 51, 204),
     ("accept4", 288, 242),
     ("writev", 20, 66),
+    ("execve", 59, 221),
+    ("execveat", 322, 281),
+    ("pipe2", 293, 59),
+    ("dup", 32, 23),
+    ("dup3", 292, 24),
+    ("kill", 62, 129),
+    ("tgkill", 234, 131),
+    ("nanosleep", 35, 101),
 ];
 
 /// `name`'s raw syscall number on `arch`, or `None` if it is not in
@@ -586,6 +614,26 @@ mod tests {
         assert_eq!(super::number("not-a-real-syscall", Arch::X86_64), None);
         assert_eq!(super::number("poll", Arch::Aarch64), None);
         assert!(super::number("poll", Arch::X86_64).is_some());
+    }
+
+    #[test]
+    fn monitor_table_allows_process_creation_on_both_arches() {
+        for name in [
+            "clone", "clone3", "execve", "execveat", "pipe2", "dup3", "kill", "tgkill",
+        ] {
+            assert!(
+                syscalls_for(Role::Monitor).contains(&name),
+                "monitor table is missing {name}"
+            );
+            assert!(
+                super::number(name, Arch::X86_64).is_some(),
+                "{name} has no x86_64 number"
+            );
+            assert!(
+                super::number(name, Arch::Aarch64).is_some(),
+                "{name} has no aarch64 number"
+            );
+        }
     }
 
     #[test]
