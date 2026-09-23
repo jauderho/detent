@@ -17,7 +17,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use detent_acme::{HookProvider, account_and_order, finalize, present_challenges, wait_ready};
+use detent_acme::{
+    HookProvider, account_and_order, cleanup_challenges, finalize, present_challenges, wait_ready,
+};
 use instant_acme::{OrderStatus, RetryPolicy};
 
 const TEST_DOMAIN: &str = "le.wtf";
@@ -138,7 +140,7 @@ fn pebble_dns01_issuance() -> Result<(), Box<dyn std::error::Error>> {
             publish_to_challtestsrv(&state_dir, record, &challtestsrv)?;
             Ok(())
         };
-        present_challenges(&mut order, &hook, &bridge).await?;
+        let records = present_challenges(&mut order, &hook, &bridge).await?;
         println!("challenges presented and marked ready");
 
         // Caller-owned retry loop: no sleeps in the library.
@@ -151,7 +153,9 @@ fn pebble_dns01_issuance() -> Result<(), Box<dyn std::error::Error>> {
             return Err(detent_acme::AcmeError::InvalidOrder(status).into());
         }
 
-        let issued = finalize(&mut order, &policy).await?;
+        let issued = finalize(&mut order, &policy).await;
+        cleanup_challenges(&hook, &records);
+        let issued = issued?;
         println!(
             "chain:   {} PEM block(s)",
             issued.chain_pem.matches("BEGIN CERTIFICATE").count()
