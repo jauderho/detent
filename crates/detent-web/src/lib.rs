@@ -107,8 +107,9 @@ pub use headers::{THEME_SCRIPT_SHA256, security_headers};
 pub use server::{Server, ServerError, harden, healthz};
 pub use state::{AppState, AuthState};
 pub use tls::{
-    CertStore, CertifiedKeyPair, TlsError, bootstrap_self_signed, fingerprint,
-    install_crypto_provider, load_or_bootstrap, server_config, server_config_from_store,
+    ACME_CERT_FILE, ACME_KEY_FILE, CertStore, CertifiedKeyPair, TlsError, bootstrap_self_signed,
+    fingerprint, install_acme, install_crypto_provider, load_acme, load_or_bootstrap,
+    server_config, server_config_from_store, store_acme,
 };
 
 #[cfg(test)]

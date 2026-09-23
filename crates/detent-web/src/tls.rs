@@ -58,8 +58,15 @@ pub const BOOTSTRAP_CERT_FILE: &str = "bootstrap.cert.der";
 /// File holding the bootstrap private key, PKCS#8 DER, inside `cert_dir`.
 pub const BOOTSTRAP_KEY_FILE: &str = "bootstrap.key.der";
 
-/// Mode of both bootstrap files: readable only by the account that runs the
-/// worker (PLAN §2.8).
+/// File holding the ACME-issued certificate chain (leaf + intermediates), DER,
+/// inside `cert_dir`. Leaf first; written alongside [`ACME_KEY_FILE`] by
+/// [`store_acme`], so a renewal restarts from the same files a crash left.
+pub const ACME_CERT_FILE: &str = "acme.cert.der";
+
+/// File holding the ACME-issued private key, PKCS#8 DER, inside `cert_dir`.
+pub const ACME_KEY_FILE: &str = "acme.key.der";
+/// Mode of every key and certificate file in `cert_dir`: readable only by the
+/// account that runs the worker (PLAN §2.8).
 const KEY_MODE: u32 = 0o600;
 
 /// Mode of `cert_dir` when this module has to create it.
@@ -214,6 +221,26 @@ impl CertifiedKeyPair {
         Self {
             cert_der,
             intermediates: Vec::new(),
+            key_pkcs8_der,
+        }
+    }
+    /// Wrap a DER leaf, DER intermediates, and a PKCS#8 DER private key.
+    ///
+    /// The [`load_acme`](crate::tls::load_acme) counterpart of
+    /// [`from_acme_pem`](Self::from_acme_pem): splits the stored chain back
+    /// into the leaf the fingerprint reads and the intermediates the server
+    /// must send. Nothing is validated here;
+    /// [`to_certified_key`](Self::to_certified_key) is where a mismatched
+    /// pair is caught.
+    #[must_use]
+    pub fn from_der_chain(
+        cert_der: Vec<u8>,
+        intermediates: Vec<Vec<u8>>,
+        key_pkcs8_der: Vec<u8>,
+    ) -> Self {
+        Self {
+            cert_der,
+            intermediates,
             key_pkcs8_der,
         }
     }
@@ -694,6 +721,102 @@ pub fn store_bootstrap(cert_dir: &Path, pair: &CertifiedKeyPair) -> Result<(), T
     write_key_file(&cert_dir.join(BOOTSTRAP_KEY_FILE), &pair.key_pkcs8_der)?;
     Ok(())
 }
+/// Write an ACME-issued `pair` into `cert_dir` (`0600` files, `0700` dir) and
+/// swap it into `store`, so the listener serves the new certificate without
+/// a restart. Store first, swap second: a crash between the two restarts
+/// from the same files via [`load_acme`].
+///
+/// # Errors
+///
+/// As [`CertifiedKeyPair::to_certified_key`] (swap) and [`store_acme`]
+/// (persist).
+pub fn install_acme(
+    cert_dir: &Path,
+    pair: &CertifiedKeyPair,
+    store: &CertStore,
+) -> Result<(), TlsError> {
+    store_acme(cert_dir, pair)?;
+    store.replace(pair)?;
+    Ok(())
+}
+
+/// Write an ACME-issued pair's chain (leaf + intermediates, each length-framed
+/// as u32 BE + bytes) and key into `cert_dir`, creating the directory `0700`
+/// and both files `0600` — the same confinement as [`store_bootstrap`].
+///
+/// Framing, not concatenation: bare DER does not self-delimit well enough to
+/// split a chain back into leaf + intermediates on [`load_acme`], and the
+/// server must send every certificate (RFC 8446 §4.4.2).
+///
+/// # Errors
+///
+/// [`TlsError::Prepare`] when the directory cannot be created or confined,
+/// [`TlsError::Persist`] when a file cannot be written.
+pub fn store_acme(cert_dir: &Path, pair: &CertifiedKeyPair) -> Result<(), TlsError> {
+    if !cert_dir.is_dir() {
+        std::fs::create_dir_all(cert_dir).map_err(|source| TlsError::Prepare {
+            path: cert_dir.to_path_buf(),
+            source,
+        })?;
+    }
+    confine_cert_dir(cert_dir)?;
+    let mut chain = Vec::new();
+    for cert in
+        std::iter::once(pair.cert_der()).chain(pair.intermediates_der().iter().map(Vec::as_slice))
+    {
+        let len = u32::try_from(cert.len()).map_err(|_| TlsError::Pem)?;
+        chain.extend_from_slice(&len.to_be_bytes());
+        chain.extend_from_slice(cert);
+    }
+    write_key_file(&cert_dir.join(ACME_CERT_FILE), &chain)?;
+    write_key_file(&cert_dir.join(ACME_KEY_FILE), &pair.key_pkcs8_der)?;
+    Ok(())
+}
+
+/// Read a stored ACME-issued pair from `cert_dir`, or `None` when no renewal
+/// has landed yet. A half-written store (one file present, the other not)
+/// reads as `None`, same as [`load_bootstrap`]: the next renewal overwrites
+/// rather than failing forever. The concatenated chain splits back into leaf
+/// + intermediates so [`CertStore::replace`] serves every certificate.
+///
+/// # Errors
+///
+/// [`TlsError::Read`] when a file exists but cannot be read, [`TlsError::Pem`]
+/// when the stored bytes do not parse as certificates or a PKCS#8 key.
+pub fn load_acme(cert_dir: &Path) -> Result<Option<CertifiedKeyPair>, TlsError> {
+    let Some(chain) = read_optional(&cert_dir.join(ACME_CERT_FILE))? else {
+        return Ok(None);
+    };
+    let Some(key) = read_optional(&cert_dir.join(ACME_KEY_FILE))? else {
+        return Ok(None);
+    };
+    // Length-prefixed framing written by `store_acme`: u32 BE length +
+    // bytes per certificate, leaf first. A truncated file is `Pem`, not a
+    let mut certs = Vec::new();
+    let mut rest = chain.as_slice();
+    while !rest.is_empty() {
+        let (head, body) = rest.split_at_checked(4).ok_or(TlsError::Pem)?;
+        let mut len_bytes = [0_u8; 4];
+        len_bytes.copy_from_slice(head);
+        let len = u32::from_be_bytes(len_bytes) as usize;
+        rest = body;
+        if len == 0 {
+            return Err(TlsError::Pem);
+        }
+        let (cert, tail) = rest.split_at_checked(len).ok_or(TlsError::Pem)?;
+        certs.push(cert.to_vec());
+        rest = tail;
+    }
+    let mut certs = certs.into_iter();
+    let Some(leaf) = certs.next() else {
+        return Err(TlsError::Pem);
+    };
+    Ok(Some(CertifiedKeyPair::from_der_chain(
+        leaf,
+        certs.collect(),
+        key,
+    )))
+}
 
 /// Make sure `cert_dir` grants nothing to group or other, whether this call
 /// created it or found it.
@@ -768,9 +891,10 @@ pub fn load_or_bootstrap(
 #[cfg(test)]
 mod tests {
     use super::{
-        ALPN_H2_HTTP11, BOOTSTRAP_CERT_FILE, BOOTSTRAP_KEY_FILE, CertStore, CertifiedKeyPair,
-        TlsError, bootstrap_self_signed, confine_cert_dir, fingerprint, install_crypto_provider,
-        load_bootstrap, load_or_bootstrap, server_config, store_bootstrap, validity_unix,
+        ACME_CERT_FILE, ACME_KEY_FILE, ALPN_H2_HTTP11, BOOTSTRAP_CERT_FILE, BOOTSTRAP_KEY_FILE,
+        CertStore, CertifiedKeyPair, TlsError, bootstrap_self_signed, confine_cert_dir,
+        fingerprint, install_acme, install_crypto_provider, load_acme, load_bootstrap,
+        load_or_bootstrap, server_config, store_acme, store_bootstrap, validity_unix,
     };
     use std::os::unix::fs::PermissionsExt as _;
     use std::sync::Arc;
@@ -977,6 +1101,52 @@ mod tests {
         assert_eq!(
             store.current().cert.first().map(|c| c.to_vec()),
             Some(renewed.cert_der().to_vec())
+        );
+        Ok(())
+    }
+    #[test]
+    fn acme_install_persists_and_reloads_with_the_full_chain() -> R {
+        // The renewal loop's contract in one call: lands on disk `0600`,
+        // swaps the live store without a restart, and reads back with the
+        // intermediates a public CA's client needs for path building.
+        use rcgen::generate_simple_self_signed;
+        let end_entity = generate_simple_self_signed(["leaf.example".to_owned()])?;
+        let ca = generate_simple_self_signed(["issuer.example".to_owned()])?;
+        let chain_pem = format!("{}{}", end_entity.cert.pem(), ca.cert.pem());
+        let issued =
+            CertifiedKeyPair::from_acme_pem(&chain_pem, &end_entity.signing_key.serialize_pem())?;
+        let dir = tempfile::tempdir()?;
+        let cert_dir = dir.path().join("certs");
+        let store = CertStore::new(&pair()?)?;
+        install_acme(&cert_dir, &issued, &store)?;
+        for name in [ACME_CERT_FILE, ACME_KEY_FILE] {
+            let mode = std::fs::metadata(cert_dir.join(name))?.permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{name} is {mode:o}");
+        }
+        let reloaded = load_acme(&cert_dir)?.ok_or("install left no pair")?;
+        assert_eq!(reloaded, issued);
+        assert_eq!(
+            store.current().cert.first().map(|c| c.to_vec()),
+            Some(issued.cert_der().to_vec())
+        );
+        assert!(load_acme(dir.path())?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn acme_store_survives_a_restart_from_disk() -> R {
+        // `serve` prefers `load_acme` over the bootstrap pair: store, drop,
+        // reload, and the renewed certificate — not the bootstrap one — is
+        // what a fresh `CertStore` would serve.
+        let issued = pair()?;
+        let dir = tempfile::tempdir()?;
+        store_acme(dir.path(), &issued)?;
+        let reloaded = load_acme(dir.path())?.ok_or("store left no pair")?;
+        assert_eq!(reloaded, issued);
+        let store = CertStore::new(&reloaded)?;
+        assert_eq!(
+            store.current().cert.first().map(|c| c.to_vec()),
+            Some(issued.cert_der().to_vec())
         );
         Ok(())
     }
