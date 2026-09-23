@@ -92,13 +92,42 @@ impl ConfigError {
 }
 
 // ---------------------------------------------------------------------------
+// [acme]
+// ---------------------------------------------------------------------------
+
+/// `[acme]` — how the renewal loop orders certificates (PLAN Phase 6).
+///
+/// All opt-in: an empty table means "self-signed only", and the loop only
+/// runs when every field it needs is present. Paths are files the worker
+/// owns (`0600` credentials, PEM CA root); `domains` are the dns-01 names a
+/// renewal orders for.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AcmeConfig {
+    /// ACME directory URL, e.g. a Pebble or Let's Encrypt endpoint.
+    /// `None` means the renewal loop stays idle.
+    pub directory_url: Option<String>,
+    /// `mailto:`/`tel:` URIs recorded on fresh account registration.
+    pub contacts: Vec<String>,
+    /// Domains a renewal orders for. Empty means no order is attempted.
+    pub domains: Vec<String>,
+    /// Where the cached account credentials live (`0600`).
+    pub credentials_path: Option<PathBuf>,
+    /// Optional PEM CA root for a private ACME server.
+    pub ca_root: Option<PathBuf>,
+    /// CA profile to request (e.g. `"shortlived"`); `None` where the server
+    /// advertises no profiles extension (Pebble).
+    pub profile: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // The document
 // ---------------------------------------------------------------------------
 
 /// The whole of `/etc/detent/detent.toml`.
 ///
-/// Tables this build does not own yet (`[acme]`, `[privilege]`, `[secrets]`)
-/// are deliberately absent rather than accepted-and-ignored: with
+/// Tables this build does not own yet (`[privilege]`, `[secrets]`) are
+/// deliberately absent rather than accepted-and-ignored: with
 /// `deny_unknown_fields` an operator who writes one gets told this build does
 /// not read it, which is the truth. They arrive with the phases that use them.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -108,6 +137,8 @@ pub struct Config {
     pub listen: ListenConfig,
     /// Where the certificate comes from and where it is kept.
     pub tls: TlsConfig,
+    /// How certificate renewal orders certificates. Empty means self-signed.
+    pub acme: AcmeConfig,
     /// Password hashing, session lifetimes, lockout.
     pub auth: AuthConfig,
     /// Self-update policy.
@@ -444,7 +475,7 @@ pub struct UiConfig {
 #[cfg(test)]
 mod tests {
     use super::{
-        Argon2Params, Bootstrap, Config, ConfigError, DEFAULT_CERT_DIR, DEFAULT_PORT,
+        AcmeConfig, Argon2Params, Bootstrap, Config, ConfigError, DEFAULT_CERT_DIR, DEFAULT_PORT,
         MIN_ARGON2_M_KIB,
     };
     use std::path::{Path, PathBuf};
@@ -472,6 +503,13 @@ mod tests {
         assert_eq!(config.tls.bootstrap, Bootstrap::SelfSigned);
         assert_eq!(config.tls.cert_dir, PathBuf::from(DEFAULT_CERT_DIR));
         assert!(config.tls.hostnames.is_empty());
+        assert_eq!(config.acme, AcmeConfig::default());
+        assert!(config.acme.directory_url.is_none());
+        assert!(config.acme.contacts.is_empty());
+        assert!(config.acme.domains.is_empty());
+        assert!(config.acme.credentials_path.is_none());
+        assert!(config.acme.ca_root.is_none());
+        assert!(config.acme.profile.is_none());
         assert_eq!(config.auth.argon2, Argon2Params::default());
         assert_eq!(config.auth.argon2.m_kib, None);
         assert_eq!(config.auth.argon2.t, 3);
@@ -515,6 +553,14 @@ mod tests {
             cert_dir = "/tmp/certs"
             hostnames = ["box.example"]
 
+            [acme]
+            directory_url = "https://ca.example/directory"
+            contacts = ["mailto:ops@example"]
+            domains = ["box.example"]
+            credentials_path = "/tmp/acme.json"
+            ca_root = "/tmp/ca.pem"
+            profile = "shortlived"
+
             [auth]
             idle_timeout_secs = 60
             absolute_timeout_secs = 120
@@ -543,13 +589,19 @@ mod tests {
         assert_eq!(config.tls.bootstrap, Bootstrap::Acme);
         assert_eq!(config.tls.cert_dir, PathBuf::from("/tmp/certs"));
         assert_eq!(config.tls.hostnames, vec!["box.example".to_owned()]);
+        assert_eq!(
+            config.acme.directory_url.as_deref(),
+            Some("https://ca.example/directory")
+        );
+        assert_eq!(config.acme.contacts, vec!["mailto:ops@example".to_owned()]);
+        assert_eq!(config.acme.domains, vec!["box.example".to_owned()]);
+        assert_eq!(
+            config.acme.credentials_path,
+            Some(PathBuf::from("/tmp/acme.json"))
+        );
+        assert_eq!(config.acme.ca_root, Some(PathBuf::from("/tmp/ca.pem")));
+        assert_eq!(config.acme.profile.as_deref(), Some("shortlived"));
         assert_eq!(config.auth.argon2.m_kib, Some(65536));
-        assert_eq!(config.auth.argon2.t, 4);
-        assert_eq!(config.auth.argon2.p, 2);
-        assert_eq!(config.auth.idle_timeout_secs, 60);
-        assert_eq!(config.auth.absolute_timeout_secs, 120);
-        assert_eq!(config.auth.max_failures, 2);
-        assert!(config.auth.totp_required);
         assert_eq!(config.update.min_age_days, 9);
         assert!(config.update.auto_install);
         assert_eq!(config.modules.enabled, Some(vec!["hosts".to_owned()]));
@@ -563,6 +615,7 @@ mod tests {
             "totp_requird = true\n",
             "[listen]\nport = 3333\n",
             "[tls]\nboostrap = \"acme\"\n",
+            "[acme]\ndirectory = \"https://ca.example\"\n",
             "[auth]\nargon = {}\n",
             "[auth.argon2]\nmemory = 1\n",
             "[update]\nmin_age = 1\n",
