@@ -11,12 +11,14 @@
 //! What is deliberately *not* modeled, and therefore stays
 //! [`LineKind::Unknown`]:
 //!
-//! * lines that do not start with `/` — backslash-continued entries, quoted
-//!   export names with spaces (`"/srv/with space"`), the `-` default-options
-//!   specifications, and plain garbage;
+//! * lines that do not start with `/` — backslash-continued entries (a line
+//!   ending in `\\`), quoted export names with spaces (`"/srv/with space"`),
+//!   the `-` default-options specifications, and plain garbage;
 //! * lines with unbalanced or nested parentheses (`h(rw`, `@(g)(sec=krb5p)`),
 //!   because one client token has exactly one option list;
-//! * anything carrying `#` outside the line-leading comment position.
+//! * a path, host or option containing `\\`, `"` or `#`, a host starting
+//!   with `-`, or a line ending in `\\` — all would be truncated or
+//!   folded by the file format and must stay verbatim.
 //!
 //! All of these are kept verbatim and never rewritten, so hand-written kerberos
 //! setups survive every edit this module makes.
@@ -207,10 +209,13 @@ fn parse_client(token: &str) -> Option<Client> {
         }
         None => (token, ""),
     };
-    // A host never carries `"` or `#`: the first is the marker of a quoted
-    // export name this module does not model, the second starts a comment, and
-    // neither may be silently swallowed.
-    if host.is_empty() || host.contains(['#', '"']) {
+    // A host never carries `"` or `#`, never starts with `-` (the marker of a
+    // default-options specification), and never carries `\\` (line
+    // continuation) — none may be silently swallowed.
+    if host.is_empty() || host.contains(['#', '"', '\\']) || host.starts_with('-') {
+        return None;
+    }
+    if options_raw.contains(['#', '"', '\\']) {
         return None;
     }
     let options: Vec<String> = options_raw
@@ -231,9 +236,16 @@ fn parse_client(token: &str) -> Option<Client> {
 /// quoted path with spaces, a `-` default-options specification — is not an
 /// export and stays [`LineKind::Unknown`].
 fn parse_export(raw: &str) -> Option<Export> {
+    let trimmed = raw.trim();
+    if trimmed.ends_with('\\') {
+        return None;
+    }
     let mut tokens = raw.split_whitespace();
     let path = tokens.next()?;
     if !path.starts_with('/') {
+        return None;
+    }
+    if path.contains(['#', '"', '\\']) {
         return None;
     }
     let clients: Vec<Client> = tokens.map(parse_client).collect::<Option<Vec<_>>>()?;
@@ -273,6 +285,25 @@ fn classify(raw: &str) -> LineKind {
 /// option containing whitespace, `(`, `)`, `#` or a comma, or a value that is not
 /// already trimmed.
 fn render_line(export: &Export) -> Result<String, EditError> {
+    if export.path.contains(['#', '"', '\\']) {
+        return Err(EditError::Unsupported {
+            message: format!("export path would not round-trip: {:?}", export.path),
+        });
+    }
+    for client in &export.clients {
+        if client.host.starts_with('-') || client.host.contains(['#', '"', '\\']) {
+            return Err(EditError::Unsupported {
+                message: format!("export host would not round-trip: {:?}", client.host),
+            });
+        }
+        for option in &client.options {
+            if option.contains(['#', '"', '\\']) {
+                return Err(EditError::Unsupported {
+                    message: format!("export option would not round-trip: {option:?}"),
+                });
+            }
+        }
+    }
     let mut raw = export.path.clone();
     for client in &export.clients {
         raw.push(' ');
@@ -282,6 +313,11 @@ fn render_line(export: &Export) -> Result<String, EditError> {
             raw.push_str(&client.options.join(","));
             raw.push(')');
         }
+    }
+    if raw.trim_end().ends_with('\\') {
+        return Err(EditError::Unsupported {
+            message: format!("export would end with continuation: {raw:?}"),
+        });
     }
     if raw.contains(['\n', '\r', '\0']) {
         return Err(EditError::LineBreakInValue { value: raw });
@@ -446,6 +482,12 @@ const RELATIVE_PATH: MessageId = MessageId::new("nfs-relative-path");
 const EMPTY_HOST: MessageId = MessageId::new("nfs-empty-host");
 /// Fluent id: an option token could not have come from a real exports file.
 const INVALID_OPTION: MessageId = MessageId::new("nfs-invalid-option");
+/// Fluent id: a host starts with `-` (default-options) — not modeled.
+const BAD_HOST: MessageId = MessageId::new("nfs-bad-host");
+/// Fluent id: an export path carries syntax that would truncate the line.
+const BAD_PATH: MessageId = MessageId::new("nfs-bad-path");
+/// Fluent id: a rendered line would end with a continuation backslash.
+const BAD_CONTINUATION: MessageId = MessageId::new("nfs-bad-continuation");
 /// Fluent id: `no_root_squash` hands the client root privileges on the export.
 const NO_ROOT_SQUASH: MessageId = MessageId::new("nfs-no-root-squash");
 /// Fluent id: the export is reachable with `sec=sys`, i.e. no cryptographic
@@ -468,7 +510,9 @@ const SYNC_UNDECIDED: MessageId = MessageId::new("nfs-sync-undecided");
 /// only have arrived by hand through the JSON API — and could not survive a
 /// round trip through the file.
 fn is_valid_option(option: &str) -> bool {
-    !option.is_empty() && !option.contains(char::is_whitespace) && !option.contains(['(', ')'])
+    !option.is_empty()
+        && !option.contains(char::is_whitespace)
+        && !option.contains(['(', ')', '#', '"', '\\'])
 }
 
 /// The security flavors a `sec=` option lists, when one is present.
@@ -494,9 +538,45 @@ fn validate_export(export: &Export, index: usize, diagnostics: &mut Diagnostics)
                 .with_field(path_field)
                 .with_arg("path", export.path.clone()),
         );
+    } else if export.path.trim_end().ends_with('\\') {
+        diagnostics.push(
+            Diagnostic::new(Severity::Error, BAD_CONTINUATION)
+                .with_field(path_field)
+                .with_arg("path", export.path.clone()),
+        );
+    } else if export.path.contains(['#', '"', '\\']) {
+        diagnostics.push(
+            Diagnostic::new(Severity::Error, BAD_PATH)
+                .with_field(path_field)
+                .with_arg("path", export.path.clone()),
+        );
     }
     for (client_index, client) in export.clients.iter().enumerate() {
         validate_client(client, index, client_index, diagnostics);
+    }
+    // A rendered line ending in `\` would be refused by `render_line`, so an
+    // API-supplied model ending that way must be an Error even if the fields
+    // look okay (e.g. trailing `\` in an option that otherwise passes
+    // is_valid_option before the fix).
+    let rendered_ending = {
+        let mut raw = export.path.clone();
+        for c in &export.clients {
+            raw.push(' ');
+            raw.push_str(&c.host);
+            if !c.options.is_empty() {
+                raw.push('(');
+                raw.push_str(&c.options.join(","));
+                raw.push(')');
+            }
+        }
+        raw
+    };
+    if rendered_ending.trim_end().ends_with('\\') && !export.path.trim_end().ends_with('\\') {
+        diagnostics.push(
+            Diagnostic::new(Severity::Error, BAD_CONTINUATION)
+                .with_field(FieldPath::new(format!("entries/{index}")))
+                .with_arg("path", export.path.clone()),
+        );
     }
 }
 
@@ -507,8 +587,29 @@ fn validate_client(client: &Client, index: usize, client_index: usize, out: &mut
     let host_field = FieldPath::new(format!("entries/{index}/clients/{client_index}/host"));
     if client.host.is_empty() {
         out.push(Diagnostic::new(Severity::Error, EMPTY_HOST).with_field(host_field));
+    } else if client.host.starts_with('-') || client.host.contains(['#', '"', '\\']) {
+        out.push(
+            Diagnostic::new(Severity::Error, BAD_HOST)
+                .with_field(host_field)
+                .with_arg("host", client.host.clone()),
+        );
+    } else if client.host.trim_end().ends_with('\\') {
+        out.push(
+            Diagnostic::new(Severity::Error, BAD_CONTINUATION)
+                .with_field(host_field)
+                .with_arg("host", client.host.clone()),
+        );
     }
     for (option_index, option) in client.options.iter().enumerate() {
+        if option.trim_end().ends_with('\\') {
+            out.push(
+                Diagnostic::new(Severity::Error, BAD_CONTINUATION)
+                    .with_field(FieldPath::new(format!(
+                        "entries/{index}/clients/{client_index}/options/{option_index}"
+                    )))
+                    .with_arg("option", option.clone()),
+            );
+        }
         let field = FieldPath::new(format!(
             "entries/{index}/clients/{client_index}/options/{option_index}"
         ));
@@ -714,10 +815,11 @@ impl ConfigModule for NfsModule {
 #[cfg(test)]
 mod tests {
     use super::{
-        Client, EMPTY_HOST, EMPTY_PATH, Export, INVALID_OPTION, Model, NFS_DESCRIPTOR,
-        NO_ROOT_SQUASH, NfsModule, RELATIVE_PATH, ROOT_SQUASH_UNDECIDED, SEC_SYS_ONLY,
-        SUBTREE_UNDECIDED, SYNC_UNDECIDED, WORLD_EXPORT, classify, is_valid_option, parse_client,
-        parse_export, render_line, schema_with_hints, sec_flavors,
+        BAD_CONTINUATION, BAD_HOST, BAD_PATH, Client, EMPTY_HOST, EMPTY_PATH, Export,
+        INVALID_OPTION, Model, NFS_DESCRIPTOR, NO_ROOT_SQUASH, NfsModule, RELATIVE_PATH,
+        ROOT_SQUASH_UNDECIDED, SEC_SYS_ONLY, SUBTREE_UNDECIDED, SYNC_UNDECIDED, WORLD_EXPORT,
+        classify, is_valid_option, parse_client, parse_export, render_line, schema_with_hints,
+        sec_flavors,
     };
     use detent_core::descriptor::{HostProfile, InitSystem, Os, ValidationCtx};
     use detent_core::diag::{MessageId, Severity};
@@ -759,6 +861,9 @@ mod tests {
             "nfs-empty-path",
             "nfs-relative-path",
             "nfs-empty-host",
+            "nfs-bad-host",
+            "nfs-bad-path",
+            "nfs-bad-continuation",
             "nfs-invalid-option",
             "nfs-no-root-squash",
             "nfs-sec-sys-only",
@@ -879,6 +984,26 @@ mod tests {
         assert_eq!(parse_export("1.2.3.4"), None);
     }
 
+    #[test]
+    fn parse_export_rejects_syntax_injection() {
+        assert_eq!(parse_export("/srv -rw,no_root_squash *"), None);
+        assert_eq!(parse_export("/a#b h(rw)"), None);
+        assert_eq!(parse_export("/srv h\\"), None);
+        assert_eq!(parse_export("/srv h(rw#)"), None);
+        assert_eq!(parse_export("/srv/a\\"), None);
+        assert_eq!(parse_export("/srv/a h(rw) \\"), None);
+    }
+
+    #[test]
+    fn parse_client_rejects_dash_and_backslash() {
+        assert_eq!(parse_client("-rw"), None);
+        assert_eq!(parse_client("-"), None);
+        assert_eq!(parse_client("h\\"), None);
+        assert_eq!(parse_client("h#"), None);
+        assert_eq!(parse_client("h\""), None);
+        assert_eq!(parse_client("h(rw#)"), None);
+    }
+
     // -------------------------------------------------------------------- classify
 
     #[test]
@@ -891,6 +1016,34 @@ mod tests {
     }
 
     // ----------------------------------------------------------------- render_line
+
+    #[test]
+    fn render_line_rejects_syntax_injection() {
+        assert!(matches!(
+            render_line(&export("/srv", &[client("-rw", &[])])),
+            Err(EditError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            render_line(&export("/srv", &[client("h\\", &[])])),
+            Err(EditError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            render_line(&export("/a#b", &[client("h", &["rw"])])),
+            Err(EditError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            render_line(&export("/srv", &[client("h", &["rw#"])])),
+            Err(EditError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            render_line(&export("/srv\\", &[client("h", &["rw"])])),
+            Err(EditError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            render_line(&export("/srv", &[client("h", &["rw\\"])])),
+            Err(EditError::Unsupported { .. })
+        ));
+    }
 
     #[test]
     fn render_line_emits_single_space_joins() {
@@ -1072,6 +1225,40 @@ mod tests {
         let space_option = client("h", &[" "]);
         let spaced = model(vec![export("/srv/a", &[space_option])]);
         assert!(has(&spaced, INVALID_OPTION, Severity::Error));
+    }
+
+    #[test]
+    fn validate_flags_dash_host_and_syntax_injection() {
+        assert!(has(
+            &model(vec![export("/srv", &[client("-rw", &[])])]),
+            BAD_HOST,
+            Severity::Error
+        ));
+        assert!(has(
+            &model(vec![export("/a#b", &[client("h", &["rw"])])]),
+            BAD_PATH,
+            Severity::Error
+        ));
+        assert!(has(
+            &model(vec![export("/srv\\", &[client("h", &["rw"])])]),
+            BAD_CONTINUATION,
+            Severity::Error
+        ));
+        assert!(has(
+            &model(vec![export("/srv", &[client("h\\", &[])])]),
+            BAD_HOST,
+            Severity::Error
+        ));
+        assert!(has(
+            &model(vec![export("/srv", &[client("h", &["rw#"])])]),
+            INVALID_OPTION,
+            Severity::Error
+        ));
+        assert!(has(
+            &model(vec![export("/srv", &[client("h", &["x\\"])])]),
+            BAD_CONTINUATION,
+            Severity::Error
+        ));
     }
 
     #[test]
