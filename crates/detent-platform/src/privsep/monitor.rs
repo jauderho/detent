@@ -416,14 +416,12 @@ impl<'a> Monitor<'a> {
     /// Verify the staged binary and atomically swap it over the running one.
     ///
     /// `staged_path` is `<state_root>/update/staged/<hex sha256>`. The file
-    /// must exist, be a root-owned regular file when the monitor runs as
-    /// root (the worker runs as `detent` and can write anything else under
-    /// the state root, but must never mint a binary the monitor installs as
-    /// root), open `O_NOFOLLOW`, and match `len`/`sha256` as read from the
-    /// open fd — never a re-opened path. The swap itself happens through
-    /// [`swap_running_binary`] on those verified bytes and keeps the
-    /// previous binary at `<target>.prev`, same convention
-    /// `detent-update::install::swap` uses.
+    /// must be owned by the monitor's own euid (in production that is root,
+    /// so a `detent`-owned file the worker planted refuses), open
+    /// `O_NOFOLLOW`, and match `len`/`sha256` as read from the open fd —
+    /// never a re-opened path. The swap writes those verified bytes through
+    /// [`swap_running_binary`] and keeps the previous binary at
+    /// `<target>.prev`, same convention `detent-update::install::swap` uses.
     fn replace_binary(&self, len: u64, sha256: crate::fs::atomic::Sha256Digest) -> Response {
         let staged = staged_path(self.allow.state_root(), sha256);
         let bytes = match read_staged_verified(&staged, len, sha256) {
@@ -915,8 +913,8 @@ fn staged_path(state_root: &Path, sha256: crate::fs::atomic::Sha256Digest) -> Pa
     state_root.join(STAGED_DIR).join(sha256.to_string())
 }
 
-/// Open `path` with `O_NOFOLLOW`, require a root-owned regular file when the
-/// monitor runs as root, and return the bytes read from that same fd.
+/// Open `path` with `O_NOFOLLOW`, require ownership by the monitor's own
+/// euid, and return the bytes read from that same fd.
 ///
 /// The `len` gate doubles as the allocation cap: at most `u32::MAX` bytes
 /// are read (the privsep frame cap is 1 MiB, so production requests are far
@@ -959,14 +957,16 @@ fn read_staged_verified(
             "staged binary is not a regular file".to_owned(),
         ));
     }
-    // Fail closed when privileged: a `detent`-owned staged file must never
-    // become the running binary, even if no root staged-producer exists yet
-    // (that producer is the tracked follow-up; until it lands every
-    // ReplaceBinary request refuses). Skipped off-root so dev/test runs as a
-    // normal user keep swapping.
-    if rustix::process::geteuid().is_root() && meta.uid() != 0 {
-        tracing::warn!("staged binary refused: not root-owned");
-        return Err(ProtoError::Io("staged binary is not root-owned".to_owned()));
+    // The staged file must belong to whoever the monitor runs as: in
+    // production that is root, so a `detent`-owned file the worker planted
+    // refuses; in dev/test the monitor runs as the dev uid, so the same
+    // comparison keeps the suite exercising the gate instead of skipping it.
+    // Until a privileged staged-producer lands, the web `UpdateApply` path
+    // (worker-side `write_atomic` of the digest file) stays refused when
+    // privileged — fail-closed, documented at `update_apply`.
+    if meta.uid() != rustix::process::geteuid().as_raw() {
+        tracing::warn!("staged binary refused: untrusted owner");
+        return Err(ProtoError::Io("staged binary is not trusted".to_owned()));
     }
     if meta.len() != len {
         return Err(ProtoError::Io(
@@ -1065,8 +1065,8 @@ fn swap_running_binary(bytes: &[u8], staged: &Path, target: &Path) -> Result<(),
     // Stage into the target's own directory first: `staged` lives under the
     // state root (e.g. `/var/lib/detent`), while `target` is the running
     // binary (e.g. `/usr/local/bin`) — a cross-filesystem `rename` would fail
-    // with EXDEV in production. Link-then-copy onto that filesystem, chmod
-    // there, then rename; same convention as `detent_update::install::stage`.
+    // with EXDEV in production. Write the verified `bytes` there, chmod,
+    // then rename; same convention as `detent_update::install::stage`.
     let target_dir = target.parent().map_or_else(
         || std::path::PathBuf::from("/"),
         std::path::Path::to_path_buf,
@@ -1077,8 +1077,8 @@ fn swap_running_binary(bytes: &[u8], staged: &Path, target: &Path) -> Result<(),
     );
     let mut tmp_name = staged_name;
     // Pid-unique: two concurrent swaps on the same target must not share a
-    // temp name. No partial write to leak on the link path; on the copy
-    // path a crash leaves at most one orphaned `.tmp.<pid>` beside target.
+    // temp name. A crash after the write leaves at most one orphaned
+    // `.tmp.<pid>` beside target.
     tmp_name.push(format!(".tmp.{}", std::process::id()));
     let tmp = target_dir.join(tmp_name);
     let _ = std::fs::remove_file(&tmp);
@@ -1102,12 +1102,6 @@ fn swap_running_binary(bytes: &[u8], staged: &Path, target: &Path) -> Result<(),
             err.kind()
         )));
     }
-    if let Err(err) = std::fs::set_permissions(&tmp, target_meta.permissions()) {
-        return Err(ProtoError::Io(format!(
-            "chmod staged binary: {}",
-            err.kind()
-        )));
-    }
 
     if let Err(err) = std::fs::rename(&tmp, target) {
         let _ = std::fs::remove_file(&tmp);
@@ -1116,7 +1110,7 @@ fn swap_running_binary(bytes: &[u8], staged: &Path, target: &Path) -> Result<(),
             err.kind()
         )));
     }
-    // Staged file consumed: the copy in the target dir is the new binary.
+    // Staged file consumed: the verified bytes now live at the target.
     let _ = std::fs::remove_file(staged);
     Ok(())
 }

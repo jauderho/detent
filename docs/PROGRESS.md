@@ -7,7 +7,7 @@ phase or a self-contained piece of work finishes.
 
 ## 2026-09-23 - ReplaceBinary trust boundary: staged bytes gated at the monitor
 
-Jev (`jev-1.13.0`) confirmed priv-esc (noul 0.96) and picked `root_ownership_gate` (conf 0.84, p=0.89 over in-monitor-sigstore 0.10, engine-side-verify 0.01); TOCTOU worth fixing (noul 0.87). `monitor.rs` now opens the staged file `O_NOFOLLOW` via `rustix::fs::open`, requires a root-owned regular file when euid is 0 (fail-closed until a root staged-producer lands; skipped off-root so dev/test keep working), reads + hashes from the same fd (`take(u32::MAX)` cap), and `swap_running_binary` writes those verified bytes instead of link/copy of the path. Test: symlinked staged file refused, target untouched.
+Jev (`jev-1.13.0`) confirmed priv-esc (noul 0.96) and picked `root_ownership_gate` (conf 0.84, p=0.89 over in-monitor-sigstore 0.10, engine-side-verify 0.01); TOCTOU worth fixing (noul 0.87). `monitor.rs` opens the staged file `O_NOFOLLOW` via `rustix::fs::open`, requires ownership by the monitor's own euid (root in production, so a `detent`-planted file refuses; dev/test same-euid swaps keep running and exercising the gate), reads + hashes from the same fd (`take(u32::MAX)` cap), and `swap_running_binary` writes those verified bytes (no path re-read; duplicate `set_permissions` dropped). Until a privileged staged-producer lands, the worker-side `UpdateApply` materialize stays refused when privileged — fail-closed, documented at `update_apply`. Test: symlinked staged file refused, target untouched.
 
 Verify: `cargo test -p detent-platform --lib` 232 passed; `cargo test -p detent-ops --lib` 45 passed; clippy clean; fmt clean.
 
