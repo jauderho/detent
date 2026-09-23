@@ -5,6 +5,12 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-22 - Phase 6 EAB fix: redacted Debug, decode-before-builder
+
+`EabCredentials` drops the derived `Debug` for a hand-written one: kid visible, `key_b64` as `[redacted]` — load-bearing, do not re-derive (crate convention: redacted provider impls, `debug_output_redacts_every_secret` covers Phase 6 secrets-never-logged). Test: `eab_debug_redacts_the_key_but_names_the_kid`. EAB decode moved from `create_fresh` into `load_or_create_account`, before the `Account::builder()` match; the built `ExternalAccountKey` is passed down, restored-account skip unchanged. Test: `account_and_order_refuses_bad_eab_before_it_builds_a_client` (missing creds file + bad base64 → `Config` "not base64", no file created; reaching it under `--all-features` proves the ordering since the builder panics there). Declined: a std-only blocking HTTPS client for providers — forbidden by the ADR-009 single-stack rule and ADR-011 cooldown; the correct path is the existing hyper-rustls `RealTransport` pattern at the caller boundary. Date correction: `5d9cd73` committed the scoping entry dated 2026-09-23; fixed to 2026-09-22 to match the repo timeline.
+
+Verify: `cargo test -p detent-acme --all-features --lib` 61 passed; `clippy -p detent-acme --all-targets --all-features -D warnings` clean; fmt clean. Committed as `9f0ced7`.
+
 ## 2026-09-22 - Phase 6 renewal scoping: renewal_check already exists, nothing built
 
 Jev (`jev-1.13.0`) routed next_slice `provider_transport` (conf 0.79, p=0.86 over renewal_driver 0.08, attest 0.06; non-destructive noul 0.2), then sub-slice `renewal_check` (conf 0.79, p=0.86 over cert_renew_wiring 0.11, renewal_loop 0.03). Scoping found both blocked/covered: provider transport needs a new TLS dep under ADR-011 cooldown (Jev `park_transport` conf 1.0, p=1.0; detent-acme is tokio-free, RFC2136 needs hmac too), and renewal_check already exists (`decide_renewal` + `should_renew_in_window` + `warning_for`, all tested; `CertStore::replace` hot reload + cert status endpoint live). No code changed; no verification to run.
