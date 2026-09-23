@@ -30,7 +30,7 @@
 //! [`ProtoError::Unavailable`]. `Mount` answers [`ProtoError::Unsupported`]
 //! until the `module-mounts` feature exists.
 
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -416,37 +416,25 @@ impl<'a> Monitor<'a> {
     /// Verify the staged binary and atomically swap it over the running one.
     ///
     /// `staged_path` is `<state_root>/update/staged/<hex sha256>`. The file
-    /// must exist, the on-disk length must match `len`, and the on-disk
-    /// digest must match `sha256`; otherwise the request is rejected before
-    /// any rename. The swap itself happens through [`swap_running_binary`]
-    /// and keeps the previous binary at `<target>.prev`, same convention
+    /// must exist, be a root-owned regular file when the monitor runs as
+    /// root (the worker runs as `detent` and can write anything else under
+    /// the state root, but must never mint a binary the monitor installs as
+    /// root), open `O_NOFOLLOW`, and match `len`/`sha256` as read from the
+    /// open fd — never a re-opened path. The swap itself happens through
+    /// [`swap_running_binary`] on those verified bytes and keeps the
+    /// previous binary at `<target>.prev`, same convention
     /// `detent-update::install::swap` uses.
     fn replace_binary(&self, len: u64, sha256: crate::fs::atomic::Sha256Digest) -> Response {
         let staged = staged_path(self.allow.state_root(), sha256);
-        let actual_len = match staged_path_len(&staged) {
-            Ok(len) => len,
+        let bytes = match read_staged_verified(&staged, len, sha256) {
+            Ok(bytes) => bytes,
             Err(err) => return Response::Error(err),
         };
-        if actual_len != len {
-            return Response::Error(ProtoError::Io(
-                "staged binary size does not match the request".to_owned(),
-            ));
-        }
-        let actual_digest = match staged_path_digest(&staged) {
-            Ok(digest) => digest,
-            Err(err) => return Response::Error(err),
-        };
-        if actual_digest != sha256 {
-            return Response::Error(ProtoError::Conflict {
-                expected: sha256,
-                actual: Some(actual_digest),
-            });
-        }
         let target = self
             .binary_override
             .clone()
             .unwrap_or_else(current_exe_path);
-        match swap_running_binary(&staged, &target) {
+        match swap_running_binary(&bytes, &staged, &target) {
             Ok(()) => Response::Replaced {
                 version: sha256.to_string(),
             },
@@ -927,33 +915,87 @@ fn staged_path(state_root: &Path, sha256: crate::fs::atomic::Sha256Digest) -> Pa
     state_root.join(STAGED_DIR).join(sha256.to_string())
 }
 
-fn staged_path_len(path: &Path) -> Result<u64, ProtoError> {
-    match std::fs::metadata(path) {
-        Ok(meta) => Ok(meta.len()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            Err(ProtoError::Io("staged binary is missing".to_owned()))
-        }
-        Err(err) => Err(ProtoError::Io(format!(
-            "read staged metadata: {}",
-            err.kind()
-        ))),
-    }
-}
-
-fn staged_path_digest(path: &Path) -> Result<crate::fs::atomic::Sha256Digest, ProtoError> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+/// Open `path` with `O_NOFOLLOW`, require a root-owned regular file when the
+/// monitor runs as root, and return the bytes read from that same fd.
+///
+/// The `len` gate doubles as the allocation cap: at most `u32::MAX` bytes
+/// are read (the privsep frame cap is 1 MiB, so production requests are far
+/// smaller), and the digest gate compares the fd bytes against `expected`.
+/// Reading from the open fd — not a second `fs::read(path)` — closes the
+/// check-then-use race where a worker-owned path is swapped or replaced
+/// between the check and the swap.
+fn read_staged_verified(
+    path: &Path,
+    len: u64,
+    expected: crate::fs::atomic::Sha256Digest,
+) -> Result<Vec<u8>, ProtoError> {
+    use rustix::fs::{Mode, OFlags};
+    use std::os::unix::fs::MetadataExt as _;
+    let fd = match rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(err) if err == rustix::io::Errno::NOENT => {
             return Err(ProtoError::Io("staged binary is missing".to_owned()));
         }
         Err(err) => {
+            return Err(ProtoError::Io(format!("open staged binary: {err}")));
+        }
+    };
+    let file: std::fs::File = fd.into();
+    let meta = match file.metadata() {
+        Ok(meta) => meta,
+        Err(err) => {
             return Err(ProtoError::Io(format!(
-                "read staged binary: {}",
+                "stat staged binary: {}",
                 err.kind()
             )));
         }
     };
-    Ok(crate::fs::atomic::Sha256Digest::of(&bytes))
+    if !meta.is_file() {
+        return Err(ProtoError::Io(
+            "staged binary is not a regular file".to_owned(),
+        ));
+    }
+    // Fail closed when privileged: a `detent`-owned staged file must never
+    // become the running binary, even if no root staged-producer exists yet
+    // (that producer is the tracked follow-up; until it lands every
+    // ReplaceBinary request refuses). Skipped off-root so dev/test runs as a
+    // normal user keep swapping.
+    if rustix::process::geteuid().is_root() && meta.uid() != 0 {
+        tracing::warn!("staged binary refused: not root-owned");
+        return Err(ProtoError::Io("staged binary is not root-owned".to_owned()));
+    }
+    if meta.len() != len {
+        return Err(ProtoError::Io(
+            "staged binary size does not match the request".to_owned(),
+        ));
+    }
+    let capped = usize::try_from(len).unwrap_or(usize::MAX);
+    let mut bytes = Vec::new();
+    // ponytail: `take` caps a lying `len` (TOCTOU on size); the digest check
+    // below still decides.
+    if let Err(err) = (&file).take(u64::from(u32::MAX)).read_to_end(&mut bytes) {
+        return Err(ProtoError::Io(format!(
+            "read staged binary: {}",
+            err.kind()
+        )));
+    }
+    if bytes.len() != capped {
+        return Err(ProtoError::Io(
+            "staged binary size does not match the request".to_owned(),
+        ));
+    }
+    let actual = crate::fs::atomic::Sha256Digest::of(&bytes);
+    if actual != expected {
+        return Err(ProtoError::Conflict {
+            expected,
+            actual: Some(actual),
+        });
+    }
+    Ok(bytes)
 }
 
 /// Target of the binary swap in production: the running executable.
@@ -961,14 +1003,18 @@ fn current_exe_path() -> PathBuf {
     std::env::current_exe().unwrap_or_else(|_| PathBuf::from("detent"))
 }
 
-/// Atomically swap `staged` over `target`, keeping the previous binary at
-/// `<target>.prev`.
+/// Atomically swap verified staged `bytes` over `target`, keeping the
+/// previous binary at `<target>.prev`.
 ///
-/// Renames on POSIX are atomic on the same filesystem, and we keep the temp
-/// file in the target's own directory to honor that. A hard link keeps the
-/// previous binary as a cheap second name; on a filesystem that disallows
-/// links the swap falls back to copying the bytes.
-fn swap_running_binary(staged: &Path, target: &Path) -> Result<(), ProtoError> {
+/// `bytes` are the image [`read_staged_verified`] already opened
+/// (`O_NOFOLLOW`), ownership-checked, and hashed from the same fd — the swap
+/// writes those bytes, never a re-read of `staged`, so a worker-owned path
+/// swapped in after verification cannot reach the target. Renames on POSIX
+/// are atomic on the same filesystem, and we keep the temp file in the
+/// target's own directory to honor that. A hard link keeps the previous
+/// binary as a cheap second name; on a filesystem that disallows links the
+/// swap falls back to copying the bytes.
+fn swap_running_binary(bytes: &[u8], staged: &Path, target: &Path) -> Result<(), ProtoError> {
     let previous = target.with_file_name({
         let mut name = std::ffi::OsString::from(target.file_name().map_or_else(
             || "detent".to_owned(),
@@ -1036,12 +1082,11 @@ fn swap_running_binary(staged: &Path, target: &Path) -> Result<(), ProtoError> {
     tmp_name.push(format!(".tmp.{}", std::process::id()));
     let tmp = target_dir.join(tmp_name);
     let _ = std::fs::remove_file(&tmp);
-    // Link-then-copy onto the target's filesystem: no second full write of
-    // a multi-MB binary on the fast path, same failure-atomicity as
-    // `keep_previous` above.
-    if std::fs::hard_link(staged, &tmp).is_err()
-        && let Err(err) = std::fs::copy(staged, &tmp)
-    {
+    // Write the verified bytes (not a link/copy of the staged path): the
+    // staged file was hashed from an open fd, and re-reading the path here
+    // would re-open the worker's TOCTOU window.
+    if let Err(err) = std::fs::write(&tmp, bytes) {
+        let _ = std::fs::remove_file(&tmp);
         return Err(ProtoError::Io(format!(
             "stage binary in target dir: {}",
             err.kind()
@@ -2414,6 +2459,47 @@ mod tests {
         };
         assert!(message.contains("staged"), "io message: {message}");
         assert_eq!(std::fs::read(&target)?, b"old-binary");
+        Ok(())
+    }
+    #[test]
+    fn replace_binary_refuses_a_symlinked_staged_file() -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let state_root = work.path().join("state");
+        std::fs::create_dir_all(&state_root)?;
+        let target = swap_target(work.path(), "detent-symlink", b"old-binary")?;
+        let staged_bytes = b"new-binary-contents";
+        let digest = Sha256Digest::of(staged_bytes);
+        let dir = state_root.join(STAGED_DIR);
+        std::fs::create_dir_all(&dir)?;
+        let real = work.path().join("real-staged");
+        std::fs::write(&real, staged_bytes)?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, dir.join(digest.to_string()))?;
+        #[cfg(not(unix))]
+        std::fs::write(dir.join(digest.to_string()), staged_bytes)?;
+
+        let config = Config::with_state_root(&state_root);
+        let mut monitor = Monitor::new(Allowlist::from_modules(&[], &config)?, Hooks::default());
+        monitor.set_binary_override(target.clone());
+        let _ = monitor.dispatch(Request::Hello {
+            proto: PROTO_VERSION,
+        });
+        let response = monitor.dispatch(Request::ReplaceBinary {
+            len: staged_bytes.len() as u64,
+            sha256: digest,
+        })?;
+
+        #[cfg(unix)]
+        {
+            let Response::Error(ProtoError::Io(message)) = response else {
+                return Err(format!("expected Io, got {response:?}").into());
+            };
+            assert_eq!(std::fs::read(&target)?, b"old-binary");
+            assert!(
+                message.contains("staged"),
+                "symlink refusal must name the staged file: {message}"
+            );
+        }
         Ok(())
     }
 
