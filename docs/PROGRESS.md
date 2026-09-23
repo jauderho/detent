@@ -5,6 +5,11 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-23 - STAGE3 M11 completed: MCP HTTP enforces origin validation
+
+Advisory correction: `124eac5`+`c3b1c13` had only the loopback bind gate; the STAGE3 M11 second half (`enforce_origin_validation()`) was unbuilt. `e1f07fc` adds `http_config()` (`StreamableHttpServerConfig::default().enforce_origin_validation()`, empty allow-list rejects every present `Origin`, missing `Origin` passes for non-browser clients) and wires it into `serve_http`; default loopback `allowed_hosts` unchanged. Test `http_config_enforces_origin_validation` pins the flag via `Debug`.
+Verify: `cargo test -p detent --features mcp` 160 passed; clippy clean; fmt clean.
+
 ## 2026-09-23 - STAGE3 Batch1: C1-a, C1-d, H6, H12+M11, H23 docs, M1+M2
 
 C1-a (`8ae7979`): monitor refuses a hardlinked staged binary (fail closed on link count).
