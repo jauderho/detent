@@ -293,10 +293,11 @@ async fn serve_http(
     bind: SocketAddr,
 ) -> Exit {
     let make_server = move || Ok(server.clone());
+    let config = http_config();
     let http = StreamableHttpService::new(
         make_server,
         Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default(),
+        config,
     );
     let gate = verifier.clone();
     let app = axum::Router::new()
@@ -392,10 +393,16 @@ fn check_bind(bind: std::net::SocketAddr) -> bool {
 fn http_transport_allowed(euid_is_root: bool) -> bool {
     !euid_is_root
 }
+/// Streamable-HTTP config: default loopback hosts plus enforced `Origin`
+/// validation (STAGE3 M11). Empty allow-list + enforced flag rejects every
+/// present `Origin` value; missing `Origin` (non-browser clients) passes.
+fn http_config() -> StreamableHttpServerConfig {
+    StreamableHttpServerConfig::default().enforce_origin_validation()
+}
 
 #[cfg(test)]
 mod tests {
-    use super::{bearer_of, check_bind, http_transport_allowed};
+    use super::{bearer_of, check_bind, http_config, http_transport_allowed};
     fn headers(
         value: Option<&str>,
     ) -> Result<axum::http::HeaderMap, axum::http::header::InvalidHeaderValue> {
@@ -431,5 +438,13 @@ mod tests {
             assert!(!check_bind(bad.parse()?), "{bad}");
         }
         Ok(())
+    }
+    #[test]
+    fn http_config_enforces_origin_validation() {
+        let debug = format!("{:?}", http_config());
+        assert!(
+            debug.contains("validate_empty_origin_allowlist: true"),
+            "{debug}"
+        );
     }
 }
