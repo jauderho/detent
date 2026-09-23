@@ -5,6 +5,16 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-23 - docs wave 2: SECURITY_HARDENING :102/:105/:107 + ADR-012 + i18n + modules comment
+
+- 3757c2c `docs: correct SECURITY_HARDENING false claims :102/:105/:107 and ADR-012`: :102 marked planned (engine.rs:402 run_checks only in plan(), H5/H6), :105 does-not-yet-survive monitor restart (recover_pending no caller, H1), :107 best-effort worker-owned fail-open with pins (engine.rs:205-207), ADR-012 files-only rollback (H4) and in-memory timer (H1). lib.rs:8-9 deferred to HostileLocust H7.
+- 6394c9a `docs: re-correct SECURITY_HARDENING:107 for H7 intent fail-closed`: row now intent fail-closed (Started aborts via AuditUnavailable at engine.rs:174-179, emit :210 returns Result), outcome/denial best-effort, M3 journald intent. Pin: an_unwritable_audit_sink_refuses_the_mutation.
+- 9dfe023 `fix(i18n): sanitize Fluent arg values (L-OPS19)`: strip C0/C1/bidi (L-OPS19), test render_neutralises_control_and_bidi_chars_in_args.
+- ace5afb `fix(modules): remove stale impl-missing comment (L-OPS18)`: Cargo.toml false claim about 7 modules having no impl.
+- This entry `fix(docs): PROGRESS What exists 14→17 operations`: op.rs has 17 variants (ListModules..UpdateApply); correct count pinned to crate source.
+Verify: fmt, clippy -p detent-i18n/-p detent-modules --all-targets --all-features -D warnings; detent-i18n 35 passed, detent-modules 2 default / 9 all-features.
+
+
 ## 2026-09-23 - STAGE3 M11 completed: MCP HTTP enforces origin validation
 
 Advisory correction: `124eac5`+`c3b1c13` had only the loopback bind gate; the STAGE3 M11 second half (`enforce_origin_validation()`) was unbuilt. `e1f07fc` adds `http_config()` (`StreamableHttpServerConfig::default().enforce_origin_validation()`, empty allow-list rejects every present `Origin`, missing `Origin` passes for non-browser clients) and wires it into `serve_http`; default loopback `allowed_hosts` unchanged. Test `http_config_enforces_origin_validation` pins the flag via `Debug`.
@@ -698,7 +708,7 @@ Pebble + challtestsrv (Phase 6 spike, `docs/spikes/acme-le.md`).
 
 **Rust** — 19 crates. `detent-core` (CST, model, schema, diag), `detent-i18n`
 (Fluent), `detent-platform` (host detection, privsep monitor/worker, sandbox,
-service managers), `detent-ops` (the 14 operations, authz, audit),
+service managers), `detent-ops` (the 17 operations, authz, audit),
 `detent-modules` (registry; `hosts`, `resolver`, `chrony`, `mounts`, `nfs`,
 `samba`, `dhcp`, `network` implemented), `detent-web` (axum,
 rustls TLS 1.3 only, auth, CSRF, API, SPA serving), `detent` (clap CLI), plus
