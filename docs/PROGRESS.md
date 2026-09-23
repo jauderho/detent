@@ -5,6 +5,12 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-22 - Phase 6 acme config: [acme] surface unblocks the loop
+
+Jev (`jev-1.13.0`) routed next_slice `acme_config` (conf 0.98, p=0.99 over renewal_loop 0.01; non-destructive noul 0.23). `config::AcmeConfig` lands all-opt-in (`directory_url`, `contacts`, `domains`, `credentials_path`, `ca_root`, `profile`; empty = self-signed only), wired into `Config` + re-exported; doc comment drops `[acme]` from the not-owned list. Tests: defaults, full-document round-trip, unknown-key refusal (`[acme] directory = ...`). Complex reasoning by default model; Jev used only for slice routing. Note: an edit dropped the `csrf` re-export mid-slice; restored, `detent` 154 pass again.
+
+Verify: `cargo test -p detent-web --lib` 301 passed; `cargo test -p detent` 154 passed; `clippy -p detent-web -p detent --all-targets -D warnings` clean; fmt clean.
+
 ## 2026-09-22 - Phase 6 renewal_due: two-thirds predicate for the loop
 
 Jev (`jev-1.13.0`) routed next_slice `renewal_loop` (conf 0.89, p=0.93 over cert_renew_wiring 0.07; non-destructive noul 0.41). No `[acme]` config surface exists yet (config `deny_unknown_fields` refuses it by design), so the loop's network half is unbuildable — built its decision half instead: `tls::renewal_due_at` (same 66 % rule as `detent-acme`'s `should_renew`, ACME-free so web stays dependency-clean; broken lifetime renews, skew waits). Test: `renewal_fires_at_two_thirds_used` (boundary 59/60 of 90, broken, skew, fresh-bootstrap). Complex reasoning by default model; Jev used only for slice routing.
