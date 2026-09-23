@@ -32,27 +32,68 @@ pub async fn present_challenges(
     order: &mut Order,
     provider: &dyn DnsProvider,
     publish: &dyn Fn(&DnsRecord) -> Result<(), AcmeError>,
-) -> Result<(), AcmeError> {
+) -> Result<Vec<DnsRecord>, AcmeError> {
+    let mut presented: Vec<DnsRecord> = Vec::new();
     let mut authorizations = order.authorizations();
     while let Some(result) = authorizations.next().await {
-        let mut authz = result.map_err(AcmeError::from)?;
+        let mut authz = match result {
+            Ok(a) => a,
+            Err(e) => {
+                cleanup_challenges(provider, &presented);
+                return Err(AcmeError::from(e));
+            }
+        };
         if !matches!(authz.status, AuthorizationStatus::Pending) {
             continue;
         }
-        let mut challenge = authz
-            .challenge(ChallengeType::Dns01)
-            .ok_or(AcmeError::NoDns01Challenge)?;
+        let Some(mut challenge) = authz.challenge(ChallengeType::Dns01) else {
+            cleanup_challenges(provider, &presented);
+            return Err(AcmeError::NoDns01Challenge);
+        };
         let domain = challenge.identifier().to_string();
-        let record = DnsRecord::new(
+        let record = match DnsRecord::new(
             format!("_acme-challenge.{domain}"),
             challenge.key_authorization().dns_value(),
-        )?;
-        provider.present(&record)?;
-        publish(&record)?;
-        provider.wait_propagated(&record)?;
-        challenge.set_ready().await.map_err(AcmeError::from)?;
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                cleanup_challenges(provider, &presented);
+                return Err(e);
+            }
+        };
+        if let Err(e) = provider.present(&record) {
+            cleanup_challenges(provider, &presented);
+            return Err(e);
+        }
+        presented.push(record.clone());
+        if let Err(e) = publish(&record) {
+            let _ = provider.delete(&record);
+            presented.pop();
+            cleanup_challenges(provider, &presented);
+            return Err(e);
+        }
+        if let Err(e) = provider.wait_propagated(&record) {
+            let _ = provider.delete(&record);
+            presented.pop();
+            cleanup_challenges(provider, &presented);
+            return Err(e);
+        }
+        if let Err(e) = challenge.set_ready().await.map_err(AcmeError::from) {
+            let _ = provider.delete(&record);
+            presented.pop();
+            cleanup_challenges(provider, &presented);
+            return Err(e);
+        }
     }
-    Ok(())
+    Ok(presented)
+}
+
+/// Deletes every record in `records` through `provider`, ignoring delete
+/// errors. Callers run this after `finalize` whatever the outcome.
+pub fn cleanup_challenges(provider: &dyn DnsProvider, records: &[DnsRecord]) {
+    for record in records {
+        let _ = provider.delete(record);
+    }
 }
 
 /// Runs the device-attest-01 challenge presentation step of an order.
@@ -946,5 +987,59 @@ mod tests {
         .map_err(|e| format!("fixture must parse: {e}"))?;
         assert_eq!(p.status, Some(400));
         Ok(())
+    }
+
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::items_after_statements,
+        clippy::map_unwrap_or
+    )]
+    fn present_failure_withdraws_presented() {
+        use std::sync::{Arc, Mutex};
+        let deleted: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        struct Mock {
+            deleted: Arc<Mutex<Vec<String>>>,
+            fail_on: String,
+        }
+        impl crate::DnsProvider for Mock {
+            fn present(&self, record: &crate::DnsRecord) -> Result<(), crate::AcmeError> {
+                if record.fqdn() == self.fail_on {
+                    return Err(crate::AcmeError::Config("injected".into()));
+                }
+                Ok(())
+            }
+            fn delete(&self, record: &crate::DnsRecord) -> Result<(), crate::AcmeError> {
+                if let Ok(mut g) = self.deleted.lock() {
+                    g.push(record.fqdn().to_owned());
+                } else {
+                    self.deleted
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(record.fqdn().to_owned());
+                }
+                Ok(())
+            }
+        }
+        let provider = Mock {
+            deleted: Arc::clone(&deleted),
+            fail_on: "_acme-challenge.b.example.com".to_owned(),
+        };
+        let a = crate::DnsRecord::new("_acme-challenge.a.example.com", "value-a").unwrap();
+        let tracked: Vec<crate::DnsRecord> = vec![a.clone()];
+        let b = crate::DnsRecord::new("_acme-challenge.b.example.com", "value-b").unwrap();
+        assert!(provider.present(&b).is_err());
+        crate::order::cleanup_challenges(&provider, &tracked);
+        let has_a = deleted
+            .lock()
+            .is_ok_and(|g| g.contains(&a.fqdn().to_owned()));
+        assert!(has_a, "withdrawn");
+        let c = crate::DnsRecord::new("_acme-challenge.c.example.com", "value-c").unwrap();
+        crate::order::cleanup_challenges(&provider, std::slice::from_ref(&c));
+        let has_c = deleted
+            .lock()
+            .is_ok_and(|g| g.contains(&c.fqdn().to_owned()));
+        assert!(has_c);
     }
 }
