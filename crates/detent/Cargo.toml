@@ -23,6 +23,7 @@ fluent-bundle = { workspace = true }
 rustix = { workspace = true, features = ["termios"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tracing = { workspace = true }
 unic-langid = { workspace = true }
 zeroize = { workspace = true }
 # Only ever built when `web` is: `serve` runs `detent-web`'s router on a
