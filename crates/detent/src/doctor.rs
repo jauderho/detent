@@ -310,7 +310,7 @@ fn confinement_checks(
     };
     vec![Check::new("confinement", Status::Warn, detail)]
 }
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "linux")))]
 mod confinement_tests {
     use super::Status;
     use super::confinement_checks;
@@ -326,6 +326,21 @@ mod confinement_tests {
         };
         assert_eq!(check.status, Status::Warn);
         assert!(check.detail.contains("allow-list"));
+        Ok(())
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_confinement_tests {
+    use super::confinement_checks;
+    #[test]
+    fn linux_confinement_reports_landlock_and_seccomp() -> Result<(), String> {
+        let checks = confinement_checks(&[], std::path::Path::new("/tmp/detent-test"));
+        let [first, second] = checks.as_slice() else {
+            return Err(format!("landlock plus seccomp, got {checks:?}"));
+        };
+        assert_eq!(first.name, "landlock");
+        assert_eq!(second.name, "seccomp");
         Ok(())
     }
 }
