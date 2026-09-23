@@ -19,9 +19,9 @@
 //! * **Lookup does not early-exit.** Every record is compared, with
 //!   `subtle`, so the time taken says nothing about which token was presented
 //!   or how many exist.
-//! * **Expiry and revocation are checked at use**, not at issue: a token
-//!   revoked a second ago stops working now, because the store is the
-//!   authority and there is no cache in front of it.
+//! * **Expiry and revocation are checked at use.** The store re-reads the
+//!   file when its `(dev, ino, len, mtime_ns)` fingerprint changes, so a
+//!   token revoked in another process stops working without a restart.
 //! * **Nothing here renders a token or a digest.**
 
 use std::fmt;
@@ -38,6 +38,38 @@ use crate::authz::{Scope, Scopes};
 
 use super::secret::{Secret, hex, random_bytes};
 use super::{AuthError, STATE_SUBDIR, confine_state_dir, write_credential_file};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Fingerprint {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime_ns: i128,
+}
+#[allow(clippy::arithmetic_side_effects)]
+fn fingerprint_of(m: &std::fs::Metadata) -> Fingerprint {
+    use std::os::unix::fs::MetadataExt as _;
+    Fingerprint {
+        dev: m.dev(),
+        ino: m.ino(),
+        len: m.len(),
+        mtime_ns: i128::from(m.mtime()) * 1_000_000_000 + i128::from(m.mtime_nsec()),
+    }
+}
+fn current_fingerprint(p: &std::path::Path) -> Result<Option<Fingerprint>, AuthError> {
+    match std::fs::metadata(p) {
+        Ok(m) => Ok(Some(fingerprint_of(&m))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(AuthError::StoreRead {
+            path: p.to_path_buf(),
+            source,
+        }),
+    }
+}
+struct TokenInner {
+    tokens: Vec<TokenRecord>,
+    fp: Option<Fingerprint>,
+}
 
 /// Envelope version this build reads and writes.
 pub const TOKENS_VERSION: u32 = 1;
@@ -143,12 +175,11 @@ struct TokensFile {
 
 /// The API token store.
 pub struct TokenStore {
-    /// `<state_root>/state/tokens.json`.
     path: PathBuf,
-    /// The records.
-    tokens: Mutex<Vec<TokenRecord>>,
+    inner: Mutex<TokenInner>,
 }
 
+#[allow(clippy::missing_fields_in_debug)]
 impl fmt::Debug for TokenStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TokenStore")
@@ -170,9 +201,9 @@ impl TokenStore {
         let dir = state_root.join(STATE_SUBDIR);
         confine_state_dir(&dir)?;
         let path = dir.join(TOKENS_FILE);
-        let tokens = match std::fs::read(&path) {
-            Ok(raw) => Self::decode(&path, &raw)?,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        let (tokens, fp) = match std::fs::read(&path) {
+            Ok(raw) => (Self::decode(&path, &raw)?, current_fingerprint(&path)?),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => (Vec::new(), None),
             Err(source) => {
                 return Err(AuthError::StoreRead {
                     path: path.clone(),
@@ -182,7 +213,7 @@ impl TokenStore {
         };
         Ok(Self {
             path,
-            tokens: Mutex::new(tokens),
+            inner: Mutex::new(TokenInner { tokens, fp }),
         })
     }
 
@@ -232,6 +263,38 @@ impl TokenStore {
             .collect()
     }
 
+    /// Re-read the file if its `(dev, ino, len, mtime_ns)` differs (NotFound=empty).
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::StoreRead`] when the file cannot be read or is malformed.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn refresh(&self) -> Result<(), AuthError> {
+        let mut guard = self.inner.lock().map_err(|_| AuthError::StoreRead {
+            path: self.path.clone(),
+            source: std::io::Error::other("lock poisoned"),
+        })?;
+        Self::refresh_locked(&mut guard, &self.path)
+    }
+    fn refresh_locked(inner: &mut TokenInner, path: &std::path::Path) -> Result<(), AuthError> {
+        let cur = current_fingerprint(path)?;
+        if cur == inner.fp {
+            return Ok(());
+        }
+        let tokens = match std::fs::read(path) {
+            Ok(raw) => Self::decode(path, &raw)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(source) => {
+                return Err(AuthError::StoreRead {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        inner.tokens = tokens;
+        inner.fp = cur;
+        Ok(())
+    }
     /// Mint a token. The plaintext comes back **once**; only its digest is
     /// kept.
     ///
@@ -294,6 +357,7 @@ impl TokenStore {
     /// has expired. One answer for both, so a caller cannot learn that a token
     /// *used* to be valid.
     pub fn authenticate(&self, presented: &str, now_unix: i64) -> Result<TokenIdentity, AuthError> {
+        self.refresh()?;
         let wanted = digest_of(presented);
         let mut matched: Option<TokenRecord> = None;
         // Every record is examined: no early exit, so the work done does not
@@ -341,9 +405,9 @@ impl TokenStore {
     /// A snapshot of the records; empty if the lock was poisoned, which
     /// refuses every token rather than accepting one.
     fn records(&self) -> Vec<TokenRecord> {
-        self.tokens
+        self.inner
             .lock()
-            .map(|tokens| tokens.clone())
+            .map(|g| g.tokens.clone())
             .unwrap_or_default()
     }
 
@@ -353,11 +417,9 @@ impl TokenStore {
     where
         F: FnOnce(&mut Vec<TokenRecord>) -> Result<(), AuthError>,
     {
-        let mut guard = self
-            .tokens
-            .lock()
-            .map_err(|_poisoned| AuthError::UnknownToken)?;
-        let mut candidate = guard.clone();
+        let mut guard = self.inner.lock().map_err(|_| AuthError::UnknownToken)?;
+        Self::refresh_locked(&mut guard, &self.path)?;
+        let mut candidate = guard.tokens.clone();
         change(&mut candidate)?;
         let file = TokensFile {
             version: TOKENS_VERSION,
@@ -370,7 +432,8 @@ impl TokenStore {
             })?;
         encoded.push(b'\n');
         write_credential_file(&self.path, &encoded)?;
-        *guard = candidate;
+        guard.tokens = candidate;
+        guard.fp = current_fingerprint(&self.path)?;
         Ok(())
     }
 }
@@ -582,11 +645,32 @@ mod tests {
         std::fs::remove_dir_all(root.path().join("state"))?;
         std::fs::write(root.path().join("state"), b"")?;
         match store.issue("second", Scope::Read, None) {
-            Err(AuthError::StoreWrite { .. }) => {}
+            Err(AuthError::StoreWrite { .. } | AuthError::StoreRead { .. }) => {}
             other => return Err(format!("expected a write failure, got {other:?}").into()),
         }
         assert_eq!(store.list().len(), 1);
-        assert!(store.authenticate(token.expose(), 0).is_ok());
+        match store.authenticate(token.expose(), 0) {
+            Err(AuthError::StoreRead { .. }) => {}
+            other => {
+                return Err(format!("expected StoreRead after corruption, got {other:?}").into());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn token_revoked_through_another_store_stops_working() -> R {
+        let root = tempfile::tempdir()?;
+        let a = TokenStore::load(root.path())?;
+        let (token, view) = a.issue("laptop", Scope::Read, None)?;
+        assert!(a.authenticate(token.expose(), 0).is_ok());
+        let b = TokenStore::load(root.path())?;
+        b.revoke(&view.id)?;
+        match a.authenticate(token.expose(), 0) {
+            Err(AuthError::UnknownToken) => {}
+            other => return Err(format!("revoked token still worked: {other:?}").into()),
+        }
+        assert!(a.list().iter().all(|v| v.id != view.id));
         Ok(())
     }
 
