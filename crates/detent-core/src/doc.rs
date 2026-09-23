@@ -94,6 +94,17 @@ pub struct Line {
 }
 
 impl Line {
+    /// Creates a line for `Document::rebuild` callers and tests.
+    #[must_use]
+    pub fn new(raw: String, kind: LineKind, ending: LineEnding) -> Self {
+        Self {
+            raw,
+            kind,
+            ending,
+            span: Span::new(0, 0),
+        }
+    }
+
     /// The classification assigned by the module's classifier.
     #[must_use]
     pub const fn kind(&self) -> LineKind {
@@ -228,6 +239,24 @@ impl Document {
         } else {
             LineEnding::Lf
         }
+    }
+
+    /// Returns the classifier function this document was parsed with.
+    #[must_use]
+    pub fn classifier(&self) -> fn(&str) -> LineKind {
+        self.classify
+    }
+
+    /// Batch-mutates the document in one pass, normalising only once.
+    ///
+    /// M20's shared helper funnels every `apply` through here so a 200k-line file
+    /// does not pay O(n) `normalize` per edited line.
+    pub fn rebuild<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut Vec<Line>),
+    {
+        f(&mut self.lines);
+        self.normalize();
     }
 
     /// Inserts a new line before position `idx`; `idx == len()` appends.
