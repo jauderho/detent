@@ -333,31 +333,6 @@ fn bearer_of(headers: &axum::http::HeaderMap) -> &str {
         .unwrap_or_default()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::bearer_of;
-
-    fn headers(value: Option<&str>) -> axum::http::HeaderMap {
-        let mut headers = axum::http::HeaderMap::new();
-        if let Some(value) = value {
-            headers.insert(
-                axum::http::header::AUTHORIZATION,
-                value.parse().expect("fixture header"),
-            );
-        }
-        headers
-    }
-
-    #[test]
-    fn bearer_parsing_accepts_one_scheme_and_value() {
-        assert_eq!(bearer_of(&headers(Some("Bearer abc"))), "abc");
-        assert_eq!(bearer_of(&headers(Some("bearer  abc  "))), "abc");
-        assert_eq!(bearer_of(&headers(None)), "");
-        assert_eq!(bearer_of(&headers(Some("Basic abc"))), "");
-        assert_eq!(bearer_of(&headers(Some("Bearer "))), "");
-        assert_eq!(bearer_of(&headers(Some("Bearer"))), "");
-    }
-}
 /// Resolves on `SIGTERM` or `SIGINT`, mirroring [`crate::serve`].
 async fn shutdown_signal() {
     use tokio::signal::unix::{SignalKind, signal};
@@ -387,5 +362,30 @@ fn scope_name(scopes: detent_web::authz::Scopes) -> &'static str {
         "read,write"
     } else {
         "read"
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::bearer_of;
+    fn headers(
+        value: Option<&str>,
+    ) -> Result<axum::http::HeaderMap, axum::http::header::InvalidHeaderValue> {
+        let mut headers = axum::http::HeaderMap::new();
+        if let Some(value) = value {
+            headers.insert(axum::http::header::AUTHORIZATION, value.parse()?);
+        }
+        Ok(headers)
+    }
+
+    #[test]
+    fn bearer_parsing_accepts_one_scheme_and_value()
+    -> Result<(), axum::http::header::InvalidHeaderValue> {
+        assert_eq!(bearer_of(&headers(Some("Bearer abc"))?), "abc");
+        assert_eq!(bearer_of(&headers(Some("bearer  abc  "))?), "abc");
+        assert_eq!(bearer_of(&headers(None)?), "");
+        assert_eq!(bearer_of(&headers(Some("Basic abc"))?), "");
+        assert_eq!(bearer_of(&headers(Some("Bearer "))?), "");
+        assert_eq!(bearer_of(&headers(Some("Bearer"))?), "");
+        Ok(())
     }
 }
