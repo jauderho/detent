@@ -300,10 +300,10 @@ impl OpsEngine {
         let module = find_module(&self.modules, id)?;
         let descriptor = module.descriptor();
         let schema = module.schema_json();
+        let secret_pointers = module.secret_pointers();
         let wiring = wiring(&self.client, descriptor, &self.host.profile)?;
         let contents = self.client.read_target(wiring.target).ok();
 
-        let module = find_module(&self.modules, id)?;
         let (model, current_hash) = match contents {
             Some(contents) => {
                 let text = decode(&contents.bytes, &wiring.path)?;
@@ -325,6 +325,7 @@ impl OpsEngine {
             model,
             current_hash,
             diagnostics,
+            secret_pointers,
         })))
     }
 

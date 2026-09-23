@@ -29,6 +29,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::auth::routes::Route;
+use crate::authz::Scope;
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -205,10 +206,14 @@ pub(super) async fn get_one(
     if !well_formed_id(&id) {
         return Err(unknown_module(&id));
     }
-    let op = Operation::GetModule { id };
+    let op = Operation::GetModule { id: id.clone() };
     authorize(&caller, &op)?;
     let outcome = state.engine.execute(op, caller.identity().clone()).await?;
-    render_module(outcome)
+    let mut view = render_module(outcome)?.0;
+    if !caller.scopes().allows(Scope::Write) {
+        redact_view(&mut view);
+    }
+    Ok(Json(view))
 }
 
 /// The `OpOutcome::Module` branch, pulled out of [`get_one`] so the mismatch
@@ -217,6 +222,104 @@ fn render_module(outcome: OpOutcome) -> Result<Json<Box<ModuleView>>, ApiError> 
     match outcome {
         OpOutcome::Module(view) => Ok(Json(view)),
         _ => Err(unexpected_outcome()),
+    }
+}
+
+fn blank_plan(report: &mut PlanReport) {
+    report.rendered = String::new();
+    report.unified_diff = String::new();
+    report.diff = Vec::new();
+}
+
+fn redact_view(view: &mut ModuleView) {
+    let Some(model) = view.model.as_mut() else {
+        return;
+    };
+    for ptr in view.secret_pointers {
+        if let Some(target) = model.pointer_mut(*ptr) {
+            redact_pointer_target(target);
+        }
+    }
+    redact_heuristic(model);
+}
+
+fn redact_pointer_target(value: &mut Value) {
+    match value {
+        Value::String(s) => {
+            if s.contains("password=") {
+                *s = redact_password_substring(s);
+            } else {
+                *s = "[redacted]".to_owned();
+            }
+        }
+        Value::Array(arr) => {
+            for el in arr {
+                redact_pointer_target(el);
+            }
+        }
+        Value::Object(map) => {
+            for (_, v) in map.iter_mut() {
+                redact_pointer_target(v);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_password_substring(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(idx) = rest.find("password=") {
+        out.push_str(&rest[..idx + 9]);
+        out.push_str("[redacted]");
+        let tail = &rest[idx + 9..];
+        let end = tail.find(',').unwrap_or(tail.len());
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn redact_heuristic(value: &mut Value) {
+    match value {
+        Value::String(s) => {
+            if s.contains("password=") {
+                *s = redact_password_substring(s);
+            }
+        }
+        Value::Array(arr) => {
+            for el in arr {
+                redact_heuristic(el);
+            }
+        }
+        Value::Object(map) => {
+            for (k, v) in map.iter_mut() {
+                let kl = k.to_ascii_lowercase();
+                if kl == "password" || kl == "psk" || kl == "secret" || kl.contains("password") {
+                    redact_inner(v);
+                } else {
+                    redact_heuristic(v);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_inner(value: &mut Value) {
+    match value {
+        Value::String(s) => *s = "[redacted]".to_owned(),
+        Value::Array(arr) => {
+            for el in arr {
+                redact_inner(el);
+            }
+        }
+        Value::Object(map) => {
+            for (_, v) in map.iter_mut() {
+                redact_inner(v);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -292,7 +395,11 @@ pub(super) async fn plan(
     };
     authorize(&caller, &op)?;
     let outcome = state.engine.execute(op, caller.identity().clone()).await?;
-    render_planned(outcome)
+    let Json(mut report) = render_planned(outcome)?;
+    if !caller.scopes().allows(Scope::Write) {
+        blank_plan(&mut report);
+    }
+    Ok(Json(report))
 }
 
 /// The `OpOutcome::Planned` branch, pulled out of [`plan`] so the mismatch
@@ -412,6 +519,7 @@ mod tests {
             model: None,
             current_hash: None,
             diagnostics: Diagnostics::default(),
+            secret_pointers: &[],
         };
         assert!(render_module(OpOutcome::Module(Box::new(view))).is_ok());
         assert!(render_module(wrong_outcome()).is_err());

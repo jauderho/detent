@@ -198,6 +198,16 @@ pub trait ConfigModule: Send + Sync + 'static {
     /// Secure, host-appropriate defaults.
     fn defaults(profile: &HostProfile) -> Self::Model;
 
+    /// JSON Pointers (RFC 6901) to fields that hold secrets.
+    ///
+    /// Empty by default; a module that stores a `password`, `psk` or similar
+    /// overrides this so the web layer can redact the values for callers that
+    /// hold only `read` scope (see `detent-web` `api::modules::redact_view`).
+    #[must_use]
+    fn secret_pointers() -> &'static [&'static str] {
+        &[]
+    }
+
     /// The JSON Schema of `Self::Model`, including any `x-detent` UI hints.
     ///
     /// The default is the bare `schemars` schema. A module that attaches
@@ -210,7 +220,6 @@ pub trait ConfigModule: Send + Sync + 'static {
         schemars::schema_for!(Self::Model).to_value()
     }
 }
-
 /// Anything that can go wrong behind the JSON adapter.
 #[derive(Debug, thiserror::Error)]
 pub enum DynError {
@@ -248,9 +257,13 @@ pub trait DynModule: Send + Sync {
     /// The module's static metadata.
     fn descriptor(&self) -> &'static ModuleDescriptor;
 
+    /// JSON Pointers to secret-bearing model fields.
+    fn secret_pointers(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// The JSON Schema of the module's model, including `x-detent` hints.
     fn schema_json(&self) -> Value;
-
     /// Parses `src` and returns the model as JSON.
     ///
     /// # Errors
@@ -320,6 +333,10 @@ impl<M: ConfigModule> DynModule for Dyn<M> {
 
     fn descriptor(&self) -> &'static ModuleDescriptor {
         M::descriptor()
+    }
+
+    fn secret_pointers(&self) -> &'static [&'static str] {
+        M::secret_pointers()
     }
 
     fn schema_json(&self) -> Value {
