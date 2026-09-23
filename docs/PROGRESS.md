@@ -5,6 +5,10 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-23 - STAGE3 advisories: M12 journald scope, fmt baseline, M13 reopen fix
+
+Per advisory review: STAGE3:467 is M12's binding spec (`tracing-subscriber` fmt + env-filter, serve/mcp only, stderr) — shipped as specified, no second sink. `SECURITY_HARDENING:107` "journald after M12" is forward-looking docs, not M12 scope: journald destination lands with M3/audit work where PLAN §4.1 already names `tracing-journald`. `cargo fmt --check` (unpiped): fails on `detent-update/src/fetch.rs` (H18 file) identically on clean baseline and working tree (`diff` of both outputs empty) — pre-existing, untouched by M12/M13 slices. M13 reopened: STAGE3:473-474's rejection branch requires the FFI.md + lib.rs correction ("panic aborts the host process", `catch_unwind` rejected per ADR-010), now landed in working tree; hostile-input test pins observable half, spec's `guard(|| panic!())` untestable under `panic = "abort"`.
+
 ## 2026-09-23 - STAGE3 H11 re-run + C example green
 
 `mcp_stdio_answers_initialize` passes (1 passed, 8 filtered); C example per `docs/FFI.md:160` recipe (`cc -I include examples/ffi-c/main.c target/debug/libdetent_ffi.a`) prints `OK: parse + to_model_json + apply_json + validate_json + schema_json + defaults_json`. Jev routing only; complex reasoning by default model. L-BIN still undefined (no advisory text found in docs/spikes/CI) — awaiting owner definition.

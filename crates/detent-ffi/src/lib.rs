@@ -9,9 +9,13 @@
 //!
 //! # Safety
 //!
-//! No panic ever crosses the boundary. Every `extern "C"` entry point recovers
-//! from allocation failure and user-supplied UTF-8 / JSON shape errors, routing
-//! them to a thread-local last-error buffer readable through
+//! No panic ever unwinds across the boundary: the release profile sets
+//! `panic = "abort"` (ADR-010), so a bug that panics aborts the host process
+//! instead of crossing into C. `catch_unwind` at the boundary was considered
+//! and rejected; panics are made structurally impossible via deny-lints plus
+//! fuzzing. Every `extern "C"` entry point recovers from allocation failure
+//! and user-supplied UTF-8 / JSON shape errors, routing them to a
+//! thread-local last-error buffer readable through
 //! `detent_last_error_message()`. The `unsafe_code` deny lint forbids code paths
 //! that need raw pointers; the few we do (allocating tagged buffers, registering
 //! documents) are confined to items annotated with `#[allow(unsafe_code)]` and
