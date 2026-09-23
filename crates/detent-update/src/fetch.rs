@@ -241,6 +241,18 @@ impl RealTransport {
     /// [`FetchError::Unreachable`] when the runtime or TLS configuration
     /// cannot be built (refuse-closed: no client, no update).
     pub fn new() -> Result<Self, FetchError> {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.roots = webpki_roots::TLS_SERVER_ROOTS.to_vec();
+        Self::with_roots(roots)
+    }
+
+    /// Test-only constructor with caller-supplied roots (H18).
+    ///
+    /// # Errors
+    ///
+    /// [`FetchError::Unreachable`] when TLS configuration cannot be built.
+    #[allow(clippy::missing_errors_doc, clippy::map_unwrap_or, clippy::arithmetic_side_effects)]
+    pub fn with_roots(roots: rustls::RootCertStore) -> Result<Self, FetchError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -248,8 +260,6 @@ impl RealTransport {
                 url: String::new(),
                 reason: format!("runtime: {err}"),
             })?;
-        let mut roots = rustls::RootCertStore::empty();
-        roots.roots = webpki_roots::TLS_SERVER_ROOTS.to_vec();
         let provider = rustls::crypto::aws_lc_rs::default_provider();
         let config = rustls::ClientConfig::builder_with_provider(provider.into())
             .with_protocol_versions(&[&rustls::version::TLS13])
@@ -261,7 +271,7 @@ impl RealTransport {
             .with_no_client_auth();
         let https = hyper_rustls::HttpsConnectorBuilder::new()
             .with_tls_config(config)
-            .https_or_http()
+            .https_only()
             .enable_http1()
             .build();
         let client =
@@ -274,69 +284,122 @@ impl RealTransport {
 impl Transport for RealTransport {
     fn get(&self, url: &str, cap: u64, sink: &mut dyn std::io::Write) -> Result<u64, FetchError> {
         use http_body_util::BodyExt as _;
-        self.runtime.block_on(async {
-            let request = hyper::Request::builder()
-                .method(hyper::Method::GET)
-                .uri(url)
-                .header(hyper::header::ACCEPT, "application/vnd.github+json")
-                .header(hyper::header::USER_AGENT, "detent-update")
-                .body(http_body_util::Full::new(hyper::body::Bytes::new()))
-                .map_err(|err| FetchError::Unreachable {
-                    url: url.to_owned(),
-                    reason: format!("request: {err}"),
-                })?;
-            let response = tokio::time::timeout(GET_TIMEOUT, self.client.request(request))
-                .await
-                .map_err(|_| FetchError::Unreachable {
-                    url: url.to_owned(),
-                    reason: "timed out".to_owned(),
-                })?
-                .map_err(|err| FetchError::Unreachable {
-                    url: url.to_owned(),
-                    reason: err.to_string(),
-                })?;
-            if !response.status().is_success() {
-                return Err(FetchError::BadStatus {
-                    url: url.to_owned(),
-                    status: response.status().as_u16(),
-                });
-            }
-            let mut body = response.into_body();
-            let mut total: u64 = 0;
-            loop {
-                let frame = match tokio::time::timeout(GET_TIMEOUT, body.frame()).await {
-                    Ok(Some(frame)) => frame,
-                    Ok(None) => break,
-                    Err(_) => {
+        let mut current = url.to_owned();
+        for _ in 0..6 {
+            let outcome: Result<(Option<String>, u64), FetchError> = self.runtime.block_on(async {
+                let request = hyper::Request::builder()
+                    .method(hyper::Method::GET)
+                    .uri(current.as_str())
+                    .header(hyper::header::ACCEPT, "application/vnd.github+json")
+                    .header(hyper::header::USER_AGENT, "detent-update")
+                    .body(http_body_util::Full::new(hyper::body::Bytes::new()))
+                    .map_err(|err| FetchError::Unreachable {
+                        url: current.clone(),
+                        reason: format!("request: {err}"),
+                    })?;
+                let response = tokio::time::timeout(GET_TIMEOUT, self.client.request(request))
+                    .await
+                    .map_err(|_| FetchError::Unreachable {
+                        url: current.clone(),
+                        reason: "timed out".to_owned(),
+                    })?
+                    .map_err(|err| FetchError::Unreachable {
+                        url: current.clone(),
+                        reason: err.to_string(),
+                    })?;
+                let status = response.status().as_u16();
+                if matches!(status, 301 | 302 | 303 | 307 | 308) {
+                    let loc = response
+                        .headers()
+                        .get(hyper::header::LOCATION)
+                        .and_then(|value| value.to_str().ok())
+                        .ok_or_else(|| FetchError::Unreachable {
+                            url: current.clone(),
+                            reason: "redirect without Location".to_owned(),
+                        })?
+                        .to_owned();
+                    let next = resolve_location(&current, &loc)?;
+                    if !next.starts_with("https://") {
                         return Err(FetchError::Unreachable {
-                            url: url.to_owned(),
-                            reason: "timed out".to_owned(),
+                            url: next,
+                            reason: "redirect to non-https refused".to_owned(),
                         });
                     }
-                };
-                let data = frame
-                    .map_err(|err| FetchError::Unreachable {
-                        url: url.to_owned(),
-                        reason: err.to_string(),
-                    })?
-                    .into_data()
-                    .map_err(|_| FetchError::Unreachable {
-                        url: url.to_owned(),
-                        reason: "stream returned a metadata frame".to_owned(),
-                    })?;
-                total = total.saturating_add(data.len() as u64);
-                if total > cap {
-                    return Err(FetchError::TooLarge { cap });
+                    return Ok((Some(next), 0));
                 }
-                sink.write_all(&data)
-                    .map_err(|err| FetchError::Unreachable {
-                        url: url.to_owned(),
+                if !response.status().is_success() {
+                    return Err(FetchError::BadStatus {
+                        url: current.clone(),
+                        status,
+                    });
+                }
+                let mut body = response.into_body();
+                let mut total: u64 = 0;
+                loop {
+                    let frame = match tokio::time::timeout(GET_TIMEOUT, body.frame()).await {
+                        Ok(Some(frame)) => frame,
+                        Ok(None) => break,
+                        Err(_) => {
+                            return Err(FetchError::Unreachable {
+                                url: current.clone(),
+                                reason: "timed out".to_owned(),
+                            });
+                        }
+                    };
+                    let data = frame
+                        .map_err(|err| FetchError::Unreachable {
+                            url: current.clone(),
+                            reason: err.to_string(),
+                        })?
+                        .into_data()
+                        .map_err(|_| FetchError::Unreachable {
+                            url: current.clone(),
+                            reason: "stream returned a metadata frame".to_owned(),
+                        })?;
+                    total = total.saturating_add(data.len() as u64);
+                    if total > cap {
+                        return Err(FetchError::TooLarge { cap });
+                    }
+                    sink.write_all(&data).map_err(|err| FetchError::Unreachable {
+                        url: current.clone(),
                         reason: err.to_string(),
                     })?;
+                }
+                Ok((None, total))
+            });
+            let (redirect, total) = outcome?;
+            if let Some(next) = redirect {
+                current = next;
+                continue;
             }
-            Ok(total)
+            return Ok(total);
+        }
+        Err(FetchError::Unreachable {
+            url: current,
+            reason: "too many redirects".to_owned(),
         })
     }
+}
+
+#[allow(clippy::unnecessary_wraps, clippy::map_unwrap_or, clippy::arithmetic_side_effects)]
+fn resolve_location(base: &str, location: &str) -> Result<String, FetchError> {
+    if location.starts_with("https://") || location.starts_with("http://") {
+        return Ok(location.to_owned());
+    }
+    if location.starts_with('/') {
+        let authority_end = base.find("://").map(|index| index + 3).unwrap_or(0);
+        let authority_end = base[authority_end..]
+            .find('/')
+            .map(|index| authority_end + index)
+            .unwrap_or(base.len());
+        let origin = &base[..authority_end];
+        return Ok(format!("{origin}{location}"));
+    }
+    let base_dir = base
+        .rsplit_once('/')
+        .map(|(prefix, _)| prefix)
+        .unwrap_or(base);
+    Ok(format!("{base_dir}/{location}"))
 }
 
 #[cfg(test)]
