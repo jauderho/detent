@@ -369,6 +369,13 @@ fn check_totp(
 
 /// Record a refused attempt, and the lockouts it caused.
 fn audit_failure(state: &AppState, error: &AuthError, subject: &str, ip: IpAddr, now: Instant) {
+    // Rate-limited attempts do not append: the lockout that caused the
+    // limit was already audited as `LockedOut`, and writing on every
+    // knock lets an attacker grow the log at will (M10).
+    if matches!(error, AuthError::RateLimited { .. }) {
+        tracing::debug!(subject = %subject, %ip, "login rate-limited");
+        return;
+    }
     state.auth.record(
         &AuthRecord::new(AuthEvent::LoginFailed, subject, AuditResult::Error)
             .with_kind(IdentityKind::Session)
@@ -672,14 +679,15 @@ mod tests {
             2,
             "the address and the name are both locked: {events:?}"
         );
-        // The refused-because-locked attempt was audited but did not extend
-        // the lockout: still exactly the two records the fifth failure made.
+        // The refused-because-locked attempt does not append (M10): still
+        // exactly the two lockout records the fifth failure made, and only the
+        // five `LoginFailed` that actually happened.
         assert_eq!(
             events
                 .iter()
                 .filter(|e| **e == AuthEvent::LoginFailed)
                 .count(),
-            6
+            5
         );
         assert_eq!(fixture.state.auth.limiter.tracked(), (1, 1));
         Ok(())
@@ -1149,5 +1157,30 @@ mod tests {
         assert!(rendered.contains("alice"), "{rendered}");
         assert!(!rendered.contains("hunter2"), "{rendered}");
         assert!(!rendered.contains("123456"), "{rendered}");
+    }
+
+    /// M10: a refused-because-locked attempt must not extend the audit log.
+    #[tokio::test]
+    async fn rate_limited_attempts_do_not_grow_the_audit_log() -> R {
+        let fixture = fixture_with_alice()?;
+        for _ in 0_u32..5 {
+            let response = app(&fixture.state)
+                .oneshot(login_request(&credentials("alice", "wrong"))?)
+                .await?;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let before = fixture.audit.events().len();
+        assert!(before > 0, "setup should have audited failures + lockouts");
+        let limited = app(&fixture.state)
+            .oneshot(login_request(&credentials("alice", "hunter2"))?)
+            .await?;
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(fixture.audit.events().len(), before);
+        let limited2 = app(&fixture.state)
+            .oneshot(login_request(&credentials("alice", "hunter2"))?)
+            .await?;
+        assert_eq!(limited2.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(fixture.audit.events().len(), before);
+        Ok(())
     }
 }
