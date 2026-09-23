@@ -116,3 +116,98 @@ fn a_dry_run_serve_starts_nothing() -> TestResult {
     assert!(text.contains("dry run"), "{text}");
     Ok(())
 }
+
+#[cfg(feature = "mcp")]
+#[test]
+fn mcp_stdio_answers_initialize() -> TestResult {
+    use std::io::{BufRead, BufReader};
+    use std::time::Duration;
+
+    let tmp = tempfile::tempdir()?;
+    let state_root = tmp.path().join("state-root");
+    std::fs::create_dir_all(&state_root)?;
+    let state_arg = state_root.to_string_lossy().to_string();
+
+    let create = run(
+        &[
+            "--state-root",
+            &state_arg,
+            "token",
+            "create",
+            "test-token",
+            "--json",
+        ],
+        "",
+    )?;
+    if create.status.code() != Some(0) {
+        return Err(format!(
+            "token create failed: {}",
+            String::from_utf8_lossy(&create.stderr)
+        )
+        .into());
+    }
+    let created: serde_json::Value = serde_json::from_slice(&create.stdout)?;
+    let token = created
+        .get("token")
+        .and_then(|v| v.as_str())
+        .ok_or("missing token field")?
+        .to_owned();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_detent"))
+        .args(["--state-root", &state_arg, "mcp"])
+        .env("DETENT_MCP_TOKEN", &token)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let stdin = child.stdin.take().ok_or("no stdin")?;
+    let stdout = child.stdout.take().ok_or("no stdout")?;
+
+    let mut stdin_thread = Some(std::thread::spawn(move || {
+        use std::io::Write as _;
+        let mut stdin = stdin;
+        let line = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0.0"}
+            }
+        });
+        let _ = writeln!(stdin, "{line}");
+        let _ = stdin.flush();
+    }));
+
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        if reader.read_line(&mut line).is_ok() {
+            let _ = tx.send(line);
+        }
+    });
+
+    let reply =
+        rx.recv_timeout(Duration::from_secs(10))
+            .map_err(|_| -> Box<dyn std::error::Error> {
+                let _ = child.kill();
+                "mcp stdio did not answer initialize within 10s (deadlocked stdio?)".into()
+            })?;
+
+    let _ = child.kill();
+    let _ = child.wait();
+    if let Some(h) = stdin_thread.take() {
+        let _ = h.join();
+    }
+
+    if !(reply.contains("\"id\":1") || reply.contains("\"id\": 1")) {
+        return Err(format!("reply missing id 1: {reply}").into());
+    }
+    if !reply.contains("\"result\"") {
+        return Err(format!("reply missing result: {reply}").into());
+    }
+    Ok(())
+}

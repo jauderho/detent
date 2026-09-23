@@ -90,13 +90,9 @@ fn main() -> ExitCode {
             });
         }
     };
-
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    let stderr = std::io::stderr();
-    let mut input = stdin.lock();
-    let mut out = stdout.lock();
-    let mut notes = stderr.lock();
+    let mut input = std::io::stdin();
+    let mut out = std::io::stdout();
+    let mut notes = std::io::stderr();
 
     let exit = run::run(
         &cli,
