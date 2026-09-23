@@ -143,7 +143,7 @@ pub fn run(
 /// The startup bearer, its scopes, and the audit identity tools run as.
 ///
 /// `None` after reporting: a missing/unknown token or an unreadable store
-/// refuses startup with exit 1 before anything listens (Jev-routed).
+/// refuses startup with exit 1 before anything listens.
 fn resolve_identity(
     settings: &Settings,
     renderer: &Renderer<'_>,
