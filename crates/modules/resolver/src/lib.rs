@@ -688,6 +688,34 @@ fn render_dns_servers(servers: &[DnsServer]) -> String {
 ///
 /// As [`render_resolv`].
 fn render_unbound(entry: &UnboundEntry) -> Result<String, EditError> {
+    match entry {
+        UnboundEntry::ForwardName { name } => {
+            if name.contains(' ') || name.contains('\t') || name.contains(':') || name.contains('#')
+            {
+                return Err(EditError::Unsupported {
+                    message: format!("forward name would not round-trip: {name:?}"),
+                });
+            }
+        }
+        UnboundEntry::ForwardAddr { addr } => {
+            if addr.contains(' ') || addr.contains('\t') {
+                return Err(EditError::Unsupported {
+                    message: format!("forward addr would not round-trip: {addr:?}"),
+                });
+            }
+            // `:` and `#` appear in valid forward-addrs (`2001:db8::1`,
+            // `9.9.9.9@853#dns.quad9.net`), so only reject them when the addr
+            // is not valid — otherwise an injection like `1.1.1.1 server: ...`
+            // or `1.1.1.1# bad` would not round-trip.
+            // ponytail: allow `:`/`#` inside valid addrs (IPv6, Quad9 DoT) to keep defaults rendering.
+            if (addr.contains(':') || addr.contains('#')) && !is_valid_forward_addr(addr) {
+                return Err(EditError::Unsupported {
+                    message: format!("forward addr would not round-trip: {addr:?}"),
+                });
+            }
+        }
+        _ => {}
+    }
     let raw = match entry {
         UnboundEntry::Server => "server:".to_owned(),
         UnboundEntry::ForwardZone => "forward-zone:".to_owned(),
@@ -1235,29 +1263,30 @@ fn validate_unbound(entries: &[UnboundEntry], diagnostics: &mut Diagnostics) {
                 }
             }
             UnboundEntry::ForwardName { name } => {
+                if !is_valid_forward_zone_name(name) {
+                    diagnostics.push(
+                        Diagnostic::new(Severity::Error, INVALID_FORWARD_NAME)
+                            .with_field(FieldPath::new(format!("unbound/{index}/name")))
+                            .with_arg("name", name.clone()),
+                    );
+                }
                 if section == Some(Section::ForwardZone) {
                     if is_valid_forward_zone_name(name) {
                         forward_named = true;
-                    } else {
-                        diagnostics.push(
-                            Diagnostic::new(Severity::Error, INVALID_FORWARD_NAME)
-                                .with_field(FieldPath::new(format!("unbound/{index}/name")))
-                                .with_arg("name", name.clone()),
-                        );
                     }
                 } else {
                     misplaced(diagnostics, index, "name", "name", "forward-zone");
                 }
             }
             UnboundEntry::ForwardAddr { addr } => {
+                if !is_valid_forward_addr(addr) {
+                    diagnostics.push(
+                        Diagnostic::new(Severity::Error, INVALID_FORWARD_ADDR)
+                            .with_field(FieldPath::new(format!("unbound/{index}/addr")))
+                            .with_arg("addr", addr.clone()),
+                    );
+                }
                 if section == Some(Section::ForwardZone) {
-                    if !is_valid_forward_addr(addr) {
-                        diagnostics.push(
-                            Diagnostic::new(Severity::Error, INVALID_FORWARD_ADDR)
-                                .with_field(FieldPath::new(format!("unbound/{index}/addr")))
-                                .with_arg("addr", addr.clone()),
-                        );
-                    }
                     if addr.contains('#') {
                         forward_auth = true;
                     }
@@ -2726,7 +2755,115 @@ mod tests {
             3,
             "each forward item outside a zone is misplaced"
         );
-        assert!(!diagnostics.has_errors(), "misplacement is a warning");
+        // valid misplaced items are warnings, not errors
+        assert!(
+            !diagnostics.iter().any(|d| d.id == INVALID_FORWARD_NAME),
+            "valid misplaced name is not an error"
+        );
+        assert!(
+            !diagnostics.iter().any(|d| d.id == INVALID_FORWARD_ADDR),
+            "valid misplaced addr is not an error"
+        );
+        // invalid misplaced values must still be errors
+        let bad = m(
+            Vec::new(),
+            Vec::new(),
+            vec![
+                UnboundEntry::ForwardName {
+                    name: "bad name with space".to_owned(),
+                },
+                UnboundEntry::ForwardAddr {
+                    addr: "not-an-ip".to_owned(),
+                },
+            ],
+        );
+        let diag_bad = ResolverModule::validate(&bad, &ctx(&profile()));
+        assert!(
+            diag_bad.iter().any(|d| d.id == INVALID_FORWARD_NAME),
+            "invalid forward name is an error even when misplaced"
+        );
+        assert!(
+            diag_bad.iter().any(|d| d.id == INVALID_FORWARD_ADDR),
+            "invalid forward addr is an error even when misplaced"
+        );
+        assert!(diag_bad.has_errors(), "invalid misplaced values are errors");
+    }
+
+    #[test]
+    fn misplaced_forward_name_is_still_validated() {
+        // invalid name outside any forward-zone must be Error + Warning
+        let model = m(
+            Vec::new(),
+            Vec::new(),
+            vec![UnboundEntry::ForwardName {
+                name: "bad name with space".to_owned(),
+            }],
+        );
+        let diagnostics = ResolverModule::validate(&model, &ctx(&profile()));
+        assert!(
+            diagnostics.iter().any(|d| d.id == INVALID_FORWARD_NAME),
+            "invalid name outside zone is an error"
+        );
+        assert!(
+            diagnostics.iter().any(|d| d.id == UNBOUND_MISPLACED),
+            "misplaced name is a warning"
+        );
+        assert!(diagnostics.has_errors());
+        // invalid addr outside zone likewise
+        let model2 = m(
+            Vec::new(),
+            Vec::new(),
+            vec![UnboundEntry::ForwardAddr {
+                addr: "not-an-ip".to_owned(),
+            }],
+        );
+        let diag2 = ResolverModule::validate(&model2, &ctx(&profile()));
+        assert!(
+            diag2.iter().any(|d| d.id == INVALID_FORWARD_ADDR),
+            "invalid addr outside zone is an error"
+        );
+        assert!(
+            diag2.iter().any(|d| d.id == UNBOUND_MISPLACED),
+            "misplaced addr is a warning"
+        );
+        // render must reject injection chars
+        assert!(matches!(
+            render_unbound(&UnboundEntry::ForwardName {
+                name: "a b".to_owned()
+            }),
+            Err(EditError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            render_unbound(&UnboundEntry::ForwardName {
+                name: "a:b".to_owned()
+            }),
+            Err(EditError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            render_unbound(&UnboundEntry::ForwardName {
+                name: "a#b".to_owned()
+            }),
+            Err(EditError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            render_unbound(&UnboundEntry::ForwardAddr {
+                addr: "1.1.1.1 bad".to_owned()
+            }),
+            Err(EditError::Unsupported { .. })
+        ));
+        // valid DoT addr must still render
+        assert!(
+            render_unbound(&UnboundEntry::ForwardAddr {
+                addr: "9.9.9.9@853#dns.quad9.net".to_owned()
+            })
+            .is_ok()
+        );
+        assert!(
+            render_unbound(&UnboundEntry::ForwardAddr {
+                addr: "2001:db8::1".to_owned()
+            })
+            .is_ok()
+        );
     }
 
     // -------------------------------------------------------------- validators
