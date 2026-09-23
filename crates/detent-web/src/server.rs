@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::Router;
-use axum::extract::{DefaultBodyLimit, Request};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Request};
 use axum::http::{HeaderName, HeaderValue};
 use axum::middleware::Next;
 use axum::response::Response;
@@ -291,7 +291,6 @@ impl Server {
             router,
             permits,
         } = self;
-        let service = TowerToHyperService::new(router);
         let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
         let graceful = GracefulShutdown::new();
         let mut shutdown = std::pin::pin!(shutdown);
@@ -319,7 +318,7 @@ impl Server {
             };
 
             let acceptor = acceptor.clone();
-            let service = service.clone();
+            let router = router.clone();
             let watcher = graceful.watcher();
             let builder = builder.clone();
             tokio::spawn(async move {
@@ -337,6 +336,14 @@ impl Server {
                             return;
                         }
                     };
+                let svc = tower::ServiceExt::map_request(
+                    router,
+                    move |mut req: axum::http::Request<hyper::body::Incoming>| {
+                        req.extensions_mut().insert(ConnectInfo(peer));
+                        req
+                    },
+                );
+                let service = TowerToHyperService::new(svc);
                 let connection = builder
                     .serve_connection(TokioIo::new(tls), service)
                     .into_owned();
