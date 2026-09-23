@@ -423,12 +423,13 @@ mod tests {
         assert!(!http_transport_allowed(true));
     }
     #[test]
-    fn bind_table_keeps_bearer_on_loopback() {
+    fn bind_table_keeps_bearer_on_loopback() -> Result<(), std::net::AddrParseError> {
         for ok in ["127.0.0.1:3334", "[::1]:3334"] {
-            assert!(check_bind(ok.parse().unwrap()), "{ok}");
+            assert!(check_bind(ok.parse()?), "{ok}");
         }
         for bad in ["0.0.0.0:3334", "192.168.1.10:3334", "[::]:3334"] {
-            assert!(!check_bind(bad.parse().unwrap()), "{bad}");
+            assert!(!check_bind(bad.parse()?), "{bad}");
         }
+        Ok(())
     }
 }
