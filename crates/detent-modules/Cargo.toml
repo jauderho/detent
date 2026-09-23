@@ -25,9 +25,6 @@ detent-module-network = { path = "../modules/network", optional = true }
 default = []
 ## One feature per module crate; `detent`'s `module-<id>` feature forwards here.
 module-hosts = ["dep:detent-module-hosts"]
-## The crates below exist but have no `ConfigModule` impl yet (PLAN §2.3
-## Appendix A), so `modules()` has no constructor for them; the feature only
-## pulls the (currently empty) crate in, ready for the registry entry.
 module-resolver = ["dep:detent-module-resolver"]
 module-chrony = ["dep:detent-module-chrony"]
 module-mounts = ["dep:detent-module-mounts"]
