@@ -116,7 +116,10 @@ fn gate_age(
     now: OffsetDateTime,
     policy: &Policy,
 ) -> Result<Candidate, PolicyError> {
-    let security = release.body.contains(SECURITY_MARKER);
+    let security = release
+        .body
+        .lines()
+        .any(|line| line.trim() == SECURITY_MARKER);
     if !security {
         if let Some(published) = release.published {
             #[allow(clippy::arithmetic_side_effects)] // time subtraction clamps to the era bounds
@@ -233,6 +236,20 @@ mod tests {
             select(&[young], &current(), now(), &Policy::default()),
             Err(PolicyError::TooYoung { .. })
         ));
+    }
+
+    #[test]
+    fn marker_embedded_in_sentence_does_not_bypass() -> Result<(), Box<dyn std::error::Error>> {
+        let mut young = candidate("v0.0.2", 0);
+        young.body = "See detent-security: true for details".to_owned();
+        assert!(matches!(
+            select(&[young.clone()], &current(), now(), &Policy::default()),
+            Err(PolicyError::TooYoung { .. })
+        ));
+        young.body = "  detent-security: true  ".to_owned();
+        let chosen = select(&[young.clone()], &current(), now(), &Policy::default())?;
+        assert_eq!(chosen.tag, "v0.0.2");
+        Ok(())
     }
 
     #[test]
