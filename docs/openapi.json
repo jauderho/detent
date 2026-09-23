@@ -1112,7 +1112,8 @@
         "enum": [
           "ok",
           "denied",
-          "error"
+          "error",
+          "started"
         ]
       },
       "BackupId": {
@@ -1222,14 +1223,14 @@
           },
           {
             "type": "object",
-            "description": "The program's output must contain this literal substring. Matching is a\nplain substring search, not a regular expression: the core deliberately\ncarries no regex engine (PLAN §2.3), and the platform layer applies the\npattern as-is. Do not write anchors or metacharacters here — `^Loaded`\nlooks for a literal caret.",
+            "description": "The program's output must contain this literal substring and exit 0.\nMatching is a plain substring search, not a regular expression: the core\ndeliberately carries no regex engine (PLAN §2.3), and the platform layer\napplies the pattern as-is. Do not write anchors or metacharacters here —\n`^Loaded` looks for a literal caret.",
             "required": [
-              "stdout_pattern"
+              "stdout_contains"
             ],
             "properties": {
-              "stdout_pattern": {
+              "stdout_contains": {
                 "type": "string",
-                "description": "The program's output must contain this literal substring. Matching is a\nplain substring search, not a regular expression: the core deliberately\ncarries no regex engine (PLAN §2.3), and the platform layer applies the\npattern as-is. Do not write anchors or metacharacters here — `^Loaded`\nlooks for a literal caret."
+                "description": "The program's output must contain this literal substring and exit 0.\nMatching is a plain substring search, not a regular expression: the core\ndeliberately carries no regex engine (PLAN §2.3), and the platform layer\napplies the pattern as-is. Do not write anchors or metacharacters here —\n`^Loaded` looks for a literal caret."
               }
             }
           }

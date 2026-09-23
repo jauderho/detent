@@ -19,7 +19,7 @@ const DETAIL_CAP: usize = OUTPUT_CAP;
 
 /// Runs an [`ExternalCheck`] against a candidate file.
 ///
-/// `expects: CheckExpectation::StdoutPattern` is matched as a **plain
+/// `expects: CheckExpectation::StdoutContains` is matched as a **plain
 /// substring**, not a regular expression:
 /// [`detent_core::descriptor::CheckExpectation`]'s doc comment says "must
 /// match this regular expression", but PLAN §2.3 deliberately kept regex
@@ -95,8 +95,9 @@ impl CheckRunner for ExternalCheckRunner {
         }
         let passed = match check.expects {
             CheckExpectation::ExitZero => output.status == Some(0),
-            CheckExpectation::StdoutPattern(pattern) => {
-                String::from_utf8_lossy(&output.stdout).contains(pattern)
+            CheckExpectation::StdoutContains(pattern) => {
+                output.status == Some(0)
+                    && String::from_utf8_lossy(&output.stdout).contains(pattern)
             }
         };
         Ok(CheckOutcome {
@@ -125,10 +126,73 @@ fn build_detail(stdout: &[u8], stderr: &[u8]) -> String {
     }
     detail
 }
-
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use detent_core::descriptor::{ArgTemplate, CheckExpectation, ExternalCheck, PathSpec};
+
     use super::{ExternalCheckRunner, build_detail};
+    use crate::privsep::monitor::CheckRunner;
+    use crate::service::exec::{ProcessError, ProcessOutput, ProcessRunner};
+
+    #[derive(Default)]
+    struct FakeRunner {
+        response: Mutex<Option<ProcessOutput>>,
+    }
+
+    impl FakeRunner {
+        fn with_response(self, output: ProcessOutput) -> Self {
+            if let Ok(mut slot) = self.response.lock() {
+                *slot = Some(output);
+            }
+            self
+        }
+    }
+
+    #[derive(Clone)]
+    struct SharedFake(Arc<FakeRunner>);
+
+    impl ProcessRunner for SharedFake {
+        fn exists(&self, _path: &'static str) -> bool {
+            true
+        }
+
+        fn run(
+            &self,
+            _program: &'static str,
+            _args: &[String],
+            _timeout: Duration,
+        ) -> Result<ProcessOutput, ProcessError> {
+            self.0
+                .response
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone())
+                .map_or_else(
+                    || {
+                        Ok(ProcessOutput {
+                            status: Some(0),
+                            stdout: Vec::new(),
+                            stderr: Vec::new(),
+                            timed_out: false,
+                        })
+                    },
+                    Ok,
+                )
+        }
+    }
+
+    fn output(status: i32, stdout: &str) -> ProcessOutput {
+        ProcessOutput {
+            status: Some(status),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+            timed_out: false,
+        }
+    }
 
     #[test]
     fn debug_format_mentions_the_type_name() {
@@ -167,5 +231,42 @@ mod tests {
         let detail = build_detail(long.as_bytes(), b"");
         assert_eq!(detail.len(), super::DETAIL_CAP - 1);
         assert!(detail.is_char_boundary(detail.len()));
+    }
+
+    #[test]
+    fn stdout_pattern_requires_literal_match_and_exit_zero()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let check = ExternalCheck {
+            program: PathSpec::new("/usr/sbin/chronyd"),
+            args: &[ArgTemplate::Literal("-s")],
+            expects: CheckExpectation::StdoutContains("Loaded services"),
+        };
+        // Matching stdout but non-zero exit must NOT pass.
+        let fake =
+            Arc::new(FakeRunner::default().with_response(output(1, "Loaded services file OK\n")));
+        let runner = ExternalCheckRunner::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
+        let outcome = runner
+            .run_check(&check, Path::new("/tmp/detent-candidate-test"))
+            .map_err(|err| err.to_string())?;
+        assert!(!outcome.passed);
+
+        // Non-matching stdout with exit zero must NOT pass.
+        let fake2 =
+            Arc::new(FakeRunner::default().with_response(output(0, "nothing relevant here")));
+        let runner2 = ExternalCheckRunner::with_runner(Box::new(SharedFake(fake2)));
+        let outcome2 = runner2
+            .run_check(&check, Path::new("/tmp/detent-candidate-test"))
+            .map_err(|err| err.to_string())?;
+        assert!(!outcome2.passed);
+
+        // Both conditions together must pass.
+        let fake3 =
+            Arc::new(FakeRunner::default().with_response(output(0, "Loaded services file OK\n")));
+        let runner3 = ExternalCheckRunner::with_runner(Box::new(SharedFake(fake3)));
+        let outcome3 = runner3
+            .run_check(&check, Path::new("/tmp/detent-candidate-test"))
+            .map_err(|err| err.to_string())?;
+        assert!(outcome3.passed);
+        Ok(())
     }
 }

@@ -328,11 +328,11 @@ export interface paths {
         put?: never;
         /**
          * `POST /api/v1/system/update`.
-         * @description Installs the named update. Answered as `Unsupported` (`ops-unsupported`,
-         *     500 with a reason) until the `ReplaceBinary` monitor wiring lands — the
-         *     worker cannot swap a binary it does not own, so nothing here installs
-         *     anything yet. The route, authz (`write`), and audit record land now so
-         *     the UI builds against the real shape.
+         * @description Installs the named update: the engine bridges the release tag to the
+         *     content-addressed staged file and drives the monitor's `ReplaceBinary`
+         *     swap. Refused as `Unsupported` (`ops-unsupported`, 500 with a reason)
+         *     when the staged file is missing or the request is unsafe; the route,
+         *     authz (`write`), and audit record are the stable shape the UI builds on.
          */
         post: operations["apply_update"];
         delete?: never;
@@ -448,7 +448,7 @@ export interface components {
          * @description How an operation ended.
          * @enum {string}
          */
-        AuditResult: "ok" | "denied" | "error";
+        AuditResult: "ok" | "denied" | "error" | "started";
         /**
          * Format: int32
          * @description Index into the backup listing most recently produced for a module.
@@ -486,6 +486,7 @@ export interface components {
          *     "unknown", never a failure: status must work even when the parse does not.
          */
         CertReport: {
+            expiry_warning?: null | components["schemas"]["ExpiryWarning"];
             /** @description Uppercase colon-separated SHA-256 of the DER, as printed at startup. */
             fingerprint: string;
             /**
@@ -499,17 +500,22 @@ export interface components {
              * @description Validity end, whole seconds since the Unix epoch, when parseable.
              */
             not_after_unix?: number | null;
+            /**
+             * @description Whether two thirds of the lifetime is used (the renewal threshold).
+             *     `None` when the validity window did not parse.
+             */
+            renewal_due?: boolean | null;
         };
         /** @description How the result of an [`ExternalCheck`] is judged. */
         CheckExpectation: "exit_zero" | {
             /**
-             * @description The program's output must contain this literal substring. Matching is a
-             *     plain substring search, not a regular expression: the core deliberately
-             *     carries no regex engine (PLAN §2.3), and the platform layer applies the
-             *     pattern as-is. Do not write anchors or metacharacters here — `^Loaded`
-             *     looks for a literal caret.
+             * @description The program's output must contain this literal substring and exit 0.
+             *     Matching is a plain substring search, not a regular expression: the core
+             *     deliberately carries no regex engine (PLAN §2.3), and the platform layer
+             *     applies the pattern as-is. Do not write anchors or metacharacters here —
+             *     `^Loaded` looks for a literal caret.
              */
-            stdout_pattern: string;
+            stdout_contains: string;
         };
         /** @description The result of running one of a module's upstream validators. */
         CheckReport: {
@@ -605,6 +611,12 @@ export interface components {
             /** @description The Fluent id a front end renders. */
             message_id: string;
         };
+        /**
+         * @description Certificate expiry warning level (PLAN Phase 6 failure UX): never silent
+         *     about a dying certificate.
+         * @enum {string}
+         */
+        ExpiryWarning: "half" | "quarter";
         /**
          * @description An upstream validator run against a candidate file before it is installed, e.g.
          *     `chronyd -p -f <tmp>` or `testparm -s <tmp>`.
@@ -1712,7 +1724,7 @@ export interface operations {
                     "application/json": components["schemas"]["UpdateAppliedView"];
                 };
             };
-            /** @description Install is not wired yet */
+            /** @description No staged binary to install */
             500: {
                 headers: {
                     [name: string]: unknown;

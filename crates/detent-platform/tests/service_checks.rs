@@ -1,5 +1,5 @@
 //! `ExternalCheckRunner` behaviour (PLAN §2.3, §2.4; Phase 2 task 4):
-//! `ExitZero` pass/fail, `StdoutPattern` match/miss, temp-file substitution
+//! `ExitZero` pass/fail, `StdoutContains` match/miss, temp-file substitution
 //! landing at the right argv position, and real-binary smoke tests.
 
 use std::path::Path;
@@ -149,7 +149,7 @@ fn a_timed_out_check_fails_without_an_exit_code() -> TestResult {
 }
 
 // ---------------------------------------------------------------------------
-// StdoutPattern (plain substring — see ExternalCheckRunner's doc comment for
+// StdoutContains (plain substring — see ExternalCheckRunner's doc comment for
 // why this is not a real regex match)
 // ---------------------------------------------------------------------------
 
@@ -158,7 +158,7 @@ fn stdout_pattern_check_passes_on_a_substring_match() -> TestResult {
     let check = ExternalCheck {
         program: PROGRAM,
         args: &[ArgTemplate::Literal("-s")],
-        expects: CheckExpectation::StdoutPattern("Loaded services"),
+        expects: CheckExpectation::StdoutContains("Loaded services"),
     };
     let fake =
         Arc::new(FakeRunner::default().with_response(output(0, "Loaded services file OK\n")));
@@ -175,7 +175,7 @@ fn stdout_pattern_check_fails_when_the_substring_is_absent() -> TestResult {
     let check = ExternalCheck {
         program: PROGRAM,
         args: &[ArgTemplate::Literal("-s")],
-        expects: CheckExpectation::StdoutPattern("Loaded services"),
+        expects: CheckExpectation::StdoutContains("Loaded services"),
     };
     let fake = Arc::new(FakeRunner::default().with_response(output(0, "nothing relevant here")));
     let runner = ExternalCheckRunner::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
