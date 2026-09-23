@@ -188,6 +188,9 @@ pub struct CertReport {
     /// Whole percent of `[not_before, not_after]` elapsed at read time, when
     /// both endpoints parse. `None` means "unknown", not zero.
     pub lifetime_used_percent: Option<u8>,
+    /// Whether two thirds of the lifetime is used (the renewal threshold).
+    /// `None` when the validity window did not parse.
+    pub renewal_due: Option<bool>,
 }
 
 /// The stable wire name of a network backend.
