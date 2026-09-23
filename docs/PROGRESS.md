@@ -5,9 +5,9 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
-## 2026-09-23 - Phase 6 renewal_loop half: cert status gains renewal_due
+## 2026-09-23 - Phase 6 cert renewal signal: status gains renewal_due
 
-Jev (`jev-1.13.0`) routed next_slice `renewal_loop` (conf 0.6, p=0.73 over cert_renew_wiring 0.18, attest 0.09; non-destructive noul 0.62). Smallest unblocked decision-half: `CertReport.renewal_due: Option<bool>` (`None` when validity does not parse), filled by `cert_report` from the existing `tls::renewal_due_at` two-thirds rule — the UI/poller can now read "renew now" without re-deriving lifetime math. Test: fresh bootstrap cert reports `renewal_due == false`; `docs/openapi.json` regenerated. The background poll + fetch/install half stays open (needs design, not scoping).
+Jev (`jev-1.13.0`) routed next_slice `renewal_loop` (conf 0.6, p=0.73 over cert_renew_wiring 0.18, attest 0.09; non-destructive noul 0.62), but no background poll exists and poll + fetch/install needs design — so what landed is the unblocked prerequisite, not the loop: `CertReport.renewal_due: Option<bool>` (`None` when validity does not parse), filled by `cert_report` from the existing `tls::renewal_due_at` two-thirds rule. The UI/future poller can now read "renew now" without re-deriving lifetime math. The loop itself (poll + fetch/install) stays open.
 
 Verify: `cargo test -p detent-ops --lib` 45 passed; `cargo test -p detent-web --lib` 301 passed; clippy clean; fmt clean.
 
