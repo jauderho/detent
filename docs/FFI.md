@@ -102,8 +102,13 @@ There are no `errno`-style globals. All error context lives in
 `detent_last_error_message`, which is per-thread and must be copied by
 the caller if it is to be retained across further FFI calls.
 
-The library never panics across the boundary; allocation failures and
-shape mismatches are reported as codes or in the last-error buffer.
+Panics never unwind across the boundary: the release profile sets
+`panic = "abort"` (ADR-010), so a bug that panics aborts the host process
+rather than crossing into C. `catch_unwind` at the boundary was considered
+and rejected; panics are made structurally impossible via the
+`unwrap_used`/`expect_used`/`panic`/`indexing_slicing` deny-lints plus
+fuzzing. Allocation failures and shape mismatches are reported as codes
+or in the last-error buffer.
 
 ---
 
