@@ -53,4 +53,4 @@ pub use engine::OpsEngine;
 pub use error::OpsError;
 pub use identity::{Identity, IdentityKind};
 pub use op::{OpKind, Operation, ServiceCommand};
-pub use report::{CertReport, OpOutcome, PlanReport};
+pub use report::{CertReport, ExpiryWarning, OpOutcome, PlanReport};

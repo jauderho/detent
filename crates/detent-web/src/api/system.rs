@@ -112,31 +112,40 @@ pub(super) fn cert_report(state: &AppState) -> CertReport {
     let current = state.cert_store.current();
     let der: &[u8] = current.cert.first().map_or(&[], |c| c.as_ref());
     let fingerprint = crate::tls::fingerprint(der);
-    let (not_after_unix, lifetime_used_percent, renewal_due) = match crate::tls::validity_unix(der)
-    {
-        Some((not_before, not_after)) => {
-            let now = OffsetDateTime::now_utc().unix_timestamp();
-            // `not_after > not_before` is checked first, so the subtraction
-            // cannot underflow; `saturating_*` on the rest keeps the percent
-            // inside 0-100 even across clock skew.
-            #[allow(clippy::arithmetic_side_effects)]
-            let pct = if not_after > not_before {
-                let elapsed = now.saturating_sub(not_before).max(0);
-                let total = not_after - not_before;
-                u8::try_from((i128::from(elapsed) * 100 / i128::from(total)).clamp(0, 100)).ok()
-            } else {
-                None
-            };
-            let due = crate::tls::renewal_due_at(not_before, not_after, now);
-            (Some(not_after), pct, Some(due))
-        }
-        None => (None, None, None),
-    };
+    let (not_after_unix, lifetime_used_percent, renewal_due, expiry_warning) =
+        match crate::tls::validity_unix(der) {
+            Some((not_before, not_after)) => {
+                let now = OffsetDateTime::now_utc().unix_timestamp();
+                // `not_after > not_before` is checked first, so the subtraction
+                // cannot underflow; `saturating_*` on the rest keeps the percent
+                // inside 0-100 even across clock skew.
+                #[allow(clippy::arithmetic_side_effects)]
+                let pct = if not_after > not_before {
+                    let elapsed = now.saturating_sub(not_before).max(0);
+                    let total = not_after - not_before;
+                    u8::try_from((i128::from(elapsed) * 100 / i128::from(total)).clamp(0, 100)).ok()
+                } else {
+                    None
+                };
+                let due = crate::tls::renewal_due_at(not_before, not_after, now);
+                // Same 50 %/75 % thresholds as `detent-acme`'s `warning_for`,
+                // mirrored here (not called) so `detent-web` gains no
+                // `detent-acme` dependency for one comparison.
+                let warning = match pct {
+                    Some(p) if p >= 75 => Some(detent_ops::ExpiryWarning::Quarter),
+                    Some(p) if p >= 50 => Some(detent_ops::ExpiryWarning::Half),
+                    _ => None,
+                };
+                (Some(not_after), pct, Some(due), warning)
+            }
+            None => (None, None, None, None),
+        };
     CertReport {
         fingerprint,
         not_after_unix,
         lifetime_used_percent,
         renewal_due,
+        expiry_warning,
     }
 }
 /// `GET /api/v1/system/update`.
