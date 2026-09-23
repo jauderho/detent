@@ -249,3 +249,51 @@ fn free_foreign_pointer_is_silent() {
     // No crash means the tag discrimination worked.
     unsafe { detent_free(fake.as_ptr().cast::<c_char>().cast_mut()) };
 }
+
+/// M13 / ADR-010: hostile inputs never panic across the boundary. Every
+/// entry point maps NULL, invalid UTF-8, and unknown handles to NULL +
+/// last-error instead of unwinding (lints make panics structurally
+/// impossible; this test pins the observable half of that guarantee).
+#[test]
+fn hostile_inputs_never_panic_and_report_errors() {
+    use std::ptr::{null, null_mut};
+    // NULL pointers on every pointer-taking entry point.
+    assert!(detent_parse(null(), null(), 0).is_null());
+    assert!(!detent_last_error_message().is_null());
+    assert!(detent_render(null_mut()).is_null());
+    assert!(!detent_last_error_message().is_null());
+    assert!(detent_to_model_json(null_mut()).is_null());
+    assert!(!detent_last_error_message().is_null());
+    assert!(detent_apply_json(null(), null(), 0, null(), 0).is_null());
+    assert!(!detent_last_error_message().is_null());
+    assert!(detent_validate_json(null(), null(), 0, 0, 0, null(), 0, 0).is_null());
+    assert!(!detent_last_error_message().is_null());
+    assert!(detent_defaults_json(null(), null(), 0).is_null());
+    assert!(!detent_last_error_message().is_null());
+    assert!(detent_schema_json(null()).is_null());
+    assert!(!detent_last_error_message().is_null());
+    let bad = [0xFFu8, 0xFE];
+    let module_id = c_str("hosts");
+    assert!(
+        detent_parse(
+            module_id.as_ptr().cast::<c_char>(),
+            bad.as_ptr().cast::<c_char>(),
+            bad.len(),
+        )
+        .is_null()
+    );
+    assert!(!detent_last_error_message().is_null());
+    // Use-after-free: freed handle renders to NULL, double free is silent.
+    let doc = detent_parse(
+        module_id.as_ptr().cast::<c_char>(),
+        FIXTURE.as_ptr().cast::<c_char>(),
+        FIXTURE.len(),
+    );
+    assert!(!doc.is_null(), "{}", err_msg());
+    unsafe {
+        detent_free(doc);
+        detent_free(doc);
+    }
+    assert!(detent_render(doc).is_null());
+    assert!(!detent_last_error_message().is_null());
+}
