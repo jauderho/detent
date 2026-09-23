@@ -731,9 +731,9 @@ mod tests {
     fn renewal_decision_covers_all_three_arms() -> Result<(), Box<dyn std::error::Error>> {
         use instant_acme::{RenewalInfo, SuggestedWindow};
         use time::OffsetDateTime;
-        // Lifetime 0..=1_000_000. now = 700_000 (70% used): the lifetime
-        // rule fires (≥66), but outside any window only ≥90 renews early.
-        let (nb, na, now) = (0, 1_000_000, 700_000);
+        // Lifetime 0..=1_000_000. now = 300_000 (30% used): well before the
+        // lifetime rule, so window presence decides.
+        let (nb, na, now) = (0, 1_000_000, 300_000);
         let window = |start: i64, end: i64| -> Result<RenewalInfo, Box<dyn std::error::Error>> {
             Ok(RenewalInfo {
                 suggested_window: SuggestedWindow {
@@ -746,25 +746,25 @@ mod tests {
         let unsupported = || {
             Err::<(RenewalInfo, std::time::Duration), _>(instant_acme::Error::Unsupported("ARI"))
         };
-        // Inside the window the lifetime rule applies: 70% renews.
+        // Past window (started before now) renews immediately even at 30%.
         assert!(decide_renewal(
-            Ok((window(600_000, 800_000)?, std::time::Duration::ZERO)),
-            nb,
-            na,
-            now
-        )?);
-        // Outside the window only a nearly-spent certificate renews: 70%
-        // holds.
-        assert!(!decide_renewal(
             Ok((window(100_000, 200_000)?, std::time::Duration::ZERO)),
             nb,
             na,
             now
         )?);
-        // No ARI support: the plain lifetime rule, so 70% renews — and a
-        // fresh certificate at 10% still holds.
-        assert!(decide_renewal(unsupported(), nb, na, now)?);
-        assert!(!decide_renewal(unsupported(), 0, 1_000_000, 100_000)?);
+        // Future window does not renew: 30% < 66% and now < start.
+        assert!(!decide_renewal(
+            Ok((window(600_000, 800_000)?, std::time::Duration::ZERO)),
+            nb,
+            na,
+            now
+        )?);
+        // No ARI support: the plain 66 % rule, so 30% holds.
+        assert!(!decide_renewal(unsupported(), nb, na, now)?);
+        // Past-window immediate renew still works after 66 % for the
+        // unsupported fallback: 70 % renews.
+        assert!(decide_renewal(unsupported(), 0, 1_000_000, 700_000)?);
         // Any other error propagates as `Acme`, never as a renewal answer.
         let other = Err::<(RenewalInfo, std::time::Duration), _>(instant_acme::Error::Str("boom"));
         assert!(matches!(
