@@ -67,10 +67,14 @@ jobs:
             exit 0
           fi
           status=0
+          # `cargo-fuzz` is distributed as a musl-static binary, so its
+          # compiled-in default `--target` is `x86_64-unknown-linux-musl`,
+          # whose statically linked libc rejects `-Zsanitizer=address`.
+          # Override to gnu: the runner's nightly has that std preinstalled.
           while IFS= read -r target; do
             [[ -z "${target}" ]] && continue
             echo "::group::fuzz target: ${target}"
-            if ! cargo fuzz run "${target}" -- "-max_total_time=${MAX_TOTAL_TIME}"; then
+            if ! cargo fuzz run --target=x86_64-unknown-linux-gnu "${target}" -- "-max_total_time=${MAX_TOTAL_TIME}"; then
               status=1
             fi
             echo "::endgroup::"
