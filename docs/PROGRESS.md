@@ -5,6 +5,12 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-23 - STAGE3 M12 completed: stderr tracing subscriber for serve and mcp
+
+`f017c5d` adds `tracing-subscriber 0.3` (`fmt`, `env-filter`; 0.3.23, 194d old, clears ADR-011) to workspace + `detent` deps; `run::init_tracing()` (stderr writer, `RUST_LOG` env filter, warn default, `try_init`) called from `serve::run` and `mcp::run` only. Test `mcp_refused_startup_writes_nothing_to_stdout`: bad token + `RUST_LOG=info` exits 1 with empty stdout.
+Verify: clippy `-p detent --all-targets --features mcp` clean; binary suite 9/9 pass incl. new test; `cargo check --locked` clean. Caveats: full `detent --features mcp` has 1 failure (`get_plan_apply_backup_restore_and_audit_round_trip`, 4 vs 2) reproducing on clean HEAD — pre-existing, unrelated; `cargo fmt --check` flags pre-existing `detent-update/src/fetch.rs` drift (H18 file, untouched by this slice).
+Jev (`jev-1.13.0`, live POST) used only for classification/routing; complex reasoning by default model: `next_slice` m12_tracing conf 0.99 (p=1.0), destructive noul 0.07; `merge_ready` noul 0.67, `next_slice` merge_m12 conf 0.98.
+
 ## 2026-09-23 - docs wave 2: SECURITY_HARDENING :102/:105/:107 + ADR-012 + i18n + modules comment
 
 - 3757c2c `docs: correct SECURITY_HARDENING false claims :102/:105/:107 and ADR-012`: :102 marked planned (engine.rs:402 run_checks only in plan(), H5/H6), :105 does-not-yet-survive monitor restart (recover_pending no caller, H1), :107 best-effort worker-owned fail-open with pins (engine.rs:205-207), ADR-012 files-only rollback (H4) and in-memory timer (H1). lib.rs:8-9 deferred to HostileLocust H7.
