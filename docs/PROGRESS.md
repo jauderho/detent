@@ -21,7 +21,7 @@ M1+M2 (`665ba8e`): `Policy.require_caps` + `SandboxError::CapsRequired` + `caps_
 Verify: `a_missing_landlock_is_reported_at_startup` passes; `cargo test -p detent serve` 18 passed; `--features mcp` 159 passed.
 Workspace verify: `cargo test --workspace --all-features` 1593 passed, 6 ignored; Linux docker platform 242 passed; `cargo clippy --all-targets` (`detent` + `detent-platform`) clean; `cargo fmt --all --check` clean.
 Jev (`jev-1.13.0`, live POST) used only for classification/routing; complex reasoning by default model. Recorded confidences: `next_slice` H12_finish 0.91; H23-vs-M1/M2 H23_docs 0.25 (low; proceeded, docs-only 9 lines); M1-vs-M2 M1_first 0.95; H23 true-guarantee noul 0.91, names-vectors 0.92; destructive checks 0.20-0.26; M2 shape `Vec<String>` 0.99; skip-`tracing::warn!` noul 0.38.
-Skips (open, not in this batch): H23 step 2 monitor re-validation + per-module exec deny-list (`write_target_refuses_new_root_exec_directives` unbuilt); H12 option A privsep fork (`spawn_pair` monitor/worker split for MCP HTTP); M2 `tracing::warn!` skipped (renderer note + persisted `confinement.json` carry the signal, no new dep).
+Skips (open, not in this batch): H23 step 2 monitor re-validation + per-module exec deny-list (`write_target_refuses_new_root_exec_directives` unbuilt); H12 option A privsep fork (`spawn_pair` monitor/worker split for MCP HTTP); M2 `tracing::warn!` deliberately deferred (one-liner; `tracing = "0.1.44"` already in workspace deps, `tracing = { workspace = true }` in `crates/detent` adds no new external crate).
 
 ## 2026-09-23 - STAGE3 H20 batch: clippy, Linux gate, coverage, fuzz
 
