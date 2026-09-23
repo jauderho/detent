@@ -75,15 +75,19 @@ fn detent_last_error_message_returns_null_on_success() {
 #[test]
 fn parse_and_round_trip_render() {
     let module_id = c_str("hosts");
-    let doc = detent_parse(
-        module_id.as_ptr().cast::<c_char>(),
-        FIXTURE.as_ptr().cast::<c_char>(),
-        FIXTURE.len(),
-    );
+    // SAFETY: module_id is a live NUL-terminated CString; FIXTURE is a valid
+    // `&str` slice readable for its length.
+    let doc = unsafe {
+        detent_parse(
+            module_id.as_ptr().cast::<c_char>(),
+            FIXTURE.as_ptr().cast::<c_char>(),
+            FIXTURE.len(),
+        )
+    };
     assert!(!doc.is_null(), "{}", err_msg());
 
-    let rendered_ptr = detent_render(doc);
-    assert!(!rendered_ptr.is_null(), "{}", err_msg());
+    // SAFETY: `doc` is a live handle just returned by `detent_parse`.
+    let rendered_ptr = unsafe { detent_render(doc) };
     let rendered = ptr_to_chars(rendered_ptr).to_string_lossy().into_owned();
     // hosts module satisfies invariant 4: render(parse(s)) == s
     assert_eq!(rendered, FIXTURE);
@@ -98,13 +102,17 @@ fn parse_and_round_trip_render() {
 #[test]
 fn to_model_json_returns_host_entries() {
     let module_id = c_str("hosts");
-    let doc = detent_parse(
-        module_id.as_ptr().cast::<c_char>(),
-        FIXTURE.as_ptr().cast::<c_char>(),
-        FIXTURE.len(),
-    );
+    // SAFETY: same live-pointer argument as `parse_and_round_trip_render`.
+    let doc = unsafe {
+        detent_parse(
+            module_id.as_ptr().cast::<c_char>(),
+            FIXTURE.as_ptr().cast::<c_char>(),
+            FIXTURE.len(),
+        )
+    };
     assert!(!doc.is_null(), "{}", err_msg());
-    let model_ptr = detent_to_model_json(doc);
+    // SAFETY: `doc` is a live handle just returned by `detent_parse`.
+    let model_ptr = unsafe { detent_to_model_json(doc) };
     assert!(!model_ptr.is_null(), "{}", err_msg());
     let s = ptr_to_chars(model_ptr).to_string_lossy().into_owned();
     let v: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
@@ -125,23 +133,31 @@ fn to_model_json_returns_host_entries() {
 #[test]
 fn apply_json_round_trips_losslessly() {
     let module_id = c_str("hosts");
-    let doc = detent_parse(
-        module_id.as_ptr().cast::<c_char>(),
-        FIXTURE.as_ptr().cast::<c_char>(),
-        FIXTURE.len(),
-    );
-    let model_ptr = detent_to_model_json(doc);
+    // SAFETY: same live-pointer argument as `parse_and_round_trip_render`.
+    let doc = unsafe {
+        detent_parse(
+            module_id.as_ptr().cast::<c_char>(),
+            FIXTURE.as_ptr().cast::<c_char>(),
+            FIXTURE.len(),
+        )
+    };
+    // SAFETY: `doc` is a live handle just returned by `detent_parse`.
+    let model_ptr = unsafe { detent_to_model_json(doc) };
     assert!(!model_ptr.is_null(), "{}", err_msg());
     let model_cstr = ptr_to_chars(model_ptr);
     let model_json_str = model_cstr.to_string_lossy().into_owned();
 
-    let rendered_ptr = detent_apply_json(
-        module_id.as_ptr().cast::<c_char>(),
-        FIXTURE.as_ptr().cast::<c_char>(),
-        FIXTURE.len(),
-        model_cstr.as_ptr().cast::<c_char>(),
-        model_json_str.len(),
-    );
+    // SAFETY: module_id/model buffers are live CStrings; FIXTURE is a valid
+    // slice; the model buffer is readable for its computed length.
+    let rendered_ptr = unsafe {
+        detent_apply_json(
+            module_id.as_ptr().cast::<c_char>(),
+            FIXTURE.as_ptr().cast::<c_char>(),
+            FIXTURE.len(),
+            model_cstr.as_ptr().cast::<c_char>(),
+            model_json_str.len(),
+        )
+    };
     assert!(!rendered_ptr.is_null(), "{}", err_msg());
     let rendered = ptr_to_chars(rendered_ptr).to_string_lossy().into_owned();
     assert_eq!(rendered, FIXTURE);
@@ -159,7 +175,8 @@ fn apply_json_round_trips_losslessly() {
 #[test]
 fn schema_json_is_a_valid_json_schema_with_hints() {
     let module_id = c_str("hosts");
-    let schema_ptr = detent_schema_json(module_id.as_ptr().cast::<c_char>());
+    // SAFETY: module_id is a live NUL-terminated CString.
+    let schema_ptr = unsafe { detent_schema_json(module_id.as_ptr().cast::<c_char>()) };
     assert!(!schema_ptr.is_null(), "{}", err_msg());
     let s = ptr_to_chars(schema_ptr).to_string_lossy().into_owned();
     let v: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
@@ -176,11 +193,15 @@ fn schema_json_is_a_valid_json_schema_with_hints() {
 fn defaults_json_for_a_linux_profile_is_non_empty() {
     let module_id = c_str("hosts");
     let profile = c_str("{\"os\":\"linux\",\"init\":\"systemd\",\"hostname\":\"detent-test\"}");
-    let defaults_ptr = detent_defaults_json(
-        module_id.as_ptr().cast::<c_char>(),
-        profile.as_ptr().cast::<c_char>(),
-        cstr_len(&profile),
-    );
+    // SAFETY: both are live NUL-terminated CStrings; profile readable for
+    // its computed length.
+    let defaults_ptr = unsafe {
+        detent_defaults_json(
+            module_id.as_ptr().cast::<c_char>(),
+            profile.as_ptr().cast::<c_char>(),
+            cstr_len(&profile),
+        )
+    };
     assert!(!defaults_ptr.is_null(), "{}", err_msg());
     let s = ptr_to_chars(defaults_ptr).to_string_lossy().into_owned();
     let v: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
@@ -199,16 +220,21 @@ fn defaults_json_for_a_linux_profile_is_non_empty() {
 fn validate_json_returns_diagnostics_array() {
     let module_id = c_str("hosts");
     let model = c_str("{\"entries\":[]}");
-    let diags_ptr = detent_validate_json(
-        module_id.as_ptr().cast::<c_char>(),
-        model.as_ptr().cast::<c_char>(),
-        cstr_len(&model),
-        0, // Os::Linux
-        1, // InitSystem::Systemd
-        c_str("detent-test").as_ptr().cast::<c_char>(),
-        "detent-test".len(),
-        1024,
-    );
+    let hostname = c_str("detent-test");
+    // SAFETY: all three are live NUL-terminated CStrings; model/hostname
+    // readable for their computed lengths.
+    let diags_ptr = unsafe {
+        detent_validate_json(
+            module_id.as_ptr().cast::<c_char>(),
+            model.as_ptr().cast::<c_char>(),
+            cstr_len(&model),
+            0, // Os::Linux
+            1, // InitSystem::Systemd
+            hostname.as_ptr().cast::<c_char>(),
+            cstr_len(&hostname),
+            1024,
+        )
+    };
     assert!(!diags_ptr.is_null(), "{}", err_msg());
     let s = ptr_to_chars(diags_ptr).to_string_lossy().into_owned();
     let v: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
@@ -221,11 +247,15 @@ fn validate_json_returns_diagnostics_array() {
 #[test]
 fn parse_with_unknown_module_returns_null_and_sets_last_error() {
     let module_id = c_str("does-not-exist");
-    let ptr = detent_parse(
-        module_id.as_ptr().cast::<c_char>(),
-        FIXTURE.as_ptr().cast::<c_char>(),
-        FIXTURE.len(),
-    );
+    // SAFETY: module_id is a live NUL-terminated CString; FIXTURE is a valid
+    // slice readable for its length.
+    let ptr = unsafe {
+        detent_parse(
+            module_id.as_ptr().cast::<c_char>(),
+            FIXTURE.as_ptr().cast::<c_char>(),
+            FIXTURE.len(),
+        )
+    };
     assert!(ptr.is_null());
     let msg = detent_last_error_message();
     assert!(!msg.is_null());
@@ -257,43 +287,71 @@ fn free_foreign_pointer_is_silent() {
 #[test]
 fn hostile_inputs_never_panic_and_report_errors() {
     use std::ptr::{null, null_mut};
-    // NULL pointers on every pointer-taking entry point.
-    assert!(detent_parse(null(), null(), 0).is_null());
-    assert!(!detent_last_error_message().is_null());
-    assert!(detent_render(null_mut()).is_null());
-    assert!(!detent_last_error_message().is_null());
-    assert!(detent_to_model_json(null_mut()).is_null());
-    assert!(!detent_last_error_message().is_null());
-    assert!(detent_apply_json(null(), null(), 0, null(), 0).is_null());
-    assert!(!detent_last_error_message().is_null());
-    assert!(detent_validate_json(null(), null(), 0, 0, 0, null(), 0, 0).is_null());
-    assert!(!detent_last_error_message().is_null());
-    assert!(detent_defaults_json(null(), null(), 0).is_null());
-    assert!(!detent_last_error_message().is_null());
-    assert!(detent_schema_json(null()).is_null());
-    assert!(!detent_last_error_message().is_null());
-    let bad = [0xFFu8, 0xFE];
+    // SAFETY: every `unsafe` block below upholds the callee's contract —
+    // NULL pointers, a live 2-byte buffer, a live module id, or a handle
+    // just returned by `detent_parse` — so each call is defined (refused
+    // with NULL + last-error) rather than UB.
+    unsafe {
+        // NULL pointers on every pointer-taking entry point.
+        assert!(detent_parse(null(), null(), 0).is_null());
+        assert!(!detent_last_error_message().is_null());
+        assert!(detent_render(null_mut()).is_null());
+        assert!(!detent_last_error_message().is_null());
+        assert!(detent_to_model_json(null_mut()).is_null());
+        assert!(!detent_last_error_message().is_null());
+        assert!(detent_apply_json(null(), null(), 0, null(), 0).is_null());
+        assert!(!detent_last_error_message().is_null());
+        assert!(detent_validate_json(null(), null(), 0, 0, 0, null(), 0, 0).is_null());
+        assert!(!detent_last_error_message().is_null());
+        assert!(detent_defaults_json(null(), null(), 0).is_null());
+        assert!(!detent_last_error_message().is_null());
+        assert!(detent_schema_json(null()).is_null());
+        assert!(!detent_last_error_message().is_null());
+        let bad = [0xFFu8, 0xFE];
+        let module_id = c_str("hosts");
+        assert!(
+            detent_parse(
+                module_id.as_ptr().cast::<c_char>(),
+                bad.as_ptr().cast::<c_char>(),
+                bad.len(),
+            )
+            .is_null()
+        );
+        assert!(!detent_last_error_message().is_null());
+        // Use-after-free: freed handle renders to NULL, double free is silent.
+        let doc = detent_parse(
+            module_id.as_ptr().cast::<c_char>(),
+            FIXTURE.as_ptr().cast::<c_char>(),
+            FIXTURE.len(),
+        );
+        assert!(!doc.is_null(), "{}", err_msg());
+        detent_free(doc);
+        detent_free(doc);
+        assert!(detent_render(doc).is_null());
+        assert!(!detent_last_error_message().is_null());
+    }
+}
+
+#[test]
+fn oversized_length_is_refused() {
+    // L-BIN11: from_raw_parts requires len <= isize::MAX; the FFI must
+    // refuse an oversized length without attempting allocation.
     let module_id = c_str("hosts");
-    assert!(
+    let oversized = isize::MAX as usize + 1;
+    // SAFETY: module_id is a live NUL-terminated CString; FIXTURE's
+    // allocation is valid but we claim an oversized length — the callee
+    // must not dereference past its real size because it checks the length
+    // first and returns NULL.
+    let ptr = unsafe {
         detent_parse(
             module_id.as_ptr().cast::<c_char>(),
-            bad.as_ptr().cast::<c_char>(),
-            bad.len(),
+            FIXTURE.as_ptr().cast::<c_char>(),
+            oversized,
         )
-        .is_null()
+    };
+    assert!(ptr.is_null(), "oversized len must be refused with NULL");
+    assert!(
+        !detent_last_error_message().is_null(),
+        "oversized len must set last-error"
     );
-    assert!(!detent_last_error_message().is_null());
-    // Use-after-free: freed handle renders to NULL, double free is silent.
-    let doc = detent_parse(
-        module_id.as_ptr().cast::<c_char>(),
-        FIXTURE.as_ptr().cast::<c_char>(),
-        FIXTURE.len(),
-    );
-    assert!(!doc.is_null(), "{}", err_msg());
-    unsafe {
-        detent_free(doc);
-        detent_free(doc);
-    }
-    assert!(detent_render(doc).is_null());
-    assert!(!detent_last_error_message().is_null());
 }

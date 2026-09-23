@@ -99,14 +99,17 @@ const HEADER_LEN: usize = std::mem::size_of::<AllocHeader>();
 
 /// Layout used for every allocation handed to C.
 ///
-/// The alignment is `usize` so the header's `u32`/`u64` fields stay naturally
-/// aligned on every supported target — no UB if a C consumer reads the header
-/// bytes back. A doc handle stores zero payload bytes; the tagged pointer is
-/// the entire object.
+/// The alignment is `AllocHeader`'s own (L-BIN13: `usize` under-aligned the
+/// header's `u64` fields on 32-bit targets) so the tag stays naturally
+/// aligned on every supported target. A doc handle stores zero payload
+/// bytes; the tagged pointer is the entire object.
 fn alloc_layout(payload_len: usize) -> Result<Layout, ()> {
     let total = HEADER_LEN.checked_add(payload_len).ok_or(())?;
-    Layout::from_size_align(total, std::mem::align_of::<usize>()).map_err(|_| ())
+    Layout::from_size_align(total, std::mem::align_of::<AllocHeader>()).map_err(|_| ())
 }
+
+/// The tag size stays a multiple of its alignment (L-BIN13).
+const _: () = assert!(HEADER_LEN.is_multiple_of(std::mem::align_of::<AllocHeader>()));
 
 /// Writes `header` into the bytes at `raw`.
 ///
@@ -236,12 +239,6 @@ fn track(ptr: *mut c_char) {
 fn untrack(ptr: *mut c_char) -> bool {
     LIVE.lock()
         .is_ok_and(|mut live| live.remove(&(ptr as usize)))
-}
-
-/// Whether `ptr` is a live hand-out, without removing it. For `split_doc`,
-/// which borrows rather than frees.
-fn is_live(ptr: *const c_char) -> bool {
-    LIVE.lock().is_ok_and(|live| live.contains(&(ptr as usize)))
 }
 
 /// Global table of live document handles. The `usize` keys are also written
@@ -420,14 +417,21 @@ fn last_error_ptr() -> *const c_char {
 
 // -------------------------------------------------------------------- helpers
 
-/// Validates that `ptr` is not null and that `len` bytes form UTF-8.
+/// Validates that `ptr` is not null, that `len` is addressable, and that
+/// `len` bytes form UTF-8.
 #[allow(unsafe_code)]
 fn check_utf8<'a>(ptr: *const c_char, len: usize, what: &str) -> Result<&'a str, i32> {
     if ptr.is_null() {
         set_last_error(format!("{what} is NULL"));
         return Err(DETENT_ERR_NULL_ARGUMENT);
     }
-    // SAFETY: caller guarantees the bytes are readable for `len`.
+    // L-BIN11: `from_raw_parts` requires `len <= isize::MAX`; refuse before
+    // forming the slice.
+    if len > isize::MAX as usize {
+        set_last_error(format!("{what} length {len} exceeds maximum"));
+        return Err(DETENT_ERR_INTERNAL);
+    }
+    // SAFETY: non-null + bounded len; caller guarantees readability.
     let bytes = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) };
     match std::str::from_utf8(bytes) {
         Ok(s) => Ok(s),
@@ -500,9 +504,13 @@ pub extern "C" fn detent_module_list() -> *mut c_char {
 /// Parses `src` with the module identified by `module_id` and returns a
 /// document handle. The handle must be released with `detent_free`. Returns
 /// NULL on error; the code is in `detent_last_error_message()`.
+/// # Safety
+///
+/// `module_id` must point to a readable NUL-terminated C string;
+/// `src` must be readable for `src_len` bytes and `src_len <= isize::MAX`.
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
-pub extern "C" fn detent_parse(
+pub unsafe extern "C" fn detent_parse(
     module_id: *const c_char,
     src: *const c_char,
     src_len: usize,
@@ -562,6 +570,9 @@ pub extern "C" fn detent_parse(
     );
     // SAFETY: `HEADER_LEN` is in range; the offset pointer is what C sees.
     let out = unsafe { raw.add(HEADER_LEN).cast::<c_char>() };
+    // L-BIN11: release the `DOC_HANDLES` guard before `track` takes `LIVE`
+    // (`track` is best-effort anyway), so no path ever nests the two locks.
+    drop(t);
     track(out);
     out
 }
@@ -570,9 +581,13 @@ pub extern "C" fn detent_parse(
 ///
 /// Returns a malloced NUL-terminated buffer, or NULL on error. Release the
 /// success return with `detent_free`.
+/// # Safety
+///
+/// `doc` must be NULL or a live handle from `detent_parse`. Anything else
+/// is refused, but only live handles keep the no-UB guarantee auditable.
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
-pub extern "C" fn detent_render(doc: *mut c_char) -> *mut c_char {
+pub unsafe extern "C" fn detent_render(doc: *mut c_char) -> *mut c_char {
     clear_last_error();
     let Ok((module, source)) = split_doc(doc) else {
         return std::ptr::null_mut();
@@ -599,9 +614,13 @@ pub extern "C" fn detent_render(doc: *mut c_char) -> *mut c_char {
 
 /// Projects a document onto its typed model, returning the model as JSON.
 /// Release the buffer with `detent_free`.
+///
+/// # Safety
+///
+/// `doc` must be NULL or a live handle from `detent_parse`.
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
-pub extern "C" fn detent_to_model_json(doc: *mut c_char) -> *mut c_char {
+pub unsafe extern "C" fn detent_to_model_json(doc: *mut c_char) -> *mut c_char {
     clear_last_error();
     let Ok((module, source)) = split_doc(doc) else {
         return std::ptr::null_mut();
@@ -623,9 +642,16 @@ pub extern "C" fn detent_to_model_json(doc: *mut c_char) -> *mut c_char {
 
 /// Applies `model_json` to `src` via the module and returns the rendered
 /// text. Stateless: release every successful return with `detent_free`.
+///
+/// # Safety
+///
+/// `module_id` must point to a readable NUL-terminated C string;
+/// `src` must be readable for `src_len` bytes with `src_len <= isize::MAX`;
+/// `model_json` must be readable for `model_len` bytes with
+/// `model_len <= isize::MAX`.
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
-pub extern "C" fn detent_apply_json(
+pub unsafe extern "C" fn detent_apply_json(
     module_id: *const c_char,
     src: *const c_char,
     src_len: usize,
@@ -664,14 +690,20 @@ pub extern "C" fn detent_apply_json(
         }
     }
 }
-
 /// Validates a model JSON against the module's schema plus its
 /// `ConfigModule::validate` checks. Returns the diagnostics as a JSON array
 /// (matching `detent_core::diag::Diagnostics`'s serialization). Release with
 /// `detent_free`.
+///
+/// # Safety
+///
+/// `module_id` must point to a readable NUL-terminated C string;
+/// `model_json` must be readable for `model_len` bytes with
+/// `model_len <= isize::MAX`; `hostname` must be readable for
+/// `hostname_len` bytes with `hostname_len <= isize::MAX`.
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
-pub extern "C" fn detent_validate_json(
+pub unsafe extern "C" fn detent_validate_json(
     module_id: *const c_char,
     model_json: *const c_char,
     model_len: usize,
@@ -725,9 +757,15 @@ pub extern "C" fn detent_validate_json(
 /// Returns the module's host-appropriate defaults as a JSON value matching
 /// its model schema. `profile_json` is a `HostProfile`-shaped JSON object;
 /// fields fall back to `Default::default()` when omitted.
+///
+/// # Safety
+///
+/// `module_id` must point to a readable NUL-terminated C string;
+/// `profile_json` must be readable for `profile_len` bytes with
+/// `profile_len <= isize::MAX`.
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
-pub extern "C" fn detent_defaults_json(
+pub unsafe extern "C" fn detent_defaults_json(
     module_id: *const c_char,
     profile_json: *const c_char,
     profile_len: usize,
@@ -762,9 +800,13 @@ pub extern "C" fn detent_defaults_json(
 
 /// Returns the module's model schema as a JSON Schema document, including
 /// any `x-detent` UI hints the module attaches. Release with `detent_free`.
+///
+/// # Safety
+///
+/// `module_id` must point to a readable NUL-terminated C string.
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
-pub extern "C" fn detent_schema_json(module_id: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn detent_schema_json(module_id: *const c_char) -> *mut c_char {
     clear_last_error();
     let module_id = match check_utf8(module_id, libc_strlen(module_id), "module_id") {
         Ok(s) => s.to_owned(),
@@ -789,9 +831,9 @@ pub extern "C" fn detent_schema_json(module_id: *const c_char) -> *mut c_char {
 ///
 /// Passing a foreign pointer is safe (untracked hand-outs are refused before
 /// any header read, and the pointer is left alone) but the buffer it points
-/// at will leak. Passing an already-freed pointer is likewise refused: the
-/// hand-out is removed from the set on free, so a second free reads `false`
-/// and touches nothing (the first free's memory may already be reused).
+/// at will leak. Passing an already-freed pointer is likewise refused while
+/// its address is not reused by a later hand-out, so double-free detection
+/// is best-effort (the first free's memory may already be reused).
 ///
 /// # Safety
 ///
@@ -848,19 +890,32 @@ pub unsafe extern "C" fn detent_free(ptr: *mut c_char) {
 
 /// Reads the tag header at `ptr-HEADER_LEN` and returns the `(module, source)`
 /// pair, or an error code.
+///
+/// L-BIN11: the `LIVE` membership probe and the header read happen under one
+/// `LIVE` lock hold (dropped before the `DOC_HANDLES` lookup, so no lock
+/// nesting), closing the window where a concurrent `detent_free` could
+/// invalidate the header between check and read.
 #[allow(unsafe_code)]
 fn split_doc(doc: *mut c_char) -> Result<(Arc<dyn DynModule>, String), i32> {
     if doc.is_null() {
         set_last_error("document handle is NULL".to_owned());
         return Err(DETENT_ERR_NULL_ARGUMENT);
     }
-    if !is_live(doc) {
-        set_last_error("document handle is unknown (foreign or already freed?)".to_owned());
-        return Err(DETENT_ERR_NULL_ARGUMENT);
-    }
-    // SAFETY: `doc` is a live hand-out from `detent_parse`, whose header sits
-    // exactly `HEADER_LEN` bytes before the user pointer.
-    let header = unsafe { read_header(doc.sub(HEADER_LEN).cast::<u8>()) };
+    let header = {
+        let live = LIVE.lock();
+        let Ok(live) = live else {
+            set_last_error("internal: handle table poisoned".to_owned());
+            return Err(DETENT_ERR_INTERNAL);
+        };
+        if !live.contains(&(doc as usize)) {
+            set_last_error("document handle is unknown (foreign or already freed?)".to_owned());
+            return Err(DETENT_ERR_NULL_ARGUMENT);
+        }
+        // SAFETY: `doc` is a live hand-out from `detent_parse` (membership
+        // just checked under the lock still held), whose header sits exactly
+        // `HEADER_LEN` bytes before the user pointer.
+        unsafe { read_header(doc.sub(HEADER_LEN).cast::<u8>()) }
+    };
     if header.magic != MAGIC_DOC {
         set_last_error("document handle has the wrong tag".to_owned());
         return Err(DETENT_ERR_NULL_ARGUMENT);
@@ -880,7 +935,6 @@ fn split_doc(doc: *mut c_char) -> Result<(Arc<dyn DynModule>, String), i32> {
     };
     Ok((handle.module.clone(), handle.source.clone()))
 }
-
 /// Reads the C strlen of a NUL-terminated string from a C pointer.
 ///
 /// The pointer is required to be non-null; the terminator must exist within

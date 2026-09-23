@@ -39,7 +39,9 @@ Every function is safe to call from any thread, with one rule:
 * Doc handles returned by `detent_parse` are not shared state: each
   call returns a fresh handle, backed by a global `BTreeMap`. Free
   the handle from the same thread that created it. Concurrent
-  `detent_free` on the same handle is racy.
+  `detent_free` on the same handle is racy, and double-free detection
+  is best-effort: a second free is refused only while the freed address
+  has not been reused by a later hand-out.
 
 Internal locking is three mutexes: the document-handle table, the live
 hand-out set (every `detent_free` consults it before reading any tag
