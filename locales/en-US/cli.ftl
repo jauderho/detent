@@ -96,11 +96,12 @@ cli-serve-cert-fingerprint = tls bootstrap certificate fingerprint (sha-256): {$
 cli-serve-web-failed = the web server could not start: {$reason}
 cli-serve-web-stopped = the web server did not stop cleanly: {$reason}
 cli-serve-listening = listening on {$addr}
+cli-serve-confinement-degraded = confinement degraded: {$detail}
 cli-mcp-missing-token = {$var} is not set; mint one with `detent token create` and export it before starting the mcp server.
 cli-mcp-serve-failed = the mcp server could not start: {$reason}
- cli-mcp-listening = mcp serving {$transport}
- cli-mcp-http-needs-privsep = mcp http transport cannot run as root: the network parser would share the root monitor process; run as a non-root user or use the stdio transport.
- cli-mcp-bind-not-loopback = mcp http bind must be loopback (127.0.0.1 or ::1); the bearer is plaintext on the wire.
+cli-mcp-listening = mcp serving {$transport}
+cli-mcp-http-needs-privsep = mcp http transport cannot run as root: the network parser would share the root monitor process; run as a non-root user or use the stdio transport.
+cli-mcp-bind-not-loopback = mcp http bind must be loopback (127.0.0.1 or ::1); the bearer is plaintext on the wire.
 cli-dryrun-mcp = dry run: mcp would serve {$transport} on {$addr} with scope {$scope}.
 
 ## setup, user, token

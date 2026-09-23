@@ -132,6 +132,23 @@ pub enum LandlockOutcome {
         reason: String,
     },
 }
+/// Fail closed on a bounding set that did not drop (STAGE3 M1; mirrors
+/// the seccomp verdict in `linux.rs` — an undropped caps set is the same
+/// silent over-privilege as an uninstalled filter). Portable so the spec
+/// test runs on macOS too.
+///
+/// # Errors
+///
+/// [`SandboxError::CapsRequired`] when `required` and `outcome` is
+/// [`Outcome::Unavailable`].
+pub fn caps_verdict(required: bool, outcome: &Outcome) -> Result<(), SandboxError> {
+    match *outcome {
+        Outcome::Unavailable { ref reason } if required => {
+            Err(SandboxError::CapsRequired(reason.clone()))
+        }
+        _ => Ok(()),
+    }
+}
 
 /// What was actually applied to a confined process (PLAN §2.4). `Serialize`
 /// so `detent doctor` and the web health panel can render it verbatim.
@@ -184,6 +201,14 @@ pub struct Policy {
     /// instead of degrading to [`LandlockOutcome::Unavailable`]. Default
     /// `false` (PLAN §2.4: warn and continue).
     pub require_landlock: bool,
+    /// When true, a capability bounding set that does not drop makes
+    /// [`confine`] return `Err` instead of reporting
+    /// [`Outcome::Unavailable`] and running the process over-privileged
+    /// (STAGE3 M1; mirrors `require_seccomp` below). Default `true` for
+    /// [`Policy::monitor`], `false` for [`Policy::worker`] (the worker
+    /// drops to an unprivileged uid first, where the drop is expected to
+    /// fail).
+    pub require_caps: bool,
     /// When true, a seccomp filter that does not install makes [`confine`]
     /// return `Err` instead of reporting [`Outcome::Unavailable`] and
     /// running the process unfiltered.
@@ -201,7 +226,6 @@ pub struct Policy {
     /// that class of mistake into a refusal to start.
     pub require_seccomp: bool,
 }
-
 impl Policy {
     /// The monitor's policy: write access to every enabled target's parent
     /// directory, each target's backup directory, the state root
@@ -240,6 +264,7 @@ impl Policy {
                 Capability::Fowner,
             ],
             require_landlock: false,
+            require_caps: true,
             require_seccomp: true,
         }
     }
@@ -252,6 +277,7 @@ impl Policy {
             writable_paths: vec![allowlist.state_root().to_path_buf()],
             retained_caps: Vec::new(),
             require_landlock: false,
+            require_caps: false,
             require_seccomp: true,
         }
     }
@@ -268,8 +294,7 @@ fn all_targets(
     })
 }
 
-/// Confinement failed in a way [`Policy`] considers fatal (currently: only
-/// [`Policy::require_landlock`] with a kernel that cannot satisfy it).
+/// Confinement failed in a way [`Policy`] considers fatal.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum SandboxError {
@@ -286,6 +311,9 @@ pub enum SandboxError {
     /// satisfy it.
     #[error("landlock is required by policy but unavailable: {0}")]
     LandlockRequired(String),
+    /// [`Policy::require_caps`] was set and the bounding set did not drop.
+    #[error("capabilities are required by policy but the drop failed: {0}")]
+    CapsRequired(String),
     /// [`Policy::require_seccomp`] was set and the filter did not install.
     #[error("seccomp is required by policy but the filter did not install: {0}")]
     SeccompRequired(String),
@@ -372,7 +400,9 @@ impl SandboxHooks for Hooks {
 
 #[cfg(test)]
 mod tests {
-    use super::{Capability, LandlockOutcome, LandlockStatus, Outcome, Policy};
+    use super::{
+        Capability, LandlockOutcome, LandlockStatus, Outcome, Policy, SandboxError, caps_verdict,
+    };
     // Only the non-Linux tests below construct a `Confinement`/call `confine`
     // directly: on Linux, `confine` is the real thing (irreversible — see
     // `linux.rs`'s own test module for why it always runs in a forked child
@@ -621,6 +651,22 @@ mod tests {
                 .to_string()
                 .contains("no landlock")
         );
+    }
+
+    /// STAGE3 M1: undropped caps fail closed only when required (mirrors
+    /// the seccomp verdict in `linux.rs`).
+    #[test]
+    fn caps_that_do_not_drop_are_fatal_only_when_required() {
+        let unavailable = Outcome::Unavailable {
+            reason: "caps said no".to_owned(),
+        };
+        let verdict = caps_verdict(true, &unavailable);
+        assert!(
+            matches!(verdict, Err(SandboxError::CapsRequired(ref reason)) if reason == "caps said no"),
+            "{verdict:?}"
+        );
+        assert!(caps_verdict(false, &unavailable).is_ok());
+        assert!(caps_verdict(true, &Outcome::Applied).is_ok());
     }
 
     /// `Target::backend_detect` is not called by anything in this module

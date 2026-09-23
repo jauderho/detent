@@ -34,7 +34,9 @@ use detent_core::diag::MessageId;
 use detent_platform::privsep::allowlist::{Allowlist, Config};
 use detent_platform::privsep::monitor::{ExitReason, Hooks, Monitor};
 use detent_platform::privsep::spawn::{Role, SpawnConfig, SpawnError, abort_child, spawn_pair};
-use detent_platform::sandbox::{Hooks as SandboxHooks, Policy};
+use detent_platform::sandbox::{
+    Confinement, Hooks as SandboxHooks, LandlockOutcome, Outcome, Policy,
+};
 use detent_platform::service::checks::ExternalCheckRunner;
 use detent_platform::service::{self, ServiceControlAdapter};
 
@@ -117,6 +119,7 @@ pub fn run(
             // ends up with two copies of the CLI.
             #[cfg(feature = "web")]
             {
+                report_confinement(&hooks, &settings.state_root, renderer, streams);
                 let status =
                     run_worker(*client, host, registry, config, settings, renderer, streams);
                 let _ = streams.out.flush();
@@ -138,15 +141,69 @@ pub fn run(
                 abort_child(i32::from(!(greeted && stopped)));
             }
         }
-        Role::Monitor(handle) => run_monitor(
-            &host,
-            allow,
-            handle,
-            spawned.dropped_privileges,
-            renderer,
-            streams,
-        ),
+        Role::Monitor(handle) => {
+            report_confinement(&hooks, &settings.state_root, renderer, streams);
+            run_monitor(
+                &host,
+                allow,
+                handle,
+                spawned.dropped_privileges,
+                renderer,
+                streams,
+            )
+        }
     }
+}
+
+/// Read this process's confinement (just installed by `spawn_pair`), note
+/// every degraded step, and persist it for doctor/UI (STAGE3 M2).
+fn report_confinement(
+    hooks: &SandboxHooks,
+    state_root: &std::path::Path,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) {
+    let Some(confinement) = hooks.confinement() else {
+        return;
+    };
+    for note in degradation_notes(confinement) {
+        let _ = renderer.line(
+            streams.notes,
+            MessageId::new("cli-serve-confinement-degraded"),
+            &[("detail", &note)],
+        );
+    }
+    let path = state_root.join("state/confinement.json");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(confinement) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+/// Which confinement steps did not fully apply, as human-readable lines
+/// (STAGE3 M2). Pure so the spec test pins it without a fork: every
+/// non-`Applied` field names itself and its detail.
+fn degradation_notes(confinement: &Confinement) -> Vec<String> {
+    let mut notes = Vec::new();
+    for (name, outcome) in [
+        ("no_new_privs", &confinement.no_new_privs),
+        ("dumpable", &confinement.dumpable_cleared),
+        ("caps", &confinement.caps),
+        ("seccomp", &confinement.seccomp),
+    ] {
+        if let Outcome::Unavailable { reason } | Outcome::Skipped { reason } = outcome {
+            notes.push(format!("{name}: {reason}"));
+        }
+    }
+    match &confinement.landlock {
+        LandlockOutcome::Applied { .. } => {}
+        LandlockOutcome::Unavailable { reason } | LandlockOutcome::Skipped { reason } => {
+            notes.push(format!("landlock: {reason}"));
+        }
+    }
+    notes
 }
 
 /// The privileged side: serves the closed privsep protocol until the worker
@@ -522,7 +579,7 @@ fn exit_for_spawn(error: &SpawnError) -> Exit {
 
 #[cfg(test)]
 mod tests {
-    use super::{Exit, exit_for_spawn, run};
+    use super::{Exit, degradation_notes, exit_for_spawn, run};
     use crate::i18n::Messages;
     use crate::output::Renderer;
     use crate::run::{Settings, Streams};
@@ -568,6 +625,30 @@ mod tests {
         assert!(!text.is_empty());
         assert!(!text.contains("cli-dryrun"), "{text}");
         Ok(())
+    }
+
+    #[test]
+    fn a_missing_landlock_is_reported_at_startup() {
+        use detent_platform::sandbox::{Confinement, LandlockOutcome, Outcome};
+        let full = Confinement {
+            no_new_privs: Outcome::Applied,
+            dumpable_cleared: Outcome::Applied,
+            caps: Outcome::Applied,
+            landlock: LandlockOutcome::Applied {
+                abi: 1,
+                status: detent_platform::sandbox::LandlockStatus::FullyEnforced,
+            },
+            seccomp: Outcome::Applied,
+        };
+        assert!(degradation_notes(&full).is_empty());
+        let degraded = Confinement {
+            landlock: LandlockOutcome::Unavailable {
+                reason: "old kernel".to_owned(),
+            },
+            ..full
+        };
+        let notes = degradation_notes(&degraded);
+        assert_eq!(notes, vec!["landlock: old kernel".to_owned()]);
     }
 
     #[test]
