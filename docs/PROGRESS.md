@@ -5,6 +5,12 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-22 - Phase 6 cert install: ACME chain lands on disk and in the live store
+
+`tls::{store_acme, load_acme, install_acme}` persist an ACME-issued pair as `acme.cert.der` (leaf + intermediates, u32-BE length-framed so the chain splits back) + `acme.key.der`, same `0700`/`0600` confinement as bootstrap. `install_acme` stores then `CertStore::replace`s — no restart. `serve` prefers `load_acme` over `load_or_bootstrap`, so a renewal survives restart. Tests: `acme_install_persists_and_reloads_with_the_full_chain`, `acme_store_survives_a_restart_from_disk` (plus existing `acme_pem_*`, 6 acme tests pass).
+
+Verify: `cargo test -p detent-web --lib` 300 passed; `cargo test -p detent` 154 passed; `clippy -p detent-web -p detent --all-targets -D warnings` clean; fmt clean.
+
 ## 2026-09-22 - Phase 6 EAB fix: redacted Debug, decode-before-builder
 
 `EabCredentials` drops the derived `Debug` for a hand-written one: kid visible, `key_b64` as `[redacted]` — load-bearing, do not re-derive (crate convention: redacted provider impls, `debug_output_redacts_every_secret` covers Phase 6 secrets-never-logged). Test: `eab_debug_redacts_the_key_but_names_the_kid`. EAB decode moved from `create_fresh` into `load_or_create_account`, before the `Account::builder()` match; the built `ExternalAccountKey` is passed down, restored-account skip unchanged. Test: `account_and_order_refuses_bad_eab_before_it_builds_a_client` (missing creds file + bad base64 → `Config` "not base64", no file created; reaching it under `--all-features` proves the ordering since the builder panics there). Declined: a std-only blocking HTTPS client for providers — forbidden by the ADR-009 single-stack rule and ADR-011 cooldown; the correct path is the existing hyper-rustls `RealTransport` pattern at the caller boundary. Date correction: `5d9cd73` committed the scoping entry dated 2026-09-23; fixed to 2026-09-22 to match the repo timeline.
