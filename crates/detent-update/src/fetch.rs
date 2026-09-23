@@ -251,7 +251,11 @@ impl RealTransport {
     /// # Errors
     ///
     /// [`FetchError::Unreachable`] when TLS configuration cannot be built.
-    #[allow(clippy::missing_errors_doc, clippy::map_unwrap_or, clippy::arithmetic_side_effects)]
+    #[allow(
+        clippy::missing_errors_doc,
+        clippy::map_unwrap_or,
+        clippy::arithmetic_side_effects
+    )]
     pub fn with_roots(roots: rustls::RootCertStore) -> Result<Self, FetchError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -360,10 +364,11 @@ impl Transport for RealTransport {
                     if total > cap {
                         return Err(FetchError::TooLarge { cap });
                     }
-                    sink.write_all(&data).map_err(|err| FetchError::Unreachable {
-                        url: current.clone(),
-                        reason: err.to_string(),
-                    })?;
+                    sink.write_all(&data)
+                        .map_err(|err| FetchError::Unreachable {
+                            url: current.clone(),
+                            reason: err.to_string(),
+                        })?;
                 }
                 Ok((None, total))
             });
@@ -381,7 +386,11 @@ impl Transport for RealTransport {
     }
 }
 
-#[allow(clippy::unnecessary_wraps, clippy::map_unwrap_or, clippy::arithmetic_side_effects)]
+#[allow(
+    clippy::unnecessary_wraps,
+    clippy::map_unwrap_or,
+    clippy::arithmetic_side_effects
+)]
 fn resolve_location(base: &str, location: &str) -> Result<String, FetchError> {
     if location.starts_with("https://") || location.starts_with("http://") {
         return Ok(location.to_owned());
