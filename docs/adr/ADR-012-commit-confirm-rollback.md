@@ -15,11 +15,15 @@ For modules marked `commit_confirm = true` (network, resolver, mounts, §2.5,
 §2.3 `ModuleDescriptor.commit_confirm`), `Apply` writes files, restarts
 services, and starts a timer in the **monitor** (default 90 s). The UI/CLI
 must call `ConfirmCommit`, which — arriving over the network — proves the
-new configuration is still reachable. On timeout, or if the monitor restarts
-and finds a `pending-commit` marker, it restores the backup and re-applies
-the prior service action. Only one pending commit is allowed at a time
-(§1.3, §2.5). The protocol carries this as `StartConfirmTimer` and
-`ConfirmCommit` messages between worker and monitor (Appendix B).
+new configuration is still reachable. On timeout the monitor restores the
+backup (file content only; service restart is not yet replayed — H4). A
+`pending-commit` marker intended to survive a monitor restart exists
+(`PENDING_COMMIT_MARKER`, `recover_pending`) but `recover_pending` has no
+production caller and the timer is in-memory only, so a monitor restart
+during the window does not yet trigger rollback (H1). Only one pending
+commit is allowed at a time (§1.3, §2.5). The protocol carries this as
+`StartConfirmTimer` and `ConfirmCommit` messages between worker and monitor
+(Appendix B).
 
 ## Consequences
 
@@ -28,9 +32,10 @@ Positive:
   resolver change: the monitor, not the (possibly now-unreachable) worker,
   owns the rollback timer and survives a worker crash or the admin losing
   connectivity.
-- The `pending-commit` marker surviving a monitor restart means even a full
-  process crash during the confirm window still results in rollback rather
-  than a stuck bad config (§2.5).
+- The `pending-commit` marker is intended to survive a monitor restart so
+  even a full process crash during the confirm window would still roll back
+  (§2.5); today `recover_pending` is not yet wired at startup (H1), so the
+  marker does not yet trigger rollback — the timer is in-memory only.
 
 Negative:
 - Every commit-confirm module needs backup/restore and service-action replay
