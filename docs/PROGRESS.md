@@ -5,6 +5,12 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-23 - Phase 6 renewal scoping: renewal_check already exists, nothing built
+
+Jev (`jev-1.13.0`) routed next_slice `provider_transport` (conf 0.79, p=0.86 over renewal_driver 0.08, attest 0.06; non-destructive noul 0.2), then sub-slice `renewal_check` (conf 0.79, p=0.86 over cert_renew_wiring 0.11, renewal_loop 0.03). Scoping found both blocked/covered: provider transport needs a new TLS dep under ADR-011 cooldown (Jev `park_transport` conf 1.0, p=1.0; detent-acme is tokio-free, RFC2136 needs hmac too), and renewal_check already exists (`decide_renewal` + `should_renew_in_window` + `warning_for`, all tested; `CertStore::replace` hot reload + cert status endpoint live). No code changed; no verification to run.
+
+Next buildable: renewal_loop (background poll) or cert_renew_wiring (full CertRenew flow) — both need design, not scoping. Attest backend (TPM/swtpm) also open.
+
 ## 2026-09-22 - Phase 6 EAB slice: contacts + EAB through account creation
 
 `account_and_order` takes `contacts: &[&str]` and `eab: Option<&EabCredentials>` (`order.rs`); `create_fresh` passes contacts into `NewAccount` and the decoded `ExternalAccountKey` into `builder.create`. `eab_key` decodes standard-then-URL-safe base64, rejecting empty kid/empty key/garbage as `Config` before any network. New: `EabCredentials` type (re-exported); restored accounts skip EAB entirely. Tests: `eab_key_rejects_bad_inputs_before_any_network`, `eab_key_accepts_both_base64_alphabets`; restored `problem_fixture_parses` lost in an edit repair.
