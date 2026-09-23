@@ -5,6 +5,12 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-22 - Phase 6 renewal_due: two-thirds predicate for the loop
+
+Jev (`jev-1.13.0`) routed next_slice `renewal_loop` (conf 0.89, p=0.93 over cert_renew_wiring 0.07; non-destructive noul 0.41). No `[acme]` config surface exists yet (config `deny_unknown_fields` refuses it by design), so the loop's network half is unbuildable — built its decision half instead: `tls::renewal_due_at` (same 66 % rule as `detent-acme`'s `should_renew`, ACME-free so web stays dependency-clean; broken lifetime renews, skew waits). Test: `renewal_fires_at_two_thirds_used` (boundary 59/60 of 90, broken, skew, fresh-bootstrap). Complex reasoning by default model; Jev used only for slice routing.
+
+Verify: `cargo test -p detent-web --lib` 301 passed; `clippy -p detent-web --all-targets -D warnings` clean; fmt clean.
+
 ## 2026-09-22 - Phase 6 cert install: ACME chain lands on disk and in the live store
 
 `tls::{store_acme, load_acme, install_acme}` persist an ACME-issued pair as `acme.cert.der` (leaf + intermediates, u32-BE length-framed so the chain splits back) + `acme.key.der`, same `0700`/`0600` confinement as bootstrap. `install_acme` stores then `CertStore::replace`s — no restart. `serve` prefers `load_acme` over `load_or_bootstrap`, so a renewal survives restart. Tests: `acme_install_persists_and_reloads_with_the_full_chain`, `acme_store_survives_a_restart_from_disk` (plus existing `acme_pem_*`, 6 acme tests pass).

@@ -381,6 +381,29 @@ pub(crate) fn validity_unix(der: &[u8]) -> Option<(i64, i64)> {
     }
     None
 }
+/// Whether the certificate with this lifetime should renew at `now_unix`:
+/// two thirds of its lifetime used. Mirrors
+/// [`detent_acme::schedule::should_renew`](https://docs.rs/detent-acme) —
+/// duplicated rather than depended on so `detent-web` stays ACME-free; keep
+/// the `66` in step with it.
+///
+/// Pure lifetime math for the Phase 6 renewal loop to poll: the loop pairs
+/// this with [`validity_unix`] and the clock, then drives
+/// order/finalize/[`install_acme`](crate::tls::install_acme). A broken
+/// lifetime (`not_after <= not_before`) answers `true` — renewing a broken
+/// certificate is safer than serving it — and clock skew (`now < not_before`)
+/// answers `false`.
+#[must_use]
+// Test-bounded i128 second math: cannot overflow, same as the schedule module.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn renewal_due_at(not_before: i64, not_after: i64, now_unix: i64) -> bool {
+    if not_after <= not_before {
+        return true;
+    }
+    let elapsed = i128::from(now_unix.saturating_sub(not_before).max(0));
+    let total = i128::from(not_after) - i128::from(not_before);
+    (elapsed * 100 / total).clamp(0, 100) >= 66
+}
 
 /// One DER TLV: its value bytes and whatever follows it.
 struct Tlv<'a> {
@@ -894,7 +917,8 @@ mod tests {
         ACME_CERT_FILE, ACME_KEY_FILE, ALPN_H2_HTTP11, BOOTSTRAP_CERT_FILE, BOOTSTRAP_KEY_FILE,
         CertStore, CertifiedKeyPair, TlsError, bootstrap_self_signed, confine_cert_dir,
         fingerprint, install_acme, install_crypto_provider, load_acme, load_bootstrap,
-        load_or_bootstrap, server_config, store_acme, store_bootstrap, validity_unix,
+        load_or_bootstrap, renewal_due_at, server_config, store_acme, store_bootstrap,
+        validity_unix,
     };
     use std::os::unix::fs::PermissionsExt as _;
     use std::sync::Arc;
@@ -1148,6 +1172,22 @@ mod tests {
             store.current().cert.first().map(|c| c.to_vec()),
             Some(issued.cert_der().to_vec())
         );
+        Ok(())
+    }
+    #[test]
+    fn renewal_fires_at_two_thirds_used() -> R {
+        // Lifetime 0..90: day 59 (65 %) waits, day 60 (66 %) renews. Same
+        // threshold as `detent-acme`'s `should_renew` — a second opinion on
+        // the same rule is the point, so a skew shows as a failing test.
+        assert!(!renewal_due_at(0, 90, 59));
+        assert!(renewal_due_at(0, 90, 60));
+        // Broken lifetime renews rather than serving; clock skew waits.
+        assert!(renewal_due_at(90, 90, 90));
+        assert!(!renewal_due_at(10, 90, 0));
+        // A real bootstrap pair is fresh: months from renewal.
+        let der = pair()?.cert_der().to_vec();
+        let (not_before, not_after) = validity_unix(&der).ok_or("valid pair")?;
+        assert!(!renewal_due_at(not_before, not_after, not_before));
         Ok(())
     }
 
