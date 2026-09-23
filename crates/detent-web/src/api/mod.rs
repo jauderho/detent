@@ -396,4 +396,94 @@ mod tests {
                 .all(|route| route.path.starts_with("/api/v1/"))
         );
     }
+
+    #[allow(clippy::too_many_lines)]
+    #[tokio::test]
+    async fn the_router_answers_exactly_the_table() -> Result<(), Box<dyn std::error::Error>> {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+
+        let fixture = crate::state::test_state()?;
+        let app = super::routes().with_state(fixture.state.clone());
+
+        // Concrete path for every table entry (placeholders become "x").
+        let mut allowed: BTreeMap<String, BTreeSet<Method>> = BTreeMap::new();
+        for route in table() {
+            let concrete = route
+                .path
+                .split('/')
+                .map(|seg| if seg.starts_with('{') { "x" } else { seg })
+                .collect::<Vec<_>>()
+                .join("/");
+            allowed
+                .entry(concrete)
+                .or_default()
+                .insert(route.method.clone());
+        }
+
+        // Every method the API uses plus a few it never should.
+        let probes = [
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::PATCH,
+        ];
+
+        for (path, methods) in &allowed {
+            for probe in &probes {
+                let req = Request::builder()
+                    .method(probe.clone())
+                    .uri(path.as_str())
+                    .body(Body::empty())?;
+                let res = app.clone().oneshot(req).await?;
+                let status = res.status();
+                if methods.contains(probe) {
+                    assert_ne!(
+                        status,
+                        StatusCode::NOT_FOUND,
+                        "{} {path} should be routed (table allows {:?})",
+                        probe,
+                        methods
+                    );
+                    assert_ne!(
+                        status,
+                        StatusCode::METHOD_NOT_ALLOWED,
+                        "{} {path} should be routed (table allows {:?})",
+                        probe,
+                        methods
+                    );
+                } else {
+                    assert_eq!(
+                        status,
+                        StatusCode::METHOD_NOT_ALLOWED,
+                        "{} {path} should be 405 (table allows {:?}, got {})",
+                        probe,
+                        methods,
+                        status
+                    );
+                }
+            }
+        }
+
+        // A path that is in no table must be 404 for any method.
+        for probe in [Method::GET, Method::POST] {
+            let req = Request::builder()
+                .method(probe.clone())
+                .uri("/api/v1/unknown")
+                .body(Body::empty())?;
+            let res = app.clone().oneshot(req).await?;
+            assert_eq!(
+                res.status(),
+                StatusCode::NOT_FOUND,
+                "{} /api/v1/unknown should be 404",
+                probe
+            );
+        }
+
+        Ok(())
+    }
 }
