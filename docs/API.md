@@ -38,12 +38,11 @@ Every credential holds `read`, or `read` and `write` together — there is no
 scope that grants `write` without `read`. `read` covers every endpoint that
 does not change the host: listing and reading modules, planning, validating,
 reading backups and service status, the audit log, the host profile, the
-update status.
+update status. A `read` caller sees blank `rendered`/`unified_diff`/`diff` in `plan` and redacted secrets in `GetModule` (values at JSON Pointers declared by `ConfigModule::secret_pointers` plus a heuristic fallback for undeclared `password=` substrings and `password`/`psk`/`secret` keys).
 `write` is required for anything that does: applying a module, confirming or
 rolling back a commit, restoring a backup, and acting on a service. A request
 that reaches a `write` endpoint without the scope is refused with `403` and
 `message_id: "web-denied-scope"` before anything is read or written.
-
 ## CSRF
 
 A cookie carries ambient authority a bearer token does not, so every

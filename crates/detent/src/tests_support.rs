@@ -268,6 +268,7 @@ pub fn module_view(with_model: bool) -> OpOutcome {
         model: with_model.then(|| json!({"text": "a\n"})),
         current_hash: with_model.then(digest),
         diagnostics: diagnostics(),
+        secret_pointers: &[],
     }))
 }
 

@@ -40,6 +40,9 @@ pub struct ModuleView {
     pub current_hash: Option<Sha256Digest>,
     /// Validation findings for that model.
     pub diagnostics: Diagnostics,
+    /// JSON Pointers to secret-bearing model fields, from `DynModule::secret_pointers`.
+    #[serde(skip)]
+    pub secret_pointers: &'static [&'static str],
 }
 
 /// A service a change would affect.

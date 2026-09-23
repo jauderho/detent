@@ -414,6 +414,7 @@ async fn get_module_renders_the_engine_answer() -> R {
         model: None,
         current_hash: None,
         diagnostics: Diagnostics::default(),
+        secret_pointers: &[],
     };
     let fixture = stub_state(OpOutcome::Module(Box::new(view)))?;
     let (read, _write) = tokens(&fixture.state)?;
@@ -940,6 +941,116 @@ async fn healthz_is_reachable_through_the_assembled_router() -> R {
     let response = get(live.state(), "/healthz", None).await?;
     assert_eq!(response.status(), StatusCode::OK);
     live.shutdown();
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines, clippy::redundant_closure_for_method_calls)]
+#[tokio::test]
+async fn a_read_token_never_sees_a_rendered_file() -> R {
+    use detent_ops::diff::{DiffLine, Hunk};
+    let report = PlanReport {
+        module: "stub".to_owned(),
+        path: "/tmp/stub".to_owned(),
+        diff: vec![Hunk {
+            old_start: 1,
+            old_lines: 1,
+            new_start: 1,
+            new_lines: 1,
+            lines: vec![DiffLine::Insert("hunter2\n".to_owned())],
+        }],
+        rendered: "hunter2\n".to_owned(),
+        unified_diff: "@@ -1,1 +1,1 @@\n+hunter2\n".to_owned(),
+        affected_services: Vec::new(),
+        checks: Vec::new(),
+        diagnostics: Diagnostics::default(),
+        current_hash: Sha256Digest::of(b"x"),
+        would_change: true,
+    };
+    let fixture = stub_state(OpOutcome::Planned(Box::new(report)))?;
+    let (read, write) = tokens(&fixture.state)?;
+    let read_resp = post(
+        &fixture.state,
+        "/api/v1/modules/stub/plan",
+        Some(&read),
+        r#"{"model":{}}"#,
+    )
+    .await?;
+    assert_eq!(read_resp.status(), StatusCode::OK);
+    let read_body = json(read_resp).await?;
+    let read_rendered = read_body
+        .get("rendered")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let read_unified = read_body
+        .get("unified_diff")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let read_diff = read_body.get("diff").and_then(|v| v.as_array());
+    assert!(
+        !read_rendered.contains("hunter2"),
+        "read rendered leaked secret: {read_rendered:?}"
+    );
+    assert!(
+        !read_unified.contains("hunter2"),
+        "read unified_diff leaked secret: {read_unified:?}"
+    );
+    if let Some(arr) = read_diff {
+        assert!(arr.is_empty(), "read diff not blank: {arr:?}");
+    }
+    assert!(read_rendered.is_empty(), "read rendered not blank");
+    assert!(read_unified.is_empty(), "read unified_diff not blank");
+    // GetModule model redaction: the stub model contains the secret string.
+    let gview = ModuleView {
+        descriptor: &STUB_DESCRIPTOR,
+        schema: serde_json::json!({}),
+        model: Some(serde_json::json!({"options": "password=hunter2,guest"})),
+        current_hash: None,
+        diagnostics: Diagnostics::default(),
+        secret_pointers: &["/options"],
+    };
+    let gfix = stub_state(OpOutcome::Module(Box::new(gview)))?;
+    // Reuse the read/write tokens from the first fixture's stores? Need fresh ones for this state.
+    let (read2, write2) = tokens(&gfix.state)?;
+    let read_get = get(&gfix.state, "/api/v1/modules/stub", Some(&read2)).await?;
+    assert_eq!(read_get.status(), StatusCode::OK);
+    let read_get_body = json(read_get).await?;
+    let read_model_str = read_get_body
+        .get("model")
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    assert!(
+        !read_model_str.contains("hunter2"),
+        "read GetModule leaked secret: {read_model_str}"
+    );
+
+    let write_resp = post(
+        &fixture.state,
+        "/api/v1/modules/stub/plan",
+        Some(&write),
+        r#"{"model":{}}"#,
+    )
+    .await?;
+    assert_eq!(write_resp.status(), StatusCode::OK);
+    let write_body = json(write_resp).await?;
+    let write_rendered = write_body
+        .get("rendered")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert!(
+        write_rendered.contains("hunter2"),
+        "write rendered should contain secret"
+    );
+    let write_get = get(&gfix.state, "/api/v1/modules/stub", Some(&write2)).await?;
+    assert_eq!(write_get.status(), StatusCode::OK);
+    let write_get_body = json(write_get).await?;
+    let write_model_str = write_get_body
+        .get("model")
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    assert!(
+        write_model_str.contains("hunter2"),
+        "write GetModule should contain secret"
+    );
     Ok(())
 }
 
