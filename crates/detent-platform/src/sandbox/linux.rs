@@ -530,6 +530,30 @@ mod tests {
         unsafe { syscall(nr, 0_i64, 0_i64, 0_i64, 0_i64) }
     }
 
+    /// STAGE3 H6 spec test: confine as the monitor (`Enforce`, the real
+    /// `confine`), then run `/bin/true` through the production runner.
+    /// The parent asserts exit 0. Fails while the table forbids anything
+    /// the spawn path needs; passes once it allows the full set.
+    #[test]
+    fn enforce_mode_monitor_can_spawn_a_validator() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::service::exec::{ProcessRunner, RealProcessRunner};
+        use std::time::Duration;
+        in_forked_child(|| {
+            let dir =
+                std::env::temp_dir().join(format!("detent-sandbox-spawn-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            let Ok(allow) = fixture_allowlist(&dir) else {
+                return false;
+            };
+            if confine(Role::Monitor, &Policy::monitor(&allow)).is_err() {
+                return false;
+            }
+            RealProcessRunner
+                .run("/bin/true", &[], Duration::from_secs(5))
+                .is_ok_and(|out| out.status == Some(0) && !out.timed_out)
+        })
+    }
+
     #[test]
     fn enforce_mode_seccomp_kills_the_monitor_on_a_forbidden_syscall()
     -> Result<(), Box<dyn std::error::Error>> {

@@ -217,12 +217,20 @@ const MONITOR: &[&str] = &[
     // Process creation (`service::exec::run_confined`, called live for every
     // `RunCheck` and `Service` request): `Command::spawn` is `clone`/`clone3`
     // + `execve`/`execveat` in the child, `pipe2`/`dup3` for the piped
-    // stdio, `kill`/`tgkill` for the timeout kill, `nanosleep` for the
-    // `try_wait` poll loop's sleep, and `rseq`/`set_robust_list`/
-    // `sched_getaffinity` for the two `spawn_capped_reader` threads glibc
-    // starts per child. Derived by reading `service/exec.rs`, not strace —
-    // no strace-capable host was available when this landed; re-derive on
-    // a009/k001 per STAGE3 H6 steps 1 and 4 before closing that item.
+    // stdio, `kill`/`tgkill` for the timeout kill, `clock_nanosleep` for the
+    // `try_wait` poll loop's sleep (glibc routes it there; `nanosleep` stays
+    // as the fallback), `prlimit64` (Rust `std` queries `RLIMIT_NOFILE`
+    // while wiring stdio), `faccessat` (the dynamic loader's first call in
+    // the exec'd child, `/etc/ld.so.preload`), and `rseq`/`set_robust_list`/
+    // `set_tid_address` for the two `spawn_capped_reader` threads glibc
+    // starts per child. Traced live in a privileged `debian:bookworm`
+    // container: first a fork + pipe + dup2 + exec + nanosleep + kill probe,
+    // then the real confined-monitor child spawning `/bin/true` under
+    // `strace -f`. That trace killed the child at `prlimit64` (the Rust
+    // stdio wiring) and, after allowing it, at the loader's `faccessat` —
+    // both fixed here and re-traced green (`NO_SIGSYS`). `sched_getaffinity`
+    // stays (glibc thread startup consults it). Remaining H6 work is the
+    // a009/k001 pass per STAGE3 H6 steps 1 and 4 before closing the item.
     "clone",
     "clone3",
     "execve",
@@ -232,6 +240,10 @@ const MONITOR: &[&str] = &[
     "kill",
     "tgkill",
     "nanosleep",
+    "clock_nanosleep", // glibc routes `thread::sleep` here, not `nanosleep`.
+    "prlimit64",       // Rust `std` queries `RLIMIT_NOFILE` while wiring stdio.
+    "faccessat",       // dynamic loader probes `/etc/ld.so.preload` after `execve`.
+    "set_tid_address", // glibc thread startup for the reader threads.
     "rseq",
     "set_robust_list",
     "sched_getaffinity",
@@ -454,6 +466,9 @@ const SYSCALL_NUMBERS: &[(&str, i64, i64)] = &[
     ("kill", 62, 129),
     ("tgkill", 234, 131),
     ("nanosleep", 35, 101),
+    ("clock_nanosleep", 230, 115),
+    ("prlimit64", 302, 261),
+    ("set_tid_address", 218, 96),
 ];
 
 /// `name`'s raw syscall number on `arch`, or `None` if it is not in
