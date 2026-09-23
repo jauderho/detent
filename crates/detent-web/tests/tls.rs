@@ -20,6 +20,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
+use axum::routing::get;
+use detent_web::auth::ClientIp;
 use detent_web::config::Config;
 use detent_web::server::Server;
 use detent_web::tls::{
@@ -296,4 +299,56 @@ async fn a_swapped_certificate_serves_without_a_restart() -> TestResult {
     drop(stream);
 
     running.shutdown().await
+}
+#[tokio::test]
+async fn the_peer_address_reaches_the_handlers() -> TestResult {
+    install_crypto_provider();
+    let cert = bootstrap_self_signed(&[HOST.to_owned()])?;
+    let store = Arc::new(CertStore::new(&cert)?);
+    let tls = server_config_from_store(Arc::clone(&store), ALPN_H2_HTTP11)?;
+    let mut config = Config::default();
+    config.listen.addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+    config.listen.max_connections = 8;
+    config.validate()?;
+    let router = detent_web::server::harden(
+        Router::new().route(
+            "/ip",
+            get(|ClientIp(ip): ClientIp| async move { ip.to_string() }),
+        ),
+        Duration::from_secs(30),
+    );
+    let server = Server::bind(&config, tls, router).await?;
+    let addr = server.local_addr();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        server
+            .serve(async move {
+                let _ = stopped.await;
+            })
+            .await;
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let client_cfg = client_config(&cert, &[&rustls::version::TLS13], &[b"http/1.1"])?;
+    let connector = TlsConnector::from(Arc::new(client_cfg));
+    let tcp = TcpStream::connect(addr).await?;
+    let server_name = ServerName::try_from(HOST.to_owned())?;
+    let mut stream = connector.connect(server_name, tcp).await?;
+    stream
+        .write_all(b"GET /ip HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await?;
+    stream.flush().await?;
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await?;
+    let response = String::from_utf8_lossy(&raw);
+    assert!(
+        response.contains("127.0.0.1"),
+        "expected peer 127.0.0.1 in response, got: {response}"
+    );
+    assert!(
+        !response.contains(&Ipv4Addr::UNSPECIFIED.to_string()),
+        "should not fall back to unspecified, got: {response}"
+    );
+    drop(stop);
+    let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+    Ok(())
 }

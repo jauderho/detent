@@ -35,11 +35,26 @@
 
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use super::AuthError;
+
+/// Normalize an address for bucketing: IPv6 is masked to its /64.
+#[must_use]
+pub fn normalize_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => {
+            let mut octets = v6.octets();
+            for byte in &mut octets[8..] {
+                *byte = 0;
+            }
+            IpAddr::V6(Ipv6Addr::from(octets))
+        }
+    }
+}
 
 /// Entries kept per map before the least-recently-seen one is evicted.
 pub const MAX_TRACKED: usize = 4096;
@@ -252,6 +267,7 @@ impl RateLimiter {
     /// [`AuthError::RateLimited`] carrying the seconds to wait, which is the
     /// longer of the two buckets' remaining lockouts.
     pub fn check(&self, ip: IpAddr, user: &str, now: Instant) -> Result<(), AuthError> {
+        let ip = normalize_ip(ip);
         let by_ip = self
             .ips
             .lock()
@@ -273,6 +289,7 @@ impl RateLimiter {
     /// Returns the principals this failure locked out, for the audit record;
     /// empty while the attempt count is still under the threshold.
     pub fn record_failure(&self, ip: IpAddr, user: &str, now: Instant) -> Vec<Principal> {
+        let ip = normalize_ip(ip);
         let mut locked = Vec::new();
         if let Ok(mut buckets) = self.ips.lock()
             && buckets.fail(&ip, self.max_failures, now)
@@ -289,6 +306,7 @@ impl RateLimiter {
 
     /// Forget this principal pair's failures after a successful login.
     pub fn record_success(&self, ip: IpAddr, user: &str) {
+        let ip = normalize_ip(ip);
         if let Ok(mut buckets) = self.ips.lock() {
             buckets.clear(&ip);
         }
@@ -543,5 +561,31 @@ mod tests {
         assert!(rendered.contains("tracked_users: 1"), "{rendered}");
         assert!(!rendered.contains("alice"), "{rendered}");
         assert!(!rendered.contains("198.51.100"), "{rendered}");
+    }
+
+    #[test]
+    fn ipv6_addresses_in_one_slash64_share_a_bucket() -> R {
+        let limiter = RateLimiter::new(1);
+        let start = Instant::now();
+        let a: IpAddr = "2001:db8:abcd:0012:0000:0000:0000:0001".parse()?;
+        let b: IpAddr = "2001:db8:abcd:0012:ffff:ffff:ffff:ffff".parse()?;
+        let c: IpAddr = "2001:db8:abcd:0013:0000:0000:0000:0001".parse()?;
+        assert_eq!(limiter.record_failure(a, "alice", start).len(), 2);
+        match limiter.check(b, "alice", start) {
+            Err(AuthError::RateLimited { .. }) => {}
+            other => return Err(format!("same /64 should share bucket, got {other:?}").into()),
+        }
+        assert!(limiter.check(c, "bob", start).is_ok());
+        assert_eq!(
+            super::normalize_ip(a),
+            super::normalize_ip(b),
+            "same /64 must normalize equal"
+        );
+        assert_ne!(
+            super::normalize_ip(a),
+            super::normalize_ip(c),
+            "different /64 must not collide"
+        );
+        Ok(())
     }
 }

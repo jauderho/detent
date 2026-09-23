@@ -25,6 +25,7 @@ argon2 = { workspace = true }
 axum = { workspace = true }
 getrandom = { workspace = true }
 hmac = { workspace = true }
+hyper = { workspace = true }
 hyper-util = { workspace = true }
 rcgen = { workspace = true }
 # Only pulled in by the `ui` feature (PLAN §4.2); see `src/spa.rs`.
@@ -43,8 +44,8 @@ tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 toml = { workspace = true }
 # `tower::Service` is implemented by hand in `server.rs` so that each
-# connection can hand its peer address to the handlers (the login rate
-# limiter is per-IP, PLAN §2.7). Nothing else here needs tower at run time.
+# connection can hand its peer address to the handlers via
+# `axum::extract::ConnectInfo` (the login rate limiter is per-IP, PLAN §2.7).
 tower = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
