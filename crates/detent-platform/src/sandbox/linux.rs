@@ -14,6 +14,7 @@ use landlock::{
     RulesetCreatedAttr, RulesetStatus,
 };
 
+use super::caps_verdict;
 use super::seccomp::{self, Arch, SeccompMode};
 use super::{
     Capability, Confinement, LandlockOutcome, LandlockStatus, Outcome, Policy, Role, SandboxError,
@@ -31,6 +32,7 @@ pub fn confine(role: Role, policy: &Policy) -> Result<Confinement, SandboxError>
     let no_new_privs = harden_no_new_privs();
     let dumpable_cleared = harden_dumpable();
     let caps = drop_capabilities(policy);
+    caps_verdict(policy.require_caps, &caps)?;
     let landlock = install_landlock(policy)?;
     // Seccomp last: every syscall the steps above need has already run, so
     // installing their allow-list first would risk `SIGSYS`-ing them.
@@ -200,7 +202,6 @@ fn seccomp_verdict(required: bool, outcome: &Outcome) -> Result<(), SandboxError
         _ => Ok(()),
     }
 }
-
 fn install_seccomp(role: Role) -> Outcome {
     match install_seccomp_inner(role) {
         Ok(()) => Outcome::Applied,
@@ -261,7 +262,6 @@ mod tests {
             .is_ok()
         );
     }
-
     // Forking helpers come from `privsep::sys`, the crate's single home for
     // `unsafe` POSIX calls. These children exit via
     // `exit_immediately_unflushed`, never `exit_immediately`: by the time they
