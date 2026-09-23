@@ -60,6 +60,7 @@ pub fn run(
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
+    crate::run::init_tracing();
     let host = detent_platform::host::detect_real();
     let registry = detent_modules::modules();
     let descriptors: Vec<_> = registry.iter().map(|entry| entry.descriptor()).collect();

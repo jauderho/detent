@@ -159,6 +159,22 @@ pub(crate) fn report_web_config_error(
     Ok(Exit::Failed)
 }
 
+/// Installs the process-global tracing subscriber (STAGE3 M12).
+///
+/// Called by `serve` and `mcp` only: they are the long-lived paths whose
+/// `tracing::warn!`/`error!` (privsep violations, rollbacks, the journald
+/// audit stream) otherwise go nowhere. One-shot commands stay quiet.
+/// Writes to **stderr**: stdout is the MCP stdio channel and JSON pipe.
+/// `try_init` failure (a test already installed one) is ignored.
+pub(crate) fn init_tracing() {
+    use tracing_subscriber::{EnvFilter, fmt};
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    let _ = fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
 /// Runs one parsed command to completion and reports the exit code.
 ///
 /// Never returns `Err`: a stream that cannot be written to is itself an exit

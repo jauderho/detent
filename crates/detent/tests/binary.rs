@@ -108,6 +108,25 @@ fn verbose_notes_go_to_stderr_and_leave_stdout_machine_readable() -> TestResult 
     Ok(())
 }
 
+/// STAGE3 M12: refused mcp startup leaves stdout empty with tracing on.
+#[cfg(feature = "mcp")]
+#[test]
+fn mcp_refused_startup_writes_nothing_to_stdout() -> TestResult {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("state-root").to_string_lossy().to_string();
+    let output = Command::new(env!("CARGO_BIN_EXE_detent"))
+        .args(["--state-root", &root, "mcp"])
+        .env("DETENT_MCP_TOKEN", "bad-token")
+        .env("RUST_LOG", "info")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+    assert_eq!(code(&output), Some(1));
+    assert!(output.stdout.is_empty());
+    Ok(())
+}
+
 #[test]
 fn a_dry_run_serve_starts_nothing() -> TestResult {
     let output = run(&["serve", "--dryrun"], "")?;
