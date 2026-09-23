@@ -5,6 +5,10 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-23 - STAGE3 M12 companion pin: refused mcp startup traces on stderr
+
+`resolve_identity` refused paths now `tracing::warn!` (`mcp startup refused: token missing|credential store failed|credential failed`); `mcp_refused_startup_writes_nothing_to_stdout` asserts stdout empty AND stderr contains `mcp startup refused` (non-vacuous: fails pre-warn). Jev (`jev-1.13.0`, live POST) routing only: `next_slice` companion_pin (p=0.63, conf 0.45), destructive noul 0.29; complex reasoning by default model. M13 FFI guard next: ADR-010 already rejects `catch_unwind` (lints+fuzz), so the slice is a guard test, not new code.
+
 ## 2026-09-23 - STAGE3 M12 completed: stderr tracing subscriber for serve and mcp
 
 `f017c5d` adds `tracing-subscriber 0.3` (`fmt`, `env-filter`; 0.3.23, 194d old, clears ADR-011) to workspace + `detent` deps; `run::init_tracing()` (stderr writer, `RUST_LOG` env filter, warn default, `try_init`) called from `serve::run` and `mcp::run` only. Test `mcp_refused_startup_writes_nothing_to_stdout`: bad token + `RUST_LOG=info` exits 1 with empty stdout.
