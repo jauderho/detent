@@ -51,8 +51,9 @@ pub fn should_renew(not_before: i64, not_after: i64, now: i64) -> bool {
 }
 
 /// Whether the certificate should renew now, narrowed by ARI's suggested
-/// window: inside the window renews on the lifetime rule; outside it only a
-/// nearly-spent certificate (≥90 %) renews early.
+/// window: renew immediately if the window has started, otherwise at
+/// two-thirds of the lifetime. RFC 9773: renew inside the window, and
+/// immediately if the window is already past.
 #[must_use]
 pub fn should_renew_in_window(
     not_before: i64,
@@ -63,13 +64,7 @@ pub fn should_renew_in_window(
     let used = percent_used(not_before, not_after, now);
     match window {
         None => used >= 66,
-        Some((start, end)) => {
-            if now >= start && now <= end {
-                used >= 66
-            } else {
-                used >= 90
-            }
-        }
+        Some((start, _)) => now >= start || used >= 66,
     }
 }
 
@@ -111,18 +106,23 @@ mod tests {
     }
 
     #[test]
-    fn ari_window_narrows_but_nearly_spent_overrides() {
-        let window = Some((NB + 400_000, NB + 500_000));
-        // Inside the window the lifetime rule applies.
-        assert!(!should_renew_in_window(NB, NA, NB + 300_000, window));
-        assert!(should_renew_in_window(NB, NA, NB + 450_000, window));
-        // Outside it only a nearly-spent cert renews early.
-        assert!(!should_renew_in_window(NB, NA, NB + 300_000, None));
-        assert!(should_renew_in_window(NB, NA, NB + 518_400, window)); // 90 %
-        // No window is the plain lifetime rule.
-        assert_eq!(
-            should_renew_in_window(NB, NA, NB + 300_000, None),
-            should_renew(NB, NA, NB + 300_000)
-        );
+    fn a_past_ari_window_renews_immediately() {
+        // Window started at NB+100_000, now is NB+300_000 (30 % used). Per
+        // RFC 9773 the past window renews even though lifetime < 66 %.
+        let window = Some((NB + 100_000, NB + 200_000));
+        assert!(should_renew_in_window(NB, NA, NB + 300_000, window));
+        // Before the window, 30 % does not renew — lifetime rule still gates.
+        let future = Some((NB + 400_000, NB + 500_000));
+        assert!(!should_renew_in_window(NB, NA, NB + 300_000, future));
+    }
+
+    #[test]
+    fn an_open_ari_window_renews_before_two_thirds() {
+        // Inside an open window, even 10 % renews immediately.
+        let window = Some((NB + 50_000, NB + 500_000));
+        assert!(should_renew_in_window(NB, NA, NB + 60_000, window));
+        // No window is the plain 66 % rule.
+        assert!(!should_renew_in_window(NB, NA, NB + 60_000, None));
+        assert!(should_renew_in_window(NB, NA, NB + 400_000, None));
     }
 }
