@@ -5,6 +5,12 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      security:
+        description: 'Mark this release as security bypass (adds detent-security: true)'
+        required: false
+        default: false
+        type: boolean
 
 # Unlike CI, a release run must never be cancelled mid-publish, so the group
 # only serializes runs for the same ref (no cancel-in-progress).
@@ -297,6 +303,20 @@ jobs:
         with:
           sbom-path: dist/SBOM.cyclonedx.json
           subject-path: dist/detent-*
+
+      - name: Refuse accidental security marker in generated notes
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          notes=$(gh api repos/${{ github.repository }}/releases/generate-notes --field tag_name="$GITHUB_REF_NAME" --jq .body)
+          if printf '%s\n' "$notes" | grep -qx 'detent-security: true'; then
+            if [ "${{ inputs.security }}" != "true" ]; then
+              echo "::error::generated notes contain detent-security: true without workflow input security=true" >&2
+              echo "$notes" >&2
+              exit 1
+            fi
+          fi
 
       - name: Create GitHub Release
         env:
