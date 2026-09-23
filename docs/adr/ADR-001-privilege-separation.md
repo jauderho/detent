@@ -26,11 +26,13 @@ sandboxing after fork. No setuid binary is used.
 ## Consequences
 
 Positive:
-- Confines the network-facing code (TLS/HTTP/ACME) to the unprivileged side;
-  a remote compromise of the worker does not directly grant root.
-- Portable to BSD: the design has no dependency on systemd or Linux-only IPC.
-- The monitor's allow-list design means arbitrary paths or commands can never
-  be requested by a compromised worker, even if the protocol is misused.
+ - Confines the network-facing code (TLS/HTTP/ACME) to the unprivileged side;
+   a remote compromise of the worker cannot request paths outside the
+   allow-list. It CAN still gain root through content: allow-listed targets
+   include root-execution vectors (smb.conf `root preexec`, dnsmasq
+   `dhcp-script`, `/etc/fstab`, `/etc/exports` `no_root_squash`, ifupdown `up`
+   lines), and the monitor writes worker-supplied bytes without content
+   validation (STAGE3 H23 step 2, not yet built).
 
 Negative:
 - Two-process architecture adds IPC overhead and a protocol to version and
