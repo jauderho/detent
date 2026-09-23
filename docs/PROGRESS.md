@@ -5,6 +5,12 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-23 - ReplaceBinary trust boundary: staged bytes gated at the monitor
+
+Jev (`jev-1.13.0`) confirmed priv-esc (noul 0.96) and picked `root_ownership_gate` (conf 0.84, p=0.89 over in-monitor-sigstore 0.10, engine-side-verify 0.01); TOCTOU worth fixing (noul 0.87). `monitor.rs` now opens the staged file `O_NOFOLLOW` via `rustix::fs::open`, requires a root-owned regular file when euid is 0 (fail-closed until a root staged-producer lands; skipped off-root so dev/test keep working), reads + hashes from the same fd (`take(u32::MAX)` cap), and `swap_running_binary` writes those verified bytes instead of link/copy of the path. Test: symlinked staged file refused, target untouched.
+
+Verify: `cargo test -p detent-platform --lib` 232 passed; `cargo test -p detent-ops --lib` 45 passed; clippy clean; fmt clean.
+
 ## 2026-09-22 - Phase 6 acme config: [acme] surface unblocks the loop
 
 Jev (`jev-1.13.0`) routed next_slice `acme_config` (conf 0.98, p=0.99 over renewal_loop 0.01; non-destructive noul 0.23). `config::AcmeConfig` lands all-opt-in (`directory_url`, `contacts`, `domains`, `credentials_path`, `ca_root`, `profile`; empty = self-signed only), wired into `Config` + re-exported; doc comment drops `[acme]` from the not-owned list. Tests: defaults, full-document round-trip, unknown-key refusal (`[acme] directory = ...`). Complex reasoning by default model; Jev used only for slice routing. Note: an edit dropped the `csrf` re-export mid-slice; restored, `detent` 154 pass again.
