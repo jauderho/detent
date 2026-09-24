@@ -78,6 +78,18 @@ const fn to_caps_capability(cap: Capability) -> CapsCapability {
 }
 
 fn drop_capabilities(policy: &Policy) -> Outcome {
+    // An unprivileged worker can reach this hook after `setuid`. Its
+    // effective and permitted sets are then already empty, so attempting to
+    // drop the still-full bounding set would return EPERM. Treat that state as
+    // the worker's required outcome; the monitor keeps the strict path.
+    if !policy.require_caps
+        && let Ok(effective) = caps::read(None, CapSet::Effective)
+        && effective.is_empty()
+        && let Ok(permitted) = caps::read(None, CapSet::Permitted)
+        && permitted.is_empty()
+    {
+        return Outcome::Applied;
+    }
     let retain: HashSet<CapsCapability> = policy
         .retained_caps
         .iter()
