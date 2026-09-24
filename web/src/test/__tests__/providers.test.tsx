@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { stubFetchByUrl } from '@/test/providers'
+import { stubFetch, stubFetchByUrl } from '@/test/providers'
 
 describe('stubFetchByUrl', () => {
   it('matches a method-prefixed rule', async () => {
@@ -21,3 +21,14 @@ describe('stubFetchByUrl', () => {
     )
   })
 })
+
+describe('stubFetch', () => {
+  it('rejects when no response is configured', async () => {
+    const { fetch } = stubFetch()
+
+    await expect(fetch('http://localhost/api/v1/test')).rejects.toThrow(
+      'stubFetch: no response configured',
+    )
+  })
+})
+
