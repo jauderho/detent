@@ -1,32 +1,38 @@
-//! `/api/v1/commits/{id}/confirm|rollback`: settle a commit-confirm window
-//! before its deadline (PLAN §2.5, ADR-012).
+//! `/api/v1/commits/pending` and `/api/v1/commits/{id}/confirm|rollback`:
+//! inspect and settle a commit-confirm window before its deadline (PLAN §2.5,
+//! ADR-012).
 //!
 //! ```text
+//!   GET  /commits/pending       ─▶ the current window, if any
 //!   POST /commits/{id}/confirm  ─▶ ConfirmCommit  ─▶ the write stays
 //!   POST /commits/{id}/rollback ─▶ RollbackCommit ─▶ every write since is undone
 //! ```
 //!
-//! Neither route takes a body: the id in the path is the whole request. A
-//! commit that was already confirmed, already rolled back on its own
-//! deadline, or never armed answers 409 — see
-//! `is_unknown_wire_id` in [`crate::error`].
+//! The mutation routes take no body: the id in the path is the whole request.
+//! A commit that was already confirmed, already rolled back on its own
+//! deadline, or never armed answers 409 — see `is_unknown_wire_id` in
+//! [`crate::error`].
 
 use axum::Json;
 use axum::Router;
 use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, State};
-use axum::routing::post;
+use axum::routing::{get, post};
+use detent_ops::report::PendingCommit;
 use detent_ops::{OpOutcome, Operation};
 use detent_platform::privsep::proto::CommitId;
 use serde::Serialize;
 
-use crate::auth::extract::WriteCaller;
+use crate::auth::extract::{Caller, WriteCaller};
 use crate::error::ApiError;
 use crate::state::AppState;
 
 use super::{authorize, path_rejection, unexpected_outcome};
 
-/// `POST /api/v1/commits/{id}/confirm`.
+/// `GET /api/v1/commits/pending`.
+pub const PENDING_PATH: &str = "/api/v1/commits/pending";
+
+/// The path of the commit-confirm mutation.
 pub const CONFIRM_PATH: &str = "/api/v1/commits/{id}/confirm";
 
 /// `POST /api/v1/commits/{id}/rollback`.
@@ -38,6 +44,11 @@ pub fn table() -> Vec<crate::auth::routes::Route> {
     use crate::auth::routes::Route;
     use axum::http::Method;
     vec![
+        Route {
+            method: Method::GET,
+            path: PENDING_PATH,
+            mutating: false,
+        },
         Route {
             method: Method::POST,
             path: CONFIRM_PATH,
@@ -54,8 +65,26 @@ pub fn table() -> Vec<crate::auth::routes::Route> {
 /// This module's router.
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route(PENDING_PATH, get(pending))
         .route(CONFIRM_PATH, post(confirm))
         .route(ROLLBACK_PATH, post(rollback))
+}
+
+/// `GET /api/v1/commits/pending`.
+#[cfg_attr(test, utoipa::path(
+    get,
+    path = PENDING_PATH,
+    tag = "commits",
+    responses(
+        (status = 200, description = "The active commit-confirm window, if any", body = Option<PendingCommit>),
+        (status = 401, description = "No credential", body = crate::error::ErrorBody),
+    ),
+))]
+pub(super) async fn pending(
+    State(state): State<AppState>,
+    _caller: Caller,
+) -> Result<Json<Option<PendingCommit>>, ApiError> {
+    Ok(Json(state.engine.pending_commit().await?))
 }
 
 /// Answer to `ConfirmCommit`.
@@ -162,9 +191,21 @@ fn render_rolled_back(outcome: &OpOutcome) -> Result<Json<RolledBackView>, ApiEr
 
 #[cfg(test)]
 mod tests {
-    use super::{render_confirmed, render_rolled_back};
+    use super::{PENDING_PATH, render_confirmed, render_rolled_back, table};
+    use axum::http::Method;
     use detent_ops::OpOutcome;
     use detent_platform::privsep::proto::CommitId;
+
+    #[test]
+    fn the_pending_route_is_a_read_only_get() -> Result<(), Box<dyn std::error::Error>> {
+        let route = table()
+            .into_iter()
+            .find(|route| route.path == PENDING_PATH)
+            .ok_or("pending route must be registered")?;
+        assert_eq!(route.method, Method::GET);
+        assert!(!route.mutating);
+        Ok(())
+    }
 
     /// An outcome no handler in this file expects, for the mismatch arm.
     fn wrong_outcome() -> OpOutcome {

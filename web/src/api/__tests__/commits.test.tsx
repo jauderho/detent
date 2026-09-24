@@ -4,7 +4,13 @@ import userEvent from '@testing-library/user-event'
 import { jsonResponse, renderWithProviders, stubFetch, stubFetchByUrl } from '@/test/providers'
 import type { SessionView } from '../auth'
 import { createApiClient } from '../client'
-import { confirmCommit, rollbackCommit, useConfirmCommit, useRollbackCommit } from '../commits'
+import {
+  confirmCommit,
+  fetchPendingCommit,
+  rollbackCommit,
+  useConfirmCommit,
+  useRollbackCommit,
+} from '../commits'
 
 const SESSION: SessionView = {
   csrf_token: 'csrf-abc',
@@ -33,6 +39,27 @@ describe('confirmCommit / rollbackCommit', () => {
     expect(rolledBack.ok).toBe(true)
     if (!rolledBack.ok) return
     expect(rolledBack.data.restored).toBe(1)
+  })
+})
+
+describe('fetchPendingCommit', () => {
+  it('reads the monitor pending commit without a mutation body', async () => {
+    const pending = {
+      commit_id: 7,
+      deadline: '2999-10-21T07:28:00Z',
+      rollback_targets: 1,
+      timeout_s: 300,
+    }
+    const stub = stubFetch([jsonResponse(pending)])
+    const client = createApiClient({ fetch: stub.fetch })
+
+    const result = await fetchPendingCommit(client)
+
+    expect(stub.calls[0]?.url).toBe('/api/v1/commits/pending')
+    expect(stub.calls[0]?.init.method).toBe('GET')
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.data?.commit_id).toBe(7)
   })
 })
 

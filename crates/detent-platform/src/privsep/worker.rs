@@ -298,6 +298,18 @@ impl Client {
         }
     }
 
+    /// Report whether a commit-confirm window is currently pending.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::read_target`].
+    pub fn pending_commit(&mut self) -> Result<Option<CommitId>, ClientError> {
+        match self.checked_call(&Request::PendingCommit)? {
+            Response::Pending(commit) => Ok(commit),
+            other => Err(unexpected("Pending", &other)),
+        }
+    }
+
     /// Confirm an armed commit, discarding its rollback.
     ///
     /// # Errors
@@ -418,6 +430,7 @@ const fn variant_name(response: &Response) -> &'static str {
         Response::Error(_) => "Error",
         Response::RolledBack { .. } => "RolledBack",
         Response::Replaced { .. } => "Replaced",
+        Response::Pending(_) => "Pending",
     }
 }
 

@@ -241,6 +241,8 @@ ops-no-service = `{$module}` controls no service on this host, so it cannot be r
 ops-audit-failed = the audit log could not be read: {$reason}
 ops-audit-unavailable = the audit log could not be written, so the operation was refused: {$reason}
 ops-unsupported = {$what} is not supported in this build.
+ops-commit-pending = another commit-confirm window is already pending.
+ops-no-backup = commit-confirm requires a retained backup; nothing was changed.
 ops-denied = you are not permitted to do that.
 
 ## detent-web — configuration, TLS, the operations bridge, and the listener

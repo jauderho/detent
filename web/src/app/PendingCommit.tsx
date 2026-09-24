@@ -3,8 +3,15 @@
  */
 
 import { Localized, useLocalization } from '@fluent/react'
-import { createContext, type ReactNode, useCallback, useContext, useMemo, useState } from 'react'
-import { type PendingCommit, useConfirmCommit } from '@/api/commits'
+import { useQueryClient } from '@tanstack/react-query'
+import { createContext, type ReactNode, useCallback, useContext, useMemo } from 'react'
+import {
+  PENDING_COMMIT_QUERY_KEY,
+  type PendingCommit,
+  useConfirmCommit,
+  usePendingCommitQuery,
+  useRollbackCommit,
+} from '@/api/commits'
 import { useApiErrorMessage } from '@/api/query'
 import { Banner } from '@/components/Banner'
 import { Button } from '@/components/Button'
@@ -21,14 +28,19 @@ export type PendingCommitContextValue = {
 const PendingCommitContext = createContext<PendingCommitContextValue | null>(null)
 
 export function PendingCommitProvider({ children }: { children: ReactNode }) {
-  const [pending, setPending] = useState<PendingCommit | null>(null)
+  const queryClient = useQueryClient()
+  const query = usePendingCommitQuery()
+  const pending = query.data ?? null
 
-  const arm = useCallback((commit: PendingCommit) => {
-    setPending(commit)
-  }, [])
+  const arm = useCallback(
+    (commit: PendingCommit) => {
+      queryClient.setQueryData(PENDING_COMMIT_QUERY_KEY, commit)
+    },
+    [queryClient],
+  )
   const clear = useCallback(() => {
-    setPending(null)
-  }, [])
+    queryClient.setQueryData(PENDING_COMMIT_QUERY_KEY, null)
+  }, [queryClient])
 
   const value = useMemo<PendingCommitContextValue>(
     () => ({ pending, arm, clear }),
@@ -53,6 +65,7 @@ export function PendingCommitSlot() {
   const { l10n } = useLocalization()
   const { pending, clear } = usePendingCommit()
   const confirm = useConfirmCommit()
+  const rollback = useRollbackCommit()
   const errorMessage = useApiErrorMessage()
 
   if (pending === null) {
@@ -77,12 +90,18 @@ export function PendingCommitSlot() {
             ) : null}
             <Button
               variant="primary"
-              disabled={confirm.isPending}
+              disabled={confirm.isPending || rollback.isPending}
               onClick={() => confirm.mutate(pending.commit_id, { onSuccess: clear })}
             >
               {confirm.isPending
                 ? l10n.getString('pending-commit-confirming')
                 : l10n.getString('pending-commit-confirm')}
+            </Button>
+            <Button
+              disabled={confirm.isPending || rollback.isPending}
+              onClick={() => rollback.mutate(pending.commit_id, { onSuccess: clear })}
+            >
+              {l10n.getString('audit-op-rollback-commit')}
             </Button>
           </>
         }
@@ -90,7 +109,9 @@ export function PendingCommitSlot() {
         <Localized id="pending-commit-message">
           <span>a configuration change is waiting to be confirmed.</span>
         </Localized>
-        {confirm.isError ? <div role="alert">{errorMessage(confirm.error)}</div> : null}
+        {confirm.isError || rollback.isError ? (
+          <div role="alert">{errorMessage(confirm.error ?? rollback.error)}</div>
+        ) : null}
       </Banner>
     </div>
   )

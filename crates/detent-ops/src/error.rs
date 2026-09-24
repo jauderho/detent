@@ -8,6 +8,7 @@
 use detent_core::diag::{Diagnostics, MessageId};
 use detent_core::module::DynError;
 use detent_platform::fs::atomic::Sha256Digest;
+use detent_platform::privsep::proto::CommitId;
 use detent_platform::privsep::worker::ClientError;
 use detent_platform::service::ServiceError;
 
@@ -76,6 +77,12 @@ pub enum OpsError {
         /// The module.
         module: String,
     },
+    /// A commit-confirm apply was refused because another commit is pending.
+    #[error("commit {0} is already pending")]
+    CommitPending(CommitId),
+    /// A commit-confirm apply was refused because its write had no backup.
+    #[error("commit-confirm requires a retained backup")]
+    NoBackup,
     /// The audit log could not be read.
     #[error(transparent)]
     Audit(#[from] AuditError),
@@ -107,6 +114,8 @@ impl OpsError {
             Self::NoService { .. } => MessageId::new("ops-no-service"),
             Self::Audit(_) => MessageId::new("ops-audit-failed"),
             Self::AuditUnavailable(_) => MessageId::new("ops-audit-unavailable"),
+            Self::CommitPending(_) => MessageId::new("ops-commit-pending"),
+            Self::NoBackup => MessageId::new("ops-no-backup"),
             Self::Unsupported { .. } => MessageId::new("ops-unsupported"),
         }
     }
@@ -120,6 +129,7 @@ mod tests {
     use detent_core::diag::{Diagnostic, Diagnostics, MessageId, Severity};
     use detent_core::module::{DynError, ParseError};
     use detent_platform::fs::atomic::Sha256Digest;
+    use detent_platform::privsep::proto::CommitId;
     use detent_platform::privsep::worker::ClientError;
     use detent_platform::service::ServiceError;
 
@@ -191,6 +201,8 @@ mod tests {
                 },
                 "ops-no-service",
             ),
+            (OpsError::CommitPending(CommitId(7)), "ops-commit-pending"),
+            (OpsError::NoBackup, "ops-no-backup"),
             (
                 OpsError::from(AuditError::Encode("bad".to_owned())),
                 "ops-audit-failed",

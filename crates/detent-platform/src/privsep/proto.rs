@@ -35,16 +35,17 @@ use detent_core::descriptor::{ServiceAction as CoreServiceAction, TargetKind};
 ///
 /// # Appending a variant to a closed enum
 ///
-/// [`Request::RollbackCommit`] and [`Response::RolledBack`] were added at the
+/// [`Request::RollbackCommit`], [`Request::PendingCommit`],
+/// [`Response::RolledBack`], and [`Response::Pending`] were added at the
 /// end of their enums (see each variant's doc comment) rather than grouped
-/// next to [`Request::ConfirmCommit`]/[`Response::Committed`], so every
-/// existing discriminant keeps its numeric value. That is a backward-
-/// incompatible change in exactly one direction: an *old* binary decoding a
-/// frame a *new* binary sent would meet an out-of-range discriminant and
-/// correctly terminate the connection per this module's closed-enum
-/// invariant (see the module docs) — it would not misinterpret the message
-/// as something else. The reverse direction is unaffected, because an old
-/// peer never emits a discriminant a new peer does not know.
+/// next to the confirm operations, so every existing discriminant keeps its
+/// numeric value. That is a backward-incompatible change in exactly one
+/// direction: an *old* binary decoding a frame a *new* binary sent would meet
+/// an out-of-range discriminant and correctly terminate the connection per
+/// this module's closed-enum invariant (see the module docs) — it would not
+/// misinterpret the message as something else. The reverse direction is
+/// unaffected, because an old peer never emits a discriminant a new peer does
+/// not know.
 ///
 /// This build does **not** bump `PROTO_VERSION` for the addition, because
 /// that failure mode cannot occur in practice yet: `spawn_pair` forks the
@@ -329,6 +330,11 @@ pub enum Request {
         /// The id passed to [`Request::StartConfirmTimer`].
         commit: CommitId,
     },
+    /// Report whether a commit-confirm window is currently pending.
+    ///
+    /// Appended after [`Request::RollbackCommit`] to preserve every existing
+    /// discriminant; see [`PROTO_VERSION`]'s doc comment.
+    PendingCommit,
 }
 
 // ---------------------------------------------------------------------------
@@ -545,6 +551,12 @@ pub enum Response {
         /// The version that was installed (hex sha256 of the staged image).
         version: String,
     },
+    /// Answer to [`Request::PendingCommit`].
+    ///
+    /// `Some` is the armed commit id; `None` means no commit is pending.
+    /// Appended after [`Response::Replaced`] to preserve every existing
+    /// discriminant; see [`PROTO_VERSION`]'s doc comment.
+    Pending(Option<CommitId>),
 }
 
 // ---------------------------------------------------------------------------
@@ -801,9 +813,11 @@ mod tests {
             Request::RollbackCommit {
                 commit: CommitId(11),
             },
+            Request::PendingCommit,
         ]
     }
 
+    #[allow(clippy::too_many_lines)]
     fn every_response() -> Vec<Response> {
         vec![
             Response::HelloAck(HelloAck {
@@ -904,6 +918,8 @@ mod tests {
                 commit: CommitId(1),
                 restored: 2,
             },
+            Response::Pending(Some(CommitId(3))),
+            Response::Pending(None),
         ]
     }
 
@@ -1043,6 +1059,16 @@ mod tests {
         let response_bytes = encode(&response).unwrap_or_default();
         assert_eq!(response_bytes.first(), Some(&11));
         assert_eq!(decode::<Response>(&response_bytes).ok(), Some(response));
+
+        let pending = Request::PendingCommit;
+        let pending_bytes = encode(&pending).unwrap_or_default();
+        assert_eq!(pending_bytes.first(), Some(&13));
+        assert_eq!(decode::<Request>(&pending_bytes).ok(), Some(pending));
+
+        let pending = Response::Pending(Some(CommitId(42)));
+        let pending_bytes = encode(&pending).unwrap_or_default();
+        assert_eq!(pending_bytes.first(), Some(&13));
+        assert_eq!(decode::<Response>(&pending_bytes).ok(), Some(pending));
 
         // No other `Request` variant's encoding decodes as `RollbackCommit`,
         // and vice versa: every prior request either fails to decode as

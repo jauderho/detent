@@ -194,7 +194,7 @@ nothing.
 Three tests pin the two surfaces together so neither drifts silently:
 `the_merged_table_registers_every_endpoint_and_no_get_mutates`
 (`crates/detent-web/src/api/mod.rs`) asserts the REST route table holds
-all 17 routes, `every_operation_has_a_tool`
+all 18 routes, `every_operation_has_a_tool`
 (`crates/detent-mcp/src/mcp.rs`) asserts the MCP router holds all 17
 tools, one per `Operation` variant, and `tool_schemas_match_rest_shapes`
 (same file) compares each tool's input schema live against the checked-in

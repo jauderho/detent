@@ -65,6 +65,11 @@ impl DynModule for FakeModule {
     fn id(&self) -> &'static str {
         self.descriptor.id
     }
+    fn clone_box(&self) -> Box<dyn DynModule> {
+        Box::new(Self {
+            descriptor: self.descriptor,
+        })
+    }
 
     fn descriptor(&self) -> &'static ModuleDescriptor {
         self.descriptor
@@ -1166,6 +1171,7 @@ fn a_commit_confirm_module_arms_a_window_that_confirm_closes() -> TestResult {
     assert_eq!(commit.timeout_s, 1);
     assert_eq!(commit.rollback_targets, 1);
     assert!(commit.deadline.ends_with('Z'));
+    assert_eq!(fx.engine.pending_commit()?.as_ref(), Some(&commit));
 
     let confirmed = fx.run(Operation::ConfirmCommit {
         commit_id: commit.commit_id,
@@ -1174,6 +1180,7 @@ fn a_commit_confirm_module_arms_a_window_that_confirm_closes() -> TestResult {
         confirmed,
         OpOutcome::CommitConfirmed { commit_id } if commit_id == CommitId(1)
     ));
+    assert!(fx.engine.pending_commit()?.is_none());
 
     std::thread::sleep(PAST_DEADLINE);
     assert_eq!(fx.contents()?, "v2\n");
@@ -1261,7 +1268,7 @@ fn an_explicit_confirm_window_opts_a_plain_module_in() -> TestResult {
 }
 
 #[test]
-fn commit_confirm_does_not_arm_without_a_backup() -> TestResult {
+fn a_commit_confirm_apply_without_a_backup_is_refused() -> TestResult {
     let mut fx = harness(
         b"v1\n",
         Setup {
@@ -1273,31 +1280,60 @@ fn commit_confirm_does_not_arm_without_a_backup() -> TestResult {
             ..Setup::default()
         },
     )?;
-    let outcome = fx.run(Operation::Apply {
+    assert!(matches!(
+        fx.run(Operation::Apply {
+            id: MODULE.to_owned(),
+            model: json!({"text": "v2\n"}),
+            expected_hash: None,
+            service_action: None,
+            confirm: Some(CONFIRM_WINDOW),
+        }),
+        Err(OpsError::NoBackup)
+    ));
+    fx.finish()
+}
+
+#[test]
+fn a_second_commit_confirm_apply_while_one_is_pending_writes_nothing() -> TestResult {
+    let mut fx = harness(
+        b"v1\n",
+        Setup {
+            shape: Shape {
+                commit_confirm: true,
+                ..Shape::default()
+            },
+            ..Setup::default()
+        },
+    )?;
+    fx.run(Operation::Apply {
         id: MODULE.to_owned(),
         model: json!({"text": "v2\n"}),
         expected_hash: None,
         service_action: None,
         confirm: Some(CONFIRM_WINDOW),
     })?;
-    let OpOutcome::Applied(report) = outcome else {
-        return Err("Apply must answer with an apply report".into());
-    };
-    assert!(!report.backed_up);
-    assert!(report.commit.is_none());
+    assert_eq!(fx.contents()?, "v2\n");
+
     assert!(matches!(
-        fx.run(Operation::RollbackCommit {
-            commit_id: CommitId(1),
+        fx.run(Operation::Apply {
+            id: MODULE.to_owned(),
+            model: json!({"text": "v3\n"}),
+            expected_hash: None,
+            service_action: None,
+            confirm: Some(CONFIRM_WINDOW),
         }),
-        Err(OpsError::Privsep(ClientError::Remote(
-            ProtoError::UnknownId { .. }
-        )))
+        Err(OpsError::CommitPending(CommitId(1)))
     ));
+    assert_eq!(fx.contents()?, "v2\n");
+
+    fx.run(Operation::RollbackCommit {
+        commit_id: CommitId(1),
+    })?;
     fx.finish()
 }
 
 #[test]
-fn apply_arms_the_rollback_before_a_failed_service_action() -> TestResult {
+fn a_failed_service_action_on_a_commit_confirm_module_restores_the_file() -> TestResult {
     let mut fx = harness(
         b"v1\n",
         Setup {
@@ -1322,12 +1358,6 @@ fn apply_arms_the_rollback_before_a_failed_service_action() -> TestResult {
         Err(OpsError::Privsep(ClientError::Remote(
             ProtoError::ActionNotAllowed
         )))
-    ));
-    assert!(matches!(
-        fx.run(Operation::RollbackCommit {
-            commit_id: CommitId(1),
-        })?,
-        OpOutcome::RolledBack { restored: 1, .. }
     ));
     assert_eq!(fx.contents()?, "v1\n");
     fx.finish()

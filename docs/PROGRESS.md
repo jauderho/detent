@@ -5,6 +5,18 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-23 - STAGE3 H2 commit arming and H21 pending rehydration
+
+Commit-confirm applies now preflight the monitor's pending id, arm only after
+the target write, roll back before returning a service-action failure, and
+refuse commit-confirm writes without a retained backup. The monitor exposes an
+append-only id-only pending query while the web engine keeps the full pending
+report; `GET /api/v1/commits/pending` rehydrates and polls the UI. Synthetic
+module registries are cloned into the monitor so CLI fixtures use the same
+revalidation path as production. Added the two operation error translations.
+
+Verify: `cargo test -p detent-ops` (104 passed); `cargo test -p detent-platform` (335 passed, 1 ignored); `cargo test -p detent-web` (325 passed, 2 ignored); `cargo test -p detent` (161 passed); `cargo test -p detent-mcp --features mcp` (8 passed); `bun run api:check`; `bun run typecheck`; focused web tests (11 passed).
+
 ## 2026-09-23 - STAGE3 H1 monitor lifetime and recovery
 
 The monitor now holds an exclusive `monitor.lock` for its lifetime, recovers

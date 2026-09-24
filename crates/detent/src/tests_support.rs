@@ -45,6 +45,12 @@ impl DynModule for FakeModule {
     fn id(&self) -> &'static str {
         self.descriptor.id
     }
+    fn clone_box(&self) -> Box<dyn DynModule> {
+        Box::new(Self {
+            descriptor: self.descriptor,
+            broken: self.broken,
+        })
+    }
 
     fn descriptor(&self) -> &'static ModuleDescriptor {
         self.descriptor

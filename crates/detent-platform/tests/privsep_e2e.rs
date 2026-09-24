@@ -638,7 +638,7 @@ fn rollback_commit_after_the_deadline_already_fired_finds_nothing_pending() -> T
 }
 
 #[test]
-fn recover_pending_restores_after_a_simulated_crash() -> TestResult {
+fn graceful_monitor_exit_restores_a_pending_commit() -> TestResult {
     let fx = fixture(b"v1")?;
     let allow = fx.allow()?;
     let state_root = allow.state_root().to_path_buf();
@@ -650,17 +650,11 @@ fn recover_pending_restores_after_a_simulated_crash() -> TestResult {
     client.start_confirm_timer(CommitId(3), CONFIRM_TIMEOUT_S, None)?;
     assert!(state_root.join(PENDING_COMMIT_MARKER).is_file());
 
-    // Stop the monitor before the deadline is re-checked. Its marker must
-    // survive, and the next monitor must recover it before serving requests.
+    // A graceful monitor exit restores the pending write and clears its marker.
     client.shutdown()?;
     join_shutdown(handle);
-    assert_eq!(std::fs::read(&fx.target)?, b"v2");
-
-    let (mut restarted, restarted_handle) = spawn_client(fx.allow()?)?;
     assert_eq!(std::fs::read(&fx.target)?, b"v1");
     assert!(!state_root.join(PENDING_COMMIT_MARKER).is_file());
-    restarted.shutdown()?;
-    join_shutdown(restarted_handle);
 
     Ok(())
 }
@@ -673,10 +667,7 @@ fn a_second_monitor_cannot_take_the_pending_commit_lock() -> TestResult {
     let Ok(second) = second_handle.join() else {
         unreachable!("the second monitor only reports its lock failure")
     };
-    assert!(matches!(
-        second,
-        Err(MonitorError::State { op: "flock", .. })
-    ));
+    assert!(matches!(second, Err(MonitorError::Busy)));
     first.shutdown()?;
     join_shutdown(first_handle);
     Ok(())
@@ -685,7 +676,6 @@ fn a_second_monitor_cannot_take_the_pending_commit_lock() -> TestResult {
 // ---------------------------------------------------------------------------
 // Malformed frames
 // ---------------------------------------------------------------------------
-
 #[test]
 fn an_oversize_frame_terminates_the_session_with_a_protocol_violation() -> TestResult {
     let fx = fixture(b"v1")?;

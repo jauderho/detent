@@ -387,6 +387,10 @@ impl<'a> Monitor<'a> {
 
     /// Serve after the caller has taken [`MONITOR_LOCK`] and recovered any
     /// leftover marker. The guard is held until every return path completes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a channel, protocol, or state error from serving or cleanup.
     pub fn serve_locked(
         &mut self,
         channel: &mut Channel,
@@ -402,6 +406,11 @@ impl<'a> Monitor<'a> {
     }
 
     /// Take the exclusive monitor lock without running recovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MonitorError::Busy`] when another monitor owns the lock, or
+    /// a state error when the lock cannot be opened.
     pub fn lock(state_root: &Path) -> Result<std::fs::File, MonitorError> {
         lock_state(state_root)
     }
@@ -508,6 +517,9 @@ impl<'a> Monitor<'a> {
             } => self.start_confirm_timer(commit, timeout_s, service)?,
             Request::ConfirmCommit { commit } => self.confirm_commit(commit)?,
             Request::RollbackCommit { commit } => self.rollback_commit(commit)?,
+            Request::PendingCommit => {
+                Response::Pending(self.pending.as_ref().map(|pending| pending.commit))
+            }
             Request::Mount { .. } => Response::Error(ProtoError::Unsupported(
                 "mount requires the module-mounts feature".to_owned(),
             )),
@@ -1851,6 +1863,11 @@ mod tests {
 
         fn descriptor(&self) -> &'static ModuleDescriptor {
             self.descriptor
+        }
+        fn clone_box(&self) -> Box<dyn DynModule> {
+            Box::new(Self {
+                descriptor: self.descriptor,
+            })
         }
 
         fn schema_json(&self) -> Value {

@@ -253,6 +253,7 @@ impl utoipa::Modify for SecurityAddon {
         super::modules::plan,
         super::modules::apply,
         super::commits::confirm,
+        super::commits::pending,
         super::commits::rollback,
         super::backups::list,
         super::backups::restore,
@@ -268,7 +269,7 @@ impl utoipa::Modify for SecurityAddon {
     tags(
         (name = "auth", description = "Sign in, sign out, describe the session"),
         (name = "modules", description = "List, read, validate, plan and apply module configuration"),
-        (name = "commits", description = "Confirm or roll back a commit-confirm window"),
+        (name = "commits", description = "Read, confirm or roll back a commit-confirm window"),
         (name = "backups", description = "List and restore a module's retained backups"),
         (name = "system", description = "Host profile, certificate status, update status, audit log, and liveness"),
     ),
