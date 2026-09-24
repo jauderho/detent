@@ -863,10 +863,10 @@ fn build_model_from_lines(lines: &[String]) -> Model {
             }
             // `dhcp6`/`static`/`loopback` methods contribute nothing here;
             // the `inet6` variant is handled below.
-            // `inet6 dhcp` variant
+            // `inet6 dhcp` enables IPv6 DHCP; it does not clear an earlier
+            // `inet dhcp` stanza for the same interface.
             if raw.contains("inet6") && method == "dhcp" {
                 entry.dhcp_v6 = true;
-                entry.dhcp_v4 = false;
             } else if method == "dhcp" && raw.contains("inet ") {
                 entry.dhcp_v4 = true;
             }
@@ -1144,11 +1144,6 @@ fn render_nm(iface: &Interface) -> Vec<String> {
         out.push(format!("id={}", vlan.id));
         out.push(format!("parent={}", vlan.link));
     }
-    if iface.bridge.is_some() {
-        out.push(String::new());
-        out.push("[bridge]".to_owned());
-        out.push(format!("interface-name={}", iface.name));
-    }
     out
 }
 
@@ -1176,6 +1171,8 @@ fn render_ifupdown(iface: &Interface) -> Vec<String> {
         if let Some(gw) = iface.gateway_v6.as_deref() {
             out.push(format!("\tgateway {gw}"));
         }
+    } else if iface.dhcp_v6 {
+        out.push(format!("iface {} inet6 dhcp", iface.name));
     }
     if let Some(gw) = iface.gateway_v4.as_deref() {
         out.push(format!("\tgateway {gw}"));
@@ -2950,6 +2947,7 @@ mod tests {
             .find(|i| i.name == "eth0")
             .unwrap_or_else(|| panic!("eth0 missing"));
         assert!(e0.dhcp_v6);
+        assert!(e0.dhcp_v4);
         let v10 = model2
             .interfaces
             .iter()
@@ -3099,13 +3097,13 @@ mod tests {
         assert!(rendered.contains("[Route]"));
         let back = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
         assert_eq!(back.interfaces.len(), 4);
-        // Routes are NM-unrepresentable by design — assert they drop while
-        // vlan/bridge/addresses survive the NM round trip.
+        // Routes and bridge membership are NM-unrepresentable by design —
+        // vlan, addresses, and interface shape survive the NM round trip.
         let mut nm = NetworkModule::parse("[connection]\nid=eth0\n").map_err(|e| e.to_string())?;
         NetworkModule::apply(&mut nm, &model).map_err(|e| e.to_string())?;
         let nm_rendered = NetworkModule::render(&nm);
         assert!(nm_rendered.contains("[vlan]"));
-        assert!(nm_rendered.contains("[bridge]"));
+        assert!(!nm_rendered.contains("[bridge]"));
         assert!(nm_rendered.contains("method=manual"));
         let nm_back = NetworkModule::to_model(&nm).map_err(|e| e.to_string())?;
         let nm_eth0 = nm_back
@@ -3161,6 +3159,11 @@ mod tests {
         v4only.interfaces[0].dhcp_v6 = false;
         let lines = super::render_model_lines(super::BackendFlavor::Networkd, &v4only);
         assert!(lines.iter().any(|l| l == "DHCP=ipv4"));
+        v4only.interfaces[0].dhcp_v6 = true;
+        // ifupdown needs a separate inet6 stanza for DHCPv6.
+        let lines = super::render_ifupdown(&v4only.interfaces[0]);
+        assert!(lines.iter().any(|l| l == "iface eth0 inet dhcp"));
+        assert!(lines.iter().any(|l| l == "iface eth0 inet6 dhcp"));
         Ok(())
     }
 
