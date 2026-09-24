@@ -34,8 +34,8 @@ Bumping the version is a SONAME bump:
 
 Every function is safe to call from any thread, with one rule:
 
-* `detent_last_error_message` is per-thread. Two threads must each call
-  the FFI from their own thread to see their own errors.
+* `detent_last_error_code` and `detent_last_error_message` are per-thread.
+  Two threads must each call the FFI from their own thread to see their own errors.
 * Doc handles returned by `detent_parse` are not shared state: each
   call returns a fresh handle, backed by a global `BTreeMap`. Free
   the handle from the same thread that created it. Concurrent
@@ -77,13 +77,16 @@ trailing byte is the implicit terminator.
 
 ## Error handling
 
-Every entry point returns a typed error code as the documented pattern:
+Every NULL return records a typed error code retrievable with
+`detent_last_error_code` and context retrievable with
+`detent_last_error_message`:
 
 | Returned shape | Success | Failure | Code |
 |----------------|---------|---------|------|
 | `*mut c_char` (string) | non-NULL | NULL | (see below) |
 | `*mut c_char` (doc handle) | non-NULL | NULL | (see below) |
 | `*const c_char` (last error) | text or NULL | — | — |
+| `int32_t` (error code) | `DETENT_OK` | — | — |
 | `uint32_t` (abi version) | constant | not applicable | — |
 
 Error codes on failure:
@@ -100,9 +103,10 @@ Error codes on failure:
 | `DETENT_ERR_INVALID_JSON` | 7 | A JSON input was syntactically invalid. |
 | `DETENT_ERR_INTERNAL` | 8 | Allocation failed or an internal invariant was violated. |
 
-There are no `errno`-style globals. All error context lives in
-`detent_last_error_message`, which is per-thread and must be copied by
-the caller if it is to be retained across further FFI calls.
+There are no `errno`-style globals. `detent_last_error` remains as an alias
+of `detent_last_error_code` for ABI compatibility. Error context lives in
+`detent_last_error_message`, which is per-thread and must be copied by the
+caller if it is to be retained across further FFI calls.
 
 Panics never unwind across the boundary: the release profile sets
 `panic = "abort"` (ADR-010), so a bug that panics aborts the host process
@@ -124,6 +128,12 @@ field name appears in the last-error message.
 JSON arguments and JSON returned by the library are the standard
 `serde_json` serialization: UTF-8, no trailing newline, `null` for
 absent values.
+
+`detent_defaults_json` rejects syntactically invalid profile JSON with
+`DETENT_ERR_INVALID_JSON`; a well-formed value that is not a `HostProfile`
+returns `DETENT_ERR_MODEL`. Omitted profile fields retain
+`HostProfile::default()` values.
+
 
 ---
 

@@ -45,6 +45,40 @@ fn err_msg() -> String {
         unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
     }
 }
+#[test]
+fn last_error_code_accessor_retrieves_thread_local_error() {
+    let module_id = c_str("does-not-exist");
+    // SAFETY: module_id is a live NUL-terminated CString; FIXTURE is readable
+    // for its byte length for the duration of the call.
+    let ptr = unsafe {
+        detent_parse(
+            module_id.as_ptr().cast::<c_char>(),
+            FIXTURE.as_ptr().cast::<c_char>(),
+            FIXTURE.len(),
+        )
+    };
+    assert!(ptr.is_null());
+    assert_eq!(detent_last_error_code(), DETENT_ERR_UNKNOWN_MODULE);
+    assert_eq!(detent_last_error(), detent_last_error_code());
+}
+
+#[test]
+fn defaults_json_rejects_a_bad_profile() {
+    let module_id = c_str("hosts");
+    let profile = c_str("{not json");
+    // SAFETY: both pointers are live NUL-terminated CStrings; profile is
+    // readable for its computed byte length.
+    let ptr = unsafe {
+        detent_defaults_json(
+            module_id.as_ptr().cast::<c_char>(),
+            profile.as_ptr().cast::<c_char>(),
+            cstr_len(&profile),
+        )
+    };
+    assert!(ptr.is_null());
+    assert_eq!(detent_last_error_code(), DETENT_ERR_INVALID_JSON);
+    assert!(err_msg().contains("profile_json"));
+}
 
 #[test]
 fn abi_version_matches_header() {

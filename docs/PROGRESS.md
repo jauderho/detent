@@ -5,6 +5,15 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-23 - STAGE3 L-BIN12 FFI error channel
+
+The C ABI now exposes `detent_last_error_code`, eagerly parses FFI documents,
+rejects malformed or non-`HostProfile` defaults JSON with typed errors, and
+records an error for every NULL return. The generated header and FFI contract
+document the additive accessor and compatibility alias.
+
+Verify: `cargo fmt -p detent-ffi`; `cargo test -p detent-ffi --lib --test ffi` (19 passed); `cargo clippy -p detent-ffi --all-targets --all-features -- -D warnings`; `cbindgen --config crates/detent-ffi/cbindgen.toml --crate detent-ffi --output include/detent.h --verify`.
+
 ## 2026-09-23 - STAGE3 H22, L-WEB17, L-MODA8, and L-MODA9
 
 CSRF origin checks now derive the expected origin from exactly one request

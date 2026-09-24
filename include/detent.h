@@ -78,6 +78,15 @@ const char *detent_last_error_message(void);
 int32_t detent_last_error(void);
 
 /**
+ * Returns the code of the last error raised on this thread, or
+ * [`DETENT_OK`] when the most recent operation succeeded.
+ *
+ * This is the explicit accessor for C callers; `detent_last_error` remains
+ * available for ABI compatibility.
+ */
+int32_t detent_last_error_code(void);
+
+/**
  * Lists the module ids this build was compiled with, as a JSON array of
  * strings (e.g. `["hosts","resolver"]`). The returned buffer is owned by
  * libdetent — release it with `detent_free`.
@@ -87,8 +96,9 @@ char *detent_module_list(void);
 /**
  * Parses `src` with the module identified by `module_id` and returns a
  * document handle. The handle must be released with `detent_free`.
- * NULL on error; the code is in `detent_last_error()` and the message in
- * `detent_last_error_message()`.
+ * NULL on error; the code is in `detent_last_error_code()` and the message in
+ * `detent_last_error_message()`. The source is parsed before the handle is
+ * returned.
  * # Safety
  *
  * `module_id` must point to a readable NUL-terminated C string;
