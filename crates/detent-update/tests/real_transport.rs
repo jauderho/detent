@@ -1,11 +1,6 @@
 //! H18: `RealTransport` follows 302 to the asset, refuses redirect to http, caps redirects.
 
-#![allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::doc_markdown,
-    clippy::cast_possible_truncation
-)]
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -78,7 +73,10 @@ fn follows_302() {
     let url = format!("https://localhost:{port}/releases");
     let mut out = Vec::new();
     let n = transport.get(&url, 1 << 20, &mut out).expect("follow 302");
-    assert_eq!(n as usize, b"hello-asset".len());
+    assert_eq!(
+        usize::try_from(n).expect("byte count fits usize"),
+        b"hello-asset".len()
+    );
     assert_eq!(out, b"hello-asset");
     let _ = handle.join();
 }
