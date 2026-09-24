@@ -861,6 +861,7 @@ name = "detent-ops"
 version = "0.0.1"
 dependencies = [
  "detent-core",
+ "detent-modules",
  "detent-platform",
  "detent-update",
  "proptest",
@@ -880,6 +881,7 @@ dependencies = [
  "arbitrary",
  "caps",
  "detent-core",
+ "detent-modules",
  "detent-update",
  "landlock",
  "postcard",

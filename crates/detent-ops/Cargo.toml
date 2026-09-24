@@ -21,6 +21,7 @@ tracing = { workspace = true }
 utoipa = { workspace = true, optional = true }
 
 [dev-dependencies]
+detent-modules = { path = "../detent-modules", features = ["module-samba"] }
 detent-update = { path = "../detent-update", default-features = false }
 proptest = { workspace = true }
 tempfile = { workspace = true }

@@ -466,6 +466,9 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
             Hooks::default()
         };
         let mut monitor = Monitor::new(allow, hooks);
+        monitor.set_module_registry(vec![Box::new(FakeModule {
+            descriptor: allow_descriptor,
+        })]);
         monitor.set_binary_override(binary_target);
         monitor.set_update_trust(trust);
         monitor.serve(&mut channel)
@@ -2028,7 +2031,9 @@ fn the_audit_log_never_contains_the_configuration_body() -> TestResult {
     let (monitor_end, worker_end) = Channel::pair()?;
     let handle = thread::spawn(move || {
         let mut channel = monitor_end;
-        Monitor::new(allow, Hooks::default()).serve(&mut channel)
+        let mut monitor = Monitor::new(allow, Hooks::default());
+        monitor.set_module_registry(vec![Box::new(FakeModule { descriptor })]);
+        monitor.serve(&mut channel)
     });
     let mut client = Client::new(worker_end);
     client.hello()?;

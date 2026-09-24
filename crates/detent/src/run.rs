@@ -1111,6 +1111,7 @@ impl Session {
         let (monitor_end, worker_end) = Channel::pair().map_err(|err| err.to_string())?;
 
         let init = host.profile.init;
+        let profile = host.profile.clone();
         let monitor = std::thread::spawn(move || {
             // Both collaborators are built inside the thread: `Hooks` borrows
             // them, and `&dyn CheckRunner` is not `Send`, so they cannot be
@@ -1118,14 +1119,15 @@ impl Session {
             let checks = ExternalCheckRunner::new();
             let services = ServiceControlAdapter(service::for_host(init));
             let mut channel = monitor_end;
-            Monitor::new(
+            let mut monitor = Monitor::new(
                 allow,
                 Hooks {
                     checks: &checks,
                     services: &services,
                 },
-            )
-            .serve(&mut channel)
+            );
+            monitor.set_host_profile(profile);
+            monitor.serve(&mut channel)
         });
 
         let mut client = Client::new(worker_end);

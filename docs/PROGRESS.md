@@ -5,6 +5,17 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-23 - STAGE3 H23 step 2: monitor revalidates candidate content
+
+The privileged monitor now parses and validates candidate bytes through the
+compiled module registry before the atomic target write, rejects newly added
+root-execution directives, and runs external checks before changing the file.
+Production monitors receive the detected host profile. Synthetic engine tests
+inject their existing test module through the monitor registry; platform
+fixtures use the enabled samba module.
+
+Verify: `cargo fmt --all --check`; `cargo clippy -p detent-platform -p detent-ops -p detent --all-targets --all-features -- -D warnings`; `cargo test -p detent-platform --lib` (241 passed); `cargo test -p detent-platform --test privsep_e2e` (22 passed); `cargo test -p detent-platform --test service_hooks` (1 passed); `cargo test -p detent-ops --test engine` (55 passed). Jev (`jev-1.13.0`) routing only: root-boundary slice confidence 0.48, destructive noul 0.39; complex reasoning by the default model.
+
 ## 2026-09-23 - Phase 10 close-out: libdetent C ABI and API/MCP readiness
 
 `detent-ffi` (10 entry points, `deny(unwrap/expect/panic/unsafe)` + `unsafe_code`, `DETENT_ABI_VERSION`, `include/detent.h` via `cbindgen.toml`, `examples/ffi-c/main.c`, `publish=false`) and `detent-mcp` (17 tools one per `Operation`, `every_operation_has_a_tool` + `tool_schemas_match_rest_shapes` against `docs/openapi.json`, token auth `DETENT_MCP_TOKEN` fails-closed, stdio + streamable-HTTP `127.0.0.1:3334`, default build excludes `rmcp`) are in tree and tested. CI covers Phase 10: `rust` job (`fmt`, `clippy --all-features`, `cargo test --workspace --all-features`, `cbindgen --verify`, build+run C example), `ffi-soundness` (Miri on `detent-ffi`, nightly), `ffi-semver` (`cargo-semver-checks 0.50.0` vs `origin/main`). `docs/FFI.md` (versioning/SONAME, ownership, thread safety, hostile-input guard, CI section) and `docs/API.md` MCP + parity sections are current. FreeBSD C-example CI remains deferred per PLAN §1.6 tier-3 / Phase 11 parked (recorded in PLAN §9 change log 2026-09-22) — the deliverables line's "Linux and FreeBSD" is satisfied on Linux, FreeBSD gated by Phase 11. PLAN §5 Phase 10 marked `[x]`.
