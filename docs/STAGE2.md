@@ -1,170 +1,237 @@
-# STAGE2 — Jev / TypeSafe opportunities (post-initial-development)
+# STAGE2 — Jev / TypeSafe opportunities (post-v1 experiment)
 
-Status: INVESTIGATION ONLY. No production code changed for this stage.
-Do after initial development is complete. Re-validate pricing, limits,
-and thresholds against live docs before building; cookbook numbers are
-starting points, not universals.
+Status: **INVESTIGATION ONLY — DO NOT IMPLEMENT YET.** No production code
+has changed for this stage.
+
+Revised 2026-09-23 after the adversarial review in [`STAGE3.md`](STAGE3.md) §8.
+The original 2026-09-22 investigation is commit `117e740`. This revision
+corrects its premises, adds hard constraints, and drops one proposal.
+**Do not revert this file to `117e740`.**
+
+## 0. When to run this, and the gate
+
+**Order: STAGE3 → rest of PLAN.md (through Phase 12 / M4 v1.0) → STAGE2.**
+
+Nothing here is on the v1 critical path. Do not start until **all** of the
+following hold:
+
+1. Every STAGE3 item in batches 0–7 has landed, and CI (`ci.yml`,
+   `fuzz.yml`) is green on `main`. Batches 8–10 are either landed or
+   explicitly deferred by the owner.
+2. The PLAN.md phases the owner wants in v1 are done (currently Phase 12 /
+   M4). This includes `docs/THREAT_MODEL.md`, which must cover the egress
+   this stage adds.
+3. The owner has answered the **egress decision** (§5.1) with a yes. If the
+   answer is no, this stage is closed and nothing ships.
+
+If the owner prefers, §6 step 1 (the offline corpus harness) may run earlier,
+because it touches no product code. It still needs STAGE3's H5 and H6 to
+land first, since until then the apply path produces no check results for
+it to measure.
 
 ## 1. What detent is (ground truth)
 
 Single static Rust binary for lossless host-config management (hosts,
 resolver, chrony, mounts, NFS, Samba, DHCP, network). Every front end
-(CLI, TLS 1.3 web UI, MCP, FFI) builds `Operation`
-(`crates/detent-ops/src/op.rs:93`, 17 variants) and hands it to
-`OpsEngine::execute` (`crates/detent-ops/src/engine.rs`), with audit
-(`crates/detent-ops/src/audit.rs`) and commit-confirm rollback
-(`DEFAULT_CONFIRM` 90s, `op.rs:29`).
+(CLI, TLS 1.3 web UI, MCP, FFI) builds an `Operation`
+(`crates/detent-ops/src/op.rs`, 17 variants) and hands it to
+`OpsEngine::execute` (`crates/detent-ops/src/engine.rs`). Execution goes through
+audit (`audit.rs`) and commit-confirm rollback (`DEFAULT_CONFIRM` 90 s,
+`op.rs`). The engine runs in the unprivileged worker, and root work goes
+through the privsep monitor.
 
-## 2. Current model spend: zero in-product (verified 2026-09-22)
+## 2. Current model spend: zero in-product
 
-- `Cargo.lock` grep `tch|ort|candle|tokenizers|llm|pyo3|ndarray`: no hits.
-- Repo grep `llm|openai|anthropic|completions|/v1/chat|inference` over
-  `crates/ web/src/`: only false positives (`embedded_slash`,
-  `embedded_newline`, `prompt_tty`, provider API tokens). No inference
-  crate, no model endpoint.
-- All 11 `.github/workflows/*`: no LLM steps. Product egress is release
-  feed + ACME + upstream feeds (plain HTTP, serde-parsed).
-- Real spend today is dev-process: `docs/PLAN.md` Fable/Opus/Sonnet/Haiku
-  delegation contract; Jev-routed slice decisions in `docs/PROGRESS.md`
-  (`// (Jev-routed)` on `crates/detent/src/mcp.rs:128`
-  `resolve_identity`).
+No inference crate, no model endpoint, no LLM step in CI (verified
+2026-09-22). All spend today is dev-process: the PLAN.md delegation
+contract, and Jev slice-routing noted in PROGRESS.md.
 
-Where reasoning ran for this investigation: default model did complex
-reasoning (architecture mapping, brittle-point analysis, request-shape
-design, economics, evaluation design). Jev (`jev-1.13.0`, live
-`POST /v1/systemone`) did classification, filtering, routing, and simple
-judgments: opportunity ranking, generation-risk/signal Nouls, impact
-Scores, PlanReport risk probe + benign control. Each step is labeled
-below as [default] or [Jev].
+**Process rule (added from STAGE3):** Jev may order work, meaning it may
+pick which slice comes next. It may **never** gate readiness: push,
+merge, "done", or release. Those are deterministic gates (fmt, clippy
+`--all-features`, tests, CI green). PROGRESS shows `push_ready` Nouls being
+used while CI was red; that practice stops.
 
-## 3. Live TypeSafe ground truth (vendor docs, re-check before build)
+## 3. Live TypeSafe ground truth (re-check all of it at build time)
 
-Source pages: `docs.typesafe.ai/models.md`, `api.md`, `concepts/state.md`,
-`primitives.md`, `confidence.md`, `patterns/fan-out.md`,
-`patterns/confidence-routing.md`, `cookbooks/parallel_questions.md`,
-plus `llms.txt` index and skill `skill://typesafe-ai`.
+- API: `POST https://api.typesafe.ai/v1/systemone`, Bearer key. Choice,
+  Noul and Score primitives. Pin `jev-1.13.0`, or whatever version is current
+  when tuning starts; never `jev-latest` in product code.
+- Pricing as of 2026-09-22: $0.042 per million input tokens, output free.
+- Limits: 64k tokens per request (32k state), a ~20 QPS-equivalent rate limit,
+  Choice ≤255 options, Score 2–10 levels. Rate limits adjust dynamically.
+- Official SDKs are Python and JS only. From Rust use plain HTTP, reusing the
+  **existing** hyper-rustls stack from `detent-update` (ADR-009). No new TLS
+  dependency and no ADR-011 cooldown needed.
+- Batching many questions over one state is about 12× cheaper and 10× faster
+  than separate calls (vendor cookbook).
+- **Cloudflare WAF (observed 2026-09-23):** requests whose text contained
+  literal system paths (`/etc/...`) or privilege words were refused with
+  HTTP 403 and an HTML body. Neutral wording passed. Real plan metadata
+  contains exactly those words, which is one more reason for §5.2's
+  structural-only state. The client must treat a 403 like any other failure
+  (§5.3).
+- Python `httpx` got 403 where `curl` succeeded (User-Agent filtering). Set an
+  explicit User-Agent and test from the production client.
 
-- Pricing: **$42/Btok = $0.042/Mtok input, output free**, no per-call
-  price. No dedicated pricing page; pricing lives on Models page.
-- Limits: 250k tokens/s AND 1,200 req/min (≈20 QPS implied); 64k
-  tokens/request (32k state + longest question); Choice ≤255 options;
-  Score 2–10 levels; text-only state (string | JSON object | array).
-  Errors include 401/422/429/529. Rate limits flagged by vendor as
-  dynamically adjusting — re-check at build time.
-- SDKs: official Python + JS/TS only. No official Rust SDK (both
-  crates.io Rust clients self-describe unofficial). Rust path is plain
-  HTTP `POST https://api.typesafe.ai/v1/systemone` with Bearer key;
-  retry/backoff + `Retry-After` are ~30 lines to replicate.
-- Batching (vendor cookbook, measured): 13 questions over 54k-char
-  article in one call $0.000497/0.27s vs 13 calls $0.006090/2.71s →
-  **12.2x cheaper, 10.0x faster, identical answers**. Sequential-call
-  comparison; concurrent singles narrow latency but not token cost.
-- Latency vendor-claim ~100ms typical, 70–500ms end-to-end [vendor].
-  Our live probes (6 questions/state shapes): 0.24–0.42s (see §5).
-- Patterns to reuse: speculative fan-out (one call, code consumes the
-  applicable answers), confidence-gated routing (per-action thresholds),
-  citation-check (string-match first, then Choice supports/contradicts/
-  says_nothing, conf ≥0.8 auto), SDE cascade (cheap pass → Noul verifier
-  battery → escalate flagged only), composite scoring (retune weights in
-  code without new calls).
+## 4. Opportunities (revised)
 
-## 4. Ranked opportunities [Jev-ranked, default-designed]
+### 4.1 Apply blast-radius advisory — CONDITIONAL
 
-Ranking probe [Jev]: state = project summary + 6 candidates, one
-request, 1,126 in-tokens, `jev-1.13.0`. `best_first` Choice →
-**apply_risk_gate 0.57 conf 0.49**; doctor_prioritize 0.23;
-mcp_intent_route 0.14; audit_triage/diag_relevance/update_notes_risk
-≤0.03. Impact Scores [Jev]: apply 2.22 (Large, conf 0.71), audit 1.77
-(conf 0.72). Flag [Jev]: `needs_generation_apply` Noul 0.74 (apply gate
-may need more than a snap judgment → keep advisory-only);
-`needs_generation_mcp` 0.05 (closed-set fit);
-`audit_has_signal` 0.53 (thin signal, borderline).
+**Corrected premises.** The 2026-09-22 text had three of them wrong:
+- It said validator stdout "collapses via substring match". Only a test
+  fixture uses `StdoutPattern`; every shipped module check is `ExitZero`
+  (STAGE3 L-PLAT6).
+- It assumed check results exist on the apply path. They do not: validators
+  run only in `plan` (STAGE3 H5), and under a confined `serve` running one
+  kills the monitor (STAGE3 H6). Until both are fixed, the "state" this
+  advisory reads is empty.
+- It called safety "time-only", as if that were the defect. A deterministic
+  commit-confirm window is the right mechanism (ADR-012). The actual defect
+  was that it was broken (STAGE3 H1–H4, H21, H22). A model must never
+  compensate for a broken safety net.
 
-### 4.1 Apply blast-radius gate (best-first, advisory only)
+**What remains valid, after STAGE3 lands:** an *advisory* that can make
+apply harder, never easier. It may:
+- require an explicit confirm on a module that does not need one;
+- lengthen the confirm window;
+- show a "high blast radius" banner.
 
-Brittle today [default]: `DEFAULT_CONFIRM` 90s + `commit_confirm: bool`
-(`op.rs:29`, `engine.rs:515-521`, `descriptor.rs:196-198`) — safety is
-time-only, operator manually confirms or loses the change.
-`CheckReport{passed: bool}` collapses validator stdout via substring
-match (`detent-platform/src/service/checks.rs:96-101`).
+Constraints are in §5. The question shape (a Score and a Choice in one
+call) is unchanged, but it runs over §5.2's structural features, not
+`unified_diff`:
 
-State (exists, typed): `PlanReport{module,path,unified_diff,
-diagnostics[{severity,id,field}],affected_services,
-checks[{ran,passed,exit_code,detail}],current_hash,would_change}`
-(`report.rs:77-99`) + `Apply{id,model,expected_hash,service_action,
-confirm}` (`op.rs:118-132`).
-
-Request shape (one fan-out call, three questions):
 ```json
-{"blast_radius":{"type":"score","instructions":"How large is the blast radius if applied per `unified_diff`, `affected_services`, `service_action`?","criteria":["No service impact.","Low: reloadable, easy revert.","High: restart of time-critical service with failing check.","Severe: likely loss of sync/lockout."]},
- "route":{"type":"choice","instructions":"Given `checks`,`diagnostics`,`service_action`, how should apply proceed?","criteria":{"auto_apply":"Safe without friction.","require_confirm":"Apply but require explicit confirm in window.","block":"Do not apply; resolve failing check first."}},
- "check_supports_block":{"type":"noul","instructions":"Does the failing check in `checks` support blocking?","criteria":{"true":"Failing check is a blocker.","false":"Unrelated/not a blocker."}}}
+{"blast_radius":{"type":"score","instructions":"How large is the blast radius if this change is applied, given `module`, `service_action`, `affected_units`, `changed_lines`, and `checks`?","criteria":["No service impact.","Low: reloadable, easy revert.","High: restart of a time-critical service or a failing check.","Severe: likely loss of time sync, name resolution, or remote access."]},
+ "friction":{"type":"choice","instructions":"Given `checks`, `diagnostic_ids`, and `service_action`, how much friction should apply add?","criteria":{"none":"No extra friction beyond the deterministic rules.","confirm":"Require an explicit confirm within the window.","hold":"Show a blocking warning; operator must re-submit to proceed."}}}
 ```
 
-Composition [default]: deterministic `validate` / `has_errors()` stays
-authoritative; Jev only tunes friction (`route=block` → require
-confirm, never silent auto-apply; low Choice confidence →
-require_confirm). Threshold starting points (tune on own plans):
-`block≥0.70/review≥0.35` per guardrails cookbook, blast-gate analogue
-`blast_radius≥2.0`. Pin `jev-1.13.0`, not `jev-latest`, once tuned.
+The options are named `none`/`confirm`/`hold`, not `auto_apply`/`block`. The
+model cannot authorise anything; `none` means "the deterministic rules
+alone".
 
-### 4.2 Doctor urgency rank
+### 4.2 Doctor urgency ranking — FIRST TRIAL (lowest risk)
 
-Brittle today: `Status{Ok,Warn,Fail}` + `mode_status` bit masks
-(`crates/detent/src/doctor.rs:45,207`) — whole Warn band is display-only
-manual review. State: `Report{host: HostReport, checks:
-Vec<Check{name,status,detail}>, ok}` + raw mode bits + kernel file
-contents + `privsep_verdict`. Shape: one Score (urgency 0–3) + one
-Choice (act_now/review/ignore) per check in one fan-out call; sort by
-Score in code.
+The check is read-only and display-only, and no apply depends on it. Fields
+sent: the check name, its `Status`, and a **fixed** detail id. Never send raw
+mode bits with paths, or file contents. The answer is one Score (urgency
+0–3) plus a Choice (`act_now`/`review`/`ignore`) per check, all in one call,
+with the sorting done in code. The value is modest; run it first because
+it is the cheapest way to prove the client, the failure handling and the
+egress config end to end.
 
-### 4.3 MCP NL→Operation intent route
+### 4.3 MCP natural-language → Operation routing — REJECTED
 
-Closed-set fit [Jev Noul 0.05 = no generation needed]. State: operator
-utterance + 17 `Operation` variants + module ids. Shape: one Choice (17
-options, inside 255 cap) + per-branch speculative Nouls (needs
-`service_action`? needs `confirm`?) in the same call; downstream
-`deny_unknown_fields` + authz validate. Confidence <0.5 → ask-clarify
-(intent-routing cookbook gate).
+MCP clients are already LLMs that emit typed tool calls against 17
+`deny_unknown_fields` schemas. A server-side NL router duplicates the
+client's job and adds a prompt-injection surface: text inside a config file,
+ticket or log could steer which operation runs. It offers no benefit over
+the typed tools. Do not build it.
 
-### Deprioritized
+### Deprioritised (unchanged)
 
-- Audit triage: signal Noul only 0.53 — `AuditRecord` is hashes+ids, no
-  bodies by design (`audit.rs:57-76`). Revisit only if review load
-  proves painful.
-- Update-notes risk, diag-relevance: Jev p≈0.0–0.03 in ranking.
-- Authz granularity and privsep path: deliberately NOT Jev fits — must
-  stay deterministic (security boundary).
+- **Audit triage:** records hold hashes and ids only, by design. The signal
+  Noul was 0.53, which is too thin to act on.
+- **Update-notes risk, diag relevance:** ranked p ≈ 0.0–0.03.
+- **Authz, privsep, validation, and update verification:** never Jev. These
+  are security boundaries and must stay deterministic.
 
-## 5. Economics (measured live probes [Jev])
+## 5. Hard constraints (apply to anything built from this file)
 
-- Risky chrony-NTS plan (failing `chronyd -Q`, restart): `blast_radius`
-  **2.03 conf 0.97**, `route` **block 0.75 conf 0.62**,
-  `check_supports_block` **0.85** — 803 in-tokens, 0.24s.
-- Benign hosts-comment control: blast **0.0 conf 1.0**, `route`
-  **auto_apply 0.85 conf 0.78**, support-block **0.04** — 682 tokens,
-  0.26s. Clean separation in the needed direction.
-- Cost math: ~800 in-tokens × $0.042/10^6 ≈ **$0.000034/call**; 10k
-  applies/day ≈ $0.34/day. Latency ~0.25s is noise next to privsep
-  write + service restart. Batch per-check questions (state paid once)
-  if ever fan-out heavy.
+### 5.1 Egress is an owner decision — `DECISION`
 
-## 6. Falsifying evaluation
+The web front end (the worker, confined but root-adjacent) would call a
+third party. The feature is:
+- **off by default**;
+- enabled only by an explicit `[typesafe]` config section (`enabled`,
+  `endpoint`, `model`, `timeout_ms`, and a key file path, 0600, never
+  inline);
+- documented in THREAT_MODEL.md and SECURITY_HARDENING.md.
 
-Done [Jev]: risky-vs-benign separation passed (block vs auto_apply,
-blast 2.03 vs 0.0). Kills the proposal: route confidence <0.6 on >30%
-of a 20-plan corpus, Noul inversion on controls, or p95 latency >1s on
-the apply path.
+The API key is a secret: redact it in `Debug` (the crate convention), keep
+it out of logs and the audit trail, and never return it from an endpoint.
+The call runs worker-side only, never in the monitor.
 
-Next (build after initial dev): 20-plan corpus (10 benign, 10
-failing-check/restarts) + threshold sweep on `route`/`blast_radius`.
-Go-criteria: ≥90% risky→block/require_confirm with zero benign→block;
-else drop to doctor-only or abandon. Keep credentials server-side;
-never send config bodies beyond what PlanReport already exposes.
+### 5.2 Structural state only — no file content
 
-## 7. Build order (when Stage 2 starts)
+`PlanReport.rendered` is the whole candidate file, and `unified_diff`
+carries full lines. Together they can include CIFS passwords, Kea DB
+passwords, NM PSKs and TSIG keys (STAGE3 M6). The original "nothing beyond
+what PlanReport exposes" rule therefore protects nothing.
 
-1. Apply gate probe harness (throwaway first, then corpus + sweep).
-2. Doctor rank (read-only, lowest risk).
-3. MCP intent route (closed-set, validated downstream).
-4. Revisit audit triage only with operator-pain evidence.
+The request state must be a dedicated typed struct with **no free-text
+fields that could carry file content**:
+
+```rust
+struct ApplyFeatures {
+    module: ModuleId,                         // registry id, closed set
+    service_action: Option<ServiceCommand>,   // enum
+    affected_units: Vec<&'static str>,        // from static UnitNames
+    hunks: u32, lines_added: u32, lines_removed: u32,
+    checks: Vec<CheckFeature>,                // { program_id, ran, passed, exit_code }
+    diagnostic_ids: Vec<MessageId>,           // Fluent ids, not rendered text
+    commit_confirm: bool,
+}
+```
+
+Also add a unit test that serialises an `ApplyFeatures` built from a
+`PlanReport` whose `rendered` contains `"hunter2"`, and asserts that the
+string is absent.
+
+### 5.3 Fail safe, and only ever add friction
+
+- Any error, a timeout (≤ 1 s budget), 403, 429, 5xx or a parse failure
+  means apply behaves **exactly as it would with the feature off**.
+- The model's answer can only raise friction. It can never skip a
+  descriptor's `commit_confirm`, never override a failing check (after
+  STAGE3 H5, a failing check refuses the apply regardless), and never shorten
+  a window.
+- Low confidence (Choice confidence < 0.5) maps to `confirm`, never to
+  `none`.
+- Every advisory outcome is audit-visible: add a field for the friction
+  level applied and whether the model or the fallback chose it. Record no
+  model text.
+
+### 5.4 Thresholds are per data set
+
+The starting points below come from cookbooks and must be tuned on this
+repo's corpus (§6):
+- `hold` at ≥ 0.70 and `confirm` at ≥ 0.35 on the Choice probability;
+- a blast-radius Score ≥ 2.0 counts as high.
+
+## 6. Evaluation (falsifying) — must pass before any product code
+
+Already done (2026-09-22, over diff-bearing state): a risky chrony plan
+(failing check + restart) scored blast 2.03 with route `block` 0.75, versus
+a benign hosts-comment plan at blast 0.0 with `auto_apply` 0.85. The
+separation was clean, but **redo it with §5.2 structural state**, because
+removing the diff text may remove the signal.
+
+1. **Offline harness** (throwaway, under `/tmp`, not in the repo; PEP 723
+   script or a `curl` driver):
+   - Build a corpus of **30 plans**: 12 benign, 12 risky (failing check,
+     restart of a network/resolver/chrony service, fstab without `nofail`),
+     and 6 ambiguous.
+   - Generate them with the real engine after STAGE3 H5 and H6, so the
+     `checks` values are genuine.
+2. **Sweep** thresholds on `friction` and `blast_radius`.
+3. **Go criteria** (all required):
+   - ≥ 90 % of risky plans land on `confirm` or `hold`;
+   - **zero** benign plans land on `hold`;
+   - p95 latency ≤ 1 s from a009 and k001;
+   - no WAF 403 on any corpus request;
+   - Choice confidence < 0.6 on ≤ 30 % of the corpus.
+4. **Kill conditions:** any criterion failing, or a Noul inversion on a
+   control. If killed, record the result here and close §4.1. §4.2 may
+   still ship on its own.
+
+## 7. Build order (only after §0's gate)
+
+1. The egress decision (§5.1). If no, stop.
+2. The `[typesafe]` config plus a client in the worker: timeout, explicit
+   User-Agent, fail-safe mapping, redacted key, and tests with a stub
+   transport covering 200, 403, 429 and timeout.
+3. §4.2, doctor ranking (read-only), shipped behind the flag.
+4. The §6 evaluation for §4.1. Build §4.1 only if it passes, as an advisory
+   within §5.3.
+5. Re-run §6 whenever the pinned model version changes.

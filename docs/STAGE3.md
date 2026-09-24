@@ -1,0 +1,801 @@
+# STAGE3 — Adversarial review of all code to date
+
+Status: REVIEW ONLY. No production code was changed for this stage.
+Baseline: `3f502ff` (2026-09-22). Re-checked against `69b1de7`
+(2026-09-23), which adds oh-my-pi's ReplaceBinary hardening
+(`65ad621`, `e396d26`, `98f5ec3`) and cert-status work. Line numbers are
+as of `3f502ff` unless the item says otherwise. **Re-locate every line
+before you edit it** — the tree is moving.
+
+This file is written for an implementor that did not see the review. Each
+item is self-contained: problem, evidence, fix, test, acceptance. Read
+§0 before starting any item. **§11 tracks what is done.**
+
+---
+
+## 0. Rules for the implementor
+
+1. **One item = one commit** (`git commit -S -s`, ASD-STE100 message).
+   Do not batch items. Do not fix adjacent things you notice; add them to
+   §9 instead.
+2. **Test first.** Write the test named in the item, run it, confirm it
+   **fails** on the current tree, then fix, then confirm it passes. If the
+   test passes before the fix, stop: the finding or the test is wrong —
+   report it, do not force it.
+3. **Never game the check.** No `#[allow]`, no `#[ignore]`, no weakened
+   assertions, no `cfg(test)` special-casing, no deleting tests. The
+   workspace denies `unwrap_used`/`expect_used` even under test — tests
+   return `Result`.
+4. **Gates before every commit** (all must pass; quote failures verbatim):
+   ```bash
+   cargo fmt --all --check
+   cargo clippy --workspace --all-targets --all-features -- -D warnings
+   cargo test --workspace --all-features
+   ```
+   For `web/` items: `cd web && bun run typecheck && bun run lint && bun run test && bun run i18n:check`.
+   `--all-features` is mandatory: per-crate or default-feature runs are
+   how the current red CI (H20) was missed.
+5. **Linux items** (anything under `sandbox/`, `privsep/`, seccomp,
+   Landlock, caps) must be verified on **a009** (Ubuntu x86_64). macOS
+   cannot run them. Cross-build for **k001** (aarch64) with
+   `cargo zigbuild --target aarch64-unknown-linux-musl`; never build on k001.
+6. **Items marked `DECISION` need an owner answer first.** The default
+   named in the item is what to do if the owner says "use the default".
+7. New user-facing strings need a Fluent id in `locales/en-US/*.ftl`.
+8. Append a PROGRESS.md entry per landed item. State what was verified
+   and how; never "should work".
+9. **Order matters.** Follow §2. In particular **H5 must not land before
+   H6**: running validators on apply while the monitor's seccomp filter
+   forbids `execve` kills the monitor on every apply on a confined host.
+10. **Never delete or revert `docs/STAGE3.md` or `docs/STAGE2.md`.** Update
+    §11 when an item lands. Keep uncommitted docs out of any `git stash`,
+    `git checkout -- .`, or `git clean`.
+
+Model routing (per AGENTS.md; Jev-routed, reviewed by the orchestrator):
+**Opus** = security boundary, privsep, crypto, concurrency, or
+cross-component state machines. **Sonnet** = local, well-specified change.
+The tier is given per item.
+
+---
+
+## 1. How this review was done
+
+- Baseline gates, run by the orchestrator on macOS at `3f502ff`:
+  - `cargo test --workspace --all-features`: exit 0, 61 suites.
+  - `cargo clippy --workspace --all-targets --all-features -D warnings`: **FAILS**, 2 errors in `crates/detent/src/mcp.rs`.
+  - Coverage (`cargo llvm-cov` + `scripts/coverage-merge.sh`): **FAILS**. detent-ops 99.64/100, detent-web 96.81/97, detent 91.64/95.
+  - Web typecheck, lint, test (436 pass) and i18n: all green.
+  - `fuzz/Cargo.lock`: consistent.
+  - GitHub CI on `main`: the last 5 `ci.yml` runs failed. `fuzz.yml` has failed every day since 2026-09-18.
+- Eight parallel read-only reviewers, one per crate group: Opus for all Rust, Sonnet for the SPA, scripts and CI. The orchestrator then re-read the code behind every critical and high item and most mediums. Each item carries a **Verified** line:
+  - `orchestrator`: re-read and confirmed by the orchestrator.
+  - `reviewer`: fully traced by a reviewer and spot-checked.
+  - `plausible`: the code path is confirmed, but the external behaviour (upstream daemon semantics, GitHub behaviour) was not executed.
+- Complex reasoning (review, verification, fix design, the STAGE2 assessment) was done by the default model.
+- **Jev (`jev-1.13.0`, live `POST /v1/systemone`)** was used only for classification and routing:
+  1. **Reviewer-tier routing:** one Choice per review unit, 13 units, 2,382 input tokens. Result: 12/13 were routed to the strong tier; `web-spa` got conf 0.36, so it went to Sonnet.
+  2. **Severity cross-check:** one Score per deduplicated finding (49 items). Jev rated most mediums a band higher than the orchestrator. The orchestrator raised **M26 → H23** (a Score of 2.9 is right: the worker can write `root preexec` into smb.conf) and kept the rest.
+  3. **Implementor-tier routing:** one Choice per finding. The orchestrator overrode it where Jev's confidence was below 0.3.
+
+  Steps 2 and 3 went in one request: 98 questions, 13,946 input tokens.
+- Payloads containing literal paths such as `/etc/...` or words like "root" were blocked by the TypeSafe Cloudflare WAF (HTTP 403). Neutral wording worked. Keep this in mind for Stage 2 (see §8).
+
+---
+
+## 2. Fix order (batches)
+
+| Batch | Items | Why first |
+|---|---|---|
+| 0 CI green | H20 | Nothing else can be trusted while CI is red. |
+| 1 Root boundary | C1 residuals, H23, H6, H12, M1, M2, M11 | Worker-compromise → root, and a monitor that dies on first use. |
+| 2 Commit-confirm | H1, H2, H3, H4, H21, H22, M7, L-OPS14 | The lock-out safety net is broken in five independent ways. |
+| 3 Apply safety | H5 (after H6), M5, M20, M21, L-OPS12 | Validators never gate apply; edits misplace lines. |
+| 4 Config injection | H13, H14, H15, H16, M22–M25, M8, L-MODA11, L-MODB7 | Typed-model boundary can be escaped per module. |
+| 5 Web auth | H8, H9, H10, M9, M10, M6 | Pre-auth DoS and revocation that does nothing. |
+| 6 Audit | H7, M3, M4 | Audit fails open and is forgeable. |
+| 7 Self-update | H17, H18, H19, M14, M16, L-SUP12..15 | Update cannot work on any real host today. |
+| 8 ACME | M15, M17, M18, M19, L-SUP10/11/16..18 | Latent (no production caller yet) — fix before wiring the loop. |
+| 9 MCP / FFI / CLI | H11, M12, M13, L-BIN* | |
+| 10 Docs / claims | §7 | Make the docs stop lying. |
+
+**Process finding:** the recent log shows new feature slices (ACME status fields, the renewal predicate) landing while CI on `main` is red. Jev "push_ready" Nouls were also used as a gate (PROGRESS 2026-09-22). Readiness must be the deterministic gate (§0.4, CI green), never a model judgement. **Freeze feature work until batches 0–2 land.**
+
+---
+
+## 3. Critical
+
+### C1 Root monitor installs a binary chosen by the worker (privsep escape) — PARTIALLY FIXED
+- Tier: Opus. Verified: orchestrator. Reviewers: PLAT-1, PLAT-4, OPS-1.
+- Location: `crates/detent-platform/src/privsep/monitor.rs` `replace_binary`, `read_staged_verified`, `swap_running_binary`; `crates/detent-ops/src/engine.rs` `update_apply`; `packaging/tmpfiles.d/detent.conf` (`/var/lib/detent 0700 detent:detent`); `sandbox/mod.rs` `Policy::worker` (`writable_paths = [state_root]`).
+- **Original defect (at `3f502ff`):** the monitor checked the staged file only against a length and SHA-256 that the worker itself sent. The file lived in a directory the worker owns. A compromised worker could stage any ELF, send `ReplaceBinary`, and root would swap it over `current_exe`: root code execution on the next restart. The monitor also re-opened the path by name after hashing (TOCTOU) and hard-linked the worker-owned inode into place.
+- **What `65ad621`/`e396d26`/`98f5ec3` fixed (reviewed, sound as an interim):**
+  - The staged file is opened `O_RDONLY|O_NOFOLLOW|O_CLOEXEC` and must be a regular file.
+  - It must be owned by the monitor's euid.
+  - Its bytes are read from that fd, hashed, and those same bytes are written to the target, with no re-open and no hard link.
+  - Because the engine materialises the digest file worker-side, the web `UpdateApply` path now **fails closed** on a privileged monitor.
+- **Residual work (do all of these):**
+  - **C1-a — hard-link / downgrade.** Ownership alone is not authenticity. On a host without Landlock (k001) and with `fs.protected_hardlinks=0`, the worker can hard-link any root-owned file on the same filesystem into `staged/<digest>`: an older signed detent (downgrade to a known-vulnerable build), `.prev`, or `/bin/true` (DoS). The owner check passes.
+    - Fix: in `read_staged_verified`, refuse unless `meta.nlink() == 1`. Also require the parent directory to be owned by the monitor euid, with mode `& 0o022 == 0` (`fstatat` on the parent before opening the child).
+    - Test: `replace_binary_refuses_a_hard_linked_staged_file`. Create the file, `hard_link` it to a second name, dispatch, and assert `Response::Error` with the target unchanged.
+  - **C1-b — move staging out of the worker's tree.** `DECISION` (default: yes). Stage into a monitor-owned `root:root 0700` directory that is not under `state_root` (e.g. `/var/lib/detent-monitor/staged`, added to `packaging/tmpfiles.d/detent.conf`). Also add it to the monitor Landlock policy and not the worker's. The worker streams the bytes over the channel in a new chunked `Request::StageUpdate { offset, chunk }`, because frames cap at 1 MiB. The monitor writes them with `O_EXCL|O_NOFOLLOW`.
+  - **C1-c — authenticity in the monitor.** `DECISION` (default: yes). The monitor must verify the Sigstore bundle itself before swapping. Split `crates/detent-update/src/{bundle,verify,trust}.rs` into a new dependency-light crate `detent-update-verify` that both `detent-platform` and `detent-update` depend on (no cycle). `StageUpdate` carries the bundle, and `replace_binary` calls `verify::verify(bytes, bundle, tag, trust::embedded())` and refuses on any error. **This is blocked on H17** — the verifier cannot parse real bundles yet. Until C1-c lands, `UpdateApply` stays fail-closed as it is now. Do not re-open it.
+  - **C1-d — durability.** In `swap_running_binary`, create the temp file with `OpenOptions::new().write(true).create_new(true).mode(0o700)` rather than `fs::write`. Call `sync_all` before the rename, then fsync the target directory after it.
+- Acceptance: the C1-a test passes. With C1-b and C1-c, add `replace_binary_refuses_bytes_that_do_not_verify`: stage self-hashed bytes with no valid bundle and expect `Error` with the target unchanged. Also add a positive case using the ADR-014 signed fixture.
+
+---
+
+## 4. High
+
+### H1 A pending commit-confirm is dropped when the monitor stops; CLI and MCP never roll back
+- Tier: Opus. Verified: orchestrator. Reviewers: OPS-2, BIN-2.
+- Location: `monitor.rs` `serve` (`return Ok(ExitReason::Shutdown)` ~:354, `PeerClosed` ~:361, both with `self.pending` still set); `Monitor::recover_pending` ~:788 (called only from tests); `crates/detent/src/run.rs` `Session::start`/`finish` (the CLI runs an in-process monitor and shuts it down after one op); `crates/detent/src/mcp.rs`; `crates/detent/src/serve.rs` `run_monitor`.
+- Problem:
+  1. `detent config network apply` arms a 90 s window, prints "commit 1 armed", then `finish()` stops the monitor. Nothing ever rolls back, and `detent commit rollback 1` from a new process gets `UnknownId`.
+  2. Under `serve`, a worker crash or `systemctl restart detent` inside the window leaves the change unguarded. `pending-commit.json` is written but never read at the next start.
+  3. SECURITY_HARDENING.md:105 claims the window "survives a monitor restart". It does not.
+- Fix:
+  1. In `Monitor::serve`, before **every** return (Shutdown, PeerClosed, protocol violation, channel error), if `self.pending.take()` is `Some`, call `self.roll_back(entries)` and `clear_marker`. Invariant: a monitor never exits with a pending commit.
+  2. Call `Monitor::recover_pending(state_root)` at every monitor start, before `Monitor::new(..)`: in `serve::run_monitor` and in `run.rs` `Session::start`. Report the `Recovered` result through the renderer (new id `cli-commit-recovered`).
+  3. Hold an exclusive `flock` on `<state_root>/monitor.lock` for the monitor's lifetime. A one-shot CLI that cannot take the lock must refuse mutating ops (new id `cli-monitor-busy`) and must not run recovery, so it never rolls back a commit that a live `serve` owns.
+  4. `DECISION` for one-shot CLI applies to `commit_confirm` modules. Default: refuse with `cli-commit-confirm-needs-serve`, pointing at the web UI or `serve`. The alternative is a `netplan try`-style tty prompt that keeps the session open until the deadline.
+- Tests:
+  - `monitor.rs::shutdown_with_a_pending_commit_rolls_back`: write, arm 60 s, dispatch `Shutdown`. Assert the target is restored and the marker is gone.
+  - `serve.rs::run_monitor_recovers_a_leftover_marker`.
+  - `run.rs::a_cli_apply_on_a_commit_confirm_module_never_leaves_an_unenforced_commit`: after `run()`, the target is unchanged or restored, and no `pending-commit.json` exists.
+- Acceptance: all three tests pass. Correct SECURITY_HARDENING.md:105 in the same commit.
+
+### H2 Apply arms commit-confirm only after the write and the service restart
+- Tier: Opus. Verified: orchestrator. Reviewer: OPS-3.
+- Location: `crates/detent-ops/src/engine.rs` `apply`. Step 4 `write_target` (~:496), step 5 `self.act(..)?` (~:507), step 6 `arm_commit` (~:516). `monitor.rs` `start_confirm_timer` returns `CommitPending` if one is already armed.
+- Problem:
+  - (a) File written, restart fails: `?` returns before arming, so there is no rollback. For `network` this is exactly the lock-out ADR-012 exists for.
+  - (b) With commit A pending, a second commit-confirm apply writes and restarts, then gets `CommitPending`. It has no rollback, and its journal entry lingers (H3).
+  - (c) With no backup made (`keep_backups = 0`), the engine reports an armed commit with `rollback_targets = 0`, which restores nothing.
+- Fix, in `apply`, for `descriptor.commit_confirm || confirm.is_some()`:
+  1. Before writing, ask the monitor whether a commit is pending: add `Request::PendingCommit` → `Response::Pending(Option<CommitId>)`. If one is, return a new `OpsError::CommitPending` (Fluent `ops-commit-pending`) and write nothing.
+  2. Arm immediately **after** `write_target` and **before** `act`.
+  3. If `act` fails, call `client.rollback_commit(id)`, then return the original error.
+  4. If `receipt.backed_up` is false, roll back immediately and return `OpsError::NoBackup` (new id). A commit-confirm apply without a backup is not a safe apply.
+- Tests (`crates/detent-ops/tests/engine.rs`):
+  - `a_failed_service_action_on_a_commit_confirm_module_restores_the_file` (Err, contents back to v1).
+  - `a_second_commit_confirm_apply_while_one_is_pending_writes_nothing`.
+  - `a_commit_confirm_apply_without_a_backup_is_refused`.
+
+### H3 The rollback journal collects writes from every module
+- Tier: Opus. Verified: orchestrator. Reviewer: OPS-4.
+- Location: `monitor.rs` `write_target` (~:479 pushes a `RollbackEntry` for every successful write); `start_confirm_timer` (~:656 `mem::take(&mut self.journal)`).
+- Problem: the journal is only cleared when a timer arms. So a plain `hosts` apply at 09:00 is rolled back by an unrelated `network` commit that expires at 15:00. Stale entries can also point at backups that rotation has already deleted.
+- Fix: add `journal: bool` to `Request::WriteTarget`. The engine sets it only for commit-confirm applies. The monitor pushes only when `journal` is true. When pending is `None` and `journal` is true, clear the journal before pushing, because one commit equals one write today. Bump `PROTO_VERSION`.
+- Test: `engine.rs::an_unrelated_earlier_write_is_not_rolled_back_by_a_later_commit`. Apply plain A v1→v2, then apply commit-confirm B with a 1 s window and let it expire. Assert A is still v2 and `rollback_targets == 1`.
+
+### H4 Rollback restores files but never replays the service action
+- Tier: Opus. Verified: reviewer (OPS-5). Claim source: ADR-012 and PLAN §2.5 ("re-applies the prior service action").
+- Location: `monitor.rs` `roll_back` (~:845), `enforce_deadline` (~:739). `RollbackEntry` has no binding or action.
+- Problem: a bad network config plus a restart locks the admin out. At the deadline the file is restored, but networkd keeps running the bad config.
+- Fix:
+  1. Add `service: Option<(BindingId, ServiceAction)>` to `StartConfirmTimer`, to `PendingCommit`, and to the persisted `PendingCommitMarker`. Keep serde defaults so old markers still parse.
+  2. After restoring files, `roll_back` calls `hooks.services.service(binding, action)` (it becomes `&self`) and logs the failure. `recover_pending` does the same.
+  3. The engine passes the action it just performed.
+- Test: `monitor.rs::an_expired_commit_replays_the_service_action`, using a recording `ServiceControl`.
+
+### H5 External validators never run on apply — land H6 first
+- Tier: Sonnet. Verified: orchestrator. Reviewers: MODA-1, MODB-3.
+- Location: `engine.rs` `apply` (~:455-525); `run_checks` is only called from `plan` (~:395). Claim: SECURITY_HARDENING.md:102 "External validators run before apply".
+- Problem: `chronyd -p`, `testparm -s`, `unbound-checkconf`, `findmnt --verify` and `netplan generate` only inform `plan`. Any apply from the CLI, MCP, FFI or an API client that skips `plan` writes a config the daemon rejects. `chrony` and `dhcp` have no commit-confirm at all.
+- Fix:
+  1. In `apply`, after `apply_json` and before `write_target`, call `self.run_checks(&wiring, rendered.as_bytes())`.
+  2. If any report has `ran && !passed`, return a new `OpsError::CheckFailed { reports }` (Fluent `ops-check-failed`) and write nothing.
+  3. `DECISION` for a validator that is not installed (`!ran`). Default: allow, and include the reports in `ApplyReport.checks` (new field) so the UI shows "not validated".
+- Test: `engine.rs::apply_refuses_when_an_external_check_fails`. Add `FailChecks` beside the existing `OkChecks` runner. Assert `Err(CheckFailed)`, target bytes unchanged, and no backup created.
+- **Dependency:** H6 first, then verify on a009 under `detent serve` that a real `chrony` apply runs `chronyd -p` and the monitor survives.
+
+### H6 Monitor seccomp filter forbids process creation; the first validator or restart kills it
+- Tier: Opus. Verified: orchestrator (the `MONITOR` table at `sandbox/seccomp.rs:155-218` has no `clone`, `clone3`, `fork`, `vfork`, `execve`, `execveat`, `pipe2`, `dup3` or `kill`; `Role::Monitor => KillProcess`). Reviewer: PLAT-2.
+- Location: `sandbox/seccomp.rs` `MONITOR`, `SYSCALL_NUMBERS`; `serve.rs:170-174`, where the monitor's hooks are the real `ExternalCheckRunner` and `service::for_host`; `service/exec.rs` (`Command::spawn`, reader threads, `child.kill()`).
+- Problem: on a confined `detent serve`, any `RunCheck` (every plan on chrony, samba, dhcp, network or resolver) or `Service` request makes the monitor spawn a process. The filter kills it with SIGSYS and the pair dies. The derivation comment (seccomp.rs:20-25) wrongly calls `execve`/`clone` test-harness noise. Real-hardware testing (PROGRESS 2026-09-16) only ran `host` and `doctor`, so this was never exercised.
+- Fix:
+  1. On a009, run a confined `detent serve` under `strace -f -o /tmp/mon.trace`. Drive one real `plan` on chrony (runs `chronyd -p`) and one `systemctl restart` through the API. Collect every syscall the monitor and its children use.
+  2. Add the missing ones to `MONITOR` with both arch numbers: at least `clone`, `clone3`, `execve`, `execveat`, `pipe2`, `dup3`, `kill`, `tgkill`, `rseq`, `set_robust_list`, `sched_getaffinity`, plus whatever strace shows.
+  3. Keep `KillProcess`. Rewrite the derivation comment.
+  4. Repeat on k001 (aarch64) with a cross-built binary.
+- Tests:
+  - `sandbox/linux.rs::enforce_mode_monitor_can_spawn_a_validator`: in the existing `in_forked_child` helper, call `confine(Role::Monitor, &Policy::monitor(&allow))`, then `RealProcessRunner.run("/bin/true", &[], 5s)`. The parent asserts exit 0. It must fail on the current tree.
+  - `seccomp.rs::monitor_table_allows_process_creation_on_both_arches`.
+
+### H7 Audit fails open; nothing is recorded before the side effect
+- Tier: Opus. Verified: orchestrator. Reviewer: OPS-6.
+- Location: `engine.rs` ~:205 (`if let Err(err) = self.audit.record(record) { tracing::error!(..) }`); records are emitted only after dispatch. The test `crates/detent-ops/tests/engine.rs:1749 an_unwritable_audit_sink_does_not_fail_the_operation` **enforces** fail-open. Claim: `detent-ops/src/lib.rs:8-9` ("complete record rather than a best-effort one").
+- Problem: with a full disk, a read-only filesystem, or `audit/` replaced by a file (the worker owns it), every Apply, Restore, ServiceAction and UpdateApply succeeds unaudited. A crash mid-dispatch leaves a write with no record.
+- Fix:
+  1. Add `AuditResult::Started`.
+  2. For mutating ops, `execute` writes an intent record **before** dispatch. On `Err`, return `OpsError::Audit` (new id `ops-audit-unavailable`) without dispatching.
+  3. Keep the outcome record after dispatch. If that fails, return the op's result but log at error level; the intent record already exists.
+  4. `emit` returns `Result`.
+- Test: **replace** the fail-open test with `an_unwritable_audit_sink_refuses_the_mutation`, asserting `Err(OpsError::Audit)` with the target still v1. This intentionally reverses documented behaviour; say so in the commit message.
+
+### H8 The login rate limiter is one global bucket
+- Tier: Sonnet. Verified: orchestrator (no `ConnectInfo` insertion anywhere outside a test). Reviewer: WEB-1.
+- Location: `crates/detent-web/src/server.rs` ~:294 (`TowerToHyperService::new(router)`; `peer` is only logged); `auth/extract.rs` ~:281-286 (missing `ConnectInfo` becomes `0.0.0.0`); `auth/routes.rs` ~:198-221. False claim: `crates/detent-web/Cargo.toml:44-47`.
+- Problem: every client is keyed `ip:0.0.0.0`. Five bad logins from anyone return 429 to everyone, including the admin. With the 15-minute backoff, one bad login per 15 minutes locks the UI permanently. Auth audit records also lose the source IP.
+- Fix:
+  1. In `Server::serve`, per accepted connection, wrap the router: `let svc = tower::ServiceExt::map_request(router.clone(), move |mut req: axum::extract::Request| { req.extensions_mut().insert(axum::extract::ConnectInfo(peer)); req });`, then call `TowerToHyperService::new(svc)`.
+  2. In `ratelimit.rs`, key IPv6 by /64 (mask the low 64 bits).
+  3. Fix the Cargo.toml comment.
+- Tests:
+  - `tests/tls.rs::the_peer_address_reaches_the_handlers`: a `GET /ip` route returns `ClientIp`; a TLS client from 127.0.0.1 must see "127.0.0.1".
+  - `ratelimit.rs::ipv6_addresses_in_one_slash64_share_a_bucket`.
+
+### H9 No header-read or idle timeout after the TLS handshake (slowloris)
+- Tier: Sonnet. Verified: orchestrator (`rg 'header_read_timeout|\.timer\(|keep_alive' crates/detent-web/src` finds nothing). Reviewer: WEB-2. False claim: SECURITY_HARDENING.md:72.
+- Location: `server.rs` ~:295 (`auto::Builder::new(TokioExecutor::new())`), ~:340-345 (`watcher.watch(connection).await` with no deadline).
+- Problem: hyper's default header timeout is inert without a timer. Sixty-four idle post-handshake connections hold every semaphore permit, so the UI is down pre-auth.
+- Fix:
+  1. `builder.http1().timer(TokioTimer::new()).header_read_timeout(HEADER_READ_TIMEOUT)` (10 s).
+  2. `builder.http2().timer(TokioTimer::new()).keep_alive_interval(Some(30s)).keep_alive_timeout(30s).max_concurrent_streams(32)`.
+  3. Wrap `watcher.watch(connection)` in `tokio::time::timeout(MAX_CONNECTION_LIFETIME, ..)` (e.g. 10 min).
+  4. Make the durations `Server` fields so tests can shorten them.
+- Test: `tests/tls.rs::an_idle_connection_does_not_hold_a_permit`.
+  1. Set `max_connections = 1` and the header timeout to 200 ms.
+  2. Handshake, then send nothing; sleep 500 ms.
+  3. A second client gets `/healthz` 200.
+
+### H10 User and token stores are loaded once; revocation does nothing and removed users come back
+- Tier: Opus. Verified: orchestrator (`TokenStore::authenticate` scans an in-memory `Vec` loaded in `load`). Reviewers: WEB-3, BIN-5.
+- Location: `crates/detent-web/src/auth/token.rs` (claim at :22-24 "no cache in front of it" is false; `authenticate` ~:296; `records` ~:343); `auth/users.rs` `mutate` (clones the stale set and writes it back), `note_totp_counter`; `crates/detent/src/serve.rs:346`; `crates/detent/src/webadmin.rs:353-374`; `crates/detent/src/mcp.rs` (token authenticated once at startup; `detent-mcp` `check_auth` compares the server's own env var with itself).
+- Problem:
+  - `detent token revoke` and `detent user rm/passwd` run in another process and never reach a running `serve` or `mcp`.
+  - Worse, the next server-side write (for example any TOTP login) rewrites `users.json` from the stale in-memory set and resurrects a removed user or an old password.
+  - Revoked or expired tokens keep working in MCP until restart.
+- Fix:
+  1. Add `refresh()` to `TokenStore` and `UserStore`. It stats the file, compares `(dev, ino, len, mtime_ns)` with a cached fingerprint held in the same mutex, and re-decodes on change. `NotFound` means empty.
+  2. Call it at the start of `authenticate` and `verify_password`, and inside `mutate()` under the lock before cloning, so every write is a read-modify-write of the current file.
+  3. When a refresh drops a user or changes their PHC, call a new `SessionStore::revoke_subject(name)`.
+  4. MCP: replace the startup-only check with a `StoreVerifier { state_root }` that calls `TokenStore::load(..)?.authenticate(token, now)` per request. Pass the presented token into `check_auth` explicitly instead of reading `DETENT_MCP_TOKEN` again. Label the identity `token:<id>`; never use `&token[..8]`, which exposes part of the secret and panics on a non-ASCII boundary.
+- Tests:
+  - `token.rs::a_token_revoked_through_another_store_stops_working`.
+  - `users.rs::a_removed_user_is_neither_accepted_nor_resurrected`.
+  - `detent/src/mcp.rs::a_revoked_token_is_refused_on_the_next_call` (also cover an expired token).
+
+### H11 MCP stdio (the default transport) deadlocks
+- Tier: Sonnet. Verified: orchestrator (`main.rs:94-99` holds `stdin.lock()`/`stdout.lock()` for the whole `run::run`). Reviewer: BIN-1, traced through tokio 1.53.1 and rmcp 3.4.0.
+- Problem: rmcp uses `tokio::io::stdin()`, whose blocking thread calls `Stdin::read`, which needs the lock `main` holds. The server never answers `initialize`. PROGRESS 2026-09-22 saw this ("pipe stayed silent… likely framing") and shipped anyway.
+- Fix: in `main.rs`, pass the unlocked handles instead (`let mut input = std::io::stdin(); let mut out = std::io::stdout(); let mut notes = std::io::stderr();`). `Streams` takes `&mut dyn Read/Write`, so nothing else changes. Keep the final flushes.
+- Test: `crates/detent/tests/binary.rs::mcp_stdio_answers_initialize` (`#[cfg(feature = "mcp")]`).
+  1. Create a token with `detent token create t --json --state-root <tmp>`.
+  2. Spawn `detent mcp` with `DETENT_MCP_TOKEN` set.
+  3. Write one `initialize` JSON-RPC line.
+  4. Read one stdout line on a thread with a 10 s timeout; it must contain `"id":1` and `"result"`.
+
+### H12 `detent mcp --transport http` serves the network from the root process
+- Tier: Opus. `DECISION`. Verified: reviewer (BIN-3).
+- Location: `crates/detent/src/mcp.rs` (`start_session` = in-process monitor thread, then `serve_http` in the same process); `run.rs:3-19` (the module doc justifies the in-process monitor because "a one-shot CLI has no network-facing side", which is false for `mcp`).
+- Problem: hyper, axum and rmcp parse network input in the same process as the root monitor, with no fork, uid drop, Landlock or seccomp. `serve` forks for exactly this reason.
+- Fix (default = option B now, option A later):
+  - **B (interim):** refuse `--transport http` when `geteuid() == 0` (`Exit::Privilege`, id `cli-mcp-http-needs-privsep`). Fix the `run.rs` doc.
+  - **A:** mirror `serve.rs`. Read the token store before forking. Call `spawn_pair` with `SandboxHooks::new(Policy::monitor(..), Policy::worker(..))`. Run `serve::run_monitor` on the monitor side. On the worker side, build the engine behind the privsep client and run `serve_http` on a runtime built inside the worker.
+- Test (B): a pure helper `http_transport_allowed(euid_is_root: bool) -> bool` plus a unit test.
+
+### H13 smb.conf syntax injection through keys and values
+- Tier: Sonnet. Verified: orchestrator (`render_line` guards only `\n\r\0` plus a round-trip through the module's own parser). Reviewer: MODA-2. Upstream semantics come from smb.conf(5) and were not executed.
+- Location: `crates/modules/samba/src/lib.rs` `parse_entry` (~:189-211), `render_line` (~:247-264), `validate_entry` (~:438-452). The header doc at :18-21 describes continuation wrongly.
+- Problem:
+  - (a) A value ending in `\` makes Samba fold the **next** line into it, e.g. swallowing `valid users = @admins`. The model still shows the swallowed line as present.
+  - (b) A key like `[evil] x` renders as `[evil] x = y`, which Samba reads as a new section. Every later `[global]` hardening directive moves into a share, where it is ignored.
+  - (c) A key starting with `;` or `#` becomes a comment, and the directive silently vanishes.
+  - (d) A section name containing `]` is truncated.
+- Fix:
+  1. `render_line` returns `EditError::Unsupported` when a key starts with `[`, `#` or `;`; when a key or value ends with `\`; or when a section name contains `[` or `]` or ends with `\`.
+  2. Add matching `Severity::Error` diagnostics in `validate_entry` (new Fluent ids).
+  3. `parse_entry` returns `None` for a trimmed line ending in `\`, so continued lines stay `Unknown` and are never rewritten.
+  4. Fix the header doc.
+- Tests: `render_line_rejects_smb_conf_syntax` covers each case above. Assert `parse_entry("a = b \\") == None`. Add the same probes to `crates/modules/samba/tests/conformance.rs`.
+
+### H14 NFS exports: a `-opts` host sets default options and bypasses the warnings
+- Tier: Sonnet. Verified: orchestrator (`parse_client` rejects only `#` and `"`). Reviewer: MODA-3. Upstream semantics come from exports(5) and were not executed.
+- Location: `crates/modules/nfs/src/lib.rs` `parse_client` (~:199-225), `parse_export` (~:233-244), `render_line` (~:275-295), `validate_client` (~:506-536); the header at :14-19.
+- Problem: clients `[{host:"-rw,no_root_squash"}, {host:"*"}]` render as `/srv -rw,no_root_squash *`. exportfs applies those as defaults, which gives world read-write with root. Validation sees two plain hosts and raises nothing. A trailing `\` joins the next line, `#` inside a path or option truncates the line, and `"` toggles quoting.
+- Fix:
+  1. `parse_client` returns `None` if the host starts with `-` or contains `\`.
+  2. `parse_export` returns `None` if the path or any option contains `#`, `"` or `\`, or if the trimmed line ends with `\`.
+  3. Add matching `Severity::Error` diagnostics.
+  4. Fix the header.
+- Tests: `parse_export("/srv -rw,no_root_squash *") == None`. `render_line` returns `Err(Unsupported)` for a `-rw` host, `h\`, a path `/a#b` and an option `rw#`. The `-rw` model `validate(..).has_errors()`. Add conformance probes.
+
+### H15 unbound `name:`/`forward-addr:` outside a forward zone is not validated
+- Tier: Sonnet. Verified: reviewer (MODB-2). Plausible: unbound's multi-statement-per-line parsing was not executed.
+- Location: `crates/modules/resolver/src/lib.rs` `validate_unbound` (~:1237-1267: misplaced entries get a Warning and the value is never checked), `render_unbound` (~:697), `parse_unbound` (~:563-572). The test `forward_items_outside_a_zone_are_misplaced` asserts `!has_errors()`.
+- Problem: any `stub-zone:`, `auth-zone:` or `view:` section makes its `name:` lines "misplaced", which skips value validation. A Write caller can set a value such as `. server: access-control: 0.0.0.0/0 allow remote-control: control-enable: yes …` and escape the typed model (open resolver, unauthenticated remote control).
+- Fix:
+  1. Always run `is_valid_forward_zone_name(name)` / `is_valid_forward_addr(addr)` and emit `Severity::Error` on failure, whatever the section. Keep the misplaced Warning.
+  2. In `render_unbound`, return `EditError::Unsupported` if `name` or `addr` contains whitespace, `:` or `#`.
+- Test: `misplaced_forward_name_is_still_validated`. Also update the existing test so it asserts errors for an invalid value and no error for a valid misplaced one.
+
+### H16 network `apply` moves preserved keys out of their INI section
+- Tier: Sonnet. Verified: reviewer (MODB-1; traced against `fixtures/network/edge/unknown-sections.network`, not executed).
+- Location: `crates/modules/network/src/lib.rs` `NetworkModule::apply` (~:1899-1959). It removes every `Directive` line and re-appends the rendering at EOF. `.map_or(at, |_| at)` is dead code.
+- Problem: unmodelled keys (e.g. `IPv6AcceptRA=no`) stay where they were while their `[Network]` header moves to the end. They end up outside any section, and networkd ignores them. This breaks ADR-008's "preserved-but-opaque" promise, and the plan diff misleads the operator.
+- Fix: rewrite `apply` as the two-pass minimal edit already used by `ChronyModule::apply` / `apply_dnsmasq`:
+  1. Pair rendered directive lines with existing ones.
+  2. `replace_raw` changed lines and `remove_line` surplus ones.
+  3. `insert_line` new ones after the last directive of the same section.
+  4. Never move a section header past its keys.
+  - Interim alternative: return `EditError::Unsupported` when a non-blank `Unknown` line sits between directive lines.
+  - Delete the dead insert-position code (L-MODB8).
+- Test: `crates/modules/network/tests/conformance.rs::edit_keeps_unknown_keys_under_their_section`.
+
+### H17 The update verifier cannot accept any real Sigstore bundle
+- Tier: Opus. `DECISION` (bundle format). Verified: orchestrator (`release.yml:134` is `cosign sign-blob --bundle`, a messageSignature bundle; `bundle.rs:53` requires `dsse_envelope`). Reviewer: SUP-1.
+- Location: `crates/detent-update/src/{bundle.rs,verify.rs}`; `src/bin/gen-fixtures.rs` (mints bundles in the verifier's own invented format); `.github/workflows/release.yml:134, :290-293`; ADR-014; PLAN §2.9 ("Tested against real bundles" is false).
+- Problem: every real release fails `bundle::parse` (missing `dsseEnvelope`). Even an `actions/attest` DSSE bundle fails independently on each of these:
+  - `verificationMaterial.certificate` (v0.3), which is not `x509CertificateChain`;
+  - the payload type is `application/vnd.in-toto+json`;
+  - the Rekor leaf hash is `SHA256(0x00||body)`;
+  - the checkpoint is a signed note carrying base64(root), not sha256(root);
+  - the hashedrekord `publicKey` is an object;
+  - the Fulcio intermediate is missing from `trust/`.
+
+  The result refuses closed, so there is no bypass, but self-update works 0% of the time and every test passes on self-minted fixtures.
+- Fix:
+  1. Pick one artifact (default: the `actions/attest` DSSE bundle) and publish it as `detent-<triple>.sigstore.json`.
+  2. Accept `verificationMaterial.certificate`.
+  3. Set `DSSE_PAYLOAD_TYPE = "application/vnd.in-toto+json"`.
+  4. Hash the leaf as `0x00||body`. Authenticate `integratedTime` via `inclusionPromise.signedEntryTimestamp` with the Rekor key.
+  5. Parse the checkpoint as a signed note: size must equal `tree_size`, compare the root directly, and the signature is a 4-byte keyhint plus the signature over body+"\n".
+  6. Branch body agreement on entry kind (hashedrekord vs dsse) and refuse other kinds.
+  7. Embed the Fulcio intermediate.
+  8. **Replace the fixtures with captured real bundles**: capture one from a real release run and commit it.
+- Tests: `tests/verify_fixtures.rs::a_real_cosign_bundle_parses` / `real_attest_bundle_verifies` against a committed real bundle. Also add the negative tests from M16.
+
+### H18 The update HTTP client does not follow redirects
+- Tier: Sonnet. Verified: orchestrator (`fetch.rs:298` fails on any non-2xx; there is no `Location` handling). Plausible: GitHub's 302 on `browser_download_url` is well known but was not re-checked live.
+- Location: `crates/detent-update/src/fetch.rs` `RealTransport::get` (~:288-303); `.https_or_http()` at :264. The module doc claims the real client is tested; no test constructs `RealTransport`.
+- Fix:
+  1. Loop at most 5 times. On 301/302/303/307/308, resolve `Location` against the current URL, refuse any non-https target, and re-GET with the same caps and timeouts.
+  2. Use `.https_only()`.
+  3. Add a test-only `RealTransport::with_roots` constructor.
+- Tests: `tests/real_transport.rs::follows_a_302_to_the_asset` (a loopback TLS server where `/a` → 302 → `/b` returns "hello"), and `refuses_redirect_to_http`.
+
+### H19 The post-update health probe pins the bootstrap cert, so every update rolls back on ACME hosts
+- Tier: Sonnet. Verified: reviewer (SUP-3, BIN-8). Latent until an ACME cert is stored in production.
+- Location: `crates/detent/src/run.rs` `restart_and_check` (~:667-681, pins `BOOTSTRAP_CERT_FILE`); `crates/detent/src/serve.rs` (~:419-438 prefers `load_acme`); `crates/detent-update/src/health.rs` (`SERVER_NAME = "localhost"`, webpki name check).
+- Problem: after `store_acme`, serve presents the ACME chain, but the probe trusts only the bootstrap cert and asks for SNI `localhost`. It fails for 30 s, then `mark_bad(tag)` and rollback. Every release gets blacklisted.
+- Fix:
+  1. Share one `serving_pair(cert_dir)` selector between `serve.rs` and `run.rs`: ACME if present, else bootstrap.
+  2. In `health.rs`, replace webpki anchor and name validation with a custom `rustls::client::danger::ServerCertVerifier` that accepts only if `end_entity == pinned DER`, delegating signature checks to `rustls::crypto::verify_tls13_signature`.
+  3. Build the `ClientConfig` with an explicit provider (`ClientConfig::builder_with_provider`) and delete `ensure_provider()`, which installs a process-global default from library code (L-ORC2).
+- Test: `health.rs::a_ca_issued_leaf_without_localhost_is_healthy_when_pinned`.
+
+### H20 CI on `main` is red in four independent ways
+- Tier: Sonnet. Verified: orchestrator (gh runs 35797819270 and later; local reproduction).
+- **H20-a clippy:** `crates/detent/src/mcp.rs` has items after the test module (`shutdown_signal` at ~:361, `transport_name`, `scope_name`) and `.expect("fixture header")` at ~:345. Fix: move the three fns above `mod tests`. Make the `headers()` fixture return `Result<HeaderMap, InvalidHeaderValue>` and use `?`. No `#[allow]`. PROGRESS "clippy clean" was a `-p detent-mcp`-only run.
+- **H20-b Linux-only test failure:** `doctor::confinement_tests::a_duplicate_module_id_warns_instead_of_panicking` fails on Linux: it expects one warning and gets the landlock and seccomp checks. Fix: gate that test module `#[cfg(all(test, not(target_os = "linux")))]`, and add a Linux test `linux_confinement_reports_landlock_and_seccomp`. The PROGRESS "workspace tests exit 0" results were macOS-only.
+- **H20-c coverage floors:** detent-ops 99.64 (uncovered: `engine.rs:350-354, :374`, the `update_apply` error arms); detent-web 96.81; detent 91.64. Fix by adding tests for those arms. **Never lower a floor** in `coverage-baseline.json`. Many items in this file add tests that recover detent and detent-web.
+- **H20-d fuzz workflow:** `.github/workflows/fuzz.yml` installs nightly, but `rust-toolchain.toml` (`channel = "1.98.1"`) overrides it, so `cargo fuzz` runs `-Z` on stable and fails. It has failed daily since 2026-09-18. Fix: invoke `cargo +nightly fuzz list` / `cargo +nightly fuzz run ...` in the workflow. Verify with `gh workflow run fuzz.yml` followed by a green run.
+- Acceptance: a green `ci.yml` and `fuzz.yml` on `main`.
+
+### H21 Web UI cannot confirm a commit; reload loses the countdown
+- Tier: Sonnet. Verified: orchestrator (`useConfirmCommit` / `useRollbackCommit` in `web/src/api/commits.ts` have no callers outside tests). Reviewer: FE-1.
+- Location: `web/src/app/PendingCommit.tsx`, `web/src/api/commits.ts`.
+- Problem: every commit-confirm apply from the browser (network, resolver, dhcp, mounts) auto-rolls back at the deadline, whatever the operator wants. Pending state is plain `useState`, so a reload drops the banner while the timer still runs.
+- Fix:
+  1. Add **Confirm** and **Roll back** buttons to the `PendingCommit` banner, wired to the hooks. Show errors with the existing error pattern and Fluent ids for the labels. Follow AESTHETIC_CONTRACT.md.
+  2. Add `GET /api/v1/commits/pending` (read scope), returning the monitor's pending commit via the new `Request::PendingCommit` from H2. Rehydrate the banner from it on load.
+  3. Regenerate `docs/openapi.json` and `schema.d.ts` (see the PROGRESS "Traps" for the procedure).
+- Tests:
+  - Component test: clicking Confirm calls `POST /commits/{id}/confirm` and clears the banner.
+  - e2e: apply, reload, the banner is still shown, confirm succeeds.
+
+### H22 On the default config every browser mutation is refused by CSRF
+- Tier: Sonnet. Verified: reviewer (WEB-7).
+- Location: `crates/detent-web/src/csrf.rs` `Origin::for_config` (~:133-139, `hostnames.first()` or else `listen.addr.ip()`, which is `0.0.0.0` by default); a test at ~:702 enshrines `https://0.0.0.0:3333`.
+- Problem: a browser at `https://192.168.1.5:3333` sends `Origin: https://192.168.1.5:3333`, which never matches. Login, logout, apply, confirm and rollback all return 403 on a default install. It fails closed, so there is no hole, but combined with H21 the UI cannot complete a safe apply.
+- Fix: in `verdict`, derive the expected origin from the request authority (`Host`, or the `:authority` for h2; exactly one value) and require `Origin == https://<authority>`. Keep `Sec-Fetch-Site: same-origin` and the `__Host-` cookie. Delete the `0.0.0.0` assertion.
+- Test: `csrf.rs::a_wildcard_listener_accepts_its_own_authority`. `Host 192.0.2.10:3333` + matching Origin → allowed; `Origin https://evil.example:3333` → 403.
+
+### H23 A compromised worker can still reach root through config content
+- Tier: Opus. `DECISION`. Verified: orchestrator. Reviewer: PLAT design note. Jev severity 2.9.
+- Location: `monitor.rs` `write_target` (writes any worker-supplied bytes to an allow-listed target); ADR-001 ("a worker compromise does not directly grant root").
+- Problem: allow-listed targets include root-execution vectors: smb.conf `root preexec`, dnsmasq `dhcp-script`, `/etc/fstab`, `/etc/exports` `no_root_squash`, ifupdown `up` lines. The monitor does no content validation, and its Landlock grant covers each target's parent directory (`/etc`). So ADR-001's central claim is false for any build with those modules enabled.
+- Fix (default):
+  1. **Now:** rewrite ADR-001 and SECURITY_HARDENING "Local privilege" to state the real guarantee: the worker is confined to the allow-listed files, but content written there can execute as root.
+  2. **Then:** make the monitor re-validate before writing. It parses the candidate with the module's parser (link `detent-modules` into the monitor side), refuses if `validate` has errors, and refuses any rendered content containing a per-module deny-list of exec directives. The deny-list must cover at least smb.conf `root preexec`/`root postexec`/`preexec`/`postexec`/`add user script`/`include`, dnsmasq `dhcp-script`/`dhcp-luascript`/`conf-file`/`conf-dir`, chrony `include`/`confdir`/`sourcedir`/`pidfile`, unbound `include:`/`python-script:`, ifupdown `up`/`down`/`pre-up`/`post-down` with anything but the module's own route form, and fstab `x-systemd.*` exec-like options. Directives already present in the current file are allowed to stay; only new ones are refused. That needs a diff of before and after in the monitor.
+- Test: `monitor.rs::write_target_refuses_new_root_exec_directives`, with an allow-listed samba target and a candidate adding `root preexec = /bin/sh` → `Response::Error`.
+
+---
+
+## 5. Medium
+
+Each item: location → fix → test. Tier in brackets.
+
+- **M1 Capability drop fails open** [Opus] (PLAT-3; known gap in PROGRESS).
+  - Location: `sandbox/linux.rs:33` (`drop_capabilities` never gated), `sandbox/mod.rs` `Policy`.
+  - Fix:
+    - Add `require_caps: bool` to `Policy`, true for the monitor.
+    - Add `SandboxError::CapsRequired`.
+    - Add `caps_verdict(required, &Outcome)`, mirroring `seccomp_verdict`, and call it after `drop_capabilities`.
+    - For the worker: drop the bounding set **before** `setuid` in `become_worker`, or treat "effective and permitted already empty" as `Applied`.
+  - Test: `caps_that_do_not_drop_are_fatal_only_when_required`. Verify on a009.
+- **M2 `serve` never reports degraded confinement** [Sonnet] (PLAT-5).
+  - Location: `serve.rs`. `hooks.confinement()` is never read, and `confine` never logs.
+  - Fix:
+    - After `spawn_pair`, in both the monitor and worker branches, read `hooks.confinement()`.
+    - For each field that is not `Applied`/`FullyEnforced`, emit a renderer note `cli-serve-confinement-degraded` plus `tracing::warn!`.
+    - Persist the result to `<state_root>/state/confinement.json` so doctor and the UI show the real outcome.
+  - Test: a pure `degradation_notes(&Confinement)` helper; `a_missing_landlock_is_reported_at_startup`. This matters on k001, which has no Landlock.
+- **M3 Audit log is not tamper-evident** [Opus] (OPS-7).
+  - Location: `detent-ops/src/audit.rs:220-236`. The worker owns the file, and there is no chain.
+  - Fix:
+    - Add `seq` and `prev` (SHA-256 of the previous line) fields, written under a mutex; `query` verifies them.
+    - Create the directory 0700 and fsync the parent.
+    - Correct SECURITY_HARDENING:107 ("append-only"). Document journald (after M12) as the copy the worker cannot rewrite.
+  - Test: `a_deleted_middle_record_breaks_the_chain`.
+- **M4 The engine runs `AllowAll`; scope denials are not audited** [Opus] (OPS-8, WEB-8).
+  - Location: `serve.rs:340`, `run.rs:1118`, `detent-web/src/engine.rs:266`, `api/mod.rs:219`, `detent-mcp` `mcp.rs:465`. docs/API.md:122 is false.
+  - Fix:
+    - Change the signature to `execute(op, who, authz: &dyn Authz)`: `ScopedAuthz` for web and MCP, `AllowAll` for the CLI. Drop the stored field. The engine's existing Denied audit path then fires.
+    - Also add `AuthEvent::Denied` in `WriteCaller` rejection.
+  - Test: `integration_tests.rs::a_scope_denial_is_audited`.
+- **M5 A read-scope `plan` runs root validators on invalid input** [Sonnet] (OPS-9).
+  - Location: `engine.rs:382-395`. `run_checks` runs even when `diagnostics.has_errors()`, and its `detail` returns validator output.
+  - Fix: skip `run_checks` when `has_errors()`. Truncate `detail` to the first 512 bytes, as the monitor does today. `DECISION`: whether plan-with-checks needs Write scope. Default: no, but audit it as a new `OpKind::Plan` when checks ran.
+  - Test: `plan_does_not_run_checks_for_a_model_with_errors`.
+- **M6 Read scope exposes secret-bearing config** [Opus] `DECISION` (WEB-4).
+  - Location: `authz.rs:150-153` (`allows(Read)` is always true); `api/modules.rs:199-212, :277-296`; `report.rs` `PlanReport.rendered` / `unified_diff`; mounts `options` (CIFS `password=`); Kea `password`; NM `psk=` if keyfiles are a wired target.
+  - Fix (default): for callers without Write scope, blank `rendered`, `unified_diff` and `diff` in `plan`. Add `fn secret_pointers(&self) -> &'static [&'static str]` to the module trait (empty by default), and redact matching values in `GetModule` views for non-write callers. Document the rule in API.md.
+  - Test: `a_read_token_never_sees_a_rendered_file` ("hunter2" must be absent for the read token and present for the write token).
+- **M7 Optimistic concurrency is optional; restore and rollback overwrite concurrent edits** [Opus] (OPS-10).
+  - Fix:
+    - Make `expected_hash` required on `Apply`. The CLI passes the digest it read; the web client already has `current_hash`.
+    - Add `expected_hash` to `Restore`.
+    - Record `new_digest` in `RollbackEntry`, and have `roll_back` pass it as `expected_prev`. On `Conflict`, log, skip, and report it.
+  - Test: `rollback_does_not_overwrite_an_edit_made_during_the_window`.
+- **M8 Conformance property tests never generate multi-line input** [Sonnet] (OPS-13).
+  - Location: `crates/detent-core/src/conformance.rs:356-376`. `src in ".*"` never yields `\n`, and invariants 3 and 4 accept `Exercised::No`.
+  - Fix:
+    - Use a strategy `vec("[^\n]*(\n|\r\n)?", 0..20)` joined into one string, exposed as `conformance_src_strategy()`.
+    - Require that at least some cases produce `Exercised::Yes`, using a counter.
+  - Test: `property_inputs_include_newlines`. Expect new failures in the modules; those are real bugs, so fix them rather than narrowing the strategy.
+- **M9 TOTP replay race; the counter can go backwards** [Sonnet] (WEB-5).
+  - Location: `auth/routes.rs:305-310, :358-366`; `users.rs:397-401`.
+  - Fix: `note_totp_counter` becomes a compare-and-set under the store mutex. It returns `Err(InvalidCredentials)` if `last >= counter`.
+  - Test: `a_totp_counter_cannot_be_reused_or_go_backwards`.
+- **M10 Refused logins fill the disk** [Sonnet] (WEB-6).
+  - Location: `auth/routes.rs:221, :371`; `auth/audit.rs:192-206`.
+  - Fix: do not append for `RateLimited` (debug log only; the lockout itself is already audited). Rotate `detent-auth.jsonl` to `.1` above 16 MiB.
+  - Test: `rate_limited_attempts_do_not_grow_the_audit_log`.
+- **M11 `mcp --bind` accepts non-loopback addresses (plaintext bearer)** [Sonnet] (BIN-4).
+  - Location: `cli.rs:167-171`, `mcp.rs:65, :278`.
+  - Fix: refuse `!bind.ip().is_loopback()` with `cli-mcp-bind-not-loopback` and `Exit::Usage`. Call `enforce_origin_validation()`.
+  - Test: a `check_bind` table test (`0.0.0.0`, `192.168.1.10`, `[::]` refused; `127.0.0.1`, `[::1]` allowed).
+- **M12 No tracing subscriber is installed** [Sonnet] `DECISION` (new dependency, ADR-011 cooldown) (BIN-9).
+  - Problem: monitor protocol-violation warnings, rollbacks and the "journald audit stream" (`auth/audit.rs:3-7`) go nowhere, and `RUST_LOG` in the unit file does nothing.
+  - Fix: add `tracing-subscriber` (`fmt`, `env-filter`, cooled per ADR-011). Initialise it for `serve` and `mcp` only, writing to **stderr** (stdout is the MCP stdio channel).
+  - Test: a binary test running `detent mcp` with a bad token and `RUST_LOG=info`; stdout must be empty.
+- **M13 FFI has no panic guard** [Opus] `DECISION` (BIN-10).
+  - Location: every `extern "C"` in `crates/detent-ffi/src/lib.rs`; `[profile.release] panic = "abort"`; docs/FFI.md promises it "never panics across the boundary".
+  - Fix (default): wrap every entry point in `catch_unwind(AssertUnwindSafe(..))`, returning NULL and setting the last error to `internal: panic`. Build the cdylib and staticlib with a profile where `panic = "unwind"`. If that is rejected, correct FFI.md to say that a panic aborts the host process.
+  - Test: an internal `guard(|| panic!())` returns NULL and sets the error.
+- **M14 The update age gate is bypassed by release-note text** [Sonnet] (SUP-4; verified by the orchestrator).
+  - Location: `update.rs:204` `chosen.body.contains(SECURITY_MARKER)`; `release.yml:310` `--generate-notes`, which includes PR titles.
+  - Fix, minimum: `body.lines().any(|l| l.trim() == SECURITY_MARKER)`. Preferred: carry the flag inside signed material, checked after verify. Also have `release.yml` fail if the generated notes contain the marker without a workflow input.
+  - Test: `marker_embedded_in_a_sentence_does_not_bypass`.
+- **M15 ACME ARI renewal logic is inverted** [Sonnet] (SUP-5; verified by the orchestrator at `schedule.rs:57-74`).
+  - Problem: RFC 9773 says to renew inside the window, and immediately if the window is already past. The code renews in the window only at 66% used, and otherwise waits until 90%.
+  - Fix: `Some((start, _)) => now >= start || used >= 66`. Update `renewal_decision_covers_all_three_arms`, which enshrines the bug.
+  - Tests: `a_past_ari_window_renews_immediately`, `an_open_ari_window_renews_before_two_thirds`.
+- **M16 Verifier tests cannot catch a removed body-agreement check; SCT/SET are claimed but absent** [Opus] (SUP-6).
+  - Fix: add `gen-fixtures` variants `bad-body-sig` and `bad-body-key` (proof and checkpoint valid over the altered body), and `wrong-digest.json`. Rename `bad-sct` to `bad-checkpoint-sig`. Either implement SET verification (it is part of H17) or remove the SCT/SET claims from PLAN §2.9 and ADR-014.
+  - Tests: `a_body_with_another_signature_is_refused_at_step_6`, `a_forged_integrated_time_is_refused`. Check each is non-vacuous by deleting `verify.rs:312` and watching it fail.
+- **M17 ACME credential write is not crash-safe** [Sonnet] (SUP-7).
+  - Location: `detent-acme/src/order.rs:438-471` (`write_json_atomically`) and `lib.rs:252-270` (`HookProvider::present`).
+  - Fix: call `f.sync_all()` after `write_all`. After the rename, `File::open(parent)?.sync_all()`.
+  - Test: none is unit-observable. Say so in the commit; do not fake one.
+- **M18 dns-01 TXT records are never deleted** [Sonnet] (SUP-8).
+  - Location: `order.rs:31-56`. `DnsProvider::delete` has no non-test caller.
+  - Fix: `present_challenges` tracks the records it presented and deletes them on error. It returns `Vec<DnsRecord>` on success. Add `cleanup_challenges(provider, &records)`, which callers run after `finalize` whatever the outcome.
+  - Test: `present_failure_withdraws_already_presented_records`.
+- **M19 device-attest-01 is advertised but cannot work** [Sonnet] (SUP-9).
+  - Problem: the `acme-attest` feature adds no attestor, but `--self-test` still reports it, and `covers()` then requires every future binary to report it too. `finalize` mints a fresh key, so a TPM attestation could never bind to the certified key.
+  - Fix: remove the feature id from self-test and from `crates/detent/Cargo.toml` until a real attestor exists.
+  - Test: `run.rs::acme_attest_is_not_advertised_without_an_attestor`.
+- **M20 Positional pairing in `apply` rewrites later lines and moves directives** [Opus] (MODA-4, MODB-6).
+  - Location: `apply` in samba, nfs, hosts, mounts, `_template`, and resolver (`plan_slot`).
+  - Fix: generalise the Myers diff in `crates/detent-ops/src/diff.rs` into `align<T: PartialEq>` in `detent-core`. Add one shared `Document` helper that keeps unchanged lines, removes deleted ones, and inserts new ones after the previous kept line in the **same section**. Every module's apply uses it.
+  - Tests:
+    - samba `deleting_a_directive_does_not_move_later_directives`.
+    - hosts: drop the first of three entries; assert `changed_lines == 0` for the rest.
+    - resolver: an appended `Hardening` entry lands in `server:`, not in the trailing `forward-zone:`. For unbound, make "misplaced" a `Severity::Error`.
+- **M21 Quadratic `Document` edits allow a read-scope DoS** [Opus] (MODA-5; plausible, not timed).
+  - Location: `detent-core/src/doc.rs:244-348`. Each edit calls `normalize`, which is O(n).
+  - Fix: add a one-pass `Document::rebuild(|lines| ..)` that normalises once. M20's helper uses it.
+  - Test: a 200,000-line hosts file with an empty model applies in under 5 s (release profile, `#[ignore]`d **only** if the owner agrees it is a benchmark; otherwise use a lower bound on a debug build).
+- **M22 fstab lock-out cases are not caught** [Sonnet] (MODA-6).
+  - Location: `crates/modules/mounts/src/lib.rs`. `SERVICES` is empty, and `Request::Mount` is `Unsupported`, so commit-confirm cannot observe a bad fstab.
+  - Fix:
+    - Error on a non-absolute mountpoint (other than `none`/`swap`).
+    - Warn on a missing `nofail`/`x-systemd.automount` for every non-root, non-swap entry.
+    - Warn when entries exist but none is `/`.
+    - Correct the SERVICES comment. Document that commit-confirm cannot protect fstab until reboot.
+  - Tests: `validate_flags_relative_mountpoint`, `validate_warns_missing_nofail_on_any_data_mount`, `validate_warns_when_root_entry_absent`.
+- **M23 Samba security validation ignores sections and synonyms** [Sonnet] (MODA-7).
+  - Location: `samba/src/lib.rs:458-561` (`value_of` returns the last value anywhere in the file).
+  - Fix:
+    - Track the current section.
+    - Read global-only parameters from `[global]` only.
+    - For per-share parameters, compute the share's effective value (its own, else `[global]`'s).
+    - Normalise names (lowercase, strip whitespace) and map synonyms (`public` → `guestok`, `minprotocol` → `serverminprotocol`).
+  - Tests: `validate_is_section_aware`; `public = yes` and `GuestOK = yes` both warn.
+- **M24 Block-form netplan nameservers are parsed as interface addresses** [Sonnet] (MODB-4).
+  - Location: `network/src/lib.rs:584-593`.
+  - Fix: if the stack ends `[.., "nameservers", "addresses"]`, push to `entry.dns`.
+  - Test: `netplan_block_nameservers_are_dns`.
+- **M25 chrony and dnsmasq accept include/script directives silently** [Sonnet] (MODB-5).
+  - Fix: add Warnings, with new ids, for chrony `include`, `confdir`, `sourcedir`, `pidfile`, `user` and dnsmasq `dhcp-script`, `dhcp-luascript`, `dhcp-scriptuser`. Add `dhcp-script` to dnsmasq `INCLUDE_KEYS`. H23 is the real control; this is the plan-time signal.
+  - Tests: `validate_warns_on_include_directive`, `validate_warns_on_dhcp_script`.
+- **M26** → raised to **H23**.
+
+---
+
+## 6. Low
+
+One line each: location → fix → test. Sonnet unless marked.
+
+**Platform**
+- **L-PLAT6** `service/checks.rs:96-101`: `StdoutPattern` is a plain substring match and ignores the exit code. It is used only by a test fixture; every shipped module uses `ExitZero`.
+  - Fix: rename it `StdoutContains` and also require `status == Some(0)`.
+  - Test: `stdout_pattern_requires_literal_match_and_exit_zero`.
+- **L-PLAT7** `monitor.rs` `run_check` writes candidates under the worker-owned `<state_root>/tmp`, and `create_dir_all` follows symlinks.
+  - Fix: use a monitor-owned `/run/detent/check` (0700 root), created with no symlink following.
+  - Test: `check_candidates_live_outside_worker_writable_paths`. [Opus]
+- **L-PLAT8** `proto.rs:52-55`: the doc says `ReplaceBinary` "still answers Unsupported", which is stale. Fix the doc.
+
+**Ops / core / i18n**
+- **L-OPS11** Audit records for UpdateApply, Restore, Confirm and Rollback omit hashes and the commit id.
+  - Fix: set `hashes.new`, read the previous digest before a restore, and add `commit_id` to `AuditRecord`.
+  - Test: extend `update_apply_is_swapped_through_the_monitor_and_audited_once`.
+- **L-OPS12** A no-op Apply still writes the file, evicts a backup, restarts the service and arms a commit.
+  - Fix: return early when `rendered == current`.
+  - Test: `an_identical_apply_writes_nothing_and_keeps_backups`.
+- **L-OPS14** A `ConfirmCommit` processed after the deadline is still accepted (`monitor.rs:700-711`).
+  - Fix: guard with `Instant::now() < pending.deadline`; otherwise enforce the deadline and answer `UnknownId`.
+  - Test: `a_confirm_after_the_deadline_is_refused`. [Opus]
+- **L-OPS15** `AuditQuery` reads the whole log.
+  - Fix: set a default and a maximum `limit`, read backwards from EOF, and rotate by size.
+  - Test: `query_without_a_limit_returns_at_most_the_default_cap`.
+- **L-OPS16** Unknown module ids from callers are copied raw into audit records.
+  - Fix: record the registry id, or `<unknown>`.
+  - Test: `an_unknown_module_id_is_not_copied_into_the_audit_record`.
+- **L-OPS17** Apply cannot create a missing target, although `ApplyReport.created` suggests it can.
+  - Fix: add a distinct `ProtoError::NotFound` meaning an empty current file, and refuse commit-confirm for created files.
+  - Test: `apply_creates_a_missing_target`.
+- **L-OPS18** `detent-modules/Cargo.toml:27-30` has a stale comment. The "empty registry" test is gated on `not(module-hosts)` only.
+  - Fix: gate it on `not(any(all eight))`.
+- **L-OPS19** `detent-i18n` passes C0, C1 and bidi control characters in args through to terminals.
+  - Fix: sanitise argument values.
+  - Test: `render_neutralises_control_and_bidi_chars_in_args`.
+
+**Web**
+- **L-WEB9** `tls.rs` `store_acme` does two renames, so a torn cert/key pair blocks `serve` from starting.
+  - Fix: write one framed `acme.bundle.der`. In `bind_web_server`, fall back to the bootstrap pair on a load error.
+  - Test: `a_mismatched_stored_acme_pair_falls_back_to_bootstrap`.
+- **L-WEB10** The 90-day bootstrap cert is reused forever.
+  - Fix: regenerate when `not_after` is less than now + 7 days.
+  - Test: `an_expiring_bootstrap_pair_is_regenerated`.
+- **L-WEB11** The Argon2 timing parity only holds while stored params match the current ones.
+  - Fix: rehash on login when the PHC params differ.
+  - Test: `a_login_rehashes_a_hash_made_at_old_params`.
+- **L-WEB12** Argon2 runs on async runtime workers.
+  - Fix: run it in `spawn_blocking` behind a 2-permit semaphore, answering 503 `web-auth-busy` when full.
+  - Test: `logins_beyond_the_hashing_cap_are_refused_not_queued`.
+- **L-WEB13** `GET /system/update` checks live on every call until a stamp exists.
+  - Fix: write the stamp after a live check, and add a 10-minute in-process guard.
+  - Test: `a_second_uncached_check_does_not_reach_the_network`.
+- **L-WEB14** The route table and the router are hand-kept parallel lists, and `the_table_and_the_router_describe_the_same_three_routes` never touches the router.
+  - Fix: add `the_router_answers_exactly_the_table`, which sends every method to every path.
+- **L-WEB15** "The binary does not compile rustls `tls12`" is false: instant-acme's default features pull in hyper-rustls `tls12`.
+  - Fix: set `default-features = false`, or reword the claim. Add a CI `cargo tree -e features -i rustls` check.
+- **L-WEB16** `spawn_sweeper`, `SessionStore::rotate` and the limiter sweep are dead in production.
+  - Fix: delete them or wire them in. Fix the SECURITY_HARDENING:57 citation.
+- **L-WEB17** The session cookie is read only from the first `Cookie` header, so HTTP/2 split cookies are missed.
+  - Fix: use `get_all(COOKIE)` in both places.
+  - Test: `a_session_cookie_in_a_second_cookie_field_is_found`.
+
+**Update / ACME**
+- **L-SUP10** SECURITY_HARDENING still calls detent-acme "a stub". The issuance code has no production caller, and `bootstrap = "acme"` expects an issuer that does not exist.
+  - Fix: update the docs and refuse `bootstrap = "acme"` until it is wired.
+- **L-SUP11** `Issued` derives `Debug`, which includes `key_pem`, and a test asserts on it.
+  - Fix: write a manual redacting `Debug`.
+  - Test: assert the output does not contain "PRIVATE KEY".
+- **L-SUP12** `policy::select` trusts API order, so a later-published backport hides a newer release.
+  - Fix: sort parsable tags by version.
+  - Test: `a_later_published_backport_does_not_hide_a_newer_release`.
+- **L-SUP13** `root_from_path` does not refuse `index >= size`, and recurses without bound at size 1.
+  - Fix: refuse both, and cap `path_hashes` at 64.
+  - Test: `root_from_path(0,1,leaf,&[[0;32]])` is `Err`.
+- **L-SUP14** `install.rs` swap and rollback do not fsync the directory.
+  - Fix: call `File::open(dir)?.sync_all()` after each rename. No unit test is possible; say so.
+- **L-SUP15** acme-dns accepts `http://`, and the fetch connector uses `https_or_http`.
+  - Fix: accept https only (or loopback-only http for acme-dns).
+  - Test: `acme_dns_refuses_plain_http`.
+- **L-SUP16** The deSEC fixtures are invented: TXT values are unquoted and the TTL is 60.
+  - Fix: send quoted values with ttl 3600, and use captured responses.
+  - Test: `desec_sends_quoted_txt_rdata`. Plausible only.
+- **L-SUP17** `HttpRequest` derives `Debug`, which includes the bearer header.
+  - Fix: write a manual `Debug` that prints header names only.
+  - Test: `http_request_debug_redacts_headers`.
+- **L-SUP18** `pebble_live` returns `Ok` when `PEBBLE_URL` is unset, and the CI images use `:latest`.
+  - Fix: panic when the variable is unset, and pin the images `@sha256`.
+
+**Binary / MCP / FFI**
+- **L-BIN11** FFI entry points are safe `extern "C" fn` but dereference raw pointers. `from_raw_parts` has no `len <= isize::MAX` check, and `split_doc` reads the header after releasing the `LIVE` lock.
+  - Fix: declare them `pub unsafe extern "C" fn` with `# Safety` docs, check the length, and hold the lock across the header read. Update FFI.md to say double-free detection is best-effort.
+  - Test: `oversized_length_is_refused`. [Opus]
+- **L-BIN12** FFI error codes cannot be retrieved. `detent_parse` does not parse, `detent_defaults_json` swallows bad JSON, and `alloc_cstring` returns NULL with no error set.
+  - Fix: add `detent_last_error_code()`, make parse real, return an error for a bad profile, set the error on every NULL path, and regenerate the header.
+  - Tests: one per case.
+- **L-BIN13** On 32-bit targets the FFI alloc alignment uses `align_of::<usize>()` but writes a `u64`.
+  - Fix: use `align_of::<AllocHeader>()`, plus a const assert.
+- **L-BIN14** `doctor` follows symlinks and ignores ownership.
+  - Fix: use `symlink_metadata` and fail on a symlink. When running as root, fail if `uid != euid`.
+  - Test: `a_symlinked_state_root_fails`.
+- **L-BIN15** `token create --expires-secs <overflow>` gives a token that never expires.
+  - Fix: return a usage error, `cli-bad-expiry`.
+  - Test: `an_overflowing_expiry_is_a_usage_error`.
+- **L-BIN16** A forked child whose `spawn_pair` fails returns into `main`.
+  - Fix: call `abort_child(1)` in the child arm on a `become_worker` error.
+  - Test: failing `confine_worker` hooks make the child exit 1. [Opus]
+- **L-BIN17** Weak tests:
+  - `doctor.rs:464` `assert_eq!(Status::Ok, Status::Ok)`.
+  - The English scanner (`main.rs:159`) stops at the first `#[cfg(test)]`.
+  - The `webadmin.rs:711` test assumes there is no `/dev/tty`.
+  - The rollback test at `run.rs:3128` only asserts "not a usage error".
+  - `ffi.rs` has no negative tests.
+  - Fix each one; do not delete coverage.
+- **L-BIN18** Passwords typed at the prompt stay in an un-zeroised `BufReader` and are cloned.
+  - Fix: read byte by byte into `Zeroizing<Vec<u8>>`.
+- **L-BIN19** Dead code: public test fixtures in detent-mcp (`RecordingExecutor`, `AllowAllAuthz`, `LockedEngine`, `from_digests`), and the always-false `SessionExecutor.dryrun`.
+  - Fix: put the fixtures behind `#[cfg(test)]` and delete the rest.
+
+**Modules**
+- **L-MODA8** NFS: no `sec=` counts as sys but is not flagged, `sec=sys:krb5p` is not flagged, and `0.0.0.0/0`, `::/0` and `*.*` are not treated as world.
+  - Fix: flag these, and flip the existing test.
+  - Tests: `validate_warns_default_sec_sys`, `validate_flags_cidr_world_export`.
+- **L-MODA9** hosts: pointing `localhost` at a non-loopback address is only a Warning.
+  - Fix: make it an Error, and include `ip6-localhost` and `ip6-loopback`.
+- **L-MODA10** Samba root-exec and exposure parameters raise no warning.
+  - Fix: add warnings.
+  - Test: `validate_warns_root_exec_parameters`.
+- **L-MODA11** The samba and nfs conformance probes only try `\n`, `\r` and `\0`.
+  - Fix: add probes for `\ # ; [ ] " -` and widen the fuzz alphabets. These probes must fail before H13/H14 and pass after.
+- **L-MODA12** `_template` is excluded from the workspace and never compiled.
+  - Fix: add a CI step that instantiates it and runs its tests. Extend its `render_line` TODO: "reject every character the upstream parser treats as syntax".
+- **L-MODB7** The network conformance `prop_filter` always passes, routes are never generated, and the probes cover only `\n\r\0`.
+  - Fix: delete the filter, generate routes, add `route_to_probe("0.0.0.0/0; reboot")`, and make `render_ifupdown` reject a non-CIDR/IP `route.to`/`via` itself.
+- **L-MODB8** Dead insert-position code and `let _ = gw/bridge` placeholders in the network module. networkd drops `bridge` silently, and NM drops routes silently.
+  - Fix: return `EditError::Unsupported` instead of dropping them.
+  - Tests: an NM apply with routes, and a networkd apply with a bridge, each return `Err`.
+
+**Frontend / docs / misc**
+- **L-FE3** `web/src/api/schema.d.ts` has stale JSDoc.
+  - Fix: `bun run api:generate`; `bun run api:check` must pass.
+- **L-ORC1** The `// (Jev-routed)` doc comment on production code (`crates/detent/src/mcp.rs:128` `resolve_identity`) is dev-process metadata.
+  - Fix: delete it. Routing provenance belongs in PROGRESS.md.
+- **L-ORC2** `detent-update/src/health.rs` `ensure_provider()` installs a process-global rustls provider from library code.
+  - Fix: fold into H19 (use an explicit-provider `ClientConfig`).
+
+---
+
+## 7. Claims that are false today (fix the doc in the item's commit, or in batch 10)
+
+| Doc | Claim | Reality | Item |
+|---|---|---|---|
+| SECURITY_HARDENING:102 | External validators run before apply | Plan only; the monitor would be killed anyway | H5, H6 |
+| SECURITY_HARDENING:105 | Commit-confirm survives a monitor restart | `recover_pending` has no caller | H1 |
+| SECURITY_HARDENING:107 | Audit log append-only | Worker-owned, rewritable, fail-open | H7, M3 |
+| SECURITY_HARDENING:72 | Request timeouts stop slow-loris | No header timer | H9 |
+| ADR-001 | Worker compromise does not directly grant root | ReplaceBinary (C1) and config content (H23) | C1, H23 |
+| ADR-012 / PLAN §2.5 | Rollback re-applies the prior service action | Files only | H4 |
+| PLAN §2.9, ADR-014 | Tested against real bundles; SCT/SET verified | Self-minted fixtures; no SCT/SET | H17, M16 |
+| detent-ops lib.rs:8-9 | Complete audit record, not best-effort | Fail-open, and a test enforces it | H7 |
+| detent-web token.rs:22 | No cache in front of the store | Loaded once | H10 |
+| detent-web Cargo.toml:44 | Peer address handed to handlers | Never inserted | H8 |
+| docs/API.md:122, :170 | Refusals audited; MCP honours revocation | Neither | M4, H10 |
+| docs/FFI.md | Never panics across the boundary; typed error codes | No guard; codes not retrievable | M13, L-BIN12 |
+| detent-web tls.rs:12 | No rustls `tls12` in the binary | Pulled in by instant-acme | L-WEB15 |
+| PROGRESS (many entries) | clippy clean / workspace tests green | `--all-features` clippy red; Linux test red; coverage red; fuzz CI red | H20 |
+| PROGRESS "What exists" | "the 14 operations" | 17 | batch 10 |
+| samba lib.rs:18-21, nfs lib.rs:14-19 | Continuation and `-`/`#` handling | Wrong | H13, H14 |
+
+---
+
+## 8. STAGE2 (Jev opportunities): what this review accepts, corrects, and rejects
+
+STAGE2 was re-read in full against the code. **Accepted:**
+- Stage 2 waits until initial development is complete. The order is now **STAGE3 → the rest of PLAN.md → STAGE2**; STAGE2.md §0 holds the gate. STAGE2's main proposal depends on subsystems that do not work yet (below). STAGE2.md was revised on 2026-09-23 to include everything in this section.
+- Jev must never sit on the security boundary. Authz, privsep and validation stay deterministic, and `validate`/`has_errors()` stay authoritative.
+- Pin `jev-1.13.0` (not `jev-latest`) once tuned. Re-check pricing, limits and thresholds at build time.
+- The falsifying-evaluation discipline (a 20-plan corpus, go/no-go criteria, kill conditions) is right. Keep it.
+- Doctor ranking (§4.2) is the lowest-risk trial because it is read-only. Low value, but acceptable as a first experiment.
+- Deprioritising audit triage is correct. Audit records carry hashes and ids only.
+
+**Corrected:**
+1. **§4.1's premise about checks is wrong.** STAGE2 says `CheckReport` collapses stdout via a substring match (`checks.rs:96-101`). That code exists, but only a test fixture uses `StdoutPattern`; every shipped module uses `ExitZero` (L-PLAT6). The real problems are larger:
+   - validators never run on apply (H5);
+   - under a confined `serve`, running one kills the monitor (H6).
+
+   The `checks` field the proposed apply gate would read is empty on the apply path today.
+2. **"Safety is time-only" is not the defect.** A deterministic commit-confirm window is the right mechanism (ADR-012). The defect is that it is broken: H1–H4, H21 and H22. Fix it before adding model-tuned "friction". A model must never compensate for a broken safety net.
+3. **The privacy guard in §6 does not protect anything.** STAGE2 says "never send config bodies beyond what PlanReport already exposes". But `PlanReport.rendered` is the whole file, and `unified_diff` carries full lines, which can include CIFS passwords, Kea DB passwords and NM PSKs (M6). If §4.1 is ever built, the request state must be **structural features only**: module id, `service_action`, affected unit names, hunk and line counts, check pass/fail/exit codes, and diagnostic ids. No file text and no diff lines. Make this a typed struct with no `String` fields that could carry file content.
+4. **Failure mode must be specified.** The call runs in the worker. On any API error, timeout (>1 s) or WAF 403, apply behaves exactly as today. Jev may only **add** friction (require an explicit confirm, a longer window, a second click). It may **never remove** a deterministic requirement: `route = auto_apply` must not skip a descriptor's `commit_confirm` or a failing check. The feature is off by default and needs explicit egress config, because a root-adjacent tool calling a third-party API is an egress-policy decision for the owner.
+5. **WAF caveat.** TypeSafe's Cloudflare WAF returned 403 for payloads containing literal system paths and privilege words. Real plan metadata contains exactly those. This is one more reason for structural-only state, and it makes the fail-open-to-today's-behaviour rule mandatory.
+6. **Dependency note.** A Rust client needs an HTTPS client in the worker. `detent-update` already has hyper-rustls; reuse that stack (ADR-009), so no new TLS dependency or ADR-011 cooldown is needed.
+
+**Rejected:**
+- **§4.3 MCP natural-language → Operation routing.** MCP clients are already LLMs that emit typed tool calls against 17 `deny_unknown_fields` schemas. A server-side NL router duplicates the client's job and adds a prompt-injection surface: text in a config file or ticket can steer an operation choice. No benefit over the typed tools.
+- **Using Jev Nouls as process gates.** PROGRESS shows `push_ready` Nouls deciding pushes while CI was red. Slice ordering by Jev is harmless; readiness gates must be deterministic (§0.4, CI green).
+
+---
+
+## 9. Checked and clean (coverage record — do not re-review without cause)
+
+- **privsep wire:**
+  - `transport.rs` frame cap checked before allocation; `proto.rs` closed enums with trailing-byte rejection; handshake required, and a second Hello is fatal.
+  - Allowlist ids are dense and no paths cross the wire.
+  - `atomic_to_proto` strips paths.
+  - `sys.rs` unsafe is sound: the setgroups → setgid → setuid order is checked.
+  - `spawn.rs` forks before any runtime, and sets no_new_privs and dumpable=0 before dropping privileges.
+- **`fs/atomic.rs`:**
+  - `O_NOFOLLOW`/`O_EXCL` temp in the same directory, fchmod/fchown, xattr copy (SELinux), fsync of the file, renameat, fsync of the directory.
+  - Backups 0700/0600 with rotation fsync'd.
+- **`service/exec.rs`:** absolute compile-time paths, no shell, `env_clear` + `LC_ALL=C`, capped output, timeout then kill and reap. Unit names are never taken from the worker.
+- **Engine:**
+  - `authz.permit` runs before any I/O for all 17 variants, and mutating variants emit exactly one outcome record.
+  - `has_errors()` gates apply.
+  - `expected_hash`, when present, closes the read→write TOCTOU via `expected_prev`.
+  - The engine is single and `&mut self`.
+  - Double rollback is impossible (`take_if`), and the confirm window is clamped to 1..=3600.
+- **Lossless doc model:** `parse`/`render` are total and exact (CRLF, lone CR, NUL, no final newline), and every edit path rejects `\n\r\0`.
+  - Kea JSONC escapes correctly with depth ≤128.
+  - chrony, dhcp and resolver use two-pass edits.
+  - There are no `unwrap`/`expect`/panicking indexes in non-test module code.
+  - Every model uses `deny_unknown_fields`.
+- **Web:**
+  - Every mutating route sits under the CSRF layer with `WriteCaller` + `authorize`.
+  - `__Host-` cookie with Secure/HttpOnly/SameSite=Strict; login invalidates the presented id.
+  - `subtle` comparisons throughout; a 256 KiB body cap plus a JSON depth check.
+  - SPA serving has no filesystem join.
+  - TLS 1.3 only with no 0-RTT; hot replace is safe; `load_acme` framing uses checked splits.
+  - Secrets are redacted in `Debug`; `Config`/`AcmeConfig` are not `Serialize`.
+- **Update:**
+  - The verified buffer is exactly what gets installed.
+  - The SAN check is exact equality bound to the tag; downgrade is refused by default.
+  - The placeholder trust root refuses closed.
+  - Streaming caps and timeouts are in place.
+  - Self-test runs before the swap; `.prev` plus rollback and `mark_bad`.
+- **ACME:**
+  - EAB and provider secrets redacted; credential files 0600 via `create_new`; an unreadable credential never re-registers.
+  - `percent_used` is overflow-safe.
+  - HookProvider fqdn validation prevents traversal.
+  - Pebble issuance runs in CI.
+- **MCP:**
+  - The HTTP bearer check uses SHA-256 + `ct_eq` and returns 401 before rmcp runs; rmcp's default allowed hosts are loopback only.
+  - Every tool input uses `deny_unknown_fields`; scope is checked before execute.
+- **FFI:** alloc and free pair correctly; every pointer is null-checked and every string UTF-8-checked; handles live behind mutexes.
+- **SPA:** no `dangerouslySetInnerHTML`, CSRF token held in a closure (not in storage), no `any` at API boundaries, CSP hash matches the inline theme script, errors surfaced rather than swallowed.
+- **CI and packaging:**
+  - All actions are SHA-pinned with least-privilege permissions, and there is no `pull_request_target`.
+  - `install.sh` has no `curl|sh`.
+  - systemd and polkit hardening match ADR-001; release publishes Sigstore signatures, SBOM and attestations.
+
+---
+
+## 10. Out of scope, noted for later
+
+- Upstream daemon parsing (smb.conf continuation, exportfs `-opts`, unbound multi-statement lines, deSEC rdata) was taken from man pages and memory, not executed. H13, H14, H15 and L-SUP16 should each start with a quick live confirmation on a009 before the fix: run `testparm`, `exportfs -v` and `unbound-checkconf` against the crafted file.
+- The coverage floors were measured on macOS. CI measures on Linux (detent-platform is known to differ by about 5 points).
+
+---
+
+## 11. Status
+
+(Filled in below; update it as items land.)
