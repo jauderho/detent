@@ -240,7 +240,7 @@ fn run_monitor(
             services: &services,
         },
     );
-    report_recovery(renderer, streams, &mut monitor)?;
+    report_recovery(renderer, streams, &monitor)?;
     monitor.set_host_profile(host.profile.clone());
     let served = monitor.serve_locked(&mut handle.channel, state_lock);
     let status = handle.wait();
