@@ -230,6 +230,7 @@ fn run_monitor(
             ("dropped", if dropped_privileges { "1" } else { "0" }),
         ],
     )?;
+    let state_lock = Monitor::lock(allow.state_root()).map_err(std::io::Error::other)?;
     let checks = ExternalCheckRunner::new();
     let services = ServiceControlAdapter(service::for_host(host.profile.init));
     let mut monitor = Monitor::new(
@@ -239,8 +240,9 @@ fn run_monitor(
             services: &services,
         },
     );
+    report_recovery(renderer, streams, &mut monitor)?;
     monitor.set_host_profile(host.profile.clone());
-    let served = monitor.serve(&mut handle.channel);
+    let served = monitor.serve_locked(&mut handle.channel, state_lock);
     let status = handle.wait();
     match (served, status) {
         (Ok(ExitReason::Shutdown), Ok(Some(0))) => Ok(Exit::Ok),
@@ -256,6 +258,25 @@ fn run_monitor(
             Ok(Exit::Failed)
         }
     }
+}
+
+fn report_recovery(
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+    monitor: &Monitor<'_>,
+) -> std::io::Result<()> {
+    let Some(recovered) = monitor.recover_pending().map_err(std::io::Error::other)? else {
+        return Ok(());
+    };
+    renderer.line(
+        streams.notes,
+        MessageId::new("cli-commit-recovered"),
+        &[
+            ("commit", &recovered.commit.get().to_string()),
+            ("restored", &recovered.restored.to_string()),
+            ("failures", &recovered.failures.len().to_string()),
+        ],
+    )
 }
 
 /// Loads and validates `detent.toml`, and rejects a listen port this build
@@ -591,10 +612,15 @@ fn exit_for_spawn(error: &SpawnError) -> Exit {
 
 #[cfg(test)]
 mod tests {
-    use super::{Exit, degradation_notes, exit_for_spawn, run};
+    use super::{Exit, degradation_notes, exit_for_spawn, report_recovery, run};
     use crate::i18n::Messages;
     use crate::output::Renderer;
     use crate::run::{Settings, Streams};
+    use detent_platform::privsep::allowlist::Config as AllowConfig;
+    use detent_platform::privsep::monitor::{
+        Hooks as MonitorHooks, Monitor, PENDING_COMMIT_MARKER, PendingCommitMarker, RollbackEntry,
+    };
+    use detent_platform::privsep::proto::CommitId;
     use detent_platform::privsep::spawn::SpawnError;
     use detent_platform::privsep::users::LookupError;
     use std::path::PathBuf;
@@ -636,6 +662,57 @@ mod tests {
         let text = String::from_utf8(out)?;
         assert!(!text.is_empty());
         assert!(!text.contains("cli-dryrun"), "{text}");
+        Ok(())
+    }
+
+    #[test]
+    fn run_monitor_recovers_a_leftover_marker() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let state = dir.path().join("state");
+        let target = dir.path().join("target.conf");
+        let backup = dir.path().join("target.conf.v1");
+        std::fs::create_dir_all(&state)?;
+        std::fs::write(&target, b"v2")?;
+        std::fs::write(&backup, b"v1")?;
+        std::fs::write(
+            state.join(PENDING_COMMIT_MARKER),
+            serde_json::to_vec(&PendingCommitMarker {
+                commit: CommitId(7).get(),
+                deadline_unix_ms: 0,
+                entries: vec![RollbackEntry {
+                    target: 0,
+                    path: target.clone(),
+                    backup,
+                }],
+                service: None,
+            })?,
+        )?;
+        let allow = detent_platform::privsep::allowlist::Allowlist::from_modules(
+            &[],
+            &AllowConfig::with_state_root(&state),
+        )?;
+        let monitor = Monitor::new(allow, MonitorHooks::default());
+        let messages = Messages::new(Some("en-US"));
+        let renderer = Renderer {
+            messages: &messages,
+            json: false,
+            verbose: true,
+        };
+        let mut input = std::io::empty();
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        report_recovery(
+            &renderer,
+            &mut Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+            &monitor,
+        )?;
+        assert_eq!(std::fs::read(&target)?, b"v1");
+        assert!(!state.join(PENDING_COMMIT_MARKER).exists());
+        assert!(String::from_utf8(notes)?.contains("commit 7"));
         Ok(())
     }
 

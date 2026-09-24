@@ -5,6 +5,16 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-23 - STAGE3 H1 monitor lifetime and recovery
+
+The monitor now holds an exclusive `monitor.lock` for its lifetime, recovers
+leftover pending-commit markers before serving, rolls back and clears pending
+commits on every monitor exit, and reports recovery. One-shot CLI applies to
+commit-confirm modules fail closed because they cannot enforce the confirmation
+window.
+
+Verify: `cargo test -p detent-platform pending_commit_rolls_back` (1 passed); `cargo test -p detent run_monitor_recovers_a_leftover_marker` (1 passed); `cargo test -p detent a_cli_apply_on_a_commit_confirm_module_never_leaves_an_unenforced_commit` (1 passed); `cargo check -p detent --tests --all-features`.
+
 ## 2026-09-23 - STAGE3 L-BIN12 FFI error channel
 
 The C ABI now exposes `detent_last_error_code`, eagerly parses FFI documents,

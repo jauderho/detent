@@ -39,7 +39,7 @@ use detent_web::authz::{Scope, ScopedAuthz};
 
 use crate::cli::{McpArgs, McpTransport};
 use crate::output::{Exit, Renderer};
-use crate::run::{Session, Settings, Streams};
+use crate::run::{Session, SessionStartError, Settings, Streams};
 
 /// Loopback default for `--transport http`; `--bind` overrides.
 pub const DEFAULT_HTTP_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3334);
@@ -206,12 +206,29 @@ fn start_session(
     let registry = detent_modules::modules();
     let descriptors: Vec<_> = registry.iter().map(|entry| entry.descriptor()).collect();
     match Session::start(settings, host, registry, &descriptors, dryrun) {
-        Ok(session) => Ok(Some(session)),
+        Ok(mut session) => {
+            if let Some(recovered) = session.take_recovery() {
+                renderer.line(
+                    streams.notes,
+                    MessageId::new("cli-commit-recovered"),
+                    &[
+                        ("commit", &recovered.commit.get().to_string()),
+                        ("restored", &recovered.restored.to_string()),
+                        ("failures", &recovered.failures.len().to_string()),
+                    ],
+                )?;
+            }
+            Ok(Some(session))
+        }
+        Err(SessionStartError::Busy) => {
+            renderer.line(streams.notes, MessageId::new("cli-monitor-busy"), &[])?;
+            Ok(None)
+        }
         Err(err) => {
             renderer.line(
                 streams.notes,
                 MessageId::new("cli-start-failed"),
-                &[("reason", &err)],
+                &[("reason", &err.to_string())],
             )?;
             Ok(None)
         }

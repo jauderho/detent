@@ -347,18 +347,43 @@ fn operate(
         path,
     };
     let kind = operation.kind();
+    if matches!(&operation, Operation::Apply { id, .. } if descriptors.iter().any(|descriptor| descriptor.id == id && descriptor.commit_confirm))
+    {
+        renderer.line(
+            streams.notes,
+            MessageId::new("cli-commit-confirm-needs-serve"),
+            &[("module", module.as_deref().unwrap_or_default())],
+        )?;
+        return Ok(Exit::Failed);
+    }
 
     let mut session = match Session::start(settings, host, registry, &descriptors, cli.dryrun) {
         Ok(session) => session,
+        Err(SessionStartError::Busy) => {
+            renderer.line(streams.notes, MessageId::new("cli-monitor-busy"), &[])?;
+            return Ok(Exit::Failed);
+        }
         Err(err) => {
             renderer.line(
                 streams.notes,
                 MessageId::new("cli-start-failed"),
-                &[("reason", &err)],
+                &[("reason", &err.to_string())],
             )?;
             return Ok(Exit::Failed);
         }
     };
+
+    if let Some(recovered) = session.take_recovery() {
+        renderer.line(
+            streams.notes,
+            MessageId::new("cli-commit-recovered"),
+            &[
+                ("commit", &recovered.commit.get().to_string()),
+                ("restored", &recovered.restored.to_string()),
+                ("failures", &recovered.failures.len().to_string()),
+            ],
+        )?;
+    }
 
     renderer.note(
         streams.notes,
@@ -1082,6 +1107,36 @@ pub struct DryRun {
 pub struct Session {
     engine: OpsEngine,
     monitor: Option<JoinHandle<Result<ExitReason, MonitorError>>>,
+    recovered: Option<detent_platform::privsep::monitor::Recovered>,
+}
+
+/// Why a monitor-backed one-shot session could not start.
+#[derive(Debug)]
+pub enum SessionStartError {
+    /// The state root is owned by a live monitor.
+    Busy,
+    /// Any other startup failure.
+    Other(String),
+}
+
+impl std::fmt::Display for SessionStartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy => f.write_str("monitor is busy"),
+            Self::Other(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for SessionStartError {}
+
+impl From<MonitorError> for SessionStartError {
+    fn from(err: MonitorError) -> Self {
+        match err {
+            MonitorError::Busy => Self::Busy,
+            other => Self::Other(other.to_string()),
+        }
+    }
 }
 
 impl std::fmt::Debug for Session {
@@ -1105,10 +1160,14 @@ impl Session {
         registry: Vec<Box<dyn DynModule>>,
         descriptors: &[&'static ModuleDescriptor],
         dryrun: bool,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, SessionStartError> {
+        let state_lock = Monitor::lock(&settings.state_root)?;
+        let (recovery_tx, recovery_rx) = std::sync::mpsc::sync_channel(1);
         let config = Config::with_state_root(&settings.state_root);
-        let allow = Allowlist::from_modules(descriptors, &config).map_err(|err| err.to_string())?;
-        let (monitor_end, worker_end) = Channel::pair().map_err(|err| err.to_string())?;
+        let allow = Allowlist::from_modules(descriptors, &config)
+            .map_err(|err| SessionStartError::Other(err.to_string()))?;
+        let (monitor_end, worker_end) =
+            Channel::pair().map_err(|err| SessionStartError::Other(err.to_string()))?;
 
         let init = host.profile.init;
         let profile = host.profile.clone();
@@ -1127,11 +1186,22 @@ impl Session {
                 },
             );
             monitor.set_host_profile(profile);
-            monitor.serve(&mut channel)
+            let recovered = monitor.recover_pending();
+            let report = recovered.as_ref().map_err(|err| err.to_string()).cloned();
+            let _ = recovery_tx.send(report);
+            recovered.and_then(|_| monitor.serve_locked(&mut channel, state_lock))
         });
 
+        let recovered = recovery_rx
+            .recv()
+            .map_err(|_| {
+                SessionStartError::Other("monitor thread stopped before recovery".to_owned())
+            })?
+            .map_err(SessionStartError::Other)?;
         let mut client = Client::new(worker_end);
-        client.hello().map_err(|err| err.to_string())?;
+        client
+            .hello()
+            .map_err(|err| SessionStartError::Other(err.to_string()))?;
 
         let audit: Box<dyn AuditSink> = if dryrun {
             Box::new(NullAudit)
@@ -1149,7 +1219,13 @@ impl Session {
         Ok(Self {
             engine,
             monitor: Some(monitor),
+            recovered,
         })
+    }
+
+    /// Take the startup recovery report, if one was produced.
+    pub fn take_recovery(&mut self) -> Option<detent_platform::privsep::monitor::Recovered> {
+        self.recovered.take()
     }
 
     /// Runs one operation as the local caller, honouring `--dryrun`.
@@ -2716,7 +2792,7 @@ mod tests {
         )
         .err()
         .ok_or("a duplicate module id must be refused")?;
-        assert!(err.contains("duplicate"), "{err}");
+        assert!(err.to_string().contains("duplicate"), "{err}");
         Ok(())
     }
 
@@ -3192,6 +3268,44 @@ mod tests {
         );
         assert_ne!(exit, Exit::Usage);
         assert!(!notes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_cli_apply_on_a_commit_confirm_module_never_leaves_an_unenforced_commit() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let state = dir.path().join("state");
+        let state_arg = state.display().to_string();
+        let cli = parse(&[
+            "detent",
+            "config",
+            "network",
+            "apply",
+            "--state-root",
+            &state_arg,
+        ])?;
+        let registry = detent_modules::modules();
+        let descriptors: Vec<_> = registry.iter().map(|entry| entry.descriptor()).collect();
+        let profile = detent_platform::host::detect_real().profile;
+        let target = target_path(&descriptors, "network", &profile).map(PathBuf::from);
+        let before = target.as_deref().and_then(|path| std::fs::read(path).ok());
+        let mut input = b"{}".as_slice();
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = run(
+            &cli,
+            &mut Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+        );
+        assert_eq!(exit, Exit::Failed);
+        assert!(String::from_utf8(notes)?.contains("requires commit-confirm"));
+        assert!(!state.join("pending-commit.json").exists());
+        if let (Some(path), Some(before)) = (target.as_deref(), before.as_deref()) {
+            assert_eq!(std::fs::read(path)?, before);
+        }
         Ok(())
     }
 
