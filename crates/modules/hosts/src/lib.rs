@@ -451,7 +451,7 @@ fn validate_localhost(model: &Model, diagnostics: &mut Diagnostics) {
         present |= is_localhost;
         if entry.ip.is_loopback() {
             ipv6_present |= entry.ip.is_ipv6() && (is_localhost || is_ipv6_alias);
-        } else if is_localhost || (entry.ip.is_ipv6() && is_ipv6_alias) {
+        } else if is_localhost || is_ipv6_alias {
             diagnostics.push(
                 Diagnostic::new(Severity::Error, LOCALHOST_NOT_LOOPBACK)
                     .with_field(FieldPath::new(format!("entries/{index}/ip")))
@@ -932,6 +932,22 @@ mod tests {
             MISSING_IPV6_LOCALHOST,
             Severity::Recommendation
         ));
+    }
+
+    #[test]
+    fn validate_flags_ipv6_localhost_aliases_that_are_not_loopback() {
+        for alias in ["ip6-localhost", "ip6-loopback"] {
+            let model = Model {
+                entries: vec![
+                    entry("127.0.0.1", &["localhost"], None),
+                    entry("192.0.2.1", &[alias], None),
+                ],
+            };
+            assert!(
+                has(&model, LOCALHOST_NOT_LOOPBACK, Severity::Error),
+                "{alias} mapped to a non-loopback address must be an Error"
+            );
+        }
     }
 
     #[test]
