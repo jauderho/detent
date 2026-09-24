@@ -11,7 +11,7 @@ import userEvent from '@testing-library/user-event'
 import type { SessionView } from '@/api/auth'
 import type { ModuleDescriptor } from '@/api/modules'
 import type { ServiceCommand, ServiceReport, ServiceStatus } from '@/api/services'
-import { errorResponse, jsonResponse, renderWithProviders, stubFetch } from '@/test/providers'
+import { errorResponse, jsonResponse, renderWithProviders, stubFetchByUrl } from '@/test/providers'
 import { ServicesPage } from '../ServicesPage'
 
 const READ_WRITE_SESSION: SessionView = {
@@ -57,16 +57,19 @@ function buildStatus(overrides: Partial<ServiceStatus> = {}): ServiceStatus {
 
 describe('ServicesPage — module list', () => {
   it('shows the loading state before the module list answers', () => {
-    const stub = stubFetch([])
+    const stub = stubFetchByUrl([
+      ['/api/v1/modules', () => jsonResponse([])],
+      ['/api/v1/auth/session', () => jsonResponse(READ_WRITE_SESSION)],
+    ])
     renderWithProviders(<ServicesPage />, { fetch: stub.fetch })
 
     expect(screen.getAllByText('loading').length).toBeGreaterThan(0)
   })
 
   it('shows the resolved sentence when the module list fails, never the message id', async () => {
-    const stub = stubFetch([
-      errorResponse(500, 'ops-unknown-module', 'server_error'),
-      jsonResponse(READ_WRITE_SESSION),
+    const stub = stubFetchByUrl([
+      ['/api/v1/modules', () => errorResponse(500, 'ops-unknown-module', 'server_error')],
+      ['/api/v1/auth/session', () => jsonResponse(READ_WRITE_SESSION)],
     ])
     renderWithProviders(<ServicesPage />, { fetch: stub.fetch })
 
@@ -76,9 +79,9 @@ describe('ServicesPage — module list', () => {
   })
 
   it('shows the empty message when no module declares a service', async () => {
-    const stub = stubFetch([
-      jsonResponse([buildModule('noservice', [])]),
-      jsonResponse(READ_WRITE_SESSION),
+    const stub = stubFetchByUrl([
+      ['/api/v1/modules', () => jsonResponse([buildModule('noservice', [])])],
+      ['/api/v1/auth/session', () => jsonResponse(READ_WRITE_SESSION)],
     ])
     renderWithProviders(<ServicesPage />, { fetch: stub.fetch })
 
@@ -91,11 +94,14 @@ describe('ServicesPage — module list', () => {
 describe('ServicesPage — rows', () => {
   it('renders one row per service-bearing module and shows a failed row without breaking the others', async () => {
     const modules = [buildModule('alpha', ['restart']), buildModule('beta', ['restart'])]
-    const stub = stubFetch([
-      jsonResponse(modules),
-      jsonResponse(READ_WRITE_SESSION),
-      errorResponse(500, 'ops-service-failed', 'server_error'),
-      jsonResponse(buildStatus({ unit: 'beta.service' })),
+    const stub = stubFetchByUrl([
+      ['/api/v1/modules', () => jsonResponse(modules)],
+      ['/api/v1/auth/session', () => jsonResponse(READ_WRITE_SESSION)],
+      [
+        'GET /api/v1/services/alpha',
+        () => errorResponse(500, 'ops-service-failed', 'server_error'),
+      ],
+      ['GET /api/v1/services/beta', () => jsonResponse(buildStatus({ unit: 'beta.service' }))],
     ])
     renderWithProviders(<ServicesPage />, { fetch: stub.fetch })
 
@@ -116,10 +122,13 @@ describe('ServicesPage — rows', () => {
   })
 
   it('renders the populated status columns', async () => {
-    const stub = stubFetch([
-      jsonResponse([buildModule('alpha', ['restart', 'stop'])]),
-      jsonResponse(READ_WRITE_SESSION),
-      jsonResponse(buildStatus({ enabled: false, state: 'failed', unit: 'alpha.service' })),
+    const stub = stubFetchByUrl([
+      ['/api/v1/modules', () => jsonResponse([buildModule('alpha', ['restart', 'stop'])])],
+      ['/api/v1/auth/session', () => jsonResponse(READ_WRITE_SESSION)],
+      [
+        'GET /api/v1/services/alpha',
+        () => jsonResponse(buildStatus({ enabled: false, state: 'failed', unit: 'alpha.service' })),
+      ],
     ])
     renderWithProviders(<ServicesPage />, { fetch: stub.fetch })
 
@@ -137,10 +146,13 @@ describe('ServicesPage — rows', () => {
 
 describe('ServicesPage — row state branches', () => {
   it('shows unknown when the enabled field is absent', async () => {
-    const stub = stubFetch([
-      jsonResponse([buildModule('alpha', ['restart'])]),
-      jsonResponse(READ_WRITE_SESSION),
-      jsonResponse(buildStatus({ enabled: null, unit: 'alpha.service' })),
+    const stub = stubFetchByUrl([
+      ['/api/v1/modules', () => jsonResponse([buildModule('alpha', ['restart'])])],
+      ['/api/v1/auth/session', () => jsonResponse(READ_WRITE_SESSION)],
+      [
+        'GET /api/v1/services/alpha',
+        () => jsonResponse(buildStatus({ enabled: null, unit: 'alpha.service' })),
+      ],
     ])
     renderWithProviders(<ServicesPage />, { fetch: stub.fetch })
 
@@ -155,10 +167,17 @@ describe('ServicesPage — row state branches', () => {
 describe('ServicesPage — acting on a service', () => {
   it('confirms through the modal and posts the command, then shows the result', async () => {
     const user = userEvent.setup()
-    const stub = stubFetch([
-      jsonResponse([buildModule('alpha', ['restart'])]),
-      jsonResponse(READ_WRITE_SESSION),
-      jsonResponse(buildStatus({ unit: 'alpha.service' })),
+    const report: ServiceReport = {
+      action: 'restart',
+      active: true,
+      detail: 'unit restarted',
+      unit: 'alpha.service',
+    }
+    const stub = stubFetchByUrl([
+      ['/api/v1/modules', () => jsonResponse([buildModule('alpha', ['restart'])])],
+      ['/api/v1/auth/session', () => jsonResponse(READ_WRITE_SESSION)],
+      ['GET /api/v1/services/alpha', () => jsonResponse(buildStatus({ unit: 'alpha.service' }))],
+      ['POST /api/v1/services/alpha', () => jsonResponse(report)],
     ])
     renderWithProviders(<ServicesPage />, { fetch: stub.fetch })
 
@@ -174,15 +193,6 @@ describe('ServicesPage — acting on a service', () => {
     expect(
       within(dialog).getByText('this acts on the running service immediately.'),
     ).toBeInTheDocument()
-
-    const report: ServiceReport = {
-      action: 'restart',
-      active: true,
-      detail: 'unit restarted',
-      unit: 'alpha.service',
-    }
-    stub.push(jsonResponse(report))
-    stub.push(jsonResponse(buildStatus({ unit: 'alpha.service' })))
 
     await user.click(within(dialog).getByRole('button', { name: 'restart' }))
 
@@ -203,10 +213,10 @@ describe('ServicesPage — acting on a service', () => {
   })
 
   it('disables the action and states the reason for a read-only session', async () => {
-    const stub = stubFetch([
-      jsonResponse([buildModule('alpha', ['restart'])]),
-      jsonResponse(READ_ONLY_SESSION),
-      jsonResponse(buildStatus({ unit: 'alpha.service' })),
+    const stub = stubFetchByUrl([
+      ['/api/v1/modules', () => jsonResponse([buildModule('alpha', ['restart'])])],
+      ['/api/v1/auth/session', () => jsonResponse(READ_ONLY_SESSION)],
+      ['GET /api/v1/services/alpha', () => jsonResponse(buildStatus({ unit: 'alpha.service' }))],
     ])
     renderWithProviders(<ServicesPage />, { fetch: stub.fetch })
 
@@ -222,10 +232,10 @@ describe('ServicesPage — acting on a service', () => {
 
   it('closes the confirm modal with the close button', async () => {
     const user = userEvent.setup()
-    const stub = stubFetch([
-      jsonResponse([buildModule('alpha', ['restart'])]),
-      jsonResponse(READ_WRITE_SESSION),
-      jsonResponse(buildStatus({ unit: 'alpha.service' })),
+    const stub = stubFetchByUrl([
+      ['/api/v1/modules', () => jsonResponse([buildModule('alpha', ['restart'])])],
+      ['/api/v1/auth/session', () => jsonResponse(READ_WRITE_SESSION)],
+      ['GET /api/v1/services/alpha', () => jsonResponse(buildStatus({ unit: 'alpha.service' }))],
     ])
     renderWithProviders(<ServicesPage />, { fetch: stub.fetch })
 
@@ -241,10 +251,10 @@ describe('ServicesPage — acting on a service', () => {
 
   it('closes the confirm modal with the cancel button', async () => {
     const user = userEvent.setup()
-    const stub = stubFetch([
-      jsonResponse([buildModule('alpha', ['restart'])]),
-      jsonResponse(READ_WRITE_SESSION),
-      jsonResponse(buildStatus({ unit: 'alpha.service' })),
+    const stub = stubFetchByUrl([
+      ['/api/v1/modules', () => jsonResponse([buildModule('alpha', ['restart'])])],
+      ['/api/v1/auth/session', () => jsonResponse(READ_WRITE_SESSION)],
+      ['GET /api/v1/services/alpha', () => jsonResponse(buildStatus({ unit: 'alpha.service' }))],
     ])
     renderWithProviders(<ServicesPage />, { fetch: stub.fetch })
 
@@ -260,11 +270,14 @@ describe('ServicesPage — acting on a service', () => {
 
   it('shows the resolved error when a service action fails', async () => {
     const user = userEvent.setup()
-    const stub = stubFetch([
-      jsonResponse([buildModule('alpha', ['restart'])]),
-      jsonResponse(READ_WRITE_SESSION),
-      jsonResponse(buildStatus({ unit: 'alpha.service' })),
-      errorResponse(500, 'ops-service-failed', 'server_error'),
+    const stub = stubFetchByUrl([
+      ['/api/v1/modules', () => jsonResponse([buildModule('alpha', ['restart'])])],
+      ['/api/v1/auth/session', () => jsonResponse(READ_WRITE_SESSION)],
+      ['GET /api/v1/services/alpha', () => jsonResponse(buildStatus({ unit: 'alpha.service' }))],
+      [
+        'POST /api/v1/services/alpha',
+        () => errorResponse(500, 'ops-service-failed', 'server_error'),
+      ],
     ])
     renderWithProviders(<ServicesPage />, { fetch: stub.fetch })
 
