@@ -160,6 +160,7 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<Re
   // from the start would skip LoginPage entirely and quietly delete the only
   // e2e coverage the sign-in screen has.
   let signedIn = false
+  let pendingCommit: typeof APPLY_REPORT.commit = null
 
   const json = (route: Route, body: unknown, status = 200) =>
     route.fulfill({
@@ -204,6 +205,9 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<Re
     if (path.endsWith('/system/cert')) {
       return json(route, CERT_REPORT)
     }
+    if (path.endsWith('/commits/pending')) {
+      return json(route, pendingCommit)
+    }
     if (path.endsWith('/audit')) {
       return json(route, AUDIT_RECORDS)
     }
@@ -214,6 +218,7 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<Re
       return json(route, [])
     }
     if (path.endsWith('/apply')) {
+      pendingCommit = APPLY_REPORT.commit
       return json(route, APPLY_REPORT)
     }
     if (path.endsWith('/confirm')) {

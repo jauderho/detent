@@ -75,6 +75,7 @@ test.describe('the apply flow', () => {
   test('plans, applies, and arms the commit-confirm window', async ({ page }) => {
     const calls = await stubApi(page)
     await signIn(page)
+    await expect.poll(() => calls.some((call) => call.url.endsWith('/commits/pending'))).toBe(true)
     await page.getByRole('link', { name: 'modules' }).click()
     await page.getByRole('link', { name: 'hosts' }).click()
 
@@ -94,10 +95,15 @@ test.describe('the apply flow', () => {
     // character for character. Scoped by content rather than position, because
     // the shell's own pending-commit banner is on screen at the same time.
     await expect(page.getByText(/the change was written to/)).toBeVisible()
+    await expect(
+      page.getByRole('alert').filter({ hasText: 'waiting to be confirmed' }),
+    ).toBeVisible()
     // The armed window belongs to the shell, so it is still there after
     // navigating away from the page that started it.
     await page.getByRole('link', { name: 'audit' }).click()
-    await expect(page.getByRole('alert')).toContainText('waiting to be confirmed')
+    await expect(
+      page.getByRole('alert').filter({ hasText: 'waiting to be confirmed' }),
+    ).toBeVisible()
 
     const apply = calls.find((call) => call.url.endsWith('/apply'))
     expect(apply).toBeDefined()
@@ -155,7 +161,9 @@ test.describe('failure states', () => {
     await stubApi(page, { profileStatus: 500 })
     await signIn(page)
 
-    await expect(page.getByRole('alert')).toContainText('privileged helper')
+    await expect(page.getByRole('alert').filter({ hasText: 'privileged helper' })).toContainText(
+      'privileged helper',
+    )
     // The module count came from a different query and is still rendered.
     await expect(page.getByText('one module is compiled into this build.')).toBeVisible()
   })
