@@ -56,8 +56,8 @@ use crate::fs::atomic::{
 /// Name of the crash-recovery marker inside the state root.
 pub const PENDING_COMMIT_MARKER: &str = "pending-commit.json";
 
-/// Lock file serialising monitor startup and preventing a second live monitor.
-const PENDING_COMMIT_LOCK: &str = "pending-commit.lock";
+/// Exclusive monitor-lifetime lock inside the state root.
+pub const MONITOR_LOCK: &str = "monitor.lock";
 
 /// How often the loop wakes to re-check a pending commit-confirm deadline.
 const PENDING_POLL: Duration = Duration::from_millis(20);
@@ -214,6 +214,9 @@ pub enum MonitorError {
     /// The socket failed in a way that is not the peer's fault.
     #[error("privsep channel failed")]
     Channel(#[source] ChannelError),
+    /// Another live monitor owns the state root.
+    #[error("monitor is busy")]
+    Busy,
     /// The state directory could not be read or written.
     #[error("{op} failed on the monitor's state directory")]
     State {
@@ -377,8 +380,33 @@ impl<'a> Monitor<'a> {
     /// a protocol violation, and [`MonitorError::State`] when the state
     /// directory cannot be maintained.
     pub fn serve(&mut self, channel: &mut Channel) -> Result<ExitReason, MonitorError> {
-        let _state_lock = lock_state(self.allow.state_root())?;
+        let state_lock = Self::lock(self.allow.state_root())?;
         self.recover_pending()?;
+        self.serve_locked(channel, state_lock)
+    }
+
+    /// Serve after the caller has taken [`MONITOR_LOCK`] and recovered any
+    /// leftover marker. The guard is held until every return path completes.
+    pub fn serve_locked(
+        &mut self,
+        channel: &mut Channel,
+        _state_lock: std::fs::File,
+    ) -> Result<ExitReason, MonitorError> {
+        let result = self.serve_loop(channel);
+        let cleanup = self.rollback_pending_on_exit();
+        match (result, cleanup) {
+            (Ok(reason), Ok(())) => Ok(reason),
+            (Err(err), Ok(())) | (Ok(_), Err(err)) => Err(err),
+            (Err(_), Err(cleanup)) => Err(cleanup),
+        }
+    }
+
+    /// Take the exclusive monitor lock without running recovery.
+    pub fn lock(state_root: &Path) -> Result<std::fs::File, MonitorError> {
+        lock_state(state_root)
+    }
+
+    fn serve_loop(&mut self, channel: &mut Channel) -> Result<ExitReason, MonitorError> {
         let idle_timeout = channel.read_timeout();
         loop {
             let want = if self.pending.is_some() {
@@ -424,6 +452,23 @@ impl<'a> Monitor<'a> {
 
             self.enforce_deadline()?;
         }
+    }
+
+    fn rollback_pending_on_exit(&mut self) -> Result<(), MonitorError> {
+        let Some(pending) = self.pending.take() else {
+            return Ok(());
+        };
+        let restored = roll_back(&pending.entries);
+        if let Err(err) = self.replay_service(pending.service) {
+            tracing::error!(error = %err, "service replay after monitor shutdown failed");
+        }
+        self.clear_marker()?;
+        tracing::warn!(
+            commit = pending.commit.get(),
+            restored,
+            "commit-confirm rolled back because the monitor is stopping"
+        );
+        Ok(())
     }
 
     /// Handle one request. Never returns an error for a *request* failure;
@@ -1170,7 +1215,7 @@ fn lock_state(state_dir: &Path) -> Result<std::fs::File, MonitorError> {
         .create(true)
         .truncate(false)
         .mode(0o600)
-        .open(state_dir.join(PENDING_COMMIT_LOCK))
+        .open(state_dir.join(MONITOR_LOCK))
     {
         Ok(file) => file,
         Err(source) if source.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -1186,15 +1231,10 @@ fn lock_state(state_dir: &Path) -> Result<std::fs::File, MonitorError> {
             });
         }
     };
-    if let Err(source) =
-        rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-    {
+    if rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_err() {
         // A dummy /dev/null fd never contends, so this only fires for the
         // real lock file. A second live monitor is the intended error.
-        return Err(MonitorError::State {
-            op: "flock",
-            source: std::io::Error::other(source),
-        });
+        return Err(MonitorError::Busy);
     }
     Ok(file)
 }
@@ -1686,6 +1726,7 @@ mod tests {
         ProtoError, Request, Response, ServiceAction, ServiceOutcome, TargetId,
     };
     use crate::privsep::transport::{Channel, ChannelError};
+    use crate::privsep::worker::Client;
     use detent_core::descriptor::{
         ArgTemplate, CheckExpectation, ExternalCheck, HostProfile, ModuleDescriptor, Owner,
         PathSpec, ServiceAction as CoreServiceAction, ServiceBinding, Target, TargetKind,
@@ -2772,6 +2813,31 @@ mod tests {
             monitor.serve(&mut channel).ok(),
             Some(ExitReason::PeerClosed)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn shutdown_with_a_pending_commit_rolls_back() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let (mut monitor_end, worker_end) = Channel::pair()?;
+        let allow = fx.allow()?;
+        let module = descriptor(&fx.target);
+        let monitor = std::thread::spawn(move || {
+            let mut monitor = Monitor::new(allow, Hooks::default());
+            monitor.set_module_registry(vec![Box::new(SyntheticModule { descriptor: module })]);
+            monitor.serve(&mut monitor_end)
+        });
+        let mut client = Client::new(worker_end);
+        client.hello()?;
+        client.write_target(TargetId(0), None, b"v2".to_vec())?;
+        client.start_confirm_timer(CommitId(1), 60, None)?;
+        client.shutdown()?;
+        assert_eq!(
+            monitor.join().map_err(|_| "monitor thread panicked")??,
+            ExitReason::Shutdown
+        );
+        assert_eq!(std::fs::read(&fx.target)?, b"v1");
+        assert!(!fx.state_root.join(PENDING_COMMIT_MARKER).exists());
         Ok(())
     }
 
