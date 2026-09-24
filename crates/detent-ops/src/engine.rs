@@ -131,7 +131,7 @@ impl OpsEngine {
 
     /// Tell the engine where the monitor's state directory lives.
     ///
-    /// `UpdateApply` reads the release tag from
+    /// `UpdateApply` reads the worker-staged release tag from
     /// `<state_root>/update/staged/<tag>` to compute the `(len, sha256)` it
     /// sends via [`Client::replace_binary`]; without this set, the operation
     /// is refused up front as `Unsupported`.

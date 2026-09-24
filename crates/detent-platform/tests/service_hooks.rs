@@ -165,6 +165,7 @@ fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
 fn monitor_runs_with_real_check_and_service_hooks() -> TestResult {
     let fx = fixture()?;
     let allow = fx.allow()?;
+    let staging_dir = allow.state_root().with_file_name("monitor-staging");
 
     let checks = ExternalCheckRunner::with_runner(Box::new(AlwaysOk));
     let services = ServiceControlAdapter(Box::new(SystemdManager::with_runner(Box::new(AlwaysOk))));
@@ -176,7 +177,9 @@ fn monitor_runs_with_real_check_and_service_hooks() -> TestResult {
             checks: &checks,
             services: &services,
         };
-        Monitor::new(allow, hooks).serve(&mut channel)
+        let mut monitor = Monitor::new(allow, hooks);
+        monitor.set_staging_dir(staging_dir);
+        monitor.serve(&mut channel)
     });
 
     let mut client = Client::new(worker_end);

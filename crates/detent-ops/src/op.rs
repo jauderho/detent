@@ -200,9 +200,9 @@ pub enum Operation {
     /// the module header): the variant exists so the API, authz, audit, and
     /// UI can be built against the real shape instead of a stub that drifts.
     CertRenew,
-    /// Install a verified update: the engine bridges the release tag to the
-    /// content-addressed staged file and asks the monitor's `ReplaceBinary`
-    /// to swap it over the running binary.
+    /// Install a verified update: the engine bridges the worker-staged release
+    /// tag to the monitor's private runtime staging copy and asks the
+    /// monitor's `ReplaceBinary` to swap it over the running binary.
     UpdateApply {
         /// The update version to install, e.g. `v1.2.3`.
         version: String,
