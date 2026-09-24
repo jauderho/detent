@@ -76,8 +76,17 @@ jobs:
 
       - name: cargo test (unprivileged; privileged sandbox tests run below)
         run: cargo test --workspace --all-features -- --skip sandbox::linux::tests
-      - name: cargo test (root sandbox tests)
-        run: sudo -E env PATH="$PATH" cargo test -p detent-platform --lib --all-features sandbox::linux::tests -- --test-threads=1
+      # D2': cargo itself never runs as root (root-owned target/ files broke
+      # later unprivileged builds with EACCES). The test binary builds
+      # unprivileged; only the binary runs under sudo.
+      - name: cargo test (root sandbox tests; binary runs as root, cargo never does)
+        run: |
+          set -euo pipefail
+          bin=$(cargo test -p detent-platform --lib --all-features --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .profile.test == true) | .executable' \
+            | head -n 1)
+          test -n "$bin" && test -x "$bin"
+          sudo "$bin" sandbox::linux::tests --test-threads=1
       - name: Install cbindgen
         uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e # v2.87.14
         with:
@@ -391,21 +400,34 @@ jobs:
         run: scripts/coverage-merge.sh --selftest
 
       - name: cargo llvm-cov (unprivileged tests)
-        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov-linux.info -- --skip sandbox::linux::tests
+        run: cargo llvm-cov --workspace --all-features --no-report -- --skip sandbox::linux::tests
 
-      - name: cargo llvm-cov (root sandbox tests)
-        run: sudo -E env PATH="$PATH" cargo llvm-cov -p detent-platform --all-features --lib --lcov --output-path lcov-sandbox.info -- sandbox::linux::tests --test-threads=1
+      # D2': cargo itself never runs as root. The instrumented run above
+      # leaves its test binaries under target/llvm-cov-target; only the
+      # platform binary runs under sudo, with LLVM_PROFILE_FILE pointing
+      # into the llvm-cov profile dir so `report` merges its counters.
+      # Afterwards root-owned profiles are chowned back before reporting.
+      - name: cargo llvm-cov (root sandbox tests; binary runs as root, cargo never does)
+        run: |
+          set -euo pipefail
+          bin=$(ls -t target/llvm-cov-target/debug/deps/detent_platform-* | grep -v '\.' | head -n 1)
+          test -n "$bin" && test -x "$bin"
+          sudo env "LLVM_PROFILE_FILE=$PWD/target/llvm-cov-target/detent-%p-%m.profraw" \
+            "$PWD/$bin" sandbox::linux::tests --test-threads=1
+          sudo chown -R "$(id -u):$(id -g)" target
+
+      - name: cargo llvm-cov report (merge unprivileged + root profiles)
+        run: cargo llvm-cov report --lcov --output-path lcov.info
 
       - name: Merge coverage and enforce threshold
-        run: scripts/coverage-merge.sh --verbose --output merged.info lcov-linux.info lcov-sandbox.info
+        run: scripts/coverage-merge.sh --verbose --output merged.info lcov.info
 
       - name: Upload lcov artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: lcov-linux
           path: |
-            lcov-linux.info
-            lcov-sandbox.info
+            lcov.info
             merged.info
           retention-days: 14
 
