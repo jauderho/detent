@@ -237,13 +237,21 @@ const MONITOR: &[&str] = &[
     "execveat",
     "pipe2",
     "dup3",
+    "dup2",
     "kill",
     "tgkill",
     "nanosleep",
     "clock_nanosleep", // glibc routes `thread::sleep` here, not `nanosleep`.
     "prlimit64",       // Rust `std` queries `RLIMIT_NOFILE` while wiring stdio.
     "faccessat",       // dynamic loader probes `/etc/ld.so.preload` after `execve`.
+    "open", // musl `File::open_c` (null stdio, `PathFd::new`); Trap oracle named `__NR_open` on x86_64.
+    "access", // loader fallback probe (`/etc/ld.so.preload`, SELinux config).
+    "readlink", // `current_exe` in `Policy::monitor` resolves `/proc/self/exe`.
+    "readlinkat", // loader/exe-path resolution variant.
+    "ppoll", // loader wait in the `poll`/`ppoll` family.
+    "poll", // `coreutils true` (a010) issues `poll`; number 7, x86_64-only.
     "set_tid_address", // glibc thread startup for the reader threads.
+    "arch_prctl",
     "rseq",
     "set_robust_list",
     "sched_getaffinity",
@@ -426,6 +434,7 @@ const SYSCALL_NUMBERS: &[(&str, i64, i64)] = &[
     ("exit", 60, 93),
     ("exit_group", 231, 94),
     ("wait4", 61, 260),
+    ("open", 2, -1),
     ("openat", 257, 56),
     ("renameat", 264, 38),
     ("linkat", 265, 37),
@@ -463,6 +472,12 @@ const SYSCALL_NUMBERS: &[(&str, i64, i64)] = &[
     ("pipe2", 293, 59),
     ("dup", 32, 23),
     ("dup3", 292, 24),
+    ("dup2", 33, -1),
+    ("arch_prctl", 158, -1),
+    ("access", 21, -1),
+    ("readlink", 89, -1),
+    ("readlinkat", 267, 78),
+    ("ppoll", 271, 73),
     ("kill", 62, 129),
     ("tgkill", 234, 131),
     ("nanosleep", 35, 101),
@@ -491,12 +506,15 @@ fn number(name: &str, arch: Arch) -> Option<i64> {
 ///
 /// [`SeccompError::UnknownSyscall`] (see `SYSCALL_NUMBERS`'s doc comment).
 pub fn numbers_for(role: Role, arch: Arch) -> Result<Vec<i64>, SeccompError> {
-    syscalls_for(role)
-        .iter()
-        .map(|name| {
-            number(name, arch).ok_or_else(|| SeccompError::UnknownSyscall((*name).to_owned()))
-        })
-        .collect()
+    let mut numbers = Vec::new();
+    for name in syscalls_for(role) {
+        if let Some(number) = number(name, arch) {
+            numbers.push(number);
+        } else if !SYSCALL_NUMBERS.iter().any(|(known, _, _)| *known == *name) {
+            return Err(SeccompError::UnknownSyscall((*name).to_owned()));
+        }
+    }
+    Ok(numbers)
 }
 
 /// Build a real `seccompiler::BpfProgram` for `role` on `arch`, without
@@ -567,14 +585,24 @@ mod tests {
     }
 
     #[test]
-    fn every_table_entry_resolves_on_both_tier_one_architectures()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn every_table_entry_resolves_or_is_arch_specific() -> Result<(), Box<dyn std::error::Error>> {
         for role in [Role::Monitor, Role::Worker] {
             let names = syscalls_for(role);
             assert!(!names.is_empty());
             for arch in [Arch::X86_64, Arch::Aarch64] {
                 let numbers = numbers_for(role, arch)?;
-                assert_eq!(numbers.len(), names.len());
+                assert!(
+                    !numbers.is_empty(),
+                    "{role:?} resolves to nothing on {arch:?}"
+                );
+                assert!(numbers.len() <= names.len());
+                for name in names {
+                    assert!(
+                        super::number(name, Arch::X86_64).is_some()
+                            || super::number(name, Arch::Aarch64).is_some(),
+                        "{name} resolves on neither tier-one arch"
+                    );
+                }
                 // Every resolved number is a plausible Linux syscall number:
                 // non-negative, and distinct entries resolve to distinct
                 // numbers (a collision would mean two different syscalls
@@ -648,6 +676,16 @@ mod tests {
                 super::number(name, Arch::Aarch64).is_some(),
                 "{name} has no aarch64 number"
             );
+        }
+        for name in ["dup2", "arch_prctl", "access", "readlink", "poll", "open"] {
+            assert!(syscalls_for(Role::Monitor).contains(&name));
+            assert!(super::number(name, Arch::X86_64).is_some());
+            assert!(super::number(name, Arch::Aarch64).is_none());
+        }
+        for name in ["readlinkat", "ppoll"] {
+            assert!(syscalls_for(Role::Monitor).contains(&name));
+            assert!(super::number(name, Arch::X86_64).is_some());
+            assert!(super::number(name, Arch::Aarch64).is_some());
         }
     }
 

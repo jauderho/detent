@@ -1060,3 +1060,4 @@ Open decisions carried from the review (owner answers pending):
 - H1.4: one-shot CLI apply on a commit-confirm module. Check what 13e4f10/462e9bf chose and record it here.
 - 2026-09-24 C1-b (orchestrator): implemented in `4b098d0` before an owner answer. Owner to confirm or reject: monitor staging at `/run/detent/staging` (root 0700). — owner answer:
 - 2026-09-24 a010 libbz2 (orchestrator): oh-my-pi downgraded `libbz2-1.0` to `1.0.8-6build2` with `--allow-downgrades`. Owner to decide whether to restore it. Agents must not touch it. — owner answer:
+- 2026-09-24 H6: root proof done on a010 with operator sudo. Trap oracle named `__NR_open` (`open("/dev/null")`, musl `File::open_c`); fix adds `open` (2,-1) plus `dup2 arch_prctl access readlink readlinkat ppoll poll`. `enforce_mode_monitor_can_spawn_a_validator` passes as root, zero SIGSYS. - owner/orchestrator answer:

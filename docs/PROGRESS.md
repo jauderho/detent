@@ -4,6 +4,13 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-24 - H6 Linux monitor syscall repair
+
+Root trace on a010 named the killer: confined child installed the filter, then died at `open("/dev/null")` (`si_syscall=__NR_open`, Trap oracle). Musl `File::open_c` issues raw `open` (nr 2, x86_64-only), not `openat`. MONITOR gains `dup2`, `arch_prctl`, `access`, `readlink`, `readlinkat`, `ppoll`, `poll`, `open` with both-arch number rows; arch-absent entries skip table construction instead of failing it. Resolving test asserts non-empty per arch plus resolves-on-one-arch.
+
+Verify: `cargo test -p detent-platform --all-features` (339 passed, 1 ignored); `seccomp::tests` (6 passed); fmt=0 clippy=0; aarch64 native check clean (runtime unverified); a010 root `enforce_mode_monitor_can_spawn_a_validator` passes, zero SIGSYS.
+
+
 ## 2026-09-24 - L-SUP18 Pebble pin verification
 
 Resolved and pulled the digest-only Pebble and challtestsrv images. Started
