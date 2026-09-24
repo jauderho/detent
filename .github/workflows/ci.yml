@@ -243,11 +243,11 @@ jobs:
           EOF
           docker run -d --name pebble --network detent-pebble -p 14000:14000 -p 15000:15000 \
             -v /tmp/detent-pebble/pebble-config.json:/test/config/pebble-config.json \
-            ghcr.io/letsencrypt/pebble:v2.10.1 \
+            ghcr.io/letsencrypt/pebble@sha256:ddf230642b1a584f519f32e347de1b05a6e4c1f6c35c1863b33effeab5f78199 \
             -config /test/config/pebble-config.json -dnsserver challtestsrv:8053
           docker run -d --name challtestsrv --network detent-pebble \
             -p 8053:8053 -p 8053:8053/udp -p 8055:8055 \
-            ghcr.io/letsencrypt/pebble-challtestsrv:v2.10.1 \
+            ghcr.io/letsencrypt/pebble-challtestsrv@sha256:12ce21884def456bcf9786542113949e1f19dc7738d2c70e156c2d0c38a1405b \
             -defaultIPv4 "" -defaultIPv6 "" -dnsserver ":8053" \
             -http01 ":5002" -https01 ":5003" -tlsalpn01 ":5001" -management ":8055"
           docker cp pebble:/test/certs/pebble.minica.pem /tmp/detent-pebble/pebble.minica.pem
