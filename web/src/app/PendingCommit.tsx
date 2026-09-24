@@ -1,26 +1,13 @@
 /**
  * The pending-commit slot in the app shell.
- *
- * docs/API.md, "the commit-confirm flow": an `apply` on a module that can lock
- * an administrator out arms a window instead of finalizing, and if nobody
- * confirms before the deadline the privileged monitor rolls the change back on
- * its own. That window belongs to the *shell*, not to the page that started
- * it: the operator who applied a network change and then walked to the modules
- * list must still see the clock running.
- *
- * So the armed commit lives here, above the router, and any page that receives
- * a `PendingCommit` from an `apply` hands it over with `arm`. The banner
- * clears itself when the countdown reaches zero — the monitor has rolled the
- * change back by then, and a window that has closed is not pending.
- *
- * The confirm and roll-back controls are the next wave's; the requests they
- * will call already exist in `src/api/commits.ts`.
  */
 
 import { Localized, useLocalization } from '@fluent/react'
 import { createContext, type ReactNode, useCallback, useContext, useMemo, useState } from 'react'
-import type { PendingCommit } from '@/api/commits'
+import { type PendingCommit, useConfirmCommit } from '@/api/commits'
+import { useApiErrorMessage } from '@/api/query'
 import { Banner } from '@/components/Banner'
+import { Button } from '@/components/Button'
 import { Countdown } from '@/components/Countdown'
 
 export type PendingCommitContextValue = {
@@ -61,21 +48,18 @@ export function usePendingCommit(): PendingCommitContextValue {
 
 const SLOT_STYLE = { paddingTop: 12 } as const
 
-/**
- * Renders nothing until a commit is armed, so the shell can keep the slot
- * unconditionally.
- */
+/** Renders the pending state and its confirmation action in the shell. */
 export function PendingCommitSlot() {
   const { l10n } = useLocalization()
   const { pending, clear } = usePendingCommit()
+  const confirm = useConfirmCommit()
+  const errorMessage = useApiErrorMessage()
 
   if (pending === null) {
     return null
   }
 
   const deadline = Date.parse(pending.deadline)
-  // An unparseable deadline is not a reason to hide the fact that a change is
-  // pending; it is a reason not to show a clock counting from nowhere.
   const hasDeadline = !Number.isNaN(deadline)
 
   return (
@@ -83,18 +67,30 @@ export function PendingCommitSlot() {
       <Banner
         tone="amber"
         actions={
-          hasDeadline ? (
-            <Countdown
-              deadline={deadline}
-              onExpire={clear}
-              label={l10n.getString('pending-commit-countdown-label')}
-            />
-          ) : undefined
+          <>
+            {hasDeadline ? (
+              <Countdown
+                deadline={deadline}
+                onExpire={clear}
+                label={l10n.getString('pending-commit-countdown-label')}
+              />
+            ) : null}
+            <Button
+              variant="primary"
+              disabled={confirm.isPending}
+              onClick={() => confirm.mutate(pending.commit_id, { onSuccess: clear })}
+            >
+              {confirm.isPending
+                ? l10n.getString('pending-commit-confirming')
+                : l10n.getString('pending-commit-confirm')}
+            </Button>
+          </>
         }
       >
         <Localized id="pending-commit-message">
           <span>a configuration change is waiting to be confirmed.</span>
         </Localized>
+        {confirm.isError ? <div role="alert">{errorMessage(confirm.error)}</div> : null}
       </Banner>
     </div>
   )

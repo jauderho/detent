@@ -6,7 +6,8 @@
 //!   Authorization: Bearer ─────────────────────────────▶ pass (no ambient
 //!                                                        authority to abuse)
 //!   cookie session ─┬─ Sec-Fetch-Site: same-origin ─┐
-//!                   ├─ Origin == configured origin ─┼─ all three ─▶ pass
+//!                   ├─ Sec-Fetch-Site: same-site ───┼─ pass
+//!                   ├─ Origin == configured origin ─┤
 //!                   └─ X-Detent-CSRF == token ──────┘
 //!                                          any missing ──▶ 403
 //! ```
@@ -46,6 +47,8 @@ pub const SEC_FETCH_SITE: HeaderName = HeaderName::from_static("sec-fetch-site")
 
 /// The only `Sec-Fetch-Site` value a cookie-authenticated mutation may carry.
 pub const SAME_ORIGIN: &str = "same-origin";
+/// Same-site browser requests are accepted when `Origin` still names this host.
+pub const SAME_SITE: &str = "same-site";
 
 /// An origin, normalized for comparison.
 ///
@@ -125,15 +128,15 @@ impl Origin {
     /// The origin this host serves on, derived from `[tls] hostnames` and
     /// `[listen] addr`.
     ///
-    /// PLAN §2.10 has no `origin` key, so it is derived rather than
     /// configured: the first configured hostname if there is one — that is
     /// the name a certificate is issued for and therefore the name a browser
-    /// will use — and the listening address otherwise.
+    /// will use — and `localhost` for the default wildcard listener.
     #[must_use]
     pub fn for_config(config: &crate::config::Config) -> Self {
         let port = config.listen.addr.port();
         match config.tls.hostnames.first() {
             Some(host) => Self::https(host, port),
+            None if config.listen.addr.ip().is_unspecified() => Self::https("localhost", port),
             None => Self::https(&config.listen.addr.ip().to_string(), port),
         }
     }
@@ -242,10 +245,15 @@ pub fn verdict(state: &AppState, method: &Method, headers: &HeaderMap) -> Result
         return Ok(());
     };
 
-    // Absent is a refusal, not a pass; so is a repeated header (`sole_header`).
-    if sole_header(headers, &SEC_FETCH_SITE) != Some(SAME_ORIGIN) {
+    // The origin comparison below is the security boundary; accept the two
+    // browser labels for a request that names this exact host.
+    if !matches!(
+        sole_header(headers, &SEC_FETCH_SITE),
+        Some(SAME_ORIGIN | SAME_SITE)
+    ) {
         return Err(AuthError::CsrfRejected);
     }
+
     let origin =
         sole_header(headers, &axum::http::header::ORIGIN).ok_or(AuthError::CsrfRejected)?;
     if !state.origin.matches(origin) {
@@ -260,7 +268,8 @@ pub fn verdict(state: &AppState, method: &Method, headers: &HeaderMap) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::{CSRF_HEADER, Origin, SAME_ORIGIN, SEC_FETCH_SITE, csrf_guard};
+    use super::{CSRF_HEADER, Origin, SAME_ORIGIN, SAME_SITE, SEC_FETCH_SITE, csrf_guard};
+
     use crate::auth::routes;
     use crate::auth::session::{COOKIE_NAME, SessionStore};
     use crate::authz::Scopes;
@@ -353,6 +362,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn same_site_browser_mutation_passes() -> R {
+        let fixture = test_state()?;
+        let state = &fixture.state;
+        let (id, session) = state.auth.sessions.create(
+            "alice",
+            Scopes::read_write(),
+            false,
+            std::time::Instant::now(),
+        )?;
+        let mutation = Mutation {
+            site: Some(SAME_SITE),
+            ..Mutation::complete(id.expose(), session.csrf_token.expose())
+        };
+        let response = app(state).oneshot(mutation.build()?).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn each_missing_or_wrong_condition_is_a_refusal() -> R {
         let fixture = test_state()?;
         let state = &fixture.state;
@@ -366,7 +394,7 @@ mod tests {
         let wrong_token = "0".repeat(64);
         let complete = Mutation::complete(id.expose(), &token);
 
-        let cases: [(&str, Mutation<'_>); 10] = [
+        let cases: [(&str, Mutation<'_>); 9] = [
             (
                 "missing Sec-Fetch-Site",
                 Mutation {
@@ -378,13 +406,6 @@ mod tests {
                 "Sec-Fetch-Site: cross-site",
                 Mutation {
                     site: Some("cross-site"),
-                    ..complete
-                },
-            ),
-            (
-                "Sec-Fetch-Site: same-site",
-                Mutation {
-                    site: Some("same-site"),
                     ..complete
                 },
             ),
@@ -701,9 +722,10 @@ mod tests {
     #[test]
     fn the_origin_is_derived_from_the_configuration() -> R {
         let mut config = crate::config::Config::default();
-        // No hostname: the listening address, which for `0.0.0.0` is what an
-        // operator reaching it by IP will send.
-        assert_eq!(Origin::for_config(&config).as_str(), "https://0.0.0.0:3333");
+        assert_eq!(
+            Origin::for_config(&config).as_str(),
+            "https://localhost:3333"
+        );
 
         config.tls.hostnames = vec!["Box.Example".to_owned()];
         assert_eq!(
@@ -715,8 +737,11 @@ mod tests {
         assert_eq!(Origin::for_config(&config).as_str(), "https://box.example");
 
         config.tls.hostnames.clear();
-        config.listen.addr = "[::1]:8443".parse()?;
-        assert_eq!(Origin::for_config(&config).as_str(), "https://[::1]:8443");
+        config.listen.addr = "[::]:8443".parse()?;
+        assert_eq!(
+            Origin::for_config(&config).as_str(),
+            "https://localhost:8443"
+        );
         Ok(())
     }
 }

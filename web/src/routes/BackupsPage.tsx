@@ -13,8 +13,7 @@ import { Localized, useLocalization } from '@fluent/react'
 import { useState } from 'react'
 import type { BackupInfo } from '@/api/backups'
 import { useBackups, useRestoreBackup } from '@/api/backups'
-import type { ModuleDescriptor } from '@/api/modules'
-import { useModules } from '@/api/modules'
+import { useModule, useModules, type ModuleDescriptor } from '@/api/modules'
 import { useApiErrorMessage } from '@/api/query'
 import { useWriteGate } from '@/auth/ScopeGate'
 import { Banner, type BannerTone } from '@/components/Banner'
@@ -42,6 +41,7 @@ type ActionBanner = { tone: BannerTone; message: string }
 function BackupsPanel({ descriptor }: { descriptor: ModuleDescriptor }) {
   const { l10n } = useLocalization()
   const errorMessage = useApiErrorMessage()
+  const moduleQuery = useModule(descriptor.id)
   const backupsQuery = useBackups(descriptor.id)
   const gate = useWriteGate()
   const restore = useRestoreBackup(descriptor.id)
@@ -49,16 +49,18 @@ function BackupsPanel({ descriptor }: { descriptor: ModuleDescriptor }) {
   const [banner, setBanner] = useState<ActionBanner | null>(null)
 
   function confirmRestore(): void {
-    if (confirming === null) return
-    const backupId = confirming.id
-    restore.mutate(backupId, {
-      onSuccess: () => {
-        setBanner({ tone: 'blue', message: l10n.getString('backups-restored') })
+    if (confirming === null || moduleQuery.data?.current_hash == null) return
+    restore.mutate(
+      { backupId: confirming.id, expectedHash: moduleQuery.data.current_hash },
+      {
+        onSuccess: () => {
+          setBanner({ tone: 'blue', message: l10n.getString('backups-restored') })
+        },
+        onError: (error) => {
+          setBanner({ tone: 'amber', message: errorMessage(error) })
+        },
       },
-      onError: (error) => {
-        setBanner({ tone: 'amber', message: errorMessage(error) })
-      },
-    })
+    )
     setConfirming(null)
   }
 

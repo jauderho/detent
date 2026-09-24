@@ -143,7 +143,7 @@ pub struct ApplyRequest {
 /// # Errors
 ///
 /// A 400 [`ApiError`] when `hex` is not exactly [`HASH_HEX_LEN`] hex digits.
-fn parse_hash(hex: &str) -> Result<detent_platform::fs::atomic::Sha256Digest, ApiError> {
+pub(super) fn parse_hash(hex: &str) -> Result<detent_platform::fs::atomic::Sha256Digest, ApiError> {
     use std::str::FromStr as _;
     if hex.len() != HASH_HEX_LEN {
         return Err(bad_request());
@@ -172,7 +172,7 @@ pub(super) async fn list(
     caller: crate::auth::extract::Caller,
 ) -> Result<Json<Vec<&'static ModuleDescriptor>>, ApiError> {
     let op = Operation::ListModules;
-    authorize(&caller, &op)?;
+    authorize(&state, &caller, &op)?;
     let outcome = state.engine.execute(op, caller.identity().clone()).await?;
     render_modules(outcome)
 }
@@ -207,7 +207,7 @@ pub(super) async fn get_one(
         return Err(unknown_module(&id));
     }
     let op = Operation::GetModule { id: id.clone() };
-    authorize(&caller, &op)?;
+    authorize(&state, &caller, &op)?;
     let outcome = state.engine.execute(op, caller.identity().clone()).await?;
     let mut view = render_module(outcome)?.0;
     if !caller.scopes().allows(Scope::Write) {
@@ -236,7 +236,7 @@ fn redact_view(view: &mut ModuleView) {
         return;
     };
     for ptr in view.secret_pointers {
-        if let Some(target) = model.pointer_mut(*ptr) {
+        if let Some(target) = model.pointer_mut(ptr) {
             redact_pointer_target(target);
         }
     }
@@ -249,7 +249,8 @@ fn redact_pointer_target(value: &mut Value) {
             if s.contains("password=") {
                 *s = redact_password_substring(s);
             } else {
-                *s = "[redacted]".to_owned();
+                s.clear();
+                s.push_str("[redacted]");
             }
         }
         Value::Array(arr) => {
@@ -270,9 +271,10 @@ fn redact_password_substring(s: &str) -> String {
     let mut out = String::new();
     let mut rest = s;
     while let Some(idx) = rest.find("password=") {
-        out.push_str(&rest[..idx + 9]);
+        let end = idx.saturating_add(9);
+        out.push_str(&rest[..end]);
         out.push_str("[redacted]");
-        let tail = &rest[idx + 9..];
+        let tail = &rest[end..];
         let end = tail.find(',').unwrap_or(tail.len());
         rest = &tail[end..];
     }
@@ -308,7 +310,10 @@ fn redact_heuristic(value: &mut Value) {
 
 fn redact_inner(value: &mut Value) {
     match value {
-        Value::String(s) => *s = "[redacted]".to_owned(),
+        Value::String(s) => {
+            s.clear();
+            s.push_str("[redacted]");
+        }
         Value::Array(arr) => {
             for el in arr {
                 redact_inner(el);
@@ -351,7 +356,7 @@ pub(super) async fn validate(
         id,
         model: request.model,
     };
-    authorize(&caller, &op)?;
+    authorize(&state, &caller, &op)?;
     let outcome = state.engine.execute(op, caller.identity().clone()).await?;
     render_validated(outcome)
 }
@@ -393,7 +398,7 @@ pub(super) async fn plan(
         id,
         model: request.model,
     };
-    authorize(&caller, &op)?;
+    authorize(&state, &caller, &op)?;
     let outcome = state.engine.execute(op, caller.identity().clone()).await?;
     let Json(mut report) = render_planned(outcome)?;
     if !caller.scopes().allows(Scope::Write) {
@@ -449,7 +454,7 @@ pub(super) async fn apply(
         service_action: request.service_action.map(Into::into),
         confirm: request.confirm_secs.map(std::time::Duration::from_secs),
     };
-    authorize(caller.caller(), &op)?;
+    authorize(&state, caller.caller(), &op)?;
     let outcome = state
         .engine
         .execute(op, caller.caller().identity().clone())

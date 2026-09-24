@@ -85,7 +85,7 @@ pub(super) async fn status(
         return Err(unknown_module(&id));
     }
     let op = Operation::ServiceStatus { id };
-    authorize(&caller, &op)?;
+    authorize(&state, &caller, &op)?;
     let outcome = state.engine.execute(op, caller.identity().clone()).await?;
     render_status(outcome)
 }
@@ -127,7 +127,7 @@ pub(super) async fn action(
         id,
         action: request.action.into(),
     };
-    authorize(caller.caller(), &op)?;
+    authorize(&state, caller.caller(), &op)?;
     let outcome = state
         .engine
         .execute(op, caller.caller().identity().clone())

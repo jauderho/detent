@@ -238,7 +238,9 @@ pub fn spawn_pair(config: &SpawnConfig, sandbox: &dyn SandboxHooks) -> Result<Sp
         }
         Side::Child => {
             drop(monitor_end);
-            let dropped = become_worker(credentials, sandbox)?;
+            let Ok(dropped) = become_worker(credentials, sandbox) else {
+                abort_child(1);
+            };
             Ok(Spawned {
                 role: Role::Worker(Box::new(Client::new(worker_end))),
                 dropped_privileges: dropped,
@@ -407,6 +409,17 @@ mod tests {
         assert!(NoSandbox.confine_monitor().is_ok());
     }
 
+    #[test]
+    fn a_failed_worker_setup_exits_instead_of_returning() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let spawned = spawn_pair(&SpawnConfig::unprivileged(), &Refuses)?;
+        let Role::Monitor(handle) = spawned.role else {
+            return Err("failed child unexpectedly returned to its caller".into());
+        };
+        assert_eq!(handle.wait()?, Some(1));
+        Ok(())
+    }
+
     /// The real thing: fork, speak the protocol across the process boundary,
     /// and reap the child.
     #[test]
@@ -434,7 +447,8 @@ mod tests {
             }
             Role::Monitor(handle) => {
                 let mut handle = handle;
-                let allow = Allowlist::from_modules(&[], &Config::default())?;
+                let state = tempfile::tempdir()?;
+                let allow = Allowlist::from_modules(&[], &Config::with_state_root(state.path()))?;
                 let mut monitor = Monitor::new(allow, Hooks::default());
                 let reason = monitor.serve(&mut handle.channel);
                 assert_eq!(reason.ok(), Some(ExitReason::Shutdown));
@@ -492,7 +506,8 @@ mod tests {
             }
             Role::Monitor(handle) => {
                 let mut handle = handle;
-                let allow = Allowlist::from_modules(&[], &Config::default())?;
+                let state = tempfile::tempdir()?;
+                let allow = Allowlist::from_modules(&[], &Config::with_state_root(state.path()))?;
                 let mut monitor = Monitor::new(allow, Hooks::default());
                 let reason = monitor.serve(&mut handle.channel);
                 assert_eq!(reason.ok(), Some(ExitReason::Shutdown));

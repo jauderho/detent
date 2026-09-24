@@ -32,11 +32,11 @@ use std::time::Duration;
 
 use detent_core::descriptor::{ModuleDescriptor, ValidationCtx};
 use detent_core::module::{DynModule, ParseError};
-use detent_platform::fs::atomic::{Sha256Digest, WriteRequest, write_atomic};
+use detent_platform::fs::atomic::Sha256Digest;
 use detent_platform::host::Detected;
 use detent_platform::privsep::proto::{
-    BackupId, BindingId, CheckId, CommitId, ProtoError, ServiceAction as WireServiceAction,
-    TargetId,
+    BackupId, BindingId, CheckId, CommitId, PendingService, ProtoError,
+    ServiceAction as WireServiceAction, TargetId,
 };
 use detent_platform::privsep::worker::{Client, ClientError};
 use detent_platform::service::ServiceManager;
@@ -60,6 +60,7 @@ use crate::report::{
 struct Hashes {
     prev: Option<Sha256Digest>,
     new: Option<Sha256Digest>,
+    commit_id: Option<u32>,
 }
 
 /// Everything the monitor advertised about one module, resolved once so the
@@ -126,10 +127,10 @@ impl OpsEngine {
 
     /// Tell the engine where the monitor's state directory lives.
     ///
-    /// `UpdateApply` reads `<state_root>/update/staged/<hex sha256>` to
-    /// compute the `(len, sha256)` it sends to the monitor via
-    /// [`Client::replace_binary`]; without this set, the operation is
-    /// refused up front as `Unsupported`.
+    /// `UpdateApply` reads the release tag from
+    /// `<state_root>/update/staged/<tag>` to compute the `(len, sha256)` it
+    /// sends via [`Client::replace_binary`]; without this set, the operation
+    /// is refused up front as `Unsupported`.
     pub fn set_state_root(&mut self, state_root: impl Into<PathBuf>) {
         self.state_root = Some(state_root.into());
     }
@@ -160,7 +161,12 @@ impl OpsEngine {
     /// [`OpsError`] — see its variants; [`OpsError::Denied`] when the policy
     /// refused.
     pub fn execute(&mut self, op: Operation, who: &Identity) -> Result<OpOutcome, OpsError> {
-        let module = op.module().map(ToOwned::to_owned);
+        let module = op.module().and_then(|id| {
+            self.modules
+                .iter()
+                .find(|module| module.id() == id)
+                .map(|module| module.descriptor().id.to_owned())
+        });
         let kind = op.kind();
         let mutating = op.is_mutating();
         if let Err(denied) = self.authz.permit(who, &op) {
@@ -170,8 +176,8 @@ impl OpsEngine {
             let _ = self.emit(&record);
             return Err(OpsError::Denied(denied));
         }
-
-        if mutating {
+        let no_op = mutating && self.apply_is_noop(&op).unwrap_or(false);
+        if mutating && !no_op {
             let started = AuditRecord::new(who, kind, module.clone(), AuditResult::Started);
             if let Err(err) = self.emit(&started) {
                 return Err(OpsError::AuditUnavailable(err));
@@ -180,7 +186,7 @@ impl OpsEngine {
 
         let mut hashes = Hashes::default();
         let result = self.dispatch(op, &mut hashes);
-        if !mutating {
+        if !mutating || no_op {
             return result;
         }
 
@@ -190,6 +196,9 @@ impl OpsEngine {
         };
         let mut record =
             AuditRecord::new(who, kind, module, outcome).with_hashes(hashes.prev, hashes.new);
+        if let Some(commit_id) = hashes.commit_id {
+            record = record.with_commit_id(commit_id);
+        }
         if let Err(err) = &result {
             record = record.with_error(err.message_id());
         }
@@ -248,10 +257,12 @@ impl OpsEngine {
                 .apply(&id, &model, expected_hash, service_action, confirm, hashes)
                 .map(|report| OpOutcome::Applied(Box::new(report))),
             Operation::ConfirmCommit { commit_id } => {
+                hashes.commit_id = Some(commit_id.get());
                 let commit = self.client.confirm_commit(commit_id).map_err(map_client)?;
                 Ok(OpOutcome::CommitConfirmed { commit_id: commit })
             }
             Operation::RollbackCommit { commit_id } => {
+                hashes.commit_id = Some(commit_id.get());
                 let (commit, restored) =
                     self.client.rollback_commit(commit_id).map_err(map_client)?;
                 Ok(OpOutcome::RolledBack {
@@ -264,7 +275,11 @@ impl OpsEngine {
                 let backups = self.client.list_backups(module).map_err(map_client)?;
                 Ok(OpOutcome::Backups(backups))
             }
-            Operation::Restore { id, backup_id } => self.restore(&id, backup_id, hashes),
+            Operation::Restore {
+                id,
+                backup_id,
+                expected_hash,
+            } => self.restore(&id, backup_id, expected_hash, hashes),
             Operation::ServiceStatus { id } => self.service_status(&id),
             Operation::ServiceAction { id, action } => self.service_action(&id, action),
             Operation::HostProfile => Ok(OpOutcome::Host(Box::new(HostReport::from(&self.host)))),
@@ -329,47 +344,23 @@ impl OpsEngine {
         })))
     }
 
-    /// Walk the staged-path layout the verifier writes and ask the monitor to
-    /// swap the file at `<state_root>/update/staged/<hex sha256>` over the
-    /// running binary. The verifier has already done the SHA-256 and
-    /// signature checks; the engine only re-hashes the bytes the monitor
-    /// will see and forwards `(len, sha256)` so the monitor can refuse any
-    /// mismatch independently.
-    ///
-    /// Fail-closed until a privileged staged-producer lands: the monitor
-    /// only swaps files owned by its own euid, but this engine runs
-    /// worker-side, so the digest file materialised below is worker-owned.
-    /// A privileged monitor therefore refuses the web `UpdateApply` path
-    /// until staging moves root-side; unprivileged dev/test monitors (same
-    /// euid on both sides) still swap.
-    ///
-    /// The path used here must match the monitor's [`staged_path`] helper.
-    /// The `version` argument is the release tag (e.g. `v1.2.3`); the file
-    /// the verifier staged under that tag is read, its digest computed, and
-    /// the bytes are materialised at the digest-named path the monitor
-    /// expects. This bridges the tag-based API and the content-addressed
-    /// staging layout without changing the API shape; tests that pass the
-    /// digest hex as `version` still work because the same bytes end up at
-    /// the digest path either way.
+    /// Ask the monitor to bridge the tag-named staged release into the
+    /// digest-named path, authenticate it, and swap it over the running binary.
+    /// The worker only hashes the bytes it asks the monitor to install; the
+    /// monitor owns materialization and performs the authenticity gate.
     fn update_apply(&mut self, version: &str) -> Result<(), OpsError> {
         let Some(state_root) = self.state_root.as_ref() else {
             return Err(OpsError::Unsupported {
                 what: "update_apply",
             });
         };
-        // `version` comes from the API caller (`POST /api/v1/system/update`
-        // `{"version": ...}`), so it must never reach `Path::join` raw: a
-        // body like `../../etc/shadow` would make this (root, unconfined)
-        // process read an arbitrary file. Only a release tag or a hex
-        // digest is ever valid here.
         if !is_staged_name(version) {
             tracing::warn!("staged version refused");
             return Err(OpsError::Unsupported {
                 what: "update_apply",
             });
         }
-        let staged_dir = state_root.join("update").join("staged");
-        let tag_path = staged_dir.join(version);
+        let tag_path = state_root.join("update").join("staged").join(version);
         let bytes = std::fs::read(&tag_path).map_err(|err| {
             tracing::warn!(path = %tag_path.display(), error = %err, "staged binary missing");
             OpsError::Unsupported {
@@ -378,27 +369,8 @@ impl OpsEngine {
         })?;
         let len = bytes.len() as u64;
         let sha256 = Sha256Digest::of(&bytes);
-        // Materialise the digest-named file the monitor's `staged_path` will
-        // look up. If the caller already passed a digest hex as `version`,
-        // `tag_path == digest_path` and there is nothing to do. Otherwise
-        // copy the tag-named staging file into the content-addressed
-        // location — atomically (temp + rename), so a crash never leaves a
-        // partial file behind that a later run would read as corrupt.
-        let digest_path = staged_dir.join(sha256.to_string());
-        if tag_path != digest_path {
-            let _ = std::fs::create_dir_all(&staged_dir);
-            let mut req = WriteRequest::new(&digest_path, &bytes, &staged_dir);
-            // No optimistic-concurrency gate: a leftover digest file from a
-            // crashed earlier run is legitimate content to overwrite, and the
-            // monitor re-reads + re-hashes before swapping anyway.
-            req.expected_prev = None;
-            req.keep_backups = 0;
-            write_atomic(&req).map_err(|_| OpsError::Unsupported {
-                what: "update_apply",
-            })?;
-        }
         self.client
-            .replace_binary(len, sha256)
+            .replace_binary(version, len, sha256)
             .map_err(map_client)?;
         Ok(())
     }
@@ -410,9 +382,14 @@ impl OpsEngine {
         let current = decode(&contents.bytes, &wiring.path)?;
 
         let module = find_module(&self.modules, id)?;
-        let rendered = module.apply_json(&current, model)?;
         let ctx = ValidationCtx::new(&self.host.profile);
         let diagnostics = module.validate_json(model, &ctx)?;
+        if diagnostics.has_errors() {
+            return Err(OpsError::Invalid {
+                diagnostics: Box::new(diagnostics),
+            });
+        }
+        let rendered = module.apply_json(&current, model)?;
 
         let hunks = diff(&current, &rendered, DEFAULT_CONTEXT);
         let unified_diff = render_unified(&wiring.path, &wiring.path, &hunks);
@@ -470,7 +447,40 @@ impl OpsEngine {
             .ok_or_else(|| OpsError::NoService {
                 module: descriptor.id.to_owned(),
             })?;
+
         Ok(OpOutcome::Status(self.services.status(&binding.units)?))
+    }
+
+    fn apply_is_noop(&mut self, op: &Operation) -> Result<bool, OpsError> {
+        let Operation::Apply {
+            id,
+            model,
+            expected_hash,
+            service_action,
+            ..
+        } = op
+        else {
+            return Ok(false);
+        };
+        let descriptor = find_module(&self.modules, id)?.descriptor();
+        let ctx = ValidationCtx::new(&self.host.profile);
+        if find_module(&self.modules, id)?
+            .validate_json(model, &ctx)?
+            .has_errors()
+        {
+            return Ok(false);
+        }
+        let wiring = wiring(&self.client, descriptor, &self.host.profile)?;
+        if service_action.is_some() && wiring.binding.is_none() {
+            return Ok(false);
+        }
+        let contents = self.client.read_target(wiring.target).map_err(map_client)?;
+        if expected_hash.is_some_and(|expected| expected != contents.digest) {
+            return Ok(false);
+        }
+        let current = decode(&contents.bytes, &wiring.path)?;
+        let rendered = find_module(&self.modules, id)?.apply_json(&current, model)?;
+        Ok(current == rendered)
     }
 
     // -- mutating operations -------------------------------------------------
@@ -517,31 +527,60 @@ impl OpsEngine {
             });
         }
 
-        // 4. Render and write.
+        // 4. Render, then run every declared external validator against the
+        // exact bytes that would be written. Apply fails closed on refusal or
+        // validator execution failure; no target or service is touched.
         let current = decode(&contents.bytes, &wiring.path)?;
         let rendered = find_module(&self.modules, id)?.apply_json(&current, model)?;
+        if current == rendered {
+            return Ok(ApplyReport {
+                module: descriptor.id.to_owned(),
+                path: wiring.path,
+                prev_hash: Some(contents.digest),
+                new_hash: contents.digest,
+                created: false,
+                backed_up: false,
+                service: None,
+                commit: None,
+            });
+        }
+        let checks = self.run_checks(&wiring, rendered.as_bytes());
+        if let Some(report) = checks.iter().find(|report| !report.ran || !report.passed) {
+            return Err(OpsError::CheckFailed {
+                program: report.program.clone(),
+                detail: report.detail.clone(),
+            });
+        }
         let receipt = self
             .client
             .write_target(wiring.target, Some(contents.digest), rendered.into_bytes())
             .map_err(map_client)?;
         hashes.prev = receipt.prev_digest;
         hashes.new = Some(receipt.new_digest);
+        let pending_service = match (service_action, wiring.binding.as_ref()) {
+            (Some(action), Some(&(binding, _))) => Some(PendingService {
+                binding,
+                action: action.to_wire(),
+            }),
+            _ => None,
+        };
 
-        // 5. Act on the service. Step 2 established that a binding exists
+        // 5. Arm commit-confirm immediately after the successful write and
+        //    before touching the service. A timer without a backup could not
+        //    restore the target, so no rollback window is advertised.
+        let commit = if receipt.backed_up && (descriptor.commit_confirm || confirm.is_some()) {
+            Some(self.arm_commit(confirm, pending_service)?)
+        } else {
+            None
+        };
+
+        // 6. Act on the service. Step 2 established that a binding exists
         //    whenever an action was asked for.
         let service = match (service_action, wiring.binding.as_ref()) {
             (Some(action), Some(&(binding, ref affected))) => {
                 Some(self.act(binding, &affected.unit, action)?)
             }
             _ => None,
-        };
-
-        // 6. Arm commit-confirm. The descriptor decides; an explicit `confirm`
-        //    additionally opts a module in, which is never less safe.
-        let commit = if descriptor.commit_confirm || confirm.is_some() {
-            Some(self.arm_commit(confirm)?)
-        } else {
-            None
         };
 
         Ok(ApplyReport {
@@ -557,14 +596,18 @@ impl OpsEngine {
     }
 
     /// Start the monitor's commit-confirm timer and describe the window.
-    fn arm_commit(&mut self, confirm: Option<Duration>) -> Result<PendingCommit, OpsError> {
+    fn arm_commit(
+        &mut self,
+        confirm: Option<Duration>,
+        service: Option<PendingService>,
+    ) -> Result<PendingCommit, OpsError> {
         let commit_id = CommitId(self.next_commit);
         self.next_commit = self.next_commit.saturating_add(1);
         let requested =
             u16::try_from(confirm.unwrap_or(DEFAULT_CONFIRM).as_secs()).unwrap_or(u16::MAX);
         let (timeout_s, rollback_targets) = self
             .client
-            .start_confirm_timer(commit_id, requested)
+            .start_confirm_timer(commit_id, requested, service)
             .map_err(map_client)?;
         Ok(PendingCommit {
             commit_id,
@@ -578,9 +621,22 @@ impl OpsEngine {
         &mut self,
         id: &str,
         backup_id: BackupId,
+        expected_hash: Option<Sha256Digest>,
         hashes: &mut Hashes,
     ) -> Result<OpOutcome, OpsError> {
         let module = module_id(&self.client, find_module(&self.modules, id)?)?;
+        let descriptor = find_module(&self.modules, id)?.descriptor();
+        let wiring = wiring(&self.client, descriptor, &self.host.profile)?;
+        let contents = self.client.read_target(wiring.target).map_err(map_client)?;
+        hashes.prev = Some(contents.digest);
+        if let Some(expected) = expected_hash
+            && expected != contents.digest
+        {
+            return Err(OpsError::HashConflict {
+                expected,
+                actual: Some(contents.digest),
+            });
+        }
         let (target, new_hash) = self.client.restore(module, backup_id).map_err(map_client)?;
         hashes.new = Some(new_hash);
         Ok(OpOutcome::Restored { target, new_hash })

@@ -42,9 +42,11 @@ export function restoreBackup(
   client: ApiClient,
   moduleId: string,
   backupId: number,
+  expectedHash: string,
 ): Promise<ApiResult<RestoredView>> {
   return client.post('/api/v1/modules/{id}/backups/{backup_id}/restore', {
     path: { id: moduleId, backup_id: backupId },
+    body: { expected_hash: expectedHash },
   })
 }
 
@@ -60,11 +62,12 @@ export function useBackups(moduleId: string): UseQueryResult<BackupInfo[], ApiRe
 
 export function useRestoreBackup(
   moduleId: string,
-): UseMutationResult<RestoredView, ApiRequestError, number> {
+): UseMutationResult<RestoredView, ApiRequestError, { backupId: number; expectedHash: string }> {
   const client = useApiClient()
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (backupId: number) => unwrap(restoreBackup(client, moduleId, backupId)),
+    mutationFn: ({ backupId, expectedHash }: { backupId: number; expectedHash: string }) =>
+      unwrap(restoreBackup(client, moduleId, backupId, expectedHash)),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: backupsQueryKey(moduleId) })
       void queryClient.invalidateQueries({ queryKey: moduleQueryKey(moduleId) })

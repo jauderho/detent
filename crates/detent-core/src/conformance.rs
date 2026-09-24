@@ -67,15 +67,20 @@ pub fn adversarial_inputs() -> &'static [&'static str] {
 /// Deterministic pseudo-random text of at least `len` bytes, built from a fixed
 /// linear congruential generator so a failure always reproduces.
 ///
-/// The alphabet mixes delimiters, terminators, NUL and multi-byte characters, and
-/// deliberately excludes `!` so it cannot collide with a test module's marker syntax.
+/// The alphabet mixes delimiters, terminators, NUL, non-ASCII text, and
+/// newline-heavy text. The last two entries ensure generated source is
+/// genuinely multi-line rather than relying on proptest's random choice of `\n`.
 #[must_use]
 pub fn pseudo_random_input(len: usize, seed: u64) -> String {
     const ALPHABET: [char; 16] = [
         'a', 'Z', '0', ' ', '\t', '#', '=', ':', '"', '\\', '/', '\n', '\r', '\0', 'é', '日',
     ];
+    const MULTILINE: &str = "first line\nsecond line\nthird line\n";
     let mut state = seed;
-    let mut out = String::with_capacity(len.saturating_add(4));
+    let mut out = String::with_capacity(len.saturating_add(MULTILINE.len()));
+    if len > 0 {
+        out.push_str(MULTILINE);
+    }
     while out.len() < len {
         state = state
             .wrapping_mul(6_364_136_223_846_793_005)
@@ -204,6 +209,32 @@ pub fn check_injection_rejected<M: ConfigModule>(
         "{}: apply accepted an injection probe: {probe:?}",
         M::ID
     ))
+}
+
+/// Add an embedded newline to the first string in a serialized model.
+///
+/// Returns `None` for models with no string field. The conformance macro uses
+/// this to exercise invariant 5 with generated models rather than only fixed
+/// hand-written probes.
+#[must_use]
+pub fn with_embedded_newline<M: ConfigModule>(model: &M::Model) -> Option<M::Model> {
+    fn inject(value: &mut serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::String(text) => {
+                text.push_str("\nsecond line");
+                true
+            }
+            serde_json::Value::Array(items) => items.iter_mut().any(inject),
+            serde_json::Value::Object(fields) => fields.values_mut().any(inject),
+            _ => false,
+        }
+    }
+
+    let mut value = serde_json::to_value(model).ok()?;
+    if !inject(&mut value) {
+        return None;
+    }
+    serde_json::from_value(value).ok()
 }
 
 /// Invariant 6: `parse` handles 1 MiB of adversarial input without hanging or
@@ -351,6 +382,8 @@ macro_rules! module_conformance {
                 assert_eq!(r, Ok(()));
             }
 
+
+
             ::proptest::proptest! {
                 #[test]
                 fn invariant_1_render_parse_roundtrip_prop(src in ".*") {
@@ -375,6 +408,19 @@ macro_rules! module_conformance {
                     let r = $crate::conformance::check_idempotent::<$module>(&src, &model);
                     ::proptest::prop_assert!(r.is_ok());
                 }
+
+                #[test]
+                fn generated_models_cover_embedded_newlines(model in $strategy) {
+                    let Some(probe) = $crate::conformance::with_embedded_newline::<$module>(&model) else {
+                        return Err(::proptest::test_runner::TestCaseError::reject(
+                            "model has no string field",
+                        ));
+                    };
+                    for case in conformance_cases() {
+                        let result = $crate::conformance::check_injection_rejected::<$module>(case, &probe);
+                        ::proptest::prop_assert!(result.is_ok());
+                    }
+                }
             }
         }
     };
@@ -391,6 +437,7 @@ mod tests {
         assert!(cases.iter().any(|s| s.contains('\0')));
         assert!(cases.iter().any(|s| s.contains("\r\n")));
         assert!(cases.iter().any(|s| !s.ends_with('\n') && !s.is_empty()));
+        assert!(cases.iter().any(|s| s.matches('\n').count() >= 2));
     }
 
     #[test]
@@ -402,5 +449,6 @@ mod tests {
         assert!(!a.contains('!'));
         assert!(a.contains('\n'));
         assert_eq!(pseudo_random_input(0, 1), "");
+        assert!(a.matches('\n').count() >= 2);
     }
 }

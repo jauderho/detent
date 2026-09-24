@@ -10,11 +10,73 @@
 //! [`wait_ready`], and [`finalize`] through their retry loops.
 
 use crate::{AcmeError, DnsProvider, DnsRecord};
+use hyper::body::Bytes;
+use hyper_rustls::HttpsConnector;
+use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::TokioExecutor;
 use instant_acme::{
-    Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier, NewAccount,
-    NewOrder, Order, OrderStatus, RetryPolicy,
+    Account, AccountBuilder, AccountCredentials, AuthorizationStatus, BodyWrapper, BytesResponse,
+    ChallengeType, HttpClient, Identifier, NewAccount, NewOrder, Order, OrderStatus, RetryPolicy,
 };
+use rustls_pki_types::{CertificateDer, pem::PemObject as _};
 use std::path::Path;
+use std::pin::Pin;
+
+type AcmeHttpClient = Client<HttpsConnector<HttpConnector>, BodyWrapper<Bytes>>;
+
+struct Tls13HttpClient(AcmeHttpClient);
+
+impl HttpClient for Tls13HttpClient {
+    fn request(
+        &self,
+        request: hyper::Request<BodyWrapper<Bytes>>,
+    ) -> Pin<Box<dyn Future<Output = Result<BytesResponse, instant_acme::Error>> + Send>> {
+        let future = self.0.request(request);
+        Box::pin(async move {
+            future
+                .await
+                .map(BytesResponse::from)
+                .map_err(|err| instant_acme::Error::Other(Box::new(err)))
+        })
+    }
+}
+
+fn account_builder(ca_root: Option<&Path>) -> Result<AccountBuilder, AcmeError> {
+    let mut roots = rustls::RootCertStore::empty();
+    match ca_root {
+        Some(path) => {
+            let pem = std::fs::read(path)?;
+            for cert in CertificateDer::pem_slice_iter(&pem) {
+                roots
+                    .add(
+                        cert.map_err(|err| {
+                            AcmeError::Config(format!("invalid ACME CA root: {err}"))
+                        })?,
+                    )
+                    .map_err(|err| AcmeError::Config(format!("invalid ACME CA root: {err}")))?;
+            }
+        }
+        None => roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
+    }
+    let versions = &[&rustls::version::TLS13];
+    let config = rustls::ClientConfig::builder_with_provider(
+        rustls::crypto::aws_lc_rs::default_provider().into(),
+    )
+    .with_protocol_versions(versions)
+    .map_err(|err| AcmeError::Config(format!("TLS 1.3 client: {err}")))?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let https = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_tls_config(config)
+        .https_only()
+        .enable_http1()
+        .build();
+    let client = Client::builder(TokioExecutor::new()).build(https);
+    Ok(Account::builder_with_http(Box::new(Tls13HttpClient(
+        client,
+    ))))
+}
 
 /// Runs the dns-01 challenge presentation step of an order.
 ///
@@ -151,12 +213,21 @@ pub async fn wait_ready(order: &mut Order, policy: &RetryPolicy) -> Result<Order
 /// Named rather than a `(String, String)`: both halves are PEM, so a tuple
 /// lets `let (key, chain) = finalize(..)` compile and write the private key
 /// to the certificate's path. The field names make that a type error.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Issued {
     /// The certificate chain, leaf first, then intermediates.
     pub chain_pem: String,
     /// The PKCS#8 private key for the leaf.
     pub key_pem: String,
+}
+
+impl std::fmt::Debug for Issued {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Issued")
+            .field("chain_pem", &self.chain_pem)
+            .field("key_pem", &"[redacted]")
+            .finish()
+    }
 }
 
 /// Finalizes a `ready` order and returns the certificate and its key.
@@ -411,10 +482,7 @@ async fn load_or_create_account(
         None => eab.map(eab_key).transpose()?,
     };
 
-    let builder = match ca_root {
-        Some(pem) => Account::builder_with_root(pem).map_err(AcmeError::from)?,
-        None => Account::builder().map_err(AcmeError::from)?,
-    };
+    let builder = account_builder(ca_root)?;
 
     if let Some(json) = cached {
         let credentials = parse_credentials(&json)?;
@@ -537,6 +605,17 @@ pub fn fuzz_acme_json(data: &[u8]) {
 mod tests {
     use super::*;
     use instant_acme::{AuthorizationState, ChallengeStatus, OrderState, OrderStatus, Problem};
+
+    #[test]
+    fn issued_debug_redacts_private_key() {
+        let issued = Issued {
+            chain_pem: "certificate".to_owned(),
+            key_pem: "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----".to_owned(),
+        };
+        let dump = format!("{issued:?}");
+        assert!(!dump.contains("PRIVATE KEY"));
+        assert!(dump.contains("[redacted]"));
+    }
 
     // Recorded instant-acme fixtures: RFC 8555 order/authorization JSON as
     // Pebble serves it, trimmed to the fields the driver reads. No network.

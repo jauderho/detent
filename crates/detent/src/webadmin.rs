@@ -25,7 +25,7 @@
 //!   exactly once, because [`TokenStore`] keeps only its digest.
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead as _, BufReader, Read, Write as _};
+use std::io::{Read, Write as _};
 
 use detent_core::diag::MessageId;
 use detent_web::auth::{AuthError, Hasher, TokenStore, UserStore};
@@ -319,7 +319,20 @@ fn token_create(
     }
 
     let scope = if write { Scope::Write } else { Scope::Read };
-    let expires_at = expires_secs.and_then(|secs| now_unix().checked_add(secs));
+    let expires_at = match expires_secs {
+        None => None,
+        Some(secs) => {
+            let Some(expires_at) = now_unix().checked_add(secs) else {
+                renderer.line(
+                    streams.notes,
+                    MessageId::new("cli-credential-failed"),
+                    &[("reason", "expires-secs is too large")],
+                )?;
+                return Ok(Exit::Usage);
+            };
+            Some(expires_at)
+        }
+    };
     let (secret, view) = match store.issue(label, scope, expires_at) {
         Ok(minted) => minted,
         Err(err) => return credential_failed(&err, renderer, streams),
@@ -545,15 +558,22 @@ fn read_password(
         return read_password_line(input);
     };
     let guard = EchoGuard::new(&tty).map_err(|err| io_usage_error(&err))?;
-    let first = Zeroizing::new(
-        prompt_tty(&tty, messages, MessageId::new("cli-password-prompt"))
-            .map_err(|err| io_usage_error(&err))?,
-    );
+    let mut reader = tty.try_clone().map_err(|err| io_usage_error(&err))?;
+    let first = prompt_tty(
+        &tty,
+        &mut reader,
+        messages,
+        MessageId::new("cli-password-prompt"),
+    )
+    .map_err(|err| io_usage_error(&err))?;
     let matched = if confirm {
-        let second = Zeroizing::new(
-            prompt_tty(&tty, messages, MessageId::new("cli-password-confirm"))
-                .map_err(|err| io_usage_error(&err))?,
-        );
+        let second = prompt_tty(
+            &tty,
+            &mut reader,
+            messages,
+            MessageId::new("cli-password-confirm"),
+        )
+        .map_err(|err| io_usage_error(&err))?;
         *first == *second
     } else {
         true
@@ -609,26 +629,50 @@ impl Drop for EchoGuard<'_> {
 
 /// Writes `prompt`, reads one line with echo off, and moves the cursor to the
 /// next line (the newline the caller typed was consumed, not echoed).
-fn prompt_tty(tty: &File, messages: &Messages, prompt: MessageId) -> std::io::Result<String> {
-    let mut writer = tty;
-    write!(writer, "{}", messages.get(prompt))?;
-    writer.flush()?;
-    let mut reader = BufReader::new(tty);
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-    let mut writer = tty;
-    writeln!(writer)?;
-    Ok(trim_newline(line))
+fn prompt_tty(
+    mut tty: &File,
+    input: &mut dyn Read,
+    messages: &Messages,
+    prompt: MessageId,
+) -> std::io::Result<Zeroizing<String>> {
+    write!(tty, "{}", messages.get(prompt))?;
+    tty.flush()?;
+    let password = read_secret_line(input)?;
+    writeln!(tty)?;
+    Ok(password)
 }
 
 /// One line from `input`, for the no-controlling-terminal path.
 fn read_password_line(input: &mut dyn Read) -> Result<Zeroizing<String>, UsageError> {
-    let mut reader = BufReader::new(input);
-    let mut line = Zeroizing::new(String::new());
-    reader
-        .read_line(&mut line)
-        .map_err(|err| io_usage_error(&err))?;
-    check_nonempty(Zeroizing::new(trim_newline((*line).clone())))
+    check_nonempty(read_secret_line(input).map_err(|err| io_usage_error(&err))?)
+}
+
+/// Reads through the newline without leaving a `BufReader` copy of the
+/// password in the allocator.
+fn read_secret_line(reader: &mut dyn Read) -> std::io::Result<Zeroizing<String>> {
+    let mut bytes = Zeroizing::new(Vec::new());
+    let mut chunk = Zeroizing::new([0_u8; 256]);
+    loop {
+        let read = reader.read(&mut chunk[..])?;
+        if read == 0 {
+            break;
+        }
+        let newline = chunk.iter().take(read).position(|byte| *byte == b'\n');
+        let end = newline.map_or(read, |index| index.saturating_add(1));
+        bytes.extend(chunk.iter().take(end));
+        if newline.is_some() {
+            break;
+        }
+    }
+    let line = std::str::from_utf8(&bytes)
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "password is not valid UTF-8",
+            )
+        })?
+        .to_owned();
+    Ok(Zeroizing::new(trim_newline(line)))
 }
 
 /// Strips a trailing `\n` and, if present, the `\r` before it.
@@ -717,6 +761,17 @@ mod tests {
         let mut input = b"hunter2\n".as_slice();
         let password = read_password(&messages, &mut input, true).map_err(|err| err.detail)?;
         assert_eq!(*password, "hunter2");
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_utf8_password_bytes_are_refused() -> R {
+        let mut input = b"\xff\n".as_slice();
+        let err = read_password_line(&mut input)
+            .err()
+            .ok_or("invalid UTF-8 must be refused")?;
+        assert_eq!(err.id, MessageId::new("cli-bad-stdin"));
+        assert!(err.detail.contains("not valid UTF-8"), "{err:?}");
         Ok(())
     }
 
@@ -1053,9 +1108,9 @@ mod tests {
         )?;
         assert_eq!(exit, Exit::Ok, "{}", String::from_utf8_lossy(&notes));
         let out = String::from_utf8(out)?;
-        assert!(
-            out.contains("cli-token-no-tokens") || !out.is_empty(),
-            "{out}"
+        assert_eq!(
+            out.trim(),
+            messages.get(MessageId::new("cli-token-no-tokens"))
         );
         Ok(())
     }
@@ -1128,6 +1183,38 @@ mod tests {
         let listed = TokenStore::load(&settings.state_root)?.list();
         assert_eq!(listed.len(), 1);
         assert!(listed.first().is_some_and(|view| view.expires_at.is_some()));
+        Ok(())
+    }
+
+    #[test]
+    fn token_create_rejects_expiry_overflow_without_writing() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let settings = settings(dir.path());
+        let messages = messages();
+        let renderer = renderer(&messages, false);
+        let mut input = std::io::empty();
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = token(
+            &TokenAction::Create {
+                label: "overflow".to_owned(),
+                write: true,
+                expires_secs: Some(i64::MAX),
+            },
+            false,
+            &settings,
+            &renderer,
+            &mut Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+
+        assert_eq!(exit, Exit::Usage);
+        assert!(out.is_empty());
+        assert!(String::from_utf8(notes)?.contains("expires-secs is too large"));
+        assert!(TokenStore::load(&settings.state_root)?.list().is_empty());
         Ok(())
     }
 

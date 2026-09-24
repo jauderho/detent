@@ -20,7 +20,7 @@
 //!   actually got. Off Linux, `sandbox::confine` is a documented no-op, so it is
 //!   called and its own reporting types are rendered — which say `linux only`.
 
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::Path;
 
 use detent_core::diag::MessageId;
@@ -159,21 +159,26 @@ pub fn report(
 /// Which modules this build was compiled with (PLAN §2.2).
 fn modules_check(descriptors: &[&'static detent_core::descriptor::ModuleDescriptor]) -> Check {
     let ids: Vec<&str> = descriptors.iter().map(|entry| entry.id).collect();
-    let status = if ids.is_empty() {
-        Status::Warn
-    } else {
-        Status::Ok
-    };
-    Check::new("modules", status, ids.join(" "))
+    if ids.is_empty() {
+        return Check::new("modules", Status::Warn, "none");
+    }
+    Check::new("modules", Status::Ok, ids.join(" "))
 }
 
-/// The state directory: present, a directory, and not writable by anyone else
-/// (PLAN §2.10 makes it `0700`).
+/// The state directory: present, a directory, safely owned, and not writable
+/// by anyone else (PLAN §2.10 makes it `0700`).
 fn directory_check(path: &Path) -> Check {
     let detail = path.display().to_string();
-    let Ok(meta) = std::fs::metadata(path) else {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
         return Check::new("state-root", Status::Warn, format!("{detail} (absent)"));
     };
+    if meta.file_type().is_symlink() {
+        return Check::new(
+            "state-root",
+            Status::Fail,
+            format!("{detail} (symbolic link)"),
+        );
+    }
     if !meta.is_dir() {
         return Check::new(
             "state-root",
@@ -181,23 +186,31 @@ fn directory_check(path: &Path) -> Check {
             format!("{detail} (not a directory)"),
         );
     }
-    let mode = meta.permissions().mode() & 0o7777;
-    let detail = format!("{detail} ({mode:04o})");
-    Check::new("state-root", mode_status(mode), detail)
+    owned_mode_check("state-root", &detail, &meta)
 }
 
-/// The configuration file: absent is fine, group-writable is not.
+/// The configuration file: absent is fine, a symlink or foreign owner is not.
 fn config_check(path: &Path) -> Check {
     let detail = path.display().to_string();
-    let Ok(meta) = std::fs::metadata(path) else {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
         return Check::new("config", Status::Warn, format!("{detail} (absent)"));
     };
+    if meta.file_type().is_symlink() {
+        return Check::new("config", Status::Fail, format!("{detail} (symbolic link)"));
+    }
+    owned_mode_check("config", &detail, &meta)
+}
+
+fn owned_mode_check(name: &'static str, path: &str, meta: &std::fs::Metadata) -> Check {
+    let euid = rustix::process::geteuid().as_raw();
     let mode = meta.permissions().mode() & 0o7777;
-    Check::new(
-        "config",
-        mode_status(mode),
-        format!("{detail} ({mode:04o})"),
-    )
+    let uid = meta.uid();
+    let status = if uid != 0 && uid != euid {
+        Status::Fail
+    } else {
+        mode_status(mode)
+    };
+    Check::new(name, status, format!("{path} (uid {uid}, {mode:04o})"))
 }
 
 /// Fail on write access for group or other, warn on read access, otherwise ok.
@@ -462,7 +475,9 @@ mod tests {
             (0o666, Status::Fail),
         ] {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))?;
-            assert_eq!(config_check(&path).status, expected, "{mode:o}");
+            let check = config_check(&path);
+            assert_eq!(check.status, expected, "{mode:o}: {check:?}");
+            assert!(check.detail.contains(&format!("{mode:04o}")), "{check:?}");
         }
         assert_eq!(
             config_check(&dir.path().join("absent.toml")).status,
@@ -472,14 +487,33 @@ mod tests {
     }
 
     #[test]
+    fn doctor_refuses_symlink_targets() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let target = dir.path().join("target");
+        std::fs::write(&target, b"x")?;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))?;
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link)?;
+
+        let config = config_check(&link);
+        assert_eq!(config.status, Status::Fail);
+        assert!(config.detail.contains("symbolic link"), "{config:?}");
+
+        let state = directory_check(&link);
+        assert_eq!(state.status, Status::Fail);
+        assert!(state.detail.contains("symbolic link"), "{state:?}");
+        Ok(())
+    }
+
+    #[test]
     fn mode_status_classifies_every_band() {
         assert_eq!(mode_status(0o700), Status::Ok);
         assert_eq!(mode_status(0o750), Status::Warn);
         assert_eq!(mode_status(0o770), Status::Fail);
-        assert_eq!(Status::Ok, Status::Ok);
         // PLAN §2.2: a build with no modules compiled in warns, not passes.
         let empty = modules_check(&[]);
         assert_eq!(empty.status, Status::Warn);
+        assert_eq!(empty.detail, "none");
     }
 
     #[test]

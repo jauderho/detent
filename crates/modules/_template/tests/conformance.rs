@@ -17,7 +17,7 @@
 //! the module author, chose its formatting.
 
 use detent_core::module::ConfigModule;
-use detent_module_TEMPLATE::{Model, Setting, TemplateModule};
+use detent_module_template::{Model, Setting, TemplateModule};
 use proptest::prelude::Strategy;
 
 /// A stock file: comments, blanks, and settings.

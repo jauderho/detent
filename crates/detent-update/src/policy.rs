@@ -72,9 +72,9 @@ pub struct Candidate {
 
 /// Picks the release to update to, or explains why none qualifies.
 ///
-/// GitHub returns releases newest-first; the first candidate whose semver is
-/// greater than `current` (or lower, under `allow_downgrade`) wins, subject
-/// to the age gate.
+/// Releases are sorted by semver and publication date before policy checks;
+/// API order is not trusted because a backport can precede a newer release.
+/// The newest release that satisfies the age gate wins.
 ///
 /// # Errors
 ///
@@ -85,29 +85,48 @@ pub fn select(
     now: OffsetDateTime,
     policy: &Policy,
 ) -> Result<Candidate, PolicyError> {
-    for release in releases {
-        let Some(version) = version_of(&release.tag) else {
-            continue;
-        };
+    let mut parsed = releases
+        .iter()
+        .filter_map(|release| version_of(&release.tag).map(|version| (release, version)))
+        .collect::<Vec<_>>();
+    parsed.sort_by(|(left, left_version), (right, right_version)| {
+        right_version
+            .cmp(left_version)
+            .then_with(|| right.published.cmp(&left.published))
+    });
+
+    let mut too_young = None;
+    for (release, version) in parsed {
         if version > *current {
-            return gate_age(release, now, policy);
+            match gate_age(release, now, policy) {
+                Ok(_) => return Ok(release.clone()),
+                Err(error @ PolicyError::TooYoung { .. }) => {
+                    too_young.get_or_insert(error);
+                }
+                Err(error) => return Err(error),
+            }
+        } else if version == *current {
+            if too_young.is_none() {
+                return Err(PolicyError::NoUpdate);
+            }
+        } else if !policy.allow_downgrade {
+            if too_young.is_none() {
+                return Err(PolicyError::DowngradeRefused {
+                    candidate: release.tag.clone(),
+                    current: current.to_string(),
+                });
+            }
+        } else {
+            match gate_age(release, now, policy) {
+                Ok(_) => return Ok(release.clone()),
+                Err(error @ PolicyError::TooYoung { .. }) => {
+                    too_young.get_or_insert(error);
+                }
+                Err(error) => return Err(error),
+            }
         }
-        // GitHub returns releases newest-first, so the first parsed tag that
-        // is not newer decides: equal means up to date, lower means the
-        // operator is asking for a downgrade.
-        if version == *current {
-            return Err(PolicyError::NoUpdate);
-        }
-        if !policy.allow_downgrade {
-            return Err(PolicyError::DowngradeRefused {
-                candidate: release.tag.clone(),
-                current: current.to_string(),
-            });
-        }
-        return gate_age(release, now, policy);
     }
-    // Nothing had a parsable tag.
-    Err(PolicyError::NoUpdate)
+    Err(too_young.unwrap_or(PolicyError::NoUpdate))
 }
 
 /// The age gate applied to an already-chosen release.
@@ -182,6 +201,14 @@ mod tests {
         let chosen = select(&releases, &current(), now(), &Policy::default())
             .expect("v0.0.2 is three days old");
         assert_eq!(chosen.tag, "v0.0.2");
+    }
+
+    #[test]
+    fn backport_in_api_order_does_not_hide_newer_release() {
+        let releases = [candidate("v0.1.0", 3), candidate("v0.0.2", 3)];
+        let chosen = select(&releases, &current(), now(), &Policy::default())
+            .expect("newest semver should be selected");
+        assert_eq!(chosen.tag, "v0.1.0");
     }
 
     #[test]

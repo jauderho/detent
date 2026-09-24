@@ -385,12 +385,18 @@ fn validate_hostnames(entry: &Entry, index: usize, diagnostics: &mut Diagnostics
 }
 
 /// Reports a canonical name that two entries both claim.
+///
+/// `localhost` is exempt: a standard dual-stack hosts file has `127.0.0.1
+/// localhost` and `::1 localhost` and both entries are expected.
 fn validate_canonical_uniqueness(model: &Model, diagnostics: &mut Diagnostics) {
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for (index, entry) in model.entries.iter().enumerate() {
         let Some(canonical) = entry.hostnames.first() else {
             continue;
         };
+        if canonical.eq_ignore_ascii_case("localhost") {
+            continue;
+        }
         if !seen.insert(canonical.to_ascii_lowercase()) {
             diagnostics.push(
                 Diagnostic::new(Severity::Error, DUPLICATE_CANONICAL)
@@ -431,26 +437,29 @@ fn validate_localhost(model: &Model, diagnostics: &mut Diagnostics) {
     let mut present = false;
     let mut ipv6_present = false;
     for (index, entry) in model.entries.iter().enumerate() {
-        if !entry
+        let is_localhost = entry
             .hostnames
             .iter()
-            .any(|name| name.eq_ignore_ascii_case("localhost"))
-        {
+            .any(|name| name.eq_ignore_ascii_case("localhost"));
+        let is_ipv6_alias = entry.hostnames.iter().any(|name| {
+            name.eq_ignore_ascii_case("ip6-localhost") || name.eq_ignore_ascii_case("ip6-loopback")
+        });
+        if !is_localhost && !is_ipv6_alias {
             continue;
         }
-        present = true;
+        present |= is_localhost;
         if entry.ip.is_loopback() {
-            ipv6_present = ipv6_present || entry.ip.is_ipv6();
-        } else {
+            ipv6_present |= entry.ip.is_ipv6() && (is_localhost || is_ipv6_alias);
+        } else if is_localhost || (entry.ip.is_ipv6() && is_ipv6_alias) {
             diagnostics.push(
-                Diagnostic::new(Severity::Warning, LOCALHOST_NOT_LOOPBACK)
+                Diagnostic::new(Severity::Error, LOCALHOST_NOT_LOOPBACK)
                     .with_field(FieldPath::new(format!("entries/{index}/ip")))
                     .with_arg("ip", entry.ip.to_string()),
             );
         }
     }
     if !present {
-        diagnostics.push(Diagnostic::new(Severity::Warning, MISSING_LOCALHOST));
+        diagnostics.push(Diagnostic::new(Severity::Error, MISSING_LOCALHOST));
     }
     if !ipv6_present {
         diagnostics.push(Diagnostic::new(
@@ -862,7 +871,7 @@ mod tests {
         let model = Model {
             entries: vec![entry("192.0.2.1", &["localhost"], None)],
         };
-        assert!(has(&model, LOCALHOST_NOT_LOOPBACK, Severity::Warning));
+        assert!(has(&model, LOCALHOST_NOT_LOOPBACK, Severity::Error));
     }
 
     #[test]
@@ -870,7 +879,7 @@ mod tests {
         let model = Model {
             entries: vec![entry("192.0.2.1", &["other"], None)],
         };
-        assert!(has(&model, MISSING_LOCALHOST, Severity::Warning));
+        assert!(has(&model, MISSING_LOCALHOST, Severity::Error));
         assert!(has(
             &model,
             MISSING_IPV6_LOCALHOST,
@@ -886,13 +895,28 @@ mod tests {
                 entry("::1", &["localhost"], None),
             ],
         };
-        assert!(!has(&model, MISSING_LOCALHOST, Severity::Warning));
+        assert!(!has(&model, MISSING_LOCALHOST, Severity::Error));
         assert!(!has(
             &model,
             MISSING_IPV6_LOCALHOST,
             Severity::Recommendation
         ));
-        assert!(!has(&model, LOCALHOST_NOT_LOOPBACK, Severity::Warning));
+        assert!(!has(&model, LOCALHOST_NOT_LOOPBACK, Severity::Error));
+    }
+
+    #[test]
+    fn validate_recognizes_ipv6_localhost_aliases() {
+        let model = Model {
+            entries: vec![
+                entry("127.0.0.1", &["localhost"], None),
+                entry("::1", &["ip6-localhost", "ip6-loopback"], None),
+            ],
+        };
+        assert!(!has(
+            &model,
+            MISSING_IPV6_LOCALHOST,
+            Severity::Recommendation
+        ));
     }
 
     #[test]

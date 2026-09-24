@@ -627,7 +627,7 @@ fn validate_client(client: &Client, index: usize, client_index: usize, out: &mut
                     .with_arg("host", client.host.clone()),
             );
         }
-        if option == "rw" && client.host == "*" {
+        if option == "rw" && matches!(client.host.as_str(), "*" | "0.0.0.0/0" | "::/0") {
             out.push(
                 Diagnostic::new(Severity::Warning, WORLD_EXPORT)
                     .with_field(field)
@@ -635,9 +635,8 @@ fn validate_client(client: &Client, index: usize, client_index: usize, out: &mut
             );
         }
     }
-    if let Some(flavors) = sec_flavors(&client.options)
-        && is_sys_only(&flavors)
-    {
+    let sys_only = sec_flavors(&client.options).is_none_or(|flavors| is_sys_only(&flavors));
+    if sys_only {
         out.push(
             Diagnostic::new(Severity::Warning, SEC_SYS_ONLY)
                 .with_field(FieldPath::new(format!(
@@ -1284,6 +1283,14 @@ mod tests {
         )]);
         assert!(has(&m, SEC_SYS_ONLY, Severity::Warning));
         assert_eq!(sec_flavors(&["sec=sys".to_owned()]), Some(vec!["sys"]));
+        let default = model(vec![export(
+            "/srv/a",
+            &[client(
+                "h",
+                &["rw", "sync", "no_subtree_check", "root_squash"],
+            )],
+        )]);
+        assert!(has(&default, SEC_SYS_ONLY, Severity::Warning));
     }
 
     #[test]
@@ -1306,14 +1313,16 @@ mod tests {
 
     #[test]
     fn validate_flags_a_world_writable_export() {
-        let m = model(vec![export(
-            "/srv/a",
-            &[client(
-                "*",
-                &["rw", "sync", "no_subtree_check", "root_squash"],
-            )],
-        )]);
-        assert!(has(&m, WORLD_EXPORT, Severity::Warning));
+        for host in ["*", "0.0.0.0/0", "::/0"] {
+            let m = model(vec![export(
+                "/srv/a",
+                &[client(
+                    host,
+                    &["rw", "sync", "no_subtree_check", "root_squash", "sec=krb5p"],
+                )],
+            )]);
+            assert!(has(&m, WORLD_EXPORT, Severity::Warning), "{host}");
+        }
     }
 
     #[test]
@@ -1330,7 +1339,7 @@ mod tests {
             "/srv/a",
             &[client(
                 "h.lan",
-                &["rw", "sync", "no_subtree_check", "root_squash"],
+                &["rw", "sync", "no_subtree_check", "root_squash", "sec=krb5p"],
             )],
         )]);
         assert!(!has(&m, EMPTY_PATH, Severity::Error));
@@ -1457,6 +1466,9 @@ mod tests {
             "\r\n",
             long_line.as_str(),
             many.as_str(),
+            "\u{feff}/srv/café h(rw)\n",
+            "/srv/a h(rw)\r/srv/b g(rw)",
+            "/srv/a h(rw) # not-a-comment\n/srv/b g(ro)\n",
         ] {
             let mut doc = NfsModule::parse(src).map_err(|e| e.to_string())?;
             assert_eq!(NfsModule::render(&doc), src);

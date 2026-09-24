@@ -425,6 +425,17 @@ export interface components {
         } | "temp_file";
         /** @description One line of the audit log. */
         AuditRecord: {
+            /** @description Digest of the target afterwards, using the public audit name. */
+            after_hash?: string | null;
+            /** @description Digest of the target before the operation, using the public audit name. */
+            before_hash?: string | null;
+            /** @description Position and hash link in the audit log. */
+            chain?: Record<string, never> | null;
+            /**
+             * Format: int32
+             * @description Commit-confirm id associated with this operation.
+             */
+            commit_id?: number | null;
             /** @description Fluent id of the failure, when it failed. */
             error_id?: string | null;
             /** @description How the caller was authenticated. */
@@ -846,6 +857,11 @@ export interface components {
             unified_diff: string;
             /** @description Whether applying would change anything at all. */
             would_change: boolean;
+        };
+        /** @description The body of `POST /api/v1/modules/{id}/backups/{backup_id}/restore`. */
+        RestoreRequest: {
+            /** @description Digest the caller last read, as 64 lowercase hex characters. */
+            expected_hash: string;
         };
         /** @description Answer to `Restore`. */
         RestoredView: {
@@ -1424,7 +1440,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RestoreRequest"];
+            };
+        };
         responses: {
             /** @description The backup was put back */
             200: {
@@ -1437,6 +1457,15 @@ export interface operations {
             };
             /** @description No such module */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The target changed since `expected_hash` was read */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

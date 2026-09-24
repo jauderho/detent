@@ -44,7 +44,8 @@ impl Installed {
     /// holds the new binary and the previous one is still at
     /// [`Installed::previous`].
     pub fn rollback(self) -> Result<(), UpdateError> {
-        std::fs::rename(&self.previous, &self.target).map_err(|err| failed("rollback", &err))
+        std::fs::rename(&self.previous, &self.target).map_err(|err| failed("rollback", &err))?;
+        sync_directory(&self.target)
     }
 }
 
@@ -72,7 +73,10 @@ pub fn swap(candidate: &Path, target: &Path) -> Result<Installed, UpdateError> {
     let previous = previous_path(target)?;
     let staged = stage(candidate, directory_of(target), meta.permissions())?;
 
-    match keep_previous(target, &previous).and_then(|()| persist(staged, target)) {
+    match keep_previous(target, &previous)
+        .and_then(|()| persist(staged, target))
+        .and_then(|()| sync_directory(target))
+    {
         Ok(()) => Ok(Installed {
             target: target.to_path_buf(),
             previous,
@@ -156,6 +160,12 @@ fn directory_of(target: &Path) -> &Path {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     }
+}
+
+fn sync_directory(path: &Path) -> Result<(), UpdateError> {
+    std::fs::File::open(directory_of(path))
+        .and_then(|directory| directory.sync_all())
+        .map_err(|err| failed("sync-dir", &err))
 }
 
 /// Removes `path` when it is there. Best effort by design: the callers are

@@ -55,8 +55,8 @@ mod mcp;
 
 #[cfg(feature = "mcp")]
 pub use mcp::{
-    AuthError, AuthOutcome, Authz, ConstantTimeTokenVerifier, EngineExecutor, LockedEngine,
-    McpServer, RecordingExecutor, TokenVerifier, Transport,
+    AuthError, AuthOutcome, Authz, ConstantTimeTokenVerifier, EngineExecutor, McpServer,
+    TokenVerifier, Transport,
 };
 
 /// What the owning binary needs to serve [`McpServer`] itself: `stdio` for

@@ -380,6 +380,17 @@ const MISSING_GUARDS: MessageId = MessageId::new("mounts-missing-guards");
 const NETWORK_AUTOMOUNT: MessageId = MessageId::new("mounts-network-automount");
 /// Fluent id: `noauto` is set without `user`.
 const NOAUTO_WITHOUT_USER: MessageId = MessageId::new("mounts-noauto-without-user");
+/// Fluent id: a non-critical mount can hold up boot without an escape option.
+const MISSING_BOOT_ESCAPE: MessageId = MessageId::new("mounts-missing-boot-escape");
+/// Fluent id: a critical boot mount is marked not to mount.
+const CRITICAL_NO_AUTO: MessageId = MessageId::new("mounts-critical-noauto");
+
+/// Whether `mountpoint` is required before the system can continue booting.
+fn is_boot_critical(mountpoint: &str) -> bool {
+    matches!(mountpoint, "/" | "/boot" | "/efi")
+        || mountpoint.starts_with("/boot/")
+        || mountpoint.starts_with("/efi/")
+}
 
 /// Whether `fstype` is shaped like a filesystem type (`ext4`, `nfs4`,
 /// `fuseblk`).
@@ -448,13 +459,20 @@ fn missing_guards(options: &[String]) -> Vec<&'static str> {
         .collect()
 }
 
+/// Whether a non-critical mount is allowed to defer or skip mounting.
+fn has_boot_escape(options: &[String]) -> bool {
+    options
+        .iter()
+        .any(|option| option == "nofail" || option == "noauto")
+}
 /// Checks one entry against the fstab(5) rules and the hardening conventions.
 ///
 /// * [`Severity::Error`] — the entry is invalid and must not be applied (empty
 ///   columns, an fstype shape no filesystem type uses, a fsck pass above 2).
 /// * [`Severity::Warning`] — valid, but likely not what the admin meant (root
-///   not in fsck pass 1, removable media without `nofail`, data mounts without
-///   guards).
+///   not in fsck pass 1, a local mount without `nofail`/`noauto`, critical
+///   mounts disabled with `noauto`, removable media without `nofail`, or data
+///   mounts without guards).
 /// * [`Severity::Recommendation`] — fine, but a better option exists
 ///   (`x-systemd.automount` on network filesystems, `noauto` without `user`).
 fn validate_entry(entry: &Entry, index: usize, diagnostics: &mut Diagnostics) {
@@ -495,6 +513,26 @@ fn validate_entry(entry: &Entry, index: usize, diagnostics: &mut Diagnostics) {
             Diagnostic::new(Severity::Warning, ROOT_PASS)
                 .with_field(field("pass"))
                 .with_arg("pass", entry.pass.to_string()),
+        );
+    }
+    let boot_critical = is_boot_critical(&entry.mountpoint);
+    if boot_critical && has("noauto") {
+        diagnostics.push(
+            Diagnostic::new(Severity::Warning, CRITICAL_NO_AUTO)
+                .with_field(field("options"))
+                .with_arg("mountpoint", entry.mountpoint.clone()),
+        );
+    }
+    if !boot_critical
+        && entry.mountpoint != "none"
+        && entry.fstype != "swap"
+        && !is_kernel_state_fstype(&entry.fstype)
+        && !has_boot_escape(&entry.options)
+    {
+        diagnostics.push(
+            Diagnostic::new(Severity::Warning, MISSING_BOOT_ESCAPE)
+                .with_field(field("options"))
+                .with_arg("mountpoint", entry.mountpoint.clone()),
         );
     }
     if is_removable(entry) && !has("nofail") {
@@ -679,10 +717,10 @@ impl ConfigModule for MountsModule {
 #[cfg(test)]
 mod tests {
     use super::{
-        DESCRIPTOR, EMPTY_MOUNTPOINT, EMPTY_SPEC, Entry, INVALID_FSTYPE, MISSING_GUARDS,
-        MISSING_NOFAIL, MOUNT_GUARDS, Model, MountsModule, NETWORK_AUTOMOUNT, NOAUTO_WITHOUT_USER,
-        PASS_TOO_HIGH, ROOT_PASS, classify, is_valid_fstype, missing_guards, parse_entry,
-        render_entry, schema_with_hints,
+        CRITICAL_NO_AUTO, DESCRIPTOR, EMPTY_MOUNTPOINT, EMPTY_SPEC, Entry, INVALID_FSTYPE,
+        MISSING_BOOT_ESCAPE, MISSING_GUARDS, MISSING_NOFAIL, MOUNT_GUARDS, Model, MountsModule,
+        NETWORK_AUTOMOUNT, NOAUTO_WITHOUT_USER, PASS_TOO_HIGH, ROOT_PASS, classify,
+        is_valid_fstype, missing_guards, parse_entry, render_entry, schema_with_hints,
     };
     use detent_core::descriptor::{HostProfile, InitSystem, Os, ValidationCtx};
     use detent_core::diag::{MessageId, Severity};
@@ -721,6 +759,8 @@ mod tests {
             "mounts-missing-guards",
             "mounts-network-automount",
             "mounts-noauto-without-user",
+            "mounts-missing-boot-escape",
+            "mounts-critical-noauto",
         ] {
             assert!(
                 CORE_FTL.contains(&format!("{id} =")),
@@ -1110,6 +1150,45 @@ mod tests {
             entries: vec![entry("a", "/srv", "ext4", &["defaults"], 0, 2)],
         };
         assert!(!has(&not_removable, MISSING_NOFAIL, Severity::Warning));
+    }
+
+    #[test]
+    fn validate_flags_boot_blockers_and_critical_noauto() {
+        let blocked = Model {
+            entries: vec![entry(
+                "server:/data",
+                "/srv/data",
+                "nfs4",
+                &["defaults"],
+                0,
+                0,
+            )],
+        };
+        assert!(has(&blocked, MISSING_BOOT_ESCAPE, Severity::Warning));
+        let escaped = Model {
+            entries: vec![entry(
+                "server:/data",
+                "/srv/data",
+                "nfs4",
+                &["defaults", "nofail"],
+                0,
+                0,
+            )],
+        };
+        assert!(!has(&escaped, MISSING_BOOT_ESCAPE, Severity::Warning));
+        for mountpoint in ["/", "/boot", "/efi/EFI"] {
+            let model = Model {
+                entries: vec![entry(
+                    "a",
+                    mountpoint,
+                    "ext4",
+                    &["defaults", "noauto"],
+                    0,
+                    1,
+                )],
+            };
+            assert!(has(&model, CRITICAL_NO_AUTO, Severity::Warning));
+        }
     }
 
     #[test]

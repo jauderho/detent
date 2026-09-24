@@ -96,7 +96,7 @@ pub(super) async fn confirm(
     let op = Operation::ConfirmCommit {
         commit_id: CommitId(raw),
     };
-    authorize(caller.caller(), &op)?;
+    authorize(&state, caller.caller(), &op)?;
     let outcome = state
         .engine
         .execute(op, caller.caller().identity().clone())
@@ -137,7 +137,7 @@ pub(super) async fn rollback(
     let op = Operation::RollbackCommit {
         commit_id: CommitId(raw),
     };
-    authorize(caller.caller(), &op)?;
+    authorize(&state, caller.caller(), &op)?;
     let outcome = state
         .engine
         .execute(op, caller.caller().identity().clone())

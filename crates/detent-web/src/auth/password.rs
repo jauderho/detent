@@ -25,7 +25,7 @@
 
 use std::fmt;
 
-use argon2::password_hash::PasswordVerifier as _;
+use argon2::password_hash::{PasswordVerifier as _, phc::PasswordHash};
 use argon2::{Algorithm, Argon2, Params, PasswordHasher as _, Version};
 use zeroize::Zeroizing;
 
@@ -89,6 +89,24 @@ impl Hasher {
     pub const fn cost(&self) -> (u32, u32, u32) {
         self.params
     }
+    /// Whether `phc` was made with the current algorithm, version and cost.
+    ///
+    /// A successful login passes a `true` answer back through
+    /// [`UserStore::verify_password`](super::users::UserStore::verify_password)
+    /// so a parameter rotation upgrades old hashes without making old ones
+    /// unverifiable.
+    #[must_use]
+    pub fn needs_rehash(&self, phc: &str) -> bool {
+        let Ok(parsed) = PasswordHash::new(phc) else {
+            return true;
+        };
+        let (m_kib, t, p) = self.params;
+        parsed.algorithm.as_str() != Algorithm::Argon2id.as_str()
+            || parsed.version != Some(19)
+            || parsed.params.get_decimal("m") != Some(m_kib)
+            || parsed.params.get_decimal("t") != Some(t)
+            || parsed.params.get_decimal("p") != Some(p)
+    }
 
     /// Hash `password` into a PHC string with a fresh random salt.
     ///
@@ -109,9 +127,9 @@ impl Hasher {
     /// Whether `password` matches `phc`.
     ///
     /// The cost comes from `phc`, not from this hasher, so a hash written by
-    /// an older, cheaper configuration still verifies. Rehashing it at the
-    /// current cost is [`UserStore::set_password`](super::users::UserStore::set_password)'s
-    /// business, not this function's.
+    /// an older, cheaper configuration still verifies. After a successful
+    /// verification, callers use [`Self::needs_rehash`] to upgrade it at the
+    /// current cost.
     #[must_use]
     pub fn verify(&self, password: &str, phc: &str) -> bool {
         let buffer = Zeroizing::new(password.as_bytes().to_vec());
@@ -335,6 +353,32 @@ mod tests {
             "median wrong-password {wrong_password} ns vs unknown-user {unknown_user} ns \
              is outside the ±10 % PLAN §5 Phase 4 requires"
         );
+        Ok(())
+    }
+    #[test]
+    fn a_parameter_rotation_marks_only_old_hashes_for_rehash() -> R {
+        let old = Hasher::new(
+            Argon2Params {
+                m_kib: Some(8),
+                t: 1,
+                p: 1,
+            },
+            4096,
+        )?;
+        let old_phc = old.hash("hunter2")?;
+        let current = Hasher::new(
+            Argon2Params {
+                m_kib: Some(16),
+                t: 1,
+                p: 1,
+            },
+            4096,
+        )?;
+        assert!(current.needs_rehash(&old_phc));
+        assert!(!current.needs_rehash(&current.hash("hunter2")?));
+        assert!(current.needs_rehash("not a phc string"));
+        // Rotation changes cost, not credential validity.
+        assert!(current.verify("hunter2", &old_phc));
         Ok(())
     }
 }

@@ -3,7 +3,7 @@
 # (PLAN §2.1); the feature that pulls it into the binary is `module-<id>`
 # (PLAN §2.2). Nothing else in this file normally changes.
 [package]
-name = "detent-module-TEMPLATE"
+name = "detent-module-template"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

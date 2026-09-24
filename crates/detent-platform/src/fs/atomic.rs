@@ -278,6 +278,8 @@ pub struct WriteRequest<'a> {
     pub backup_dir: &'a Path,
     /// How many backups to retain. `0` disables backups entirely.
     pub keep_backups: usize,
+    /// Create the target's parent directories when they are absent.
+    pub create_missing: bool,
     /// Mode applied when the file did not exist yet, for example `0o644`.
     /// Ignored when the file exists: its mode is preserved.
     pub create_mode: u32,
@@ -285,7 +287,8 @@ pub struct WriteRequest<'a> {
 
 impl<'a> WriteRequest<'a> {
     /// A request with [`DEFAULT_KEEP_BACKUPS`], mode `0o644` and no
-    /// concurrency guard.
+    /// concurrency guard. Missing parent directories are not created unless
+    /// the caller opts in with [`Self::create_missing`].
     #[must_use]
     pub const fn new(path: &'a Path, contents: &'a [u8], backup_dir: &'a Path) -> Self {
         Self {
@@ -294,6 +297,7 @@ impl<'a> WriteRequest<'a> {
             expected_prev: None,
             backup_dir,
             keep_backups: DEFAULT_KEEP_BACKUPS,
+            create_missing: false,
             create_mode: 0o644,
         }
     }
@@ -359,6 +363,9 @@ pub fn read_with_digest(path: &Path) -> Result<(Vec<u8>, Sha256Digest), AtomicEr
 /// target, and [`AtomicError::Io`] for syscall failures.
 pub fn write_atomic(req: &WriteRequest<'_>) -> Result<WriteOutcome, AtomicError> {
     let (dir, name) = split_path(req.path)?;
+    if req.create_missing {
+        std::fs::create_dir_all(dir).map_err(|source| io_error("create_dir_all", dir, source))?;
+    }
     let dir_fd = open_dir(dir)?;
     let existing = read_existing(&dir_fd, &name, req.path)?;
 

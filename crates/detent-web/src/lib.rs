@@ -42,8 +42,8 @@
 //! Exactly one rustls provider is used at run time. `crypto-aws-lc` (the
 //! default) and `crypto-ring` are both offered; at least one must be enabled,
 //! and when both are — which is what `--all-features` does — aws-lc-rs wins.
-//! [`tls::install_crypto_provider`] is idempotent and safe to call from
-//! anywhere, including tests.
+//! TLS configurations receive a local provider and never mutate rustls
+//! process-global state.
 
 #[cfg(not(any(feature = "crypto-aws-lc", feature = "crypto-ring")))]
 compile_error!(
@@ -107,9 +107,9 @@ pub use headers::{THEME_SCRIPT_SHA256, security_headers};
 pub use server::{Server, ServerError, harden, healthz};
 pub use state::{AppState, AuthState};
 pub use tls::{
-    ACME_CERT_FILE, ACME_KEY_FILE, CertStore, CertifiedKeyPair, TlsError, bootstrap_self_signed,
-    fingerprint, install_acme, install_crypto_provider, load_acme, load_or_bootstrap,
-    renewal_due_at, server_config, server_config_from_store, store_acme,
+    ACME_PAIR_FILE, BOOTSTRAP_PAIR_FILE, CertStore, CertifiedKeyPair, TlsError,
+    bootstrap_self_signed, crypto_provider, fingerprint, install_acme, load_acme, load_bootstrap,
+    load_or_bootstrap, renewal_due_at, server_config, server_config_from_store, store_acme,
 };
 
 #[cfg(test)]

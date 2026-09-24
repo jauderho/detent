@@ -369,6 +369,7 @@ fn host() -> Detected {
 
 /// How the harness is wired.
 #[derive(Debug, Clone, Copy, Default)]
+#[allow(clippy::struct_excessive_bools)]
 struct Setup {
     shape: Shape,
     /// Give the monitor working check/service collaborators.
@@ -379,6 +380,8 @@ struct Setup {
     registry_mismatch: bool,
     /// Which service manager the engine gets.
     services: Services,
+    /// Disable retained backups, leaving commit-confirm nothing to restore.
+    disable_backups: bool,
 }
 
 /// Which [`ServiceManager`] the engine is built with.
@@ -439,7 +442,10 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
     std::fs::write(&target, initial)?;
 
     let allow_descriptor = build_descriptor("fake", &target, setup.shape);
-    let config = Config::with_state_root(root.join("state"));
+    let mut config = Config::with_state_root(root.join("state"));
+    if setup.disable_backups {
+        config.keep_backups = 0;
+    }
     let allow = Allowlist::from_modules(&[allow_descriptor], &config)?;
 
     let (monitor_end, worker_end) = Channel::pair()?;
@@ -448,6 +454,7 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
     // tests run in parallel, so a global override would steer every monitor
     // at once. A per-monitor field keeps each swap inside its own tempdir.
     let binary_target = target.clone();
+    let trust = update_trust()?;
     let handle = thread::spawn(move || {
         let mut channel = monitor_end;
         let hooks = if setup.hooks {
@@ -460,6 +467,7 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
         };
         let mut monitor = Monitor::new(allow, hooks);
         monitor.set_binary_override(binary_target);
+        monitor.set_update_trust(trust);
         monitor.serve(&mut channel)
     });
 
@@ -509,6 +517,30 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
 /// The id the registry advertises, which is `fake` unless the setup asked for
 /// a mismatch.
 const MODULE: &str = "fake";
+
+const UPDATE_FIXTURE_TAG: &str = "v0.0.2";
+
+fn update_fixtures() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../detent-update/tests/fixtures")
+}
+
+fn update_trust() -> Result<detent_update::trust::TrustRoot, Box<dyn std::error::Error>> {
+    let root = std::fs::read_to_string(update_fixtures().join("fulcio-root.pem"))?;
+    let rekor = std::fs::read_to_string(update_fixtures().join("rekor-pub.pem"))?;
+    Ok(detent_update::trust::from_pems(&root, &rekor)?)
+}
+
+fn plant_update(state_root: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(update_fixtures().join("binary.bin"))?;
+    let dir = state_root.join("update").join("staged");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join(UPDATE_FIXTURE_TAG), &bytes)?;
+    std::fs::copy(
+        update_fixtures().join("valid.json"),
+        dir.join(format!("{UPDATE_FIXTURE_TAG}.sigstore.json")),
+    )?;
+    Ok(bytes)
+}
 
 fn apply(text: &str, expected: Option<Sha256Digest>) -> Operation {
     Operation::Apply {
@@ -616,6 +648,7 @@ fn an_unknown_module_id_is_refused_before_any_io() -> TestResult {
         Operation::Restore {
             id: "nope".to_owned(),
             backup_id: BackupId(0),
+            expected_hash: None,
         },
         Operation::Apply {
             id: "nope".to_owned(),
@@ -814,6 +847,32 @@ fn plan_refuses_a_model_the_module_cannot_render() -> TestResult {
 }
 
 #[test]
+fn plan_rejects_invalid_model_before_reporting_checks() -> TestResult {
+    let mut fx = harness(
+        b"a\n",
+        Setup {
+            shape: Shape {
+                check: true,
+                ..Shape::default()
+            },
+            hooks: true,
+            ..Setup::default()
+        },
+    )?;
+    // `BAD` triggers a validation Error diagnostic (`Invalid`), not a missing-field `Module`
+    // error. The wrong shape `{\"wrong\": \"shape\"}` would fail in `apply_json` as `Module`,
+    // which is a different rejection reason. Using `BAD` isolates the plan's validate-before-checks gate.
+    assert!(matches!(
+        fx.run(Operation::Plan {
+            id: MODULE.to_owned(),
+            model: json!({"text": "BAD"}),
+        }),
+        Err(OpsError::Invalid { .. })
+    ));
+    fx.finish()
+}
+
+#[test]
 fn plan_refuses_a_target_that_is_not_utf8() -> TestResult {
     let mut fx = harness(&[0xff, 0xfe], Setup::default())?;
     assert!(matches!(
@@ -875,7 +934,26 @@ fn apply_writes_the_candidate_and_audits_exactly_once() -> TestResult {
     assert_eq!(record.kind, IdentityKind::LocalUser);
     assert_eq!(record.prev_hash, Some(before.to_string()));
     assert_eq!(record.new_hash, Some(fx.digest()?.to_string()));
+    assert_eq!(record.before_hash, record.prev_hash);
+    assert_eq!(record.after_hash, record.new_hash);
     assert_eq!(record.error_id, None);
+    fx.finish()
+}
+
+#[test]
+fn no_op_apply_skips_write_commit_and_audit() -> TestResult {
+    let mut fx = harness(b"v1\n", Setup::default())?;
+    let outcome = fx.run(apply("v1\n", None))?;
+    let OpOutcome::Applied(report) = outcome else {
+        return Err("no-op Apply must answer with an apply report".into());
+    };
+    assert_eq!(fx.contents()?, "v1\n");
+    assert_eq!(report.prev_hash, Some(fx.digest()?));
+    assert_eq!(report.new_hash, fx.digest()?);
+    assert!(!report.created);
+    assert!(!report.backed_up);
+    assert!(report.commit.is_none());
+    assert!(fx.records().is_empty());
     fx.finish()
 }
 
@@ -1109,6 +1187,7 @@ fn a_commit_confirm_module_arms_a_window_that_confirm_closes() -> TestResult {
     assert_eq!(records.get(2).map(|r| r.result), Some(AuditResult::Started)); // Confirm Started
     assert_eq!(records.get(3).map(|r| r.op), Some(OpKind::ConfirmCommit));
     assert_eq!(records.get(3).map(|r| r.result), Some(AuditResult::Ok));
+    assert_eq!(records.get(3).and_then(|r| r.commit_id), Some(1));
     fx.finish()
 }
 
@@ -1179,6 +1258,79 @@ fn an_explicit_confirm_window_opts_a_plain_module_in() -> TestResult {
 }
 
 #[test]
+fn commit_confirm_does_not_arm_without_a_backup() -> TestResult {
+    let mut fx = harness(
+        b"v1\n",
+        Setup {
+            shape: Shape {
+                commit_confirm: true,
+                ..Shape::default()
+            },
+            disable_backups: true,
+            ..Setup::default()
+        },
+    )?;
+    let outcome = fx.run(Operation::Apply {
+        id: MODULE.to_owned(),
+        model: json!({"text": "v2\n"}),
+        expected_hash: None,
+        service_action: None,
+        confirm: Some(CONFIRM_WINDOW),
+    })?;
+    let OpOutcome::Applied(report) = outcome else {
+        return Err("Apply must answer with an apply report".into());
+    };
+    assert!(!report.backed_up);
+    assert!(report.commit.is_none());
+    assert!(matches!(
+        fx.run(Operation::RollbackCommit {
+            commit_id: CommitId(1),
+        }),
+        Err(OpsError::Privsep(ClientError::Remote(
+            ProtoError::UnknownId { .. }
+        )))
+    ));
+    fx.finish()
+}
+
+#[test]
+fn apply_arms_the_rollback_before_a_failed_service_action() -> TestResult {
+    let mut fx = harness(
+        b"v1\n",
+        Setup {
+            shape: Shape {
+                commit_confirm: true,
+                service: true,
+                ..Shape::default()
+            },
+            hooks: true,
+            ..Setup::default()
+        },
+    )?;
+    let result = fx.run(Operation::Apply {
+        id: MODULE.to_owned(),
+        model: json!({"text": "v2\n"}),
+        expected_hash: None,
+        service_action: Some(ServiceCommand::Reload),
+        confirm: None,
+    });
+    assert!(matches!(
+        result,
+        Err(OpsError::Privsep(ClientError::Remote(
+            ProtoError::ActionNotAllowed
+        )))
+    ));
+    assert!(matches!(
+        fx.run(Operation::RollbackCommit {
+            commit_id: CommitId(1),
+        })?,
+        OpOutcome::RolledBack { restored: 1, .. }
+    ));
+    assert_eq!(fx.contents()?, "v1\n");
+    fx.finish()
+}
+
+#[test]
 fn rollback_commit_restores_the_file_and_is_audited() -> TestResult {
     let mut fx = harness(
         b"v1\n",
@@ -1236,6 +1388,7 @@ fn rollback_commit_restores_the_file_and_is_audited() -> TestResult {
     assert_eq!(records.get(2).map(|r| r.result), Some(AuditResult::Started)); // Rollback1 Started
     assert_eq!(records.get(3).map(|r| r.op), Some(OpKind::RollbackCommit));
     assert_eq!(records.get(3).map(|r| r.result), Some(AuditResult::Ok));
+    assert_eq!(records.get(3).and_then(|r| r.commit_id), Some(1));
     assert_eq!(records.get(4).map(|r| r.result), Some(AuditResult::Started)); // Rollback2 Started
     assert_eq!(records.get(5).map(|r| r.op), Some(OpKind::RollbackCommit));
     assert_eq!(records.get(5).map(|r| r.result), Some(AuditResult::Error));
@@ -1294,6 +1447,7 @@ fn backups_are_listed_and_restored() -> TestResult {
     let outcome = fx.run(Operation::Restore {
         id: MODULE.to_owned(),
         backup_id,
+        expected_hash: None,
     })?;
     let OpOutcome::Restored { new_hash, .. } = outcome else {
         return Err("Restore must answer with the restored digest".into());
@@ -1320,12 +1474,37 @@ fn backups_are_listed_and_restored() -> TestResult {
 }
 
 #[test]
+fn restore_rejects_a_stale_target_hash() -> TestResult {
+    let mut fx = harness(b"v1\n", Setup::default())?;
+    fx.run(apply("v2\n", None))?;
+    let OpOutcome::Backups(backups) = fx.run(Operation::ListBackups {
+        id: MODULE.to_owned(),
+    })?
+    else {
+        return Err("ListBackups must answer with a listing".into());
+    };
+    let stale = fx.digest()?;
+    fx.run(apply("v3\n", None))?;
+    assert!(matches!(
+        fx.run(Operation::Restore {
+            id: MODULE.to_owned(),
+            backup_id: backups.first().ok_or("one backup")?.id,
+            expected_hash: Some(stale),
+        }),
+        Err(OpsError::HashConflict { .. })
+    ));
+    assert_eq!(fx.contents()?, "v3\n");
+    fx.finish()
+}
+
+#[test]
 fn restoring_an_id_that_does_not_exist_fails_and_is_audited() -> TestResult {
     let mut fx = harness(b"v1\n", Setup::default())?;
     assert!(matches!(
         fx.run(Operation::Restore {
             id: MODULE.to_owned(),
             backup_id: BackupId(99),
+            expected_hash: None,
         }),
         Err(OpsError::Privsep(_))
     ));
@@ -1568,19 +1747,15 @@ fn update_apply_is_swapped_through_the_monitor_and_audited_once() -> TestResult 
         .join("state");
     fx.engine.set_state_root(&state_root);
 
-    let bytes = b"updated-binary-bytes";
-    let digest = Sha256Digest::of(bytes);
-    let staged_dir = state_root.join("update").join("staged");
-    std::fs::create_dir_all(&staged_dir)?;
-    std::fs::write(staged_dir.join(digest.to_string()), bytes)?;
+    plant_update(&state_root)?;
 
     let outcome = fx.run(Operation::UpdateApply {
-        version: digest.to_string(),
+        version: UPDATE_FIXTURE_TAG.to_owned(),
     })?;
     let OpOutcome::UpdateApplied { version } = outcome else {
         return Err("expected UpdateApplied outcome".into());
     };
-    assert_eq!(version, digest.to_string());
+    assert_eq!(version, UPDATE_FIXTURE_TAG);
 
     let records = fx.records();
     assert_eq!(records.len(), 2);
@@ -1691,7 +1866,7 @@ fn update_apply_refuses_dot_only_versions() -> TestResult {
 }
 
 #[test]
-fn update_apply_bridges_a_tag_to_the_digest_path_atomically() -> TestResult {
+fn update_apply_bridges_a_tag_inside_the_monitor() -> TestResult {
     let mut fx = harness(b"v1\n", Setup::default())?;
     let state_root = fx
         .target
@@ -1699,24 +1874,17 @@ fn update_apply_bridges_a_tag_to_the_digest_path_atomically() -> TestResult {
         .ok_or("harness missing parent")?
         .join("state");
     fx.engine.set_state_root(&state_root);
-    // Producer stages under the release tag; the monitor only reads the
-    // digest-named path. The engine must materialise it.
-    let bytes = b"tag-bridged-binary";
-    let digest = Sha256Digest::of(bytes);
+    let bytes = plant_update(&state_root)?;
+    let digest = Sha256Digest::of(&bytes);
     let staged_dir = state_root.join("update").join("staged");
-    std::fs::create_dir_all(&staged_dir)?;
-    std::fs::write(staged_dir.join("v9.9.9"), bytes)?;
-    // The harness already pointed this test's monitor at `fx.target`.
+
     let outcome = fx.run(Operation::UpdateApply {
-        version: "v9.9.9".to_owned(),
+        version: UPDATE_FIXTURE_TAG.to_owned(),
     })?;
     let OpOutcome::UpdateApplied { version } = outcome else {
         return Err("expected UpdateApplied outcome".into());
     };
-    assert_eq!(version, "v9.9.9");
-    // The swap consumed the staged file: it was renamed over the target, so
-    // the digest path no longer exists. The previous target contents survive
-    // at `<target>.prev`.
+    assert_eq!(version, UPDATE_FIXTURE_TAG);
     assert!(!staged_dir.join(digest.to_string()).exists());
     assert_eq!(std::fs::read(&fx.target)?, bytes);
     let file_name = fx
@@ -1729,7 +1897,7 @@ fn update_apply_bridges_a_tag_to_the_digest_path_atomically() -> TestResult {
 }
 
 #[test]
-fn update_apply_overwrites_a_stale_digest_file() -> TestResult {
+fn update_apply_refuses_a_preexisting_digest_path() -> TestResult {
     let mut fx = harness(b"v1\n", Setup::default())?;
     let state_root = fx
         .target
@@ -1737,23 +1905,19 @@ fn update_apply_overwrites_a_stale_digest_file() -> TestResult {
         .ok_or("harness missing parent")?
         .join("state");
     fx.engine.set_state_root(&state_root);
-    let bytes = b"fresh-binary-bytes";
-    let digest = Sha256Digest::of(bytes);
+    let bytes = plant_update(&state_root)?;
+    let digest = Sha256Digest::of(&bytes);
     let staged_dir = state_root.join("update").join("staged");
-    std::fs::create_dir_all(&staged_dir)?;
-    std::fs::write(staged_dir.join("v9.9.10"), bytes)?;
-    // A leftover digest file from a crashed earlier run: legitimate to
-    // overwrite, not a conflict — the monitor re-hashes before swapping.
-    std::fs::write(staged_dir.join(digest.to_string()), b"stale-partial-bytes")?;
-    // The harness already pointed this test's monitor at `fx.target`.
-    let outcome = fx.run(Operation::UpdateApply {
-        version: "v9.9.10".to_owned(),
-    })?;
-    let OpOutcome::UpdateApplied { version } = outcome else {
-        return Err("expected UpdateApplied outcome".into());
-    };
-    assert_eq!(version, "v9.9.10");
-    assert_eq!(std::fs::read(&fx.target)?, bytes);
+    std::fs::write(staged_dir.join(digest.to_string()), b"worker-planted")?;
+
+    let err = fx.run(Operation::UpdateApply {
+        version: UPDATE_FIXTURE_TAG.to_owned(),
+    });
+    assert!(matches!(
+        err,
+        Err(OpsError::Privsep(ClientError::Remote(ProtoError::Io(_))))
+    ));
+    assert_eq!(std::fs::read(&fx.target)?, b"v1\n");
     fx.finish()
 }
 
@@ -1776,41 +1940,6 @@ fn update_apply_refuses_when_the_digest_file_cannot_be_written() -> TestResult {
     std::fs::write(&staged_dir, b"not-a-directory")?;
     let err = fx.run(Operation::UpdateApply {
         version: "v9.9.11".to_owned(),
-    });
-    assert!(matches!(
-        err,
-        Err(OpsError::Unsupported {
-            what: "update_apply"
-        })
-    ));
-    let records = fx.records();
-    assert_eq!(records.len(), 2);
-    assert_eq!(
-        records.first().map(|r| r.result),
-        Some(AuditResult::Started)
-    );
-    fx.finish()
-}
-
-#[test]
-fn update_apply_refuses_when_the_bridge_copy_fails() -> TestResult {
-    let mut fx = harness(b"v1\n", Setup::default())?;
-    let state_root = fx
-        .target
-        .parent()
-        .ok_or("harness missing parent")?
-        .join("state");
-    fx.engine.set_state_root(&state_root);
-    // Tag and digest differ (ASCII tag, hex digest), so the bridge copy runs.
-    // A directory where the digest file must be makes `write_atomic` fail.
-    let bytes = b"bridge-copy-fails";
-    let digest = Sha256Digest::of(bytes);
-    let staged_dir = state_root.join("update").join("staged");
-    std::fs::create_dir_all(&staged_dir)?;
-    std::fs::write(staged_dir.join("v9.9.12"), bytes)?;
-    std::fs::create_dir_all(staged_dir.join(digest.to_string()))?;
-    let err = fx.run(Operation::UpdateApply {
-        version: "v9.9.12".to_owned(),
     });
     assert!(matches!(
         err,

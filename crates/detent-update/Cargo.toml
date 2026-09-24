@@ -11,7 +11,12 @@ publish = false
 workspace = true
 
 [features]
-default = []
+default = ["client"]
+client = [
+    "dep:http-body-util", "dep:hyper", "dep:hyper-rustls", "dep:hyper-util",
+    "dep:rustls", "dep:semver", "dep:tempfile", "dep:time", "dep:tokio",
+    "dep:webpki-roots",
+]
 # Fixture regeneration (PLAN Phase 9 task 3): mints the synthetic trust root,
 # leaf and Sigstore bundles under tests/fixtures/ with a fixed tag. Not in
 # default: rcgen is only needed when re-capturing fixtures, and the committed
@@ -24,24 +29,22 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
-time = { workspace = true }
-tempfile = { workspace = true }
-semver = { workspace = true }
 base64 = { workspace = true }
 p256 = { workspace = true }
-x509-parser = { workspace = true }
 webpki = { workspace = true }
 rustls-pki-types = { workspace = true }
-http-body-util = { workspace = true }
-# rustls itself only for the fetch client's TLS configuration; hyper features
-# extend the workspace entry (server side lives in detent-web).
-rustls = { workspace = true, features = ["aws_lc_rs"] }
-hyper = { workspace = true, features = ["client"] }
-hyper-util = { workspace = true, features = ["client", "client-legacy"] }
-hyper-rustls = { workspace = true }
-webpki-roots = { workspace = true }
-# The fetch client runs on its own current-thread runtime (the CLI is sync).
-tokio = { workspace = true, features = ["rt", "net", "time"] }
+x509-parser = { workspace = true }
+http-body-util = { workspace = true, optional = true }
+# rustls itself is only for the fetch client and health check.
+rustls = { workspace = true, features = ["aws_lc_rs"], optional = true }
+hyper = { workspace = true, features = ["client"], optional = true }
+hyper-util = { workspace = true, features = ["client", "client-legacy"], optional = true }
+hyper-rustls = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
+semver = { workspace = true, optional = true }
+time = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["rt", "net", "time"], optional = true }
 rcgen = { workspace = true, optional = true, features = ["pem"] }
 
 [dev-dependencies]

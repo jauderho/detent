@@ -32,6 +32,7 @@ multiple_crate_versions = "allow"
 [dependencies]
 arbitrary = { workspace = true, optional = true }
 detent-core = { path = "../detent-core" }
+detent-update = { path = "../detent-update", default-features = false }
 postcard = { workspace = true }
 # Adds the `thread` feature on top of the workspace default (`fs`, `process`,
 # `std`): `spawn::harden` calls `rustix::thread::set_no_new_privs` on Linux,

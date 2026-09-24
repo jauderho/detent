@@ -31,14 +31,14 @@ cat > /tmp/detent-pebble/pebble-config.json <<'EOF'
 EOF
 docker run -d --name pebble -p 14000:14000 -p 15000:15000 \
   -v /tmp/detent-pebble/pebble-config.json:/test/config/pebble-config.json \
-  ghcr.io/letsencrypt/pebble:latest \
+  ghcr.io/letsencrypt/pebble:v2.10.1 \
   -config /test/config/pebble-config.json \
   -dnsserver host.docker.internal:8053
 
 # challtestsrv: DNS server on :8053 (TCP+UDP), management API on :8055
 docker run -d --name challtestsrv \
   -p 8053:8053 -p 8053:8053/udp -p 8055:8055 \
-  ghcr.io/letsencrypt/pebble-challtestsrv:latest \
+  ghcr.io/letsencrypt/pebble-challtestsrv:v2.10.1 \
   -defaultIPv4 "" -defaultIPv6 "" -dnsserver ":8053" \
   -http01 ":5002" -https01 ":5003" -tlsalpn01 ":5001" -management ":8055"
 
@@ -48,7 +48,7 @@ docker cp pebble:/test/certs/pebble.minica.pem /tmp/detent-pebble/pebble.minica.
 
 Gotchas (both cost a container restart during the spike):
 
-- `ghcr.io/letsencrypt/pebble:latest` has no shell (`FROM scratch`); inspect
+- `ghcr.io/letsencrypt/pebble:v2.10.1` has no shell (`FROM scratch`); inspect
   it via `docker run ... -help` only.
 - Pebble takes the DNS resolver as the `-dnsserver` CLI flag; a
   `DNSResolver` key in the config JSON is ignored (it logs "Using system DNS

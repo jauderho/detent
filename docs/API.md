@@ -43,6 +43,11 @@ update status. A `read` caller sees blank `rendered`/`unified_diff`/`diff` in `p
 rolling back a commit, restoring a backup, and acting on a service. A request
 that reaches a `write` endpoint without the scope is refused with `403` and
 `message_id: "web-denied-scope"` before anything is read or written.
+Every scope denial is also recorded as an auth audit event. The operations
+audit log is fsynced and hash-chained; `FileAudit::verify` checks sequence and
+link hashes, and its terminal sequence/hash must be retained as an external
+anchor to detect truncation of the log's tail.
+
 ## CSRF
 
 A cookie carries ambient authority a bearer token does not, so every
@@ -79,6 +84,13 @@ compiled into this build are indistinguishable: both answer `404` with
 path-traversal attempt or an oversized id gets the same boring answer a
 typo would, never a 500, and never a hint about what *would* have been a
 valid id.
+
+## Restoring a backup
+
+`POST /api/v1/modules/{id}/backups/{backup_id}/restore` requires a JSON body
+`{"expected_hash":"<64 lowercase hex>"}`. The digest must be the target hash
+the caller last read. A changed target answers `409 Conflict` and is not
+restored, preventing an older request from overwriting a newer apply.
 
 ## The commit-confirm flow
 

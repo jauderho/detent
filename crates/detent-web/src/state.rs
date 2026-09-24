@@ -36,6 +36,10 @@ use crate::config::{AuthConfig, Config};
 use crate::csrf::Origin;
 use crate::engine::EngineHandle;
 use crate::tls::CertStore;
+use tokio::sync::{Mutex, Semaphore};
+
+/// Maximum password hashes allowed to run on blocking threads at once.
+pub const MAX_CONCURRENT_ARGON2: usize = 4;
 
 /// Everything authentication needs, assembled once at startup.
 #[derive(Debug)]
@@ -45,11 +49,13 @@ pub struct AuthState {
     /// Live sessions. In memory: restart is logout.
     pub sessions: std::sync::Arc<SessionStore>,
     /// API tokens.
-    pub tokens: TokenStore,
+    pub tokens: std::sync::Arc<TokenStore>,
     /// Argon2id at the configured cost, with its dummy hash.
     pub hasher: Hasher,
     /// Login throttling, per address and per user.
-    pub limiter: RateLimiter,
+    pub limiter: std::sync::Arc<RateLimiter>,
+    /// Bounds expensive password work on the blocking pool.
+    pub(crate) argon2_permits: std::sync::Arc<Semaphore>,
     /// Where auth events go.
     pub audit: Box<dyn AuthAudit>,
     /// Whether a second factor is required of every account
@@ -70,12 +76,23 @@ impl AuthState {
         let users = UserStore::load(state_root)?;
         let sessions = std::sync::Arc::new(SessionStore::from_config(auth));
         users.attach_sessions(std::sync::Arc::clone(&sessions));
+        let tokens = std::sync::Arc::new(TokenStore::load(state_root)?);
+        let limiter = std::sync::Arc::new(RateLimiter::new(auth.max_failures));
+        if tokio::runtime::Handle::try_current().is_ok() {
+            drop(crate::auth::session::spawn_sweeper(
+                &sessions,
+                &tokens,
+                &limiter,
+                crate::auth::session::SWEEP_INTERVAL,
+            ));
+        }
         Ok(Self {
             users,
             sessions,
-            tokens: TokenStore::load(state_root)?,
+            tokens,
             hasher: Hasher::new(auth.argon2, ram_mib)?,
-            limiter: RateLimiter::new(auth.max_failures),
+            limiter,
+            argon2_permits: std::sync::Arc::new(Semaphore::new(MAX_CONCURRENT_ARGON2)),
             audit: Box::new(FileAuthAudit::under_state_root(state_root)),
             totp_required: auth.totp_required,
         })
@@ -122,6 +139,9 @@ pub struct AppState {
     /// update --check` without reaching the network on the request path
     /// (PLAN §2.9 steps 5a and 6).
     pub state_root: Arc<PathBuf>,
+    /// Serializes the rare uncached update lookup so concurrent GETs cause at
+    /// most one GitHub request; the resulting on-disk stamp serves the rest.
+    pub(crate) update_check: Arc<Mutex<()>>,
 }
 
 impl AppState {
@@ -142,6 +162,7 @@ impl AppState {
             origin: Arc::new(origin),
             cert_store,
             state_root: Arc::new(state_root),
+            update_check: Arc::new(Mutex::new(())),
         }
     }
 
@@ -149,7 +170,7 @@ impl AppState {
     /// `CachedReport` the read-only `GET /api/v1/system/update` prefers over
     /// reaching the release feed on every request.
     #[must_use]
-    pub fn update_stamp(&self) -> std::path::PathBuf {
+    pub fn update_stamp(&self) -> PathBuf {
         detent_update::update::stamp_path(&self.state_root)
     }
 

@@ -31,7 +31,7 @@
 use std::fmt;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Once, RwLock};
+use std::sync::{Arc, RwLock};
 
 use detent_core::diag::MessageId;
 use detent_platform::fs::atomic::{AtomicError, WriteRequest, write_atomic};
@@ -52,19 +52,18 @@ pub const ALPN_H2_HTTP11: &[&[u8]] = &[b"h2", b"http/1.1"];
 /// How long a bootstrap certificate is valid for.
 pub const BOOTSTRAP_VALIDITY_DAYS: i64 = 90;
 
-/// File holding the bootstrap certificate, DER, inside `cert_dir`.
-pub const BOOTSTRAP_CERT_FILE: &str = "bootstrap.cert.der";
+/// File holding one complete bootstrap certificate/key pair inside `cert_dir`.
+pub const BOOTSTRAP_PAIR_FILE: &str = "bootstrap.pair";
 
-/// File holding the bootstrap private key, PKCS#8 DER, inside `cert_dir`.
-pub const BOOTSTRAP_KEY_FILE: &str = "bootstrap.key.der";
+/// File holding one complete ACME certificate-chain/key pair inside `cert_dir`.
+pub const ACME_PAIR_FILE: &str = "acme.pair";
 
-/// File holding the ACME-issued certificate chain (leaf + intermediates), DER,
-/// inside `cert_dir`. Leaf first; written alongside [`ACME_KEY_FILE`] by
-/// [`store_acme`], so a renewal restarts from the same files a crash left.
-pub const ACME_CERT_FILE: &str = "acme.cert.der";
-
-/// File holding the ACME-issued private key, PKCS#8 DER, inside `cert_dir`.
-pub const ACME_KEY_FILE: &str = "acme.key.der";
+const LEGACY_BOOTSTRAP_CERT_FILE: &str = "bootstrap.cert.der";
+const LEGACY_BOOTSTRAP_KEY_FILE: &str = "bootstrap.key.der";
+const LEGACY_ACME_CERT_FILE: &str = "acme.cert.der";
+const LEGACY_ACME_KEY_FILE: &str = "acme.key.der";
+const PAIR_MAGIC: &[u8; 8] = b"DETENTPK";
+const MAX_PAIR_CERTS: usize = 16;
 /// Mode of every key and certificate file in `cert_dir`: readable only by the
 /// account that runs the worker (PLAN §2.8).
 const KEY_MODE: u32 = 0o600;
@@ -74,6 +73,18 @@ const CERT_DIR_MODE: u32 = 0o700;
 
 /// The permission bits that must be clear on the certificate directory.
 const GROUP_AND_OTHER: u32 = 0o077;
+
+/// Whether a bootstrap certificate should be replaced at `now_unix`.
+fn bootstrap_rotation_due(pair: &CertifiedKeyPair, acme_configured: bool, now_unix: i64) -> bool {
+    let Some((not_before, not_after)) = validity_unix(pair.cert_der()) else {
+        return true;
+    };
+    if acme_configured {
+        now_unix >= not_after
+    } else {
+        renewal_due_at(not_before, not_after, now_unix)
+    }
+}
 
 /// Names every bootstrap certificate carries, whatever the operator
 /// configured, so that a local `curl` and a local browser both work.
@@ -99,11 +110,6 @@ pub enum TlsError {
     /// (`CERTIFICATE` for the chain, `PRIVATE KEY` for the key).
     #[error("the ACME material was not PEM of the expected kind")]
     Pem,
-    /// No `CryptoProvider` is installed and none could be derived from the
-    /// crate features. Unreachable in a build that compiles, because at least
-    /// one of `crypto-aws-lc` / `crypto-ring` is required.
-    #[error("no rustls crypto provider is available")]
-    NoProvider,
     /// A file in the certificate store could not be read.
     #[error("{path} could not be read: {source}")]
     Read {
@@ -138,7 +144,6 @@ impl TlsError {
         match *self {
             Self::Generate(_) => MessageId::new("web-tls-generate-failed"),
             Self::Key(_) => MessageId::new("web-tls-key-rejected"),
-            Self::NoProvider => MessageId::new("web-tls-no-provider"),
             Self::Read { .. } => MessageId::new("web-tls-store-unreadable"),
             Self::Prepare { .. } => MessageId::new("web-tls-store-unwritable"),
             Self::Persist { .. } => MessageId::new("web-tls-store-write-failed"),
@@ -151,33 +156,18 @@ impl TlsError {
 // Crypto provider
 // ---------------------------------------------------------------------------
 
-/// Guards the one-time provider installation.
-static PROVIDER: Once = Once::new();
-
-/// Install the process-wide rustls [`CryptoProvider`].
+/// A fresh provider owned by one TLS configuration or key conversion.
 ///
-/// Idempotent and safe to call from any number of threads or tests: the first
-/// call wins, later ones do nothing. When both `crypto-aws-lc` and
-/// `crypto-ring` are compiled in — which is what `--all-features` does —
-/// aws-lc-rs takes precedence, matching PLAN §2.2 and `rcgen`'s own ordering.
-pub fn install_crypto_provider() {
-    PROVIDER.call_once(|| {
-        #[cfg(feature = "crypto-aws-lc")]
-        let provider = rustls::crypto::aws_lc_rs::default_provider();
-        #[cfg(all(feature = "crypto-ring", not(feature = "crypto-aws-lc")))]
-        let provider = rustls::crypto::ring::default_provider();
-        // An `Err` means something else installed a provider first, which is
-        // exactly as good an outcome as installing ours.
-        let _ = provider.install_default();
-    });
-}
-
-/// The installed provider, installing ours first if nothing has.
-fn provider() -> Result<Arc<CryptoProvider>, TlsError> {
-    install_crypto_provider();
-    CryptoProvider::get_default()
-        .cloned()
-        .ok_or(TlsError::NoProvider)
+/// When both backends are compiled in, aws-lc-rs takes precedence. Keeping the
+/// provider local avoids mutating rustls process-global state when a library
+/// caller only needs one certificate or server configuration.
+#[must_use]
+pub fn crypto_provider() -> Arc<CryptoProvider> {
+    #[cfg(feature = "crypto-aws-lc")]
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    #[cfg(all(feature = "crypto-ring", not(feature = "crypto-aws-lc")))]
+    let provider = rustls::crypto::ring::default_provider();
+    Arc::new(provider)
 }
 
 // ---------------------------------------------------------------------------
@@ -312,15 +302,14 @@ impl CertifiedKeyPair {
         validity_unix(&self.cert_der).map(|(_, not_after)| not_after)
     }
 
-    /// Load the pair into the installed provider.
+    /// Loads the pair with a local crypto provider.
     ///
     /// # Errors
     ///
-    /// [`TlsError::NoProvider`] when no crypto provider is available, and
-    /// [`TlsError::Key`] when the key cannot be parsed by this provider or
-    /// does not match the certificate.
+    /// [`TlsError::Key`] when the key cannot be parsed by the selected provider
+    /// or does not match the certificate.
     pub fn to_certified_key(&self) -> Result<Arc<CertifiedKey>, TlsError> {
-        let provider = provider()?;
+        let provider = crypto_provider();
         // Leaf first, then the intermediates in issuance order: exactly the
         // `certificate_list` a TLS 1.3 server sends (RFC 8446 §4.4.2).
         let chain = std::iter::once(CertificateDer::from(self.cert_der.clone()))
@@ -621,18 +610,16 @@ pub fn server_config(
 ///
 /// # Errors
 ///
-/// [`TlsError::NoProvider`] when no crypto provider is available.
+/// Returns a TLS configuration error if the selected provider cannot offer TLS 1.3.
 pub fn server_config_from_store(
     store: Arc<CertStore>,
     alpn: &[&[u8]],
 ) -> Result<rustls::ServerConfig, TlsError> {
-    // Establish the provider before the builder reaches for it: the builder
-    // panics rather than erroring when it finds none.
-    let _provider = provider()?;
-    let mut config =
-        rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-            .with_no_client_auth()
-            .with_cert_resolver(store);
+    let mut config = rustls::ServerConfig::builder_with_provider(crypto_provider())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(TlsError::Key)?
+        .with_no_client_auth()
+        .with_cert_resolver(store);
     config.alpn_protocols = alpn.iter().map(|protocol| protocol.to_vec()).collect();
     Ok(config)
 }
@@ -691,20 +678,21 @@ pub fn bootstrap_self_signed(hostnames: &[String]) -> Result<CertifiedKeyPair, T
     ))
 }
 
-/// Read the stored bootstrap pair from `cert_dir`, or `None` when it has not
-/// been generated yet.
-///
-/// A half-written store — one file present, the other not — reads as `None`,
-/// so the next call regenerates rather than failing forever.
+/// Read the stored bootstrap pair, preferring the atomic pair file and
+/// accepting the legacy two-file layout for migration.
 ///
 /// # Errors
 ///
-/// [`TlsError::Read`] when a file exists but cannot be read.
+/// [`TlsError::Read`] when a file exists but cannot be read, or
+/// [`TlsError::Pem`] when the atomic pair file is malformed.
 pub fn load_bootstrap(cert_dir: &Path) -> Result<Option<CertifiedKeyPair>, TlsError> {
-    let Some(certificate) = read_optional(&cert_dir.join(BOOTSTRAP_CERT_FILE))? else {
+    if let Some(encoded) = read_optional(&cert_dir.join(BOOTSTRAP_PAIR_FILE))? {
+        return decode_pair(&encoded).map(Some);
+    }
+    let Some(certificate) = read_optional(&cert_dir.join(LEGACY_BOOTSTRAP_CERT_FILE))? else {
         return Ok(None);
     };
-    let Some(key) = read_optional(&cert_dir.join(BOOTSTRAP_KEY_FILE))? else {
+    let Some(key) = read_optional(&cert_dir.join(LEGACY_BOOTSTRAP_KEY_FILE))? else {
         return Ok(None);
     };
     Ok(Some(CertifiedKeyPair::new(certificate, key)))
@@ -722,17 +710,14 @@ fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, TlsError> {
     }
 }
 
-/// Write `pair` into `cert_dir`, creating the directory `0700` and both files
-/// `0600`.
-///
-/// `cert_dir` must be absolute: the atomic writer refuses relative paths
-/// because it resolves the parent directory by file descriptor.
-///
-/// # Errors
-///
-/// [`TlsError::Prepare`] when the directory cannot be created or its mode set,
-/// [`TlsError::Persist`] when a file cannot be written.
-pub fn store_bootstrap(cert_dir: &Path, pair: &CertifiedKeyPair) -> Result<(), TlsError> {
+/// Store one complete pair with a single durable rename, then remove any
+/// legacy component files.
+fn store_pair(
+    cert_dir: &Path,
+    filename: &str,
+    pair: &CertifiedKeyPair,
+    legacy: &[&str],
+) -> Result<(), TlsError> {
     if !cert_dir.is_dir() {
         std::fs::create_dir_all(cert_dir).map_err(|source| TlsError::Prepare {
             path: cert_dir.to_path_buf(),
@@ -740,9 +725,35 @@ pub fn store_bootstrap(cert_dir: &Path, pair: &CertifiedKeyPair) -> Result<(), T
         })?;
     }
     confine_cert_dir(cert_dir)?;
-    write_key_file(&cert_dir.join(BOOTSTRAP_CERT_FILE), pair.cert_der())?;
-    write_key_file(&cert_dir.join(BOOTSTRAP_KEY_FILE), &pair.key_pkcs8_der)?;
+    write_key_file(&cert_dir.join(filename), &encode_pair(pair)?)?;
+    for name in legacy {
+        match std::fs::remove_file(cert_dir.join(name)) {
+            Ok(()) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(TlsError::Prepare {
+                    path: cert_dir.join(name),
+                    source,
+                });
+            }
+        }
+    }
     Ok(())
+}
+
+/// Store one bootstrap pair atomically in `cert_dir`.
+///
+/// # Errors
+///
+/// [`TlsError::Prepare`] when the directory cannot be created or confined,
+/// [`TlsError::Persist`] when the pair file cannot be written.
+pub fn store_bootstrap(cert_dir: &Path, pair: &CertifiedKeyPair) -> Result<(), TlsError> {
+    store_pair(
+        cert_dir,
+        BOOTSTRAP_PAIR_FILE,
+        pair,
+        &[LEGACY_BOOTSTRAP_CERT_FILE, LEGACY_BOOTSTRAP_KEY_FILE],
+    )
 }
 /// Write an ACME-issued `pair` into `cert_dir` (`0600` files, `0700` dir) and
 /// swap it into `store`, so the listener serves the new certificate without
@@ -763,72 +774,116 @@ pub fn install_acme(
     Ok(())
 }
 
-/// Write an ACME-issued pair's chain (leaf + intermediates, each length-framed
-/// as u32 BE + bytes) and key into `cert_dir`, creating the directory `0700`
-/// and both files `0600` — the same confinement as [`store_bootstrap`].
+/// Atomically store one ACME-issued chain/key pair in `cert_dir`.
 ///
-/// Framing, not concatenation: bare DER does not self-delimit well enough to
-/// split a chain back into leaf + intermediates on [`load_acme`], and the
-/// server must send every certificate (RFC 8446 §4.4.2).
+/// The chain and key share one length-framed file, so the durable rename swaps
+/// both together. The legacy two-file layout is still readable and is removed
+/// only after the new pair is durable.
 ///
 /// # Errors
 ///
 /// [`TlsError::Prepare`] when the directory cannot be created or confined,
-/// [`TlsError::Persist`] when a file cannot be written.
+/// [`TlsError::Persist`] when the pair file cannot be written.
 pub fn store_acme(cert_dir: &Path, pair: &CertifiedKeyPair) -> Result<(), TlsError> {
-    if !cert_dir.is_dir() {
-        std::fs::create_dir_all(cert_dir).map_err(|source| TlsError::Prepare {
-            path: cert_dir.to_path_buf(),
-            source,
-        })?;
+    store_pair(
+        cert_dir,
+        ACME_PAIR_FILE,
+        pair,
+        &[LEGACY_ACME_CERT_FILE, LEGACY_ACME_KEY_FILE],
+    )
+}
+
+fn encode_pair(pair: &CertifiedKeyPair) -> Result<Vec<u8>, TlsError> {
+    let certs = std::iter::once(pair.cert_der())
+        .chain(pair.intermediates_der().iter().map(Vec::as_slice))
+        .collect::<Vec<_>>();
+    let count = u32::try_from(certs.len()).map_err(|_| TlsError::Pem)?;
+    let mut encoded = Vec::new();
+    encoded.extend_from_slice(PAIR_MAGIC);
+    encoded.extend_from_slice(&count.to_be_bytes());
+    for cert in certs {
+        write_len_prefixed(&mut encoded, cert)?;
     }
-    confine_cert_dir(cert_dir)?;
-    let mut chain = Vec::new();
-    for cert in
-        std::iter::once(pair.cert_der()).chain(pair.intermediates_der().iter().map(Vec::as_slice))
-    {
-        let len = u32::try_from(cert.len()).map_err(|_| TlsError::Pem)?;
-        chain.extend_from_slice(&len.to_be_bytes());
-        chain.extend_from_slice(cert);
+    write_len_prefixed(&mut encoded, &pair.key_pkcs8_der)?;
+    Ok(encoded)
+}
+
+fn write_len_prefixed(output: &mut Vec<u8>, value: &[u8]) -> Result<(), TlsError> {
+    let len = u32::try_from(value.len()).map_err(|_| TlsError::Pem)?;
+    if len == 0 {
+        return Err(TlsError::Pem);
     }
-    write_key_file(&cert_dir.join(ACME_CERT_FILE), &chain)?;
-    write_key_file(&cert_dir.join(ACME_KEY_FILE), &pair.key_pkcs8_der)?;
+    output.extend_from_slice(&len.to_be_bytes());
+    output.extend_from_slice(value);
     Ok(())
 }
 
-/// Read a stored ACME-issued pair from `cert_dir`, or `None` when no renewal
-/// has landed yet. A half-written store (one file present, the other not)
-/// reads as `None`, same as [`load_bootstrap`]: the next renewal overwrites
-/// rather than failing forever. The concatenated chain splits back into leaf
-/// + intermediates so [`CertStore::replace`] serves every certificate.
+fn take_len_prefixed<'a>(input: &mut &'a [u8]) -> Result<&'a [u8], TlsError> {
+    let (head, rest) = input.split_at_checked(4).ok_or(TlsError::Pem)?;
+    let mut len_bytes = [0_u8; 4];
+    len_bytes.copy_from_slice(head);
+    *input = rest;
+    let len = usize::try_from(u32::from_be_bytes(len_bytes)).map_err(|_| TlsError::Pem)?;
+    let (value, rest) = input.split_at_checked(len).ok_or(TlsError::Pem)?;
+    *input = rest;
+    if value.is_empty() {
+        return Err(TlsError::Pem);
+    }
+    Ok(value)
+}
+
+fn decode_pair(encoded: &[u8]) -> Result<CertifiedKeyPair, TlsError> {
+    let (magic, mut rest) = encoded
+        .split_at_checked(PAIR_MAGIC.len())
+        .ok_or(TlsError::Pem)?;
+    if magic != PAIR_MAGIC {
+        return Err(TlsError::Pem);
+    }
+    let count = usize::try_from(u32::from_be_bytes({
+        let (head, tail) = rest.split_at_checked(4).ok_or(TlsError::Pem)?;
+        rest = tail;
+        let mut bytes = [0_u8; 4];
+        bytes.copy_from_slice(head);
+        bytes
+    }))
+    .map_err(|_| TlsError::Pem)?;
+    if count == 0 || count > MAX_PAIR_CERTS {
+        return Err(TlsError::Pem);
+    }
+    let mut certs = Vec::with_capacity(count);
+    for _ in 0..count {
+        certs.push(take_len_prefixed(&mut rest)?.to_vec());
+    }
+    let key = take_len_prefixed(&mut rest)?.to_vec();
+    if !rest.is_empty() {
+        return Err(TlsError::Pem);
+    }
+    let leaf = certs.remove(0);
+    Ok(CertifiedKeyPair::from_der_chain(leaf, certs, key))
+}
+
+/// Read one ACME pair, preferring the atomic file and accepting the legacy
+/// length-framed chain/key files for migration.
 ///
 /// # Errors
 ///
-/// [`TlsError::Read`] when a file exists but cannot be read, [`TlsError::Pem`]
-/// when the stored bytes do not parse as certificates or a PKCS#8 key.
+/// [`TlsError::Read`] when a file cannot be read, or [`TlsError::Pem`] when
+/// stored bytes do not parse as a complete certificate/key pair.
 pub fn load_acme(cert_dir: &Path) -> Result<Option<CertifiedKeyPair>, TlsError> {
-    let Some(chain) = read_optional(&cert_dir.join(ACME_CERT_FILE))? else {
+    if let Some(encoded) = read_optional(&cert_dir.join(ACME_PAIR_FILE))? {
+        return decode_pair(&encoded).map(Some);
+    }
+    let Some(chain) = read_optional(&cert_dir.join(LEGACY_ACME_CERT_FILE))? else {
         return Ok(None);
     };
-    let Some(key) = read_optional(&cert_dir.join(ACME_KEY_FILE))? else {
+    let Some(key) = read_optional(&cert_dir.join(LEGACY_ACME_KEY_FILE))? else {
         return Ok(None);
     };
-    // Length-prefixed framing written by `store_acme`: u32 BE length +
-    // bytes per certificate, leaf first. A truncated file is `Pem`, not a
     let mut certs = Vec::new();
     let mut rest = chain.as_slice();
     while !rest.is_empty() {
-        let (head, body) = rest.split_at_checked(4).ok_or(TlsError::Pem)?;
-        let mut len_bytes = [0_u8; 4];
-        len_bytes.copy_from_slice(head);
-        let len = u32::from_be_bytes(len_bytes) as usize;
-        rest = body;
-        if len == 0 {
-            return Err(TlsError::Pem);
-        }
-        let (cert, tail) = rest.split_at_checked(len).ok_or(TlsError::Pem)?;
+        let cert = take_len_prefixed(&mut rest)?;
         certs.push(cert.to_vec());
-        rest = tail;
     }
     let mut certs = certs.into_iter();
     let Some(leaf) = certs.next() else {
@@ -890,11 +945,11 @@ fn write_key_file(path: &Path, contents: &[u8]) -> Result<(), TlsError> {
     })
 }
 
-/// The bootstrap pair for this host: the stored one if there is one, a freshly
-/// generated and persisted one otherwise.
+/// Return a usable bootstrap pair, rotating it when its lifecycle requires it.
 ///
-/// Reusing the stored pair is the point — the fingerprint an operator trusted
-/// on first use must not change because the service restarted.
+/// A valid stored pair keeps its fingerprint across ordinary restarts. It is
+/// replaced when unreadable, when expired, or — in self-signed-only mode — at
+/// the same two-thirds-lifetime renewal point used by ACME scheduling.
 ///
 /// # Errors
 ///
@@ -902,8 +957,15 @@ fn write_key_file(path: &Path, contents: &[u8]) -> Result<(), TlsError> {
 pub fn load_or_bootstrap(
     cert_dir: &Path,
     hostnames: &[String],
+    acme_configured: bool,
 ) -> Result<CertifiedKeyPair, TlsError> {
-    if let Some(pair) = load_bootstrap(cert_dir)? {
+    if let Some(pair) = load_bootstrap(cert_dir)?
+        && !bootstrap_rotation_due(
+            &pair,
+            acme_configured,
+            OffsetDateTime::now_utc().unix_timestamp(),
+        )
+    {
         return Ok(pair);
     }
     let pair = bootstrap_self_signed(hostnames)?;
@@ -914,11 +976,10 @@ pub fn load_or_bootstrap(
 #[cfg(test)]
 mod tests {
     use super::{
-        ACME_CERT_FILE, ACME_KEY_FILE, ALPN_H2_HTTP11, BOOTSTRAP_CERT_FILE, BOOTSTRAP_KEY_FILE,
-        CertStore, CertifiedKeyPair, TlsError, bootstrap_self_signed, confine_cert_dir,
-        fingerprint, install_acme, install_crypto_provider, load_acme, load_bootstrap,
-        load_or_bootstrap, renewal_due_at, server_config, store_acme, store_bootstrap,
-        validity_unix,
+        ACME_PAIR_FILE, ALPN_H2_HTTP11, BOOTSTRAP_PAIR_FILE, CertStore, CertifiedKeyPair, TlsError,
+        bootstrap_self_signed, confine_cert_dir, fingerprint, install_acme, load_acme,
+        load_bootstrap, load_or_bootstrap, renewal_due_at, server_config, store_acme,
+        store_bootstrap, validity_unix,
     };
     use std::os::unix::fs::PermissionsExt as _;
     use std::sync::Arc;
@@ -935,13 +996,6 @@ mod tests {
 
     fn pair() -> Result<CertifiedKeyPair, TlsError> {
         bootstrap_self_signed(&["box.example".to_owned()])
-    }
-
-    #[test]
-    fn installing_the_provider_twice_is_harmless() {
-        install_crypto_provider();
-        install_crypto_provider();
-        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
     }
 
     #[test]
@@ -1143,10 +1197,11 @@ mod tests {
         let cert_dir = dir.path().join("certs");
         let store = CertStore::new(&pair()?)?;
         install_acme(&cert_dir, &issued, &store)?;
-        for name in [ACME_CERT_FILE, ACME_KEY_FILE] {
-            let mode = std::fs::metadata(cert_dir.join(name))?.permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600, "{name} is {mode:o}");
-        }
+        let name = ACME_PAIR_FILE;
+        let mode = std::fs::metadata(cert_dir.join(name))?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{name} is {mode:o}");
+        assert!(!cert_dir.join("acme.cert.der").exists());
+        assert!(!cert_dir.join("acme.key.der").exists());
         let reloaded = load_acme(&cert_dir)?.ok_or("install left no pair")?;
         assert_eq!(reloaded, issued);
         assert_eq!(
@@ -1292,10 +1347,9 @@ mod tests {
 
         let dir_mode = std::fs::metadata(&cert_dir)?.permissions().mode() & 0o777;
         assert_eq!(dir_mode, 0o700, "certs dir is {dir_mode:o}");
-        for name in [BOOTSTRAP_CERT_FILE, BOOTSTRAP_KEY_FILE] {
-            let mode = std::fs::metadata(cert_dir.join(name))?.permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600, "{name} is {mode:o}");
-        }
+        let name = BOOTSTRAP_PAIR_FILE;
+        let mode = std::fs::metadata(cert_dir.join(name))?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{name} is {mode:o}");
         Ok(())
     }
 
@@ -1305,8 +1359,8 @@ mod tests {
         let cert_dir = dir.path().join("certs");
         let names = vec!["box.example".to_owned()];
 
-        let first = load_or_bootstrap(&cert_dir, &names)?;
-        let second = load_or_bootstrap(&cert_dir, &names)?;
+        let first = load_or_bootstrap(&cert_dir, &names, false)?;
+        let second = load_or_bootstrap(&cert_dir, &names, false)?;
         assert_eq!(first.fingerprint(), second.fingerprint());
         assert_eq!(first, second);
         assert!(second.to_certified_key().is_ok());
@@ -1314,18 +1368,57 @@ mod tests {
     }
 
     #[test]
-    fn a_half_written_store_reads_as_absent() -> R {
+    fn self_signed_rotation_obeys_the_acme_configuration_and_expiry() -> R {
+        use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
+        use time::{Duration, OffsetDateTime};
+
+        fn custom_pair(
+            not_before: OffsetDateTime,
+            not_after: OffsetDateTime,
+        ) -> Result<CertifiedKeyPair, Box<dyn std::error::Error>> {
+            let mut params = CertificateParams::new(vec!["box.example".to_owned()])?;
+            params.not_before = not_before;
+            params.not_after = not_after;
+            let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
+            let cert = params.self_signed(&key)?;
+            Ok(CertifiedKeyPair::new(
+                cert.der().to_vec(),
+                key.serialize_der(),
+            ))
+        }
+
+        let now = OffsetDateTime::now_utc();
+        let dir = tempfile::tempdir()?;
+        let cert_dir = dir.path().join("certs");
+        let names = vec!["box.example".to_owned()];
+        let rotation_due = custom_pair(
+            now.checked_sub(Duration::days(80))
+                .ok_or("time underflow")?,
+            now.checked_add(Duration::days(10)).ok_or("time overflow")?,
+        )?;
+        store_bootstrap(&cert_dir, &rotation_due)?;
+        assert_eq!(load_or_bootstrap(&cert_dir, &names, true)?, rotation_due);
+        assert_ne!(load_or_bootstrap(&cert_dir, &names, false)?, rotation_due);
+
+        let expired_dir = dir.path().join("expired");
+        let expired = custom_pair(
+            now.checked_sub(Duration::days(10))
+                .ok_or("time underflow")?,
+            now.checked_sub(Duration::days(1)).ok_or("time underflow")?,
+        )?;
+        store_bootstrap(&expired_dir, &expired)?;
+        assert_ne!(load_or_bootstrap(&expired_dir, &names, true)?, expired);
+        Ok(())
+    }
+
+    #[test]
+    fn a_corrupt_atomic_pair_is_reported_instead_of_guessed() -> R {
         let dir = tempfile::tempdir()?;
         let cert_dir = dir.path().join("certs");
         assert!(load_bootstrap(&cert_dir)?.is_none());
-
-        store_bootstrap(&cert_dir, &pair()?)?;
-        std::fs::remove_file(cert_dir.join(BOOTSTRAP_KEY_FILE))?;
-        assert!(load_bootstrap(&cert_dir)?.is_none());
-
-        store_bootstrap(&cert_dir, &pair()?)?;
-        std::fs::remove_file(cert_dir.join(BOOTSTRAP_CERT_FILE))?;
-        assert!(load_bootstrap(&cert_dir)?.is_none());
+        std::fs::create_dir_all(&cert_dir)?;
+        std::fs::write(cert_dir.join(BOOTSTRAP_PAIR_FILE), b"torn")?;
+        assert!(matches!(load_bootstrap(&cert_dir), Err(TlsError::Pem)));
         Ok(())
     }
 
@@ -1334,11 +1427,11 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let cert_dir = dir.path().join("certs");
         store_bootstrap(&cert_dir, &pair()?)?;
-        let key = cert_dir.join(BOOTSTRAP_KEY_FILE);
-        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644))?;
+        let path = cert_dir.join(BOOTSTRAP_PAIR_FILE);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
 
         store_bootstrap(&cert_dir, &pair()?)?;
-        let mode = std::fs::metadata(&key)?.permissions().mode() & 0o777;
+        let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "mode is {mode:o}");
         Ok(())
     }
@@ -1380,7 +1473,7 @@ mod tests {
     fn an_unreadable_store_is_reported_not_silently_regenerated() -> R {
         let dir = tempfile::tempdir()?;
         let cert_dir = dir.path().join("certs");
-        std::fs::create_dir_all(cert_dir.join(BOOTSTRAP_CERT_FILE))?;
+        std::fs::create_dir_all(cert_dir.join(BOOTSTRAP_PAIR_FILE))?;
         match load_bootstrap(&cert_dir) {
             Err(err @ TlsError::Read { .. }) => {
                 assert_eq!(err.message_id().as_str(), "web-tls-store-unreadable");
@@ -1427,16 +1520,11 @@ mod tests {
             "web-tls-generate-failed",
             "web-tls-key-rejected",
             "web-tls-acme-pem-rejected",
-            "web-tls-no-provider",
             "web-tls-store-unreadable",
             "web-tls-store-unwritable",
             "web-tls-store-write-failed",
         ] {
             assert!(catalogue_has(id), "`{id}` is missing from core.ftl");
         }
-        let no_provider = TlsError::NoProvider;
-        assert_eq!(no_provider.message_id().as_str(), "web-tls-no-provider");
-        assert!(!no_provider.to_string().is_empty());
-        assert!(!format!("{no_provider:?}").is_empty());
     }
 }

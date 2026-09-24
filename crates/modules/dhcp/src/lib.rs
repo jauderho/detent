@@ -5,8 +5,8 @@
 //! * `dnsmasq.conf` — the dnsmasq line format: `key=value`, bare flags
 //!   (`domain-needed`), `#` comment lines and blank lines. A line that is none
 //!   of those is [`LineKind::Unknown`] and is copied through an edit untouched,
-//!   as are `conf-file=`/`conf-dir=` lines: the module never follows includes,
-//!   so a fragment the model cannot see can never surprise an edit.
+//!   External-file directives remain modeled only so validation can flag them;
+//!   the renderer refuses to create or modify them.
 //! * `/etc/kea/kea-dhcp4.conf` and `kea-dhcp6.conf` — Kea's JSON with
 //!   comments. See [the JSONC CST](#the-jsonc-cst) below.
 //!
@@ -172,9 +172,8 @@ pub struct Model {
 
 // --------------------------------------------------------------- dnsmasq format
 
-/// Keys whose lines name other files; they stay `Unknown` because the module
-/// never follows includes (see the crate header).
-const INCLUDE_KEYS: &[&str] = &["conf-file", "conf-dir"];
+/// External-file directives are modeled for diagnostics but never rendered.
+const INCLUDE_KEYS: &[&str] = &["conf-file", "conf-dir", "include", "includedir", "script"];
 
 /// Parses one dnsmasq line as a setting, or `None` when it is not one.
 ///
@@ -189,7 +188,7 @@ fn parse_dnsmasq(raw: &str) -> Option<DnsmasqSetting> {
     }
     if let Some((key, value)) = trimmed.split_once('=') {
         let key = key.trim();
-        if !is_valid_dnsmasq_key(key) || INCLUDE_KEYS.contains(&key) {
+        if !is_valid_dnsmasq_key(key) {
             return None;
         }
         Some(DnsmasqSetting {
@@ -197,7 +196,7 @@ fn parse_dnsmasq(raw: &str) -> Option<DnsmasqSetting> {
             value: Some(value.trim().to_owned()),
         })
     } else {
-        if !is_valid_dnsmasq_key(trimmed) || INCLUDE_KEYS.contains(&trimmed) {
+        if !is_valid_dnsmasq_key(trimmed) {
             return None;
         }
         Some(DnsmasqSetting {
@@ -234,6 +233,14 @@ fn classify_dnsmasq(raw: &str) -> LineKind {
 /// does not parse back to the same setting — a key containing whitespace,
 /// `=`, or `#`, or a value with leading/trailing whitespace.
 fn render_dnsmasq(setting: &DnsmasqSetting) -> Result<String, EditError> {
+    if INCLUDE_KEYS.contains(&setting.key.to_ascii_lowercase().as_str()) {
+        return Err(EditError::Unsupported {
+            message: format!(
+                "external-file directive cannot be rendered: {}",
+                setting.key
+            ),
+        });
+    }
     let raw = match &setting.value {
         Some(value) => format!("{}={}", setting.key, value),
         None => setting.key.clone(),
@@ -1938,6 +1945,8 @@ fn schema_with_hints() -> serde_json::Value {
 const EMPTY_KEY: MessageId = MessageId::new("dhcp-empty-key");
 /// Fluent id: a dnsmasq key is not shaped like an option name.
 const INVALID_KEY: MessageId = MessageId::new("dhcp-invalid-key");
+/// Fluent id: a dnsmasq directive loads external files or runs commands.
+const EXTERNAL_DIRECTIVE: MessageId = MessageId::new("dhcp-external-directive");
 /// Fluent id: a subnet prefix or `dhcp-range` value is not a valid CIDR.
 const MALFORMED_CIDR: MessageId = MessageId::new("dhcp-malformed-cidr");
 /// Fluent id: a pool value is neither a CIDR prefix nor an `ip - ip` range.
@@ -2167,6 +2176,13 @@ impl ConfigModule for DhcpModule {
                         .with_arg("key", item.key.clone()),
                 );
             }
+            if INCLUDE_KEYS.contains(&item.key.to_ascii_lowercase().as_str()) {
+                diagnostics.push(
+                    Diagnostic::new(Severity::Error, EXTERNAL_DIRECTIVE)
+                        .with_field(FieldPath::new(format!("{path}/key")))
+                        .with_arg("key", item.key.clone()),
+                );
+            }
             if item.key == "dhcp-range"
                 && let Some(value) = &item.value
                 && let Some(first) = value.split(',').next()
@@ -2270,11 +2286,12 @@ impl ConfigModule for DhcpModule {
 #[cfg(test)]
 mod tests {
     use super::{
-        AUTHORITATIVE, DhcpDoc, DhcpModule, DnsmasqSetting, EMPTY_KEY, INVALID_KEY, Jsonc,
-        JsoncRoot, KEA_INTERFACES_EMPTY, KeaConfig, KeaFlavor, KeaPool, KeaSubnet, Lit,
-        MALFORMED_CIDR, MALFORMED_POOL, Member, Model, Obj, REC_LIFETIME, REC_REBIND,
-        classify_dnsmasq, decode_json_string, is_valid_dnsmasq_key, is_valid_pool, json_escape,
-        parse_cidr, parse_dnsmasq, parse_jsonc, render_dnsmasq, schema_with_hints, sniffs_jsonc,
+        AUTHORITATIVE, DhcpDoc, DhcpModule, DnsmasqSetting, EMPTY_KEY, EXTERNAL_DIRECTIVE,
+        INCLUDE_KEYS, INVALID_KEY, Jsonc, JsoncRoot, KEA_INTERFACES_EMPTY, KeaConfig, KeaFlavor,
+        KeaPool, KeaSubnet, Lit, MALFORMED_CIDR, MALFORMED_POOL, Member, Model, Obj, REC_LIFETIME,
+        REC_REBIND, classify_dnsmasq, decode_json_string, is_valid_dnsmasq_key, is_valid_pool,
+        json_escape, parse_cidr, parse_dnsmasq, parse_jsonc, render_dnsmasq, schema_with_hints,
+        sniffs_jsonc,
     };
     use detent_core::descriptor::{HostProfile, InitSystem, Os, ValidationCtx};
     use detent_core::diag::{MessageId, Severity};
@@ -2316,6 +2333,7 @@ mod tests {
             "dhcp-invalid-key",
             "dhcp-malformed-cidr",
             "dhcp-malformed-pool",
+            "dhcp-external-directive",
             "dhcp-authoritative-set",
             "dhcp-kea-interfaces-empty",
             "dhcp-rec-rebind",
@@ -2453,6 +2471,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_dnsmasq_keeps_external_directives_for_validation() {
+        for key in INCLUDE_KEYS {
+            let line = format!("{key}=/tmp/untrusted");
+            assert_eq!(
+                parse_dnsmasq(&line),
+                Some(dnsmasq_setting(key, Some("/tmp/untrusted")))
+            );
+        }
+    }
+
+    #[test]
     fn parse_dnsmasq_rejects_non_settings() {
         for line in [
             "",
@@ -2461,8 +2490,6 @@ mod tests {
             "  # indented",
             "two words",
             "=missing-key",
-            "conf-file=/etc/other.conf",
-            "conf-dir=/etc/dnsmasq.d",
         ] {
             assert_eq!(parse_dnsmasq(line), None, "expected {line:?} to be refused");
         }
@@ -2869,6 +2896,14 @@ mod tests {
         assert!(has(&model, INVALID_KEY, Severity::Error));
         let model = dnsmasq_only(vec![dnsmasq_setting("#a", Some("v"))]);
         assert!(has(&model, INVALID_KEY, Severity::Error));
+    }
+
+    #[test]
+    fn validate_rejects_external_file_and_script_directives() {
+        for key in INCLUDE_KEYS {
+            let model = dnsmasq_only(vec![dnsmasq_setting(key, Some("/tmp/untrusted"))]);
+            assert!(has(&model, EXTERNAL_DIRECTIVE, Severity::Error), "{key}");
+        }
     }
 
     #[test]

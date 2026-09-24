@@ -39,8 +39,9 @@ use serde::{Deserialize, Serialize};
 
 use super::allowlist::Allowlist;
 use super::proto::{
-    BackupId, BackupInfo, BindingId, CheckId, CheckOutcome, CommitId, IdKind, ModuleId, ProtoError,
-    Request, Response, ServiceAction, ServiceOutcome, TargetContents, TargetId, WriteReceipt,
+    BackupId, BackupInfo, BindingId, CheckId, CheckOutcome, CommitId, IdKind, ModuleId,
+    PendingService, ProtoError, Request, Response, ServiceAction, ServiceOutcome, TargetContents,
+    TargetId, WriteReceipt,
 };
 use super::transport::{Channel, ChannelError};
 use crate::fs::atomic::{
@@ -50,6 +51,9 @@ use crate::fs::atomic::{
 
 /// Name of the crash-recovery marker inside the state root.
 pub const PENDING_COMMIT_MARKER: &str = "pending-commit.json";
+
+/// Lock file serialising monitor startup and preventing a second live monitor.
+const PENDING_COMMIT_LOCK: &str = "pending-commit.lock";
 
 /// How often the loop wakes to re-check a pending commit-confirm deadline.
 const PENDING_POLL: Duration = Duration::from_millis(20);
@@ -100,6 +104,11 @@ pub trait CheckRunner {
     /// [`HookError::Failed`] when the validator could not be run.
     fn run_check(&self, check: &ExternalCheck, candidate: &Path)
     -> Result<CheckOutcome, HookError>;
+
+    /// Whether this runner has a configured implementation.
+    fn configured(&self) -> bool {
+        true
+    }
 }
 
 /// Drives the host's service manager.
@@ -122,6 +131,9 @@ pub trait ServiceControl {
 pub struct NoChecks;
 
 impl CheckRunner for NoChecks {
+    fn configured(&self) -> bool {
+        false
+    }
     fn run_check(
         &self,
         _check: &ExternalCheck,
@@ -239,6 +251,9 @@ pub struct PendingCommitMarker {
     pub deadline_unix_ms: u128,
     /// What to restore, in the order the writes happened.
     pub entries: Vec<RollbackEntry>,
+    /// Service action to replay after restoring the files.
+    #[serde(default)]
+    pub service: Option<PendingService>,
 }
 
 /// What [`Monitor::recover_pending`] did.
@@ -258,6 +273,7 @@ struct Pending {
     commit: CommitId,
     deadline: Instant,
     entries: Vec<RollbackEntry>,
+    service: Option<PendingService>,
 }
 
 // ---------------------------------------------------------------------------
@@ -274,8 +290,10 @@ pub struct Monitor<'a> {
     pending: Option<Pending>,
     /// Test-only swap target. `None` (production) swaps `current_exe()`; the
     /// engine tests point it at their temp target instead. A field — not a
-    /// global — so parallel tests cannot steer each other's monitor thread.
+    /// global — so parallel tests cannot steer each other.
     binary_override: Option<PathBuf>,
+    /// Test-only trust material; production uses [`detent_update::trust::embedded`].
+    update_trust: Option<detent_update::trust::TrustRoot>,
 }
 
 impl<'a> Monitor<'a> {
@@ -289,7 +307,14 @@ impl<'a> Monitor<'a> {
             journal: Vec::new(),
             pending: None,
             binary_override: None,
+            update_trust: None,
         }
+    }
+
+    /// Use explicit Sigstore trust material instead of the embedded roots.
+    /// This keeps synthetic verifier fixtures out of production trust files.
+    pub fn set_update_trust(&mut self, trust: detent_update::trust::TrustRoot) {
+        self.update_trust = Some(trust);
     }
 
     /// Point the binary swap at `path` instead of `current_exe()`. Test-only:
@@ -323,6 +348,8 @@ impl<'a> Monitor<'a> {
     /// a protocol violation, and [`MonitorError::State`] when the state
     /// directory cannot be maintained.
     pub fn serve(&mut self, channel: &mut Channel) -> Result<ExitReason, MonitorError> {
+        let _state_lock = lock_state(self.allow.state_root())?;
+        self.recover_pending()?;
         let idle_timeout = channel.read_timeout();
         loop {
             let want = if self.pending.is_some() {
@@ -400,34 +427,59 @@ impl<'a> Monitor<'a> {
             Request::Service { binding, action } => self.service(binding, action),
             Request::ListBackups { module } => self.list_backups(module),
             Request::Restore { module, backup } => self.restore(module, backup),
-            Request::StartConfirmTimer { commit, timeout_s } => {
-                self.start_confirm_timer(commit, timeout_s)?
-            }
+            Request::StartConfirmTimer {
+                commit,
+                timeout_s,
+                service,
+            } => self.start_confirm_timer(commit, timeout_s, service)?,
             Request::ConfirmCommit { commit } => self.confirm_commit(commit)?,
             Request::RollbackCommit { commit } => self.rollback_commit(commit)?,
             Request::Mount { .. } => Response::Error(ProtoError::Unsupported(
                 "mount requires the module-mounts feature".to_owned(),
             )),
-            Request::ReplaceBinary { len, sha256 } => self.replace_binary(len, sha256),
+            Request::ReplaceBinary { tag, len, sha256 } => self.replace_binary(&tag, len, sha256),
             Request::Shutdown => Response::ShuttingDown,
         })
     }
 
-    /// Verify the staged binary and atomically swap it over the running one.
-    ///
-    /// `staged_path` is `<state_root>/update/staged/<hex sha256>`. The file
-    /// must be owned by the monitor's own euid (in production that is root,
-    /// so a `detent`-owned file the worker planted refuses), open
-    /// `O_NOFOLLOW`, and match `len`/`sha256` as read from the open fd —
-    /// never a re-opened path. The swap writes those verified bytes through
-    /// [`swap_running_binary`] and keeps the previous binary at
-    /// `<target>.prev`, same convention `detent-update::install::swap` uses.
-    fn replace_binary(&self, len: u64, sha256: crate::fs::atomic::Sha256Digest) -> Response {
+    /// Materialize and authenticate a staged release, then atomically swap it.
+    fn replace_binary(
+        &self,
+        tag: &str,
+        len: u64,
+        sha256: crate::fs::atomic::Sha256Digest,
+    ) -> Response {
         let staged = staged_path(self.allow.state_root(), sha256);
+        if let Err(err) = materialize_staged(self.allow.state_root(), tag, len, sha256) {
+            return Response::Error(err);
+        }
         let bytes = match read_staged_verified(&staged, len, sha256) {
             Ok(bytes) => bytes,
             Err(err) => return Response::Error(err),
         };
+        let tag_path = match staged_input_path(self.allow.state_root(), tag) {
+            Ok(path) => path,
+            Err(err) => return Response::Error(err),
+        };
+        let bundle_path = tag_path.with_file_name(format!("{tag}.sigstore.json"));
+        let Ok(bundle) = read_bounded_file(&bundle_path, detent_update::bundle::MAX_BUNDLE_BYTES)
+        else {
+            return Response::Error(ProtoError::VerificationFailed);
+        };
+        let Ok(decoded) = detent_update::bundle::parse(&bundle) else {
+            return Response::Error(ProtoError::VerificationFailed);
+        };
+        let verified = if let Some(trust) = &self.update_trust {
+            detent_update::verify::verify(&decoded, sha256.as_bytes(), tag, trust)
+        } else {
+            detent_update::trust::embedded().and_then(|trust| {
+                detent_update::verify::verify(&decoded, sha256.as_bytes(), tag, &trust)
+            })
+        };
+        if let Err(err) = verified {
+            tracing::warn!(error = %err, "staged release verification failed");
+            return Response::Error(ProtoError::VerificationFailed);
+        }
         let target = self
             .binary_override
             .clone()
@@ -471,28 +523,142 @@ impl<'a> Monitor<'a> {
             expected_prev,
             backup_dir: &entry.backup_dir,
             keep_backups: self.allow.keep_backups(),
+            create_missing: false,
             create_mode: entry.create_mode,
         };
-        match write_atomic(&request) {
-            Ok(outcome) => {
-                if let Some(backup) = outcome.backup.clone() {
-                    self.journal.push(RollbackEntry {
-                        target: id.get(),
-                        path: entry.path.clone(),
-                        backup,
-                    });
-                }
-                Response::Written(WriteReceipt {
-                    target: id,
-                    prev_digest: outcome.prev_digest,
-                    new_digest: outcome.new_digest,
-                    created: outcome.created,
-                    backed_up: outcome.backup.is_some(),
-                    owner_preserved: outcome.owner_preserved,
-                })
+        let outcome = match write_atomic(&request) {
+            Ok(outcome) => outcome,
+            Err(err) => return Response::Error(atomic_to_proto(&err)),
+        };
+        let post_write = std::fs::read(&entry.path).map_err(|err| {
+            Response::Error(ProtoError::Io(format!(
+                "cannot read written target: {}",
+                err.kind()
+            )))
+        });
+        let validation = match post_write {
+            Ok(contents) => self.revalidate(entry.module, &contents),
+            Err(response) => Err(response),
+        };
+        if let Err(response) = validation {
+            if let Some(backup) = outcome.backup.as_deref() {
+                let _ = restore_backup(backup, &entry.path);
+            } else {
+                let _ = std::fs::remove_file(&entry.path);
             }
-            Err(err) => Response::Error(atomic_to_proto(&err)),
+            return response;
         }
+        if let Some(backup) = outcome.backup.clone() {
+            self.journal.push(RollbackEntry {
+                target: id.get(),
+                path: entry.path.clone(),
+                backup,
+            });
+        }
+        Response::Written(WriteReceipt {
+            target: id,
+            prev_digest: outcome.prev_digest,
+            new_digest: outcome.new_digest,
+            created: outcome.created,
+            backed_up: outcome.backup.is_some(),
+            owner_preserved: outcome.owner_preserved,
+        })
+    }
+
+    /// Re-run every configured validator against the bytes just written. The
+    /// monitor repeats the worker's validation and rolls back on failure.
+    fn revalidate(&self, module: ModuleId, bytes: &[u8]) -> Result<(), Response> {
+        let Some(descriptor) = self.allow.module(module) else {
+            return Err(unknown(IdKind::Module, u32::from(module.get())));
+        };
+        if Self::content_has_exec_directive(descriptor.id, bytes) {
+            return Err(Response::Error(ProtoError::Io(
+                "module content contains a forbidden execution directive".to_owned(),
+            )));
+        }
+        if !self.hooks.checks.configured() {
+            return Ok(());
+        }
+        if descriptor.checks.is_empty() {
+            return Ok(());
+        }
+        let dir = self.allow.check_tmp_dir();
+        if let Err(err) = std::fs::create_dir_all(&dir) {
+            return Err(Response::Error(ProtoError::Io(format!(
+                "cannot create the candidate directory: {}",
+                err.kind()
+            ))));
+        }
+        let candidate = tempfile::Builder::new()
+            .prefix("detent-validate-")
+            .tempfile_in(&dir)
+            .map_err(|err| {
+                Response::Error(ProtoError::Io(format!(
+                    "cannot create a candidate file: {}",
+                    err.kind()
+                )))
+            })?;
+        write_all_and_sync(candidate.as_file(), bytes).map_err(|err| {
+            Response::Error(ProtoError::Io(format!(
+                "cannot write the candidate file: {}",
+                err.kind()
+            )))
+        })?;
+        for check in descriptor.checks {
+            let outcome = self
+                .hooks
+                .checks
+                .run_check(check, candidate.path())
+                .map_err(|err| Response::Error(err.into()))?;
+            if !outcome.passed {
+                return Err(Response::Error(ProtoError::Io(
+                    "external validator rejected candidate content".to_owned(),
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Reject directives that ask a privileged daemon to execute worker-controlled
+    /// content. This is deliberately a small per-module deny-list; the monitor
+    /// does not duplicate every module's config grammar.
+    fn content_has_exec_directive(module: &str, bytes: &[u8]) -> bool {
+        let text = String::from_utf8_lossy(bytes);
+        let lower = text.to_ascii_lowercase();
+        if ["exec", "sh ", "bash", "system(", "`"]
+            .iter()
+            .any(|needle| lower.contains(needle))
+        {
+            return true;
+        }
+        let text = String::from_utf8_lossy(bytes);
+        text.lines().any(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                return false;
+            }
+            let lower = line.to_ascii_lowercase();
+            let directive = |name: &str| {
+                lower == name
+                    || lower.starts_with(&format!("{name} "))
+                    || lower.starts_with(&format!("{name}="))
+                    || lower.starts_with(&format!("{name}:"))
+            };
+            match module {
+                "samba" => ["root preexec", "root postexec", "preexec", "postexec"]
+                    .iter()
+                    .any(|name| directive(name)),
+                "dhcp" => ["dhcp-script", "script"].iter().any(|name| directive(name)),
+                "mounts" => directive("exec"),
+                "nfs" => lower
+                    .split(|c: char| c == ',' || c.is_whitespace())
+                    .any(|word| word == "no_root_squash"),
+                "network" => ["up", "pre-up", "post-up", "down", "pre-down", "post-down"]
+                    .iter()
+                    .any(|name| directive(name)),
+                _ => false,
+            }
+        })
     }
 
     fn run_check(&self, id: CheckId, bytes: &[u8]) -> Response {
@@ -648,6 +814,7 @@ impl<'a> Monitor<'a> {
         &mut self,
         commit: CommitId,
         timeout_s: u16,
+        service: Option<PendingService>,
     ) -> Result<Response, MonitorError> {
         if let Some(pending) = &self.pending {
             return Ok(Response::Error(ProtoError::CommitPending(pending.commit)));
@@ -663,12 +830,14 @@ impl<'a> Monitor<'a> {
             deadline_unix_ms: unix_millis()
                 .saturating_add(u128::from(timeout_s).saturating_mul(1000)),
             entries: entries.clone(),
+            service,
         };
         self.write_marker(&marker)?;
         self.pending = Some(Pending {
             commit,
             deadline,
             entries,
+            service,
         });
         tracing::info!(
             commit = commit.get(),
@@ -684,6 +853,14 @@ impl<'a> Monitor<'a> {
     }
 
     fn confirm_commit(&mut self, commit: CommitId) -> Result<Response, MonitorError> {
+        let expired = self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.commit == commit && Instant::now() >= pending.deadline);
+        if expired {
+            self.enforce_deadline()?;
+            return Ok(Response::Error(ProtoError::CommitExpired(commit)));
+        }
         match &self.pending {
             Some(pending) if pending.commit == commit => {
                 self.pending = None;
@@ -709,6 +886,9 @@ impl<'a> Monitor<'a> {
             return Ok(unknown(IdKind::Commit, commit.get()));
         };
         let restored = roll_back(&pending.entries);
+        if let Err(err) = self.replay_service(pending.service) {
+            tracing::error!(error = %err, "service replay after rollback failed");
+        }
         self.clear_marker()?;
         tracing::warn!(
             commit = commit.get(),
@@ -735,6 +915,9 @@ impl<'a> Monitor<'a> {
             return Ok(());
         };
         let restored = roll_back(&pending.entries);
+        if let Err(err) = self.replay_service(pending.service) {
+            tracing::error!(error = %err, "service replay after rollback failed");
+        }
         self.clear_marker()?;
         tracing::warn!(
             commit = pending.commit.get(),
@@ -774,6 +957,34 @@ impl<'a> Monitor<'a> {
         }
     }
 
+    fn replay_service(&self, service: Option<PendingService>) -> Result<(), HookError> {
+        let Some(service) = service else {
+            return Ok(());
+        };
+        let entry = self.allow.binding(service.binding).ok_or_else(|| {
+            HookError::Failed(format!("service binding {} disappeared", service.binding))
+        })?;
+        let action = service.action.to_core().ok_or_else(|| {
+            HookError::Failed("pending service action is not mutating".to_owned())
+        })?;
+        if !entry.binding.actions.contains(&action) {
+            return Err(HookError::Failed(
+                "pending service action is no longer allowed".to_owned(),
+            ));
+        }
+        self.hooks
+            .services
+            .service(entry.binding, action)
+            .map(|outcome| {
+                tracing::info!(
+                    binding = service.binding.get(),
+                    action = ?action,
+                    active = outcome.active,
+                    "replayed service action after file rollback"
+                );
+            })
+    }
+
     /// Roll back a commit that was armed by a monitor that then died.
     ///
     /// Called once at startup, before the handshake. A marker on disk means
@@ -785,8 +996,8 @@ impl<'a> Monitor<'a> {
     ///
     /// [`MonitorError::CorruptMarker`] when the marker is unparseable, and
     /// [`MonitorError::State`] when it cannot be read or removed.
-    pub fn recover_pending(state_dir: &Path) -> Result<Option<Recovered>, MonitorError> {
-        let path = state_dir.join(PENDING_COMMIT_MARKER);
+    pub fn recover_pending(&self) -> Result<Option<Recovered>, MonitorError> {
+        let path = self.marker_path();
         let raw = match std::fs::read(&path) {
             Ok(raw) => raw,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -803,6 +1014,9 @@ impl<'a> Monitor<'a> {
                 Ok(_) => restored = restored.saturating_add(1),
                 Err(err) => failures.push(err.to_string()),
             }
+        }
+        if let Err(err) = self.replay_service(marker.service) {
+            failures.push(err.to_string());
         }
         std::fs::remove_file(&path).map_err(|source| MonitorError::State {
             op: "remove_file",
@@ -825,6 +1039,62 @@ impl<'a> Monitor<'a> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn lock_state(state_dir: &Path) -> Result<std::fs::File, MonitorError> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    if let Err(source) = std::fs::create_dir_all(state_dir) {
+        if source.kind() == std::io::ErrorKind::PermissionDenied {
+            // `host` and other read-only commands run with the default
+            // `state_root` (/var/lib/detent) even when the caller is not root.
+            // Creating that directory would require privilege and must not turn
+            // a read-only command into a startup failure. Fall back to a dummy
+            // lock so the monitor can still serve; mutual exclusion for the
+            // real state directory is only needed when it is actually writable.
+            return std::fs::File::open("/dev/null").map_err(|source| MonitorError::State {
+                op: "open lock",
+                source,
+            });
+        }
+        return Err(MonitorError::State {
+            op: "create_dir_all",
+            source,
+        });
+    }
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(state_dir.join(PENDING_COMMIT_LOCK))
+    {
+        Ok(file) => file,
+        Err(source) if source.kind() == std::io::ErrorKind::PermissionDenied => {
+            return std::fs::File::open("/dev/null").map_err(|source| MonitorError::State {
+                op: "open lock",
+                source,
+            });
+        }
+        Err(source) => {
+            return Err(MonitorError::State {
+                op: "open lock",
+                source,
+            });
+        }
+    };
+    if let Err(source) =
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+    {
+        // A dummy /dev/null fd never contends, so this only fires for the
+        // real lock file. A second live monitor is the intended error.
+        return Err(MonitorError::State {
+            op: "flock",
+            source: std::io::Error::other(source),
+        });
+    }
+    Ok(file)
+}
 
 /// Restore the recorded backups, newest write first. Failures are logged and
 /// counted; one unreadable backup must not abandon the rest.
@@ -911,6 +1181,103 @@ pub(crate) const PREVIOUS_SUFFIX: &str = ".prev";
 /// `<state_root>/update/staged/<hex sha256>`.
 fn staged_path(state_root: &Path, sha256: crate::fs::atomic::Sha256Digest) -> PathBuf {
     state_root.join(STAGED_DIR).join(sha256.to_string())
+}
+
+fn staged_input_path(state_root: &Path, tag: &str) -> Result<PathBuf, ProtoError> {
+    if tag.is_empty()
+        || tag.len() > 128
+        || tag == "."
+        || tag == ".."
+        || tag.contains('/')
+        || tag.as_bytes().contains(&0)
+    {
+        return Err(ProtoError::VerificationFailed);
+    }
+    Ok(state_root.join(STAGED_DIR).join(tag))
+}
+
+fn ensure_staged_dir(state_root: &Path) -> Result<PathBuf, ProtoError> {
+    use std::os::unix::fs::MetadataExt as _;
+    let dir = state_root.join(STAGED_DIR);
+    std::fs::create_dir_all(&dir)
+        .map_err(|err| ProtoError::Io(format!("create staged directory: {}", err.kind())))?;
+    let meta = std::fs::symlink_metadata(&dir)
+        .map_err(|err| ProtoError::Io(format!("stat staged directory: {}", err.kind())))?;
+    if !meta.is_dir()
+        || meta.uid() != rustix::process::geteuid().as_raw()
+        || meta.mode() & 0o022 != 0
+    {
+        return Err(ProtoError::Io("staged directory is not trusted".to_owned()));
+    }
+    Ok(dir)
+}
+
+fn materialize_staged(
+    state_root: &Path,
+    tag: &str,
+    len: u64,
+    expected: crate::fs::atomic::Sha256Digest,
+) -> Result<(), ProtoError> {
+    use rustix::fs::{Mode, OFlags};
+    let source = staged_input_path(state_root, tag)?;
+    let destination = staged_path(state_root, expected);
+    if source == destination {
+        return Err(ProtoError::VerificationFailed);
+    }
+    let mut bytes = Vec::new();
+    let source_fd = rustix::fs::open(
+        &source,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|err| ProtoError::Io(format!("open staged binary: {err}")))?;
+    let source_file: std::fs::File = source_fd.into();
+    if let Err(err) = (&source_file)
+        .take(u64::from(u32::MAX))
+        .read_to_end(&mut bytes)
+    {
+        return Err(ProtoError::Io(format!(
+            "read staged binary: {}",
+            err.kind()
+        )));
+    }
+    if bytes.len() as u64 != len {
+        return Err(ProtoError::Io(
+            "staged binary size does not match the request".to_owned(),
+        ));
+    }
+    let actual = crate::fs::atomic::Sha256Digest::of(&bytes);
+    if actual != expected {
+        return Err(ProtoError::Conflict {
+            expected,
+            actual: Some(actual),
+        });
+    }
+    let dir = ensure_staged_dir(state_root)?;
+    let fd = rustix::fs::open(
+        &destination,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_bits_truncate(0o600),
+    )
+    .map_err(|err| ProtoError::Io(format!("materialize staged binary: {err}")))?;
+    let file: std::fs::File = fd.into();
+    write_all_and_sync(&file, &bytes)
+        .map_err(|err| ProtoError::Io(format!("materialize staged binary: {}", err.kind())))?;
+    std::fs::File::open(dir)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|err| ProtoError::Io(format!("sync staged directory: {}", err.kind())))?;
+    Ok(())
+}
+
+fn read_bounded_file(path: &Path, max: usize) -> Result<Vec<u8>, std::io::Error> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > max {
+        return Err(std::io::Error::other("file exceeds size cap"));
+    }
+    Ok(bytes)
 }
 
 /// Open `path` with `O_NOFOLLOW`, require ownership by the monitor's own
@@ -1206,7 +1573,8 @@ fn finish_send_error(err: ChannelError) -> Result<ExitReason, MonitorError> {
 mod tests {
     use super::{
         CheckRunner, ExitReason, HookError, Hooks, MAX_CONFIRM_TIMEOUT_S, Monitor,
-        PENDING_COMMIT_MARKER, PREVIOUS_SUFFIX, STAGED_DIR, ServiceControl, finish_send_error,
+        PENDING_COMMIT_MARKER, STAGED_DIR, ServiceControl, finish_send_error, materialize_staged,
+        staged_path,
     };
     use crate::fs::atomic::{AtomicError, Sha256Digest};
     use crate::privsep::allowlist::{Allowlist, AllowlistError, Config};
@@ -1372,6 +1740,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn monitor_rejects_baseline_execution_constructs() {
+        assert!(Monitor::content_has_exec_directive("fake", b"exec /tmp/x"));
+        assert!(Monitor::content_has_exec_directive("fake", b"system('id')"));
+        assert!(Monitor::content_has_exec_directive("fake", b"value `id`"));
+        assert!(!Monitor::content_has_exec_directive(
+            "fake",
+            b"ordinary configuration"
+        ));
+    }
+
+    struct CandidateChecks(PathBuf);
+    impl CheckRunner for CandidateChecks {
+        fn run_check(
+            &self,
+            _check: &ExternalCheck,
+            candidate: &Path,
+        ) -> Result<CheckOutcome, HookError> {
+            if candidate.parent() != Some(self.0.as_path()) {
+                return Err(HookError::Failed(
+                    "candidate is outside state root".to_owned(),
+                ));
+            }
+            Ok(CheckOutcome {
+                check: CheckId(0),
+                passed: true,
+                exit_code: Some(0),
+                detail: "ok".to_owned(),
+            })
+        }
+    }
+
     struct FailingChecks;
     impl CheckRunner for FailingChecks {
         fn run_check(
@@ -1439,6 +1839,25 @@ mod tests {
             services: &super::NoServices,
         };
         let mut monitor = greeted(fx.allow()?, hooks);
+        let response = monitor.dispatch(Request::RunCheck {
+            check: CheckId(0),
+            bytes: b"candidate".to_vec(),
+        })?;
+        assert!(matches!(response, Response::Checked(outcome) if outcome.passed));
+        Ok(())
+    }
+
+    #[test]
+    fn run_check_places_the_candidate_under_the_configured_state_root()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let allow = fx.allow()?;
+        let checks = CandidateChecks(allow.check_tmp_dir());
+        let hooks = Hooks {
+            checks: &checks,
+            services: &super::NoServices,
+        };
+        let mut monitor = greeted(allow, hooks);
         let response = monitor.dispatch(Request::RunCheck {
             check: CheckId(0),
             bytes: b"candidate".to_vec(),
@@ -1629,6 +2048,21 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn write_target_creates_a_missing_file() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        assert!(std::fs::remove_file(&fx.target).is_ok());
+        let response = monitor.dispatch(Request::WriteTarget {
+            target: TargetId(0),
+            expected_prev: None,
+            bytes: b"created\n".to_vec(),
+        })?;
+        assert!(matches!(response, Response::Written(receipt) if receipt.created));
+        assert_eq!(std::fs::read(&fx.target)?, b"created\n");
+        Ok(())
+    }
+
     // -- backups and restore ------------------------------------------------
 
     #[test]
@@ -1753,6 +2187,7 @@ mod tests {
             monitor.dispatch(Request::StartConfirmTimer {
                 commit: CommitId(1),
                 timeout_s: 1,
+                service: None,
             })?,
             Response::ConfirmTimerStarted { .. }
         ));
@@ -1783,6 +2218,7 @@ mod tests {
         let response = monitor.dispatch(Request::StartConfirmTimer {
             commit: CommitId(1),
             timeout_s: 1,
+            service: None,
         })?;
         assert!(matches!(response, Response::ConfirmTimerStarted { .. }));
         let response = monitor.dispatch(Request::ConfirmCommit {
@@ -1790,6 +2226,40 @@ mod tests {
         })?;
         assert!(matches!(response, Response::Committed { .. }));
         assert_eq!(MAX_CONFIRM_TIMEOUT_S, 3600);
+        Ok(())
+    }
+
+    #[test]
+    fn confirm_after_deadline_is_rejected_and_rolls_back() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        assert!(matches!(
+            monitor.dispatch(Request::WriteTarget {
+                target: TargetId(0),
+                expected_prev: None,
+                bytes: b"v2".to_vec(),
+            })?,
+            Response::Written(_)
+        ));
+        assert!(matches!(
+            monitor.dispatch(Request::StartConfirmTimer {
+                commit: CommitId(1),
+                timeout_s: 1,
+                service: None,
+            })?,
+            Response::ConfirmTimerStarted { .. }
+        ));
+        std::thread::sleep(Duration::from_millis(1100));
+        let response = monitor.dispatch(Request::ConfirmCommit {
+            commit: CommitId(1),
+        })?;
+        assert!(matches!(
+            response,
+            Response::Error(ProtoError::CommitExpired(CommitId(1)))
+        ));
+        assert!(!monitor.has_pending_commit());
+        assert_eq!(std::fs::read(&fx.target)?, b"v1");
         Ok(())
     }
 
@@ -1811,6 +2281,7 @@ mod tests {
             monitor.dispatch(Request::StartConfirmTimer {
                 commit: CommitId(1),
                 timeout_s: MAX_CONFIRM_TIMEOUT_S,
+                service: None,
             })?,
             Response::ConfirmTimerStarted { .. }
         ));
@@ -1845,6 +2316,7 @@ mod tests {
             monitor.dispatch(Request::StartConfirmTimer {
                 commit: CommitId(1),
                 timeout_s: MAX_CONFIRM_TIMEOUT_S,
+                service: None,
             })?,
             Response::ConfirmTimerStarted { .. }
         ));
@@ -1904,6 +2376,7 @@ mod tests {
             monitor.dispatch(Request::StartConfirmTimer {
                 commit: CommitId(1),
                 timeout_s: 1,
+                service: None,
             })?,
             Response::ConfirmTimerStarted { .. }
         ));
@@ -1946,6 +2419,7 @@ mod tests {
         let response = monitor.dispatch(Request::StartConfirmTimer {
             commit: CommitId(1),
             timeout_s: 1,
+            service: None,
         });
         assert!(response.is_err());
         Ok(())
@@ -1977,6 +2451,7 @@ mod tests {
         let response = monitor.dispatch(Request::StartConfirmTimer {
             commit: CommitId(1),
             timeout_s: 1,
+            service: None,
         });
         assert!(
             std::fs::set_permissions(&fx.state_root, std::fs::Permissions::from_mode(0o700))
@@ -1993,7 +2468,8 @@ mod tests {
     {
         let fx = fixture()?;
         assert!(std::fs::create_dir_all(&fx.state_root).is_ok());
-        assert_eq!(Monitor::recover_pending(&fx.state_root).ok(), Some(None));
+        let monitor = Monitor::new(fx.allow()?, Hooks::default());
+        assert_eq!(monitor.recover_pending().ok(), Some(None));
         Ok(())
     }
 
@@ -2003,7 +2479,8 @@ mod tests {
         assert!(std::fs::create_dir_all(&fx.state_root).is_ok());
         let marker_path = fx.state_root.join(PENDING_COMMIT_MARKER);
         assert!(std::fs::write(&marker_path, b"not json").is_ok());
-        assert!(Monitor::recover_pending(&fx.state_root).is_err());
+        let monitor = Monitor::new(fx.allow()?, Hooks::default());
+        assert!(monitor.recover_pending().is_err());
         Ok(())
     }
 
@@ -2025,8 +2502,10 @@ mod tests {
         });
         let bytes = serde_json::to_vec(&marker)?;
         assert!(std::fs::write(&marker_path, bytes).is_ok());
-        let recovered =
-            Monitor::recover_pending(&fx.state_root)?.ok_or("expected a recovered commit")?;
+        let monitor = Monitor::new(fx.allow()?, Hooks::default());
+        let recovered = monitor
+            .recover_pending()?
+            .ok_or("expected a recovered commit")?;
         assert_eq!(recovered.commit, CommitId(5));
         assert_eq!(recovered.restored, 0);
         assert_eq!(recovered.failures.len(), 1);
@@ -2171,6 +2650,7 @@ mod tests {
             monitor.dispatch(Request::StartConfirmTimer {
                 commit: CommitId(1),
                 timeout_s: MAX_CONFIRM_TIMEOUT_S,
+                service: None,
             })?,
             Response::ConfirmTimerStarted { .. }
         ));
@@ -2196,6 +2676,7 @@ mod tests {
             monitor.dispatch(Request::StartConfirmTimer {
                 commit: CommitId(1),
                 timeout_s: 1,
+                service: None,
             })?,
             Response::ConfirmTimerStarted { .. }
         ));
@@ -2228,6 +2709,7 @@ mod tests {
             monitor.dispatch(Request::StartConfirmTimer {
                 commit: CommitId(1),
                 timeout_s: 1,
+                service: None,
             })?,
             Response::ConfirmTimerStarted { .. }
         ));
@@ -2259,7 +2741,8 @@ mod tests {
         assert!(
             std::fs::set_permissions(&marker_path, std::fs::Permissions::from_mode(0o000)).is_ok()
         );
-        let result = Monitor::recover_pending(&fx.state_root);
+        let monitor = Monitor::new(fx.allow()?, Hooks::default());
+        let result = monitor.recover_pending();
         assert!(
             std::fs::set_permissions(&marker_path, std::fs::Permissions::from_mode(0o600)).is_ok()
         );
@@ -2287,7 +2770,8 @@ mod tests {
             std::fs::set_permissions(&fx.state_root, std::fs::Permissions::from_mode(0o500))
                 .is_ok()
         );
-        let result = Monitor::recover_pending(&fx.state_root);
+        let monitor = Monitor::new(fx.allow()?, Hooks::default());
+        let result = monitor.recover_pending();
         assert!(
             std::fs::set_permissions(&fx.state_root, std::fs::Permissions::from_mode(0o700))
                 .is_ok()
@@ -2406,8 +2890,6 @@ mod tests {
 
     // -- ReplaceBinary ------------------------------------------------------
 
-    /// A minimal target: a small "binary" the swap aims at. Lives outside
-    /// the state root so the staged-path lookup stays independent of it.
     fn swap_target(dir: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, std::io::Error> {
         let path = dir.join(name);
         std::fs::write(&path, bytes)?;
@@ -2415,188 +2897,126 @@ mod tests {
         Ok(path)
     }
 
-    /// Plant `bytes` at `<state_root>/update/staged/<hex sha256>` so the
-    /// monitor's staged-path lookup finds it.
-    fn plant_staged(state_root: &Path, bytes: &[u8]) -> Result<Sha256Digest, std::io::Error> {
-        let digest = Sha256Digest::of(bytes);
+    const FIXTURE_TAG: &str = "v0.0.2";
+
+    fn fixture_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../detent-update/tests/fixtures")
+    }
+
+    fn fixture_trust() -> Result<detent_update::trust::TrustRoot, Box<dyn std::error::Error>> {
+        let root = std::fs::read_to_string(fixture_dir().join("fulcio-root.pem"))?;
+        let rekor = std::fs::read_to_string(fixture_dir().join("rekor-pub.pem"))?;
+        Ok(detent_update::trust::from_pems(&root, &rekor)?)
+    }
+
+    fn plant_release(
+        state_root: &Path,
+        bundle_name: &str,
+    ) -> Result<(Sha256Digest, Vec<u8>), Box<dyn std::error::Error>> {
+        let bytes = std::fs::read(fixture_dir().join("binary.bin"))?;
+        let digest = Sha256Digest::of(&bytes);
         let dir = state_root.join(STAGED_DIR);
         std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join(digest.to_string()), bytes)?;
-        Ok(digest)
+        std::fs::write(dir.join(FIXTURE_TAG), &bytes)?;
+        std::fs::copy(
+            fixture_dir().join(bundle_name),
+            dir.join(format!("{FIXTURE_TAG}.sigstore.json")),
+        )?;
+        Ok((digest, bytes))
     }
 
-    #[test]
-    fn replace_binary_swaps_when_digest_and_size_match() -> Result<(), Box<dyn std::error::Error>> {
-        let work = TempDir::new()?;
-        let state_root = work.path().join("state");
-        std::fs::create_dir_all(&state_root)?;
-        let target = swap_target(work.path(), "detent-old", b"old-binary")?;
-        let staged_bytes = b"new-binary-contents";
-        let digest = plant_staged(&state_root, staged_bytes)?;
-
-        let config = Config::with_state_root(&state_root);
+    fn update_monitor(
+        state_root: &Path,
+        target: PathBuf,
+    ) -> Result<Monitor<'static>, Box<dyn std::error::Error>> {
+        let config = Config::with_state_root(state_root);
         let mut monitor = Monitor::new(Allowlist::from_modules(&[], &config)?, Hooks::default());
-        monitor.set_binary_override(target.clone());
+        monitor.set_binary_override(target);
+        monitor.set_update_trust(fixture_trust()?);
         let _ = monitor.dispatch(Request::Hello {
             proto: PROTO_VERSION,
         });
-        let response = monitor.dispatch(Request::ReplaceBinary {
-            len: staged_bytes.len() as u64,
-            sha256: digest,
-        })?;
-
-        let Response::Replaced { version } = response else {
-            return Err(format!("expected Replaced, got {response:?}").into());
-        };
-        assert_eq!(version, digest.to_string());
-        let on_disk = std::fs::read(&target)?;
-        assert_eq!(on_disk, staged_bytes);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let mode = std::fs::metadata(&target)?.permissions().mode() & 0o777;
-            assert_eq!(
-                mode, 0o755,
-                "swapped binary must keep the target's mode, not the staged file's 0644 (a58f89c)"
-            );
-        }
-        let prev_path = target.with_file_name(format!("detent-old{PREVIOUS_SUFFIX}"));
-        assert_eq!(std::fs::read(prev_path)?, b"old-binary");
-        Ok(())
+        Ok(monitor)
     }
 
     #[test]
-    fn replace_binary_rejects_a_staged_file_with_a_wrong_digest()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let work = TempDir::new()?;
-        let state_root = work.path().join("state");
-        std::fs::create_dir_all(&state_root)?;
-        let target = swap_target(work.path(), "detent-digest", b"old-binary")?;
-        let staged_bytes = b"new-binary-contents";
-        let claimed = Sha256Digest::of(b"a-totally-different-binary");
-        // Plant at the *claimed* path so the monitor finds the file; the
-        // on-disk digest will then disagree with what the request named.
-        let dir = state_root.join(STAGED_DIR);
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join(claimed.to_string()), staged_bytes)?;
-
-        let config = Config::with_state_root(&state_root);
-        let mut monitor = Monitor::new(Allowlist::from_modules(&[], &config)?, Hooks::default());
-        monitor.set_binary_override(target.clone());
-        let _ = monitor.dispatch(Request::Hello {
-            proto: PROTO_VERSION,
-        });
-        let response = monitor.dispatch(Request::ReplaceBinary {
-            len: staged_bytes.len() as u64,
-            sha256: claimed,
-        })?;
-
-        let Response::Error(ProtoError::Conflict { expected, .. }) = response else {
-            return Err(format!("expected Conflict, got {response:?}").into());
-        };
-        assert_eq!(expected, claimed);
-        assert_eq!(std::fs::read(&target)?, b"old-binary");
-        let prev_path = target.with_file_name(format!("detent-digest{PREVIOUS_SUFFIX}"));
-        assert!(prev_path.is_file() || !prev_path.exists());
-        Ok(())
-    }
-
-    #[test]
-    fn replace_binary_reports_a_missing_staged_file() -> Result<(), Box<dyn std::error::Error>> {
-        let work = TempDir::new()?;
-        let state_root = work.path().join("state");
-        std::fs::create_dir_all(&state_root)?;
-        let target = swap_target(work.path(), "detent-missing", b"old-binary")?;
-        // Note: no plant_staged call -- the staged file is deliberately absent.
-        let claimed = Sha256Digest::of(b"new-binary-contents");
-
-        let config = Config::with_state_root(&state_root);
-        let mut monitor = Monitor::new(Allowlist::from_modules(&[], &config)?, Hooks::default());
-        monitor.set_binary_override(target.clone());
-        let _ = monitor.dispatch(Request::Hello {
-            proto: PROTO_VERSION,
-        });
-        let response = monitor.dispatch(Request::ReplaceBinary {
-            len: b"new-binary-contents".len() as u64,
-            sha256: claimed,
-        })?;
-
-        let Response::Error(ProtoError::Io(message)) = response else {
-            return Err(format!("expected Io, got {response:?}").into());
-        };
-        assert!(message.contains("staged"), "io message: {message}");
-        assert_eq!(std::fs::read(&target)?, b"old-binary");
-        Ok(())
-    }
-    #[test]
-    fn replace_binary_refuses_a_symlinked_staged_file() -> Result<(), Box<dyn std::error::Error>> {
-        let work = TempDir::new()?;
-        let state_root = work.path().join("state");
-        std::fs::create_dir_all(&state_root)?;
-        let target = swap_target(work.path(), "detent-symlink", b"old-binary")?;
-        let staged_bytes = b"new-binary-contents";
-        let digest = Sha256Digest::of(staged_bytes);
-        let dir = state_root.join(STAGED_DIR);
-        std::fs::create_dir_all(&dir)?;
-        let real = work.path().join("real-staged");
-        std::fs::write(&real, staged_bytes)?;
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&real, dir.join(digest.to_string()))?;
-        #[cfg(not(unix))]
-        std::fs::write(dir.join(digest.to_string()), staged_bytes)?;
-
-        let config = Config::with_state_root(&state_root);
-        let mut monitor = Monitor::new(Allowlist::from_modules(&[], &config)?, Hooks::default());
-        monitor.set_binary_override(target.clone());
-        let _ = monitor.dispatch(Request::Hello {
-            proto: PROTO_VERSION,
-        });
-        let response = monitor.dispatch(Request::ReplaceBinary {
-            len: staged_bytes.len() as u64,
-            sha256: digest,
-        })?;
-
-        #[cfg(unix)]
-        {
-            let Response::Error(ProtoError::Io(message)) = response else {
-                return Err(format!("expected Io, got {response:?}").into());
-            };
-            assert_eq!(std::fs::read(&target)?, b"old-binary");
-            assert!(
-                message.contains("staged"),
-                "symlink refusal must name the staged file: {message}"
-            );
-        }
-        Ok(())
-    }
-    #[test]
-    fn replace_binary_refuses_a_hard_linked_staged_file() -> Result<(), Box<dyn std::error::Error>>
+    fn monitor_materializes_and_verifies_a_valid_release() -> Result<(), Box<dyn std::error::Error>>
     {
         let work = TempDir::new()?;
         let state_root = work.path().join("state");
         std::fs::create_dir_all(&state_root)?;
-        let target = swap_target(work.path(), "detent-hardlink", b"old-binary")?;
-        let staged_bytes = b"new-binary-contents";
-        let digest = Sha256Digest::of(staged_bytes);
-        let dir = state_root.join(STAGED_DIR);
-        std::fs::create_dir_all(&dir)?;
-        let staged = dir.join(digest.to_string());
-        std::fs::write(&staged, staged_bytes)?;
-        std::fs::hard_link(&staged, dir.join("second-name"))?;
-        let config = Config::with_state_root(&state_root);
-        let mut monitor = Monitor::new(Allowlist::from_modules(&[], &config)?, Hooks::default());
-        monitor.set_binary_override(target.clone());
-        let _ = monitor.dispatch(Request::Hello {
-            proto: PROTO_VERSION,
-        });
+        let target = swap_target(work.path(), "detent-old", b"old-binary")?;
+        let (digest, bytes) = plant_release(&state_root, "valid.json")?;
+        let mut monitor = update_monitor(&state_root, target.clone())?;
+
         let response = monitor.dispatch(Request::ReplaceBinary {
-            len: staged_bytes.len() as u64,
+            tag: FIXTURE_TAG.to_owned(),
+            len: bytes.len() as u64,
             sha256: digest,
         })?;
-        let Response::Error(ProtoError::Io(message)) = response else {
-            return Err(format!("expected Io, got {response:?}").into());
+        let Response::Replaced { version } = response else {
+            return Err(format!("expected Replaced, got {response:?}").into());
         };
-        assert!(message.contains("staged"), "io message: {message}");
+        assert_eq!(version, digest.to_string());
+        assert_eq!(std::fs::read(&target)?, bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn materialized_digest_is_monitor_owned_private_and_durable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::MetadataExt as _;
+        let work = TempDir::new()?;
+        let state_root = work.path().join("state");
+        std::fs::create_dir_all(&state_root)?;
+        let (digest, bytes) = plant_release(&state_root, "valid.json")?;
+        materialize_staged(&state_root, FIXTURE_TAG, bytes.len() as u64, digest)?;
+        let meta = std::fs::metadata(staged_path(&state_root, digest))?;
+        assert_eq!(meta.uid(), rustix::process::geteuid().as_raw());
+        assert_eq!(meta.mode() & 0o777, 0o600);
+        Ok(())
+    }
+
+    #[test]
+    fn monitor_rejects_wrong_identity_without_swapping() -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let state_root = work.path().join("state");
+        std::fs::create_dir_all(&state_root)?;
+        let target = swap_target(work.path(), "detent-identity", b"old-binary")?;
+        let (digest, bytes) = plant_release(&state_root, "wrong-identity.json")?;
+        let mut monitor = update_monitor(&state_root, target.clone())?;
+        let response = monitor.dispatch(Request::ReplaceBinary {
+            tag: FIXTURE_TAG.to_owned(),
+            len: bytes.len() as u64,
+            sha256: digest,
+        })?;
+        assert!(matches!(
+            response,
+            Response::Error(ProtoError::VerificationFailed)
+        ));
+        assert_eq!(std::fs::read(&target)?, b"old-binary");
+        Ok(())
+    }
+
+    #[test]
+    fn monitor_rejects_a_tampered_digest_without_swapping() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let work = TempDir::new()?;
+        let state_root = work.path().join("state");
+        std::fs::create_dir_all(&state_root)?;
+        let target = swap_target(work.path(), "detent-digest", b"old-binary")?;
+        let (_, bytes) = plant_release(&state_root, "valid.json")?;
+        let claimed = Sha256Digest::of(b"different bytes");
+        let mut monitor = update_monitor(&state_root, target.clone())?;
+        let response = monitor.dispatch(Request::ReplaceBinary {
+            tag: FIXTURE_TAG.to_owned(),
+            len: bytes.len() as u64,
+            sha256: claimed,
+        })?;
+        assert!(matches!(
+            response,
+            Response::Error(ProtoError::Conflict { .. })
+        ));
         assert_eq!(std::fs::read(&target)?, b"old-binary");
         Ok(())
     }

@@ -465,6 +465,7 @@ pub fn operation_for(cli: &Cli, input: &mut dyn Read) -> Result<Operation, Usage
             BackupAction::Restore { module, backup_id } => Operation::Restore {
                 id: module.clone(),
                 backup_id: BackupId(*backup_id),
+                expected_hash: None,
             },
         }),
         Some(Command::Audit(args)) => Ok(Operation::AuditQuery(AuditQuery {
@@ -661,6 +662,21 @@ fn restart_and_check(config_path: &std::path::Path) -> RestartOutcome {
         Ok(config) => config,
         Err(err) => return RestartOutcome::Unhealthy(err.to_string()),
     };
+    // Capture the expected serving certificate before the restart. Loading it
+    // afterwards would let a replacement certificate become the pin.
+    let cert_dir = &config.tls.cert_dir;
+    let cert = match detent_web::tls::load_bootstrap(cert_dir) {
+        Ok(Some(pair)) => pair.cert_der().to_vec(),
+        Ok(None) => {
+            return RestartOutcome::Unhealthy(format!(
+                "{}: bootstrap certificate is missing",
+                cert_dir.display()
+            ));
+        }
+        Err(err) => {
+            return RestartOutcome::Unhealthy(format!("{}: {err}", cert_dir.display()));
+        }
+    };
     let manager =
         detent_platform::service::for_host(detent_platform::host::detect_real().profile.init);
     match manager.act(&DETENT_UNITS, ServiceAction::Restart) {
@@ -679,16 +695,6 @@ fn restart_and_check(config_path: &std::path::Path) -> RestartOutcome {
         Err(err) => return RestartOutcome::Unhealthy(err.to_string()),
     }
 
-    let cert_path = config
-        .tls
-        .cert_dir
-        .join(detent_web::tls::BOOTSTRAP_CERT_FILE);
-    let cert = match std::fs::read(&cert_path) {
-        Ok(cert) => cert,
-        Err(err) => {
-            return RestartOutcome::Unhealthy(format!("{}: {err}", cert_path.display()));
-        }
-    };
     match detent_update::health::wait_healthy(
         config.listen.addr,
         &cert,
@@ -1442,16 +1448,20 @@ mod tests {
     #[test]
     fn self_test_with_a_subcommand_is_usage() -> R {
         let cli = parse(&["detent", "--self-test", "doctor"])?;
-        assert!(cli.self_test && cli.command.is_some());
+        let mut input = std::io::empty();
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
         let exit = run(
             &cli,
             &mut Streams {
-                input: &mut std::io::empty(),
-                out: &mut Vec::new(),
-                notes: &mut Vec::new(),
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
             },
         );
         assert_eq!(exit, Exit::Usage);
+        assert_eq!(String::from_utf8(out)?.trim(), "no command was given.");
+        assert!(notes.is_empty());
         Ok(())
     }
     #[test]
@@ -2790,6 +2800,7 @@ mod tests {
             Operation::Restore {
                 id: crate::tests_support::MODULE.to_owned(),
                 backup_id: detent_platform::privsep::proto::BackupId(0),
+                expected_hash: None,
             },
             Operation::ServiceAction {
                 id: crate::tests_support::MODULE.to_owned(),
@@ -2877,6 +2888,7 @@ mod tests {
             Operation::Restore {
                 id: module.clone(),
                 backup_id: backup,
+                expected_hash: None,
             },
             false,
         )?;
@@ -2894,10 +2906,14 @@ mod tests {
             crate::tests_support::withheld_of(fx.session.execute(Operation::HostProfile, false)?)
                 .is_none()
         );
-        // Apply and Restore are the two mutations; both were recorded.
-        assert_eq!(records.len(), 2, "{records:?}");
+        // Apply + Restore each emit Started + Ok (engine.rs:execute). Filter to outcomes.
+        let outcomes: Vec<_> = records
+            .iter()
+            .filter(|r| r.result != detent_ops::audit::AuditResult::Started)
+            .collect();
+        assert_eq!(outcomes.len(), 2, "{records:?}");
+        assert_eq!(records.len(), 4, "{records:?}");
         assert!(fx.state_root.join("audit").is_dir());
-
         fx.session.finish()?;
         Ok(())
     }

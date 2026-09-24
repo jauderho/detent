@@ -382,6 +382,28 @@ impl TokenStore {
         })
     }
 
+    /// Drop records whose absolute expiry has passed. Answers how many went.
+    ///
+    /// # Errors
+    ///
+    /// The same store read/write errors as [`Self::revoke`].
+    pub fn sweep_expired(&self, now_unix: i64) -> Result<usize, AuthError> {
+        self.refresh()?;
+        if !self.records().iter().any(|record| {
+            record
+                .expires_at
+                .is_some_and(|deadline| now_unix >= deadline)
+        }) {
+            return Ok(0);
+        }
+        let before = self.records().len();
+        self.mutate(|tokens| {
+            tokens.retain(|record| record.expires_at.is_none_or(|deadline| now_unix < deadline));
+            Ok(())
+        })?;
+        Ok(before.saturating_sub(self.records().len()))
+    }
+
     /// Revoke a token by its public id.
     ///
     /// The record is removed rather than tombstoned: a revoked token can
@@ -523,6 +545,19 @@ mod tests {
             Err(AuthError::UnknownToken) => {}
             other => return Err(format!("an expired token gave {other:?}").into()),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn expired_tokens_are_swept_from_storage() -> R {
+        let root = tempfile::tempdir()?;
+        let store = TokenStore::load(root.path())?;
+        let (_expired, _view) = store.issue("temporary", Scope::Read, Some(1_000))?;
+        let (_live, _view) = store.issue("service", Scope::Write, None)?;
+        assert_eq!(store.sweep_expired(999)?, 0);
+        assert_eq!(store.sweep_expired(1_000)?, 1);
+        assert_eq!(store.list().len(), 1);
+        assert_eq!(TokenStore::load(root.path())?.list().len(), 1);
         Ok(())
     }
 

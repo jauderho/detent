@@ -41,6 +41,7 @@ core-parse-malformed = this file does not match the format its module expects.
 ops-audit-failed = the audit log could not be read.
 ops-denied = you are not permitted to do that.
 ops-hash-conflict = the file changed on disk since it was read; re-read it and try again.
+ops-check-failed = the external validator refused the candidate.
 ops-invalid-model = that configuration is not valid.
 ops-no-service = this module controls no service on this host, so it cannot be restarted.
 ops-no-target = this module manages no file on this host.
@@ -122,6 +123,8 @@ page-not-found-home = go to the dashboard
 ## Pending commit
 pending-commit-message = a configuration change is waiting to be confirmed; it rolls back on its own when this window closes.
 pending-commit-countdown-label = time left to confirm
+pending-commit-confirm = confirm change
+pending-commit-confirming = confirming…
 
 ## Shared page states
 ## Every section is a query away from its data, so loading, failure and "this
