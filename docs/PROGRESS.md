@@ -5,6 +5,10 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-23 - hosts per-family `localhost` + update lints and CI gate
+
+`hosts::validate_canonical_uniqueness` now keys by `(name, address-family)` so `127.0.0.1 localhost` and `::1 localhost` no longer `DUPLICATE_CANONICAL`; pinned with `validate_accepts_dual_stack_localhost` (`9350771`). `real_transport.rs` trims to crate precedent `#![allow(clippy::expect_used, clippy::unwrap_used)]` and replaces `n as usize` with `usize::try_from`; gates now `cargo fmt --check` clean and `cargo clippy --workspace --all-targets --all-features -D warnings` clean (pipefail-verified).
+
 ## 2026-09-23 - M3-M8 audit, concurrency, and conformance hardening
 
 The operations audit file now uses fsynced, sequence-numbered SHA-256 hash
