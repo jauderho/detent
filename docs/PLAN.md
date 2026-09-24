@@ -704,7 +704,7 @@ Both are commit-confirm modules. Network model is backend-neutral (interface →
 
 ---
 
-### Phase 10 — libdetent C ABI and API/MCP readiness `[ ]`
+### Phase 10 — libdetent C ABI and API/MCP readiness `[x]`
 
 **Goal:** the core is consumable from C/Swift/Kotlin; operations are exposable via MCP.
 

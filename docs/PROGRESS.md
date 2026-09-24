@@ -5,6 +5,14 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-23 - Phase 10 close-out: libdetent C ABI and API/MCP readiness
+
+`detent-ffi` (10 entry points, `deny(unwrap/expect/panic/unsafe)` + `unsafe_code`, `DETENT_ABI_VERSION`, `include/detent.h` via `cbindgen.toml`, `examples/ffi-c/main.c`, `publish=false`) and `detent-mcp` (17 tools one per `Operation`, `every_operation_has_a_tool` + `tool_schemas_match_rest_shapes` against `docs/openapi.json`, token auth `DETENT_MCP_TOKEN` fails-closed, stdio + streamable-HTTP `127.0.0.1:3334`, default build excludes `rmcp`) are in tree and tested. CI covers Phase 10: `rust` job (`fmt`, `clippy --all-features`, `cargo test --workspace --all-features`, `cbindgen --verify`, build+run C example), `ffi-soundness` (Miri on `detent-ffi`, nightly), `ffi-semver` (`cargo-semver-checks 0.50.0` vs `origin/main`). `docs/FFI.md` (versioning/SONAME, ownership, thread safety, hostile-input guard, CI section) and `docs/API.md` MCP + parity sections are current. FreeBSD C-example CI remains deferred per PLAN §1.6 tier-3 / Phase 11 parked (recorded in PLAN §9 change log 2026-09-22) — the deliverables line's "Linux and FreeBSD" is satisfied on Linux, FreeBSD gated by Phase 11. PLAN §5 Phase 10 marked `[x]`.
+
+Verify: `cargo test -p detent-ffi -p detent-mcp --features detent-mcp/mcp` 23 passed; `cargo test -p detent-ops` 93 passed; `cargo test -p detent-web api::` 65 passed; `cbindgen --verify` clean (checked in `ci.yml`); C example `OK` via existing recipe.
+
+Jev (`jev-1.13.0`, live POST) used only for classification/routing; complex reasoning by default model: `next_slice` `close_phase10` conf 0.24 (p=0.43 over `ci_jobs` 0.32, `mcp_transport_ready` 0.14, `schema_parity` 0.11), destructive `noul` 0.04.
+
 ## 2026-09-23 - hosts per-family `localhost` + update lints and CI gate
 
 `hosts::validate_canonical_uniqueness` now keys by `(name, address-family)` so `127.0.0.1 localhost` and `::1 localhost` no longer `DUPLICATE_CANONICAL`; pinned with `validate_accepts_dual_stack_localhost` (`9350771`). `real_transport.rs` trims to crate precedent `#![allow(clippy::expect_used, clippy::unwrap_used)]` and replaces `n as usize` with `usize::try_from`; gates now `cargo fmt --check` clean and `cargo clippy --workspace --all-targets --all-features -D warnings` clean (pipefail-verified).
