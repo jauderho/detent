@@ -43,7 +43,7 @@ Start at **§11.3 step 1** and go in order. Items reopened by the orchestrator j
    Item: <ITEM-ID>
    Test: <test name(s)> — failed before fix: yes (<one-line failure>)
    Gates: fmt=0 clippy=0 test=0 (<N> passed) [web=0]
-   Linux: a010 <exact command> -> <result>   |   n/a
+   Linux: a010 <binary + exact command> -> <result> (built locally: <zigbuild cmd>)   |   n/a
    Allows added: none   |   <lint> at <file:line> because <reason>
    ```
 6. Update this file's §11: move the item to "Done — verified by implementor" with the commit hash. Add one PROGRESS.md entry per item.
@@ -59,17 +59,33 @@ Start at **§11.3 step 1** and go in order. Items reopened by the orchestrator j
 - **Claims without evidence.** "Done", "clean" or "green" must be backed by the command and its exit code in the commit body. A macOS-only run never counts as Linux verification.
 - **Scratch files in the repo.** Throwaway files go in `/tmp`. Remove stray worktrees when done (`git worktree list`; `/private/tmp/wt-f3309b6` exists now).
 
-### 00.5 Linux host: a010 only
-a010 is Ubuntu (development release) on x86_64, kernel 7.3, with Landlock present (`/sys/kernel/security/lsm` lists `landlock`), `fs.protected_hardlinks=1`, passwordless sudo, 2 CPUs, 3 GB RAM, and 66 GB free.
+### 00.5 Linux host: a010 only — test there, never compile there
+a010 is Ubuntu (development release) on x86_64, kernel 7.3, with Landlock present (`/sys/kernel/security/lsm` lists `landlock`), `fs.protected_hardlinks=1`, passwordless sudo, 2 CPUs, 3 GB RAM, and 66 GB free. It is a **test target only**. The owner directed (2026-09-24) that nothing is compiled on a010.
 
-**One-time provisioning is allowed. Record each command in PROGRESS.md.** At audit time a010 lacked the build tools and most target daemons. Install only these:
-- Rust via rustup, user-level, using the toolchain from `rust-toolchain.toml` plus `nightly` for fuzz.
-- `cargo-llvm-cov`, `cargo-fuzz`, and bun (user-level).
-- apt: `build-essential pkg-config clang lld strace samba unbound nfs-kernel-server dnsmasq kea-dhcp4-server chrony`.
+**Build locally, copy binaries up.** On the macOS dev host:
+```bash
+rustup target add x86_64-unknown-linux-musl          # once
+export PATH="$PWD/spikes/bin:$PATH"                  # zig shim (docs/TOOLS.md)
+# product binary
+cargo zigbuild --release --target x86_64-unknown-linux-musl -p detent --all-features
+# test binaries for the crate under change (no run)
+cargo zigbuild --target x86_64-unknown-linux-musl -p detent-platform --all-features --tests --no-run --message-format=json \
+  | jq -r 'select(.profile.test == true) | .executable'
+```
+- Copy the binaries to `a010:~/detent-test/<short-sha>/` with `scp` or `rsync`, then run them there. Run root-required sandbox and privsep tests with `sudo`, for example `sudo ./detent_platform-<hash> sandbox:: --test-threads=1`.
+- Never `cargo build`, `cargo test` or `bun` on a010. Never edit files there.
+- Delete `~/detent-test/<old-sha>/` directories when done with them.
+- If a test reads fixtures through `CARGO_MANIFEST_DIR`, rsync only the needed crate directory (no `target/`) to the same absolute path on a010 under a throwaway tree. Record the path in the commit body.
+- If `cargo zigbuild` for musl fails on a crate, stop and write it in §12. Do not fall back to building on a010.
+
+**Allowed provisioning on a010 (runtime only; record each command in PROGRESS.md):** apt `strace samba unbound nfs-kernel-server dnsmasq kea-dhcp4-server` (chrony, netplan and strace-capable sudo are already present). No compilers, no rustup, no bun, no build-essential.
 
 Do not change a010's network config, users, firewall, sysctls or kernel params. Do not enable or start any installed daemon beyond what a single test needs, and stop it afterwards.
 
-**Resource limits:** build with `CARGO_BUILD_JOBS=2`. Run `cargo test -p <crate>` for the crate under change, then the full workspace once before pushing. Use `-j1` if the linker OOMs. Sync the repo with `git fetch` + `git checkout <sha>` from origin, or `rsync` the working tree. Never edit files directly on a010.
+**What still runs where:**
+- macOS local: fmt, clippy, the full `cargo test --workspace --all-features`, web gates, and fuzz.
+- a010: Linux-only runtime behaviour (sandbox, privsep, seccomp, Landlock, caps, confined `detent serve`, and the real validators `chronyd -p`, `testparm`, `unbound-checkconf`, `exportfs`, `dnsmasq --test`, `kea-dhcp4 -t`).
+- GitHub CI: the Linux full-workspace test run and Linux coverage. CI green on a pushed commit is the final gate.
 
 **aarch64:** no aarch64 host is available. For seccomp or arch-specific changes, run `cargo check --target aarch64-unknown-linux-gnu -p detent-platform` locally and add a unit test that pins the aarch64 syscall numbers. Record "aarch64 runtime unverified" in §11. Do not claim it.
 
@@ -941,7 +957,7 @@ packaging.
 ~34 batch-only and unverified, 12 open.
 
 ### 11.3 Next steps, in order
-0. Provision a010 (§00.5), record it in PROGRESS.md, and remove the stray `/private/tmp/wt-f3309b6` worktree. Commit or discard your own uncommitted WIP **one item at a time**. Do not commit it as a batch; if a WIP hunk cannot be tied to a single item, discard it and redo it under the loop in §00.3.
+0. Install the runtime packages on a010 allowed by §00.5 (no build tools), set up the local musl cross-build, record both in PROGRESS.md, and remove the stray `/private/tmp/wt-f3309b6` worktree. Commit or discard your own uncommitted WIP **one item at a time**. Do not commit it as a batch; if a WIP hunk cannot be tied to a single item, discard it and redo it under the loop in §00.3.
 1. Make CI green on a **pushed** commit (H20, M1, L-SUP18, H18, clippy, Codespell, Checkov, fuzz). No new items until it is green.
 2. Remove the new lint suppressions or justify each one.
 3. Close H3, M4, H19, and H10's MCP half. These are safety items still open.
@@ -958,4 +974,5 @@ Open decisions carried from the review (owner answers pending):
 - C1-b: move staging to a monitor-owned root directory outside `state_root`. Proposed: yes (default).
 - C1-c / H17: bundle format for releases. Proposed: the `actions/attest` DSSE bundle (default).
 - M5: plan-with-checks scope. Proposed: stays Read scope, audited when checks ran (default).
+- 2026-09-24 STEP0-GATES: §00.3 requires `clippy=0` before every commit, while §11.3 step 0 requires WIP resolution before step 1 H20; H20 is required to make the workspace gate green. Proposed: apply the two mechanical H20 clippy fixes before committing any WIP item; push only after §11.3 step 1 is green. — owner/orchestrator answer: **Approved (orchestrator, 2026-09-24).** Land the two H20 clippy fixes (`run.rs:1192`, `serve.rs:243`) first as their own commit (Item: H20-a). Then resolve the WIP one item per commit. Push only once §11.3 step 1 is green locally, then watch CI.
 - H1.4: one-shot CLI apply on a commit-confirm module. Check what 13e4f10/462e9bf chose and record it here.
