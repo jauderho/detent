@@ -969,8 +969,23 @@ fn apply_writes_the_candidate_and_audits_exactly_once() -> TestResult {
 
 #[test]
 fn no_op_apply_skips_write_commit_and_audit() -> TestResult {
-    let mut fx = harness(b"v1\n", Setup::default())?;
-    let outcome = fx.run(apply("v1\n", None))?;
+    let mut fx = harness(
+        b"v1\n",
+        Setup {
+            shape: Shape {
+                commit_confirm: true,
+                ..Shape::default()
+            },
+            ..Setup::default()
+        },
+    )?;
+    let outcome = fx.run(Operation::Apply {
+        id: MODULE.to_owned(),
+        model: json!({ "text": "v1\n" }),
+        expected_hash: None,
+        service_action: None,
+        confirm: Some(CONFIRM_WINDOW),
+    })?;
     let OpOutcome::Applied(report) = outcome else {
         return Err("no-op Apply must answer with an apply report".into());
     };
@@ -980,6 +995,13 @@ fn no_op_apply_skips_write_commit_and_audit() -> TestResult {
     assert!(!report.created);
     assert!(!report.backed_up);
     assert!(report.commit.is_none());
+    let OpOutcome::Backups(backups) = fx.run(Operation::ListBackups {
+        id: MODULE.to_owned(),
+    })?
+    else {
+        return Err("ListBackups must answer with a listing".into());
+    };
+    assert!(backups.is_empty(), "a no-op apply created a backup");
     assert!(fx.records().is_empty());
     fx.finish()
 }
