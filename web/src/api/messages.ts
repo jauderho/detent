@@ -33,6 +33,7 @@ export const API_MESSAGE_IDS = [
   'core-parse-malformed',
   // ops — the operations engine
   'ops-audit-failed',
+  'ops-check-failed',
   'ops-denied',
   'ops-hash-conflict',
   'ops-invalid-model',
