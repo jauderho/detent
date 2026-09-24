@@ -30,6 +30,7 @@
 //! does nothing, and both hooks run at the one point in the process lifetime
 //! where confinement is still possible but privilege is no longer needed.
 
+use std::io::{Read as _, Write as _};
 use std::time::Duration;
 
 use super::sys::{self, Side};
@@ -224,20 +225,36 @@ pub fn spawn_pair(config: &SpawnConfig, sandbox: &dyn SandboxHooks) -> Result<Sp
     #[allow(unsafe_code)]
     let side = unsafe { sys::fork_process() }.map_err(SpawnError::Fork)?;
 
+    // The worker waits for this byte before it can return as a usable role;
+    // dropping the monitor end makes a failed startup exit.
     match side {
         Side::Parent(child_pid) => {
             drop(worker_end);
-            sandbox.confine_monitor().map_err(SpawnError::Sandbox)?;
+            let handle = MonitorHandle {
+                child_pid,
+                channel: monitor_end,
+            };
+            if let Err(err) = sandbox.confine_monitor() {
+                drop(handle.channel);
+                reap_child(child_pid);
+                return Err(SpawnError::Sandbox(err));
+            }
+            if let Err(source) = handle.channel.socket().write_all(&[0]) {
+                drop(handle.channel);
+                reap_child(child_pid);
+                return Err(SpawnError::Channel(ChannelError::Io(source)));
+            }
             Ok(Spawned {
-                role: Role::Monitor(MonitorHandle {
-                    child_pid,
-                    channel: monitor_end,
-                }),
+                role: Role::Monitor(handle),
                 dropped_privileges: credentials.is_some(),
             })
         }
         Side::Child => {
             drop(monitor_end);
+            let mut started = [0_u8; 1];
+            if worker_end.socket().read_exact(&mut started).is_err() {
+                abort_child(1);
+            }
             let Ok(dropped) = become_worker(credentials, sandbox) else {
                 abort_child(1);
             };
@@ -246,6 +263,12 @@ pub fn spawn_pair(config: &SpawnConfig, sandbox: &dyn SandboxHooks) -> Result<Sp
                 dropped_privileges: dropped,
             })
         }
+    }
+}
+
+fn reap_child(child_pid: i32) {
+    if let Some(pid) = rustix::process::Pid::from_raw(child_pid) {
+        let _ = rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::empty());
     }
 }
 
@@ -350,6 +373,14 @@ mod tests {
         }
     }
 
+    struct RefusesMonitor;
+
+    impl SandboxHooks for RefusesMonitor {
+        fn confine_monitor(&self) -> Result<(), SandboxError> {
+            Err(SandboxError("monitor refused".to_owned()))
+        }
+    }
+
     #[test]
     fn the_default_configuration_names_the_documented_account() {
         let config = SpawnConfig::default();
@@ -417,6 +448,18 @@ mod tests {
             return Err("failed child unexpectedly returned to its caller".into());
         };
         assert_eq!(handle.wait()?, Some(1));
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_monitor_setup_returns_an_error_and_reaps_its_worker()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let Err(SpawnError::Sandbox(err)) =
+            spawn_pair(&SpawnConfig::unprivileged(), &RefusesMonitor)
+        else {
+            return Err("monitor setup failure did not return Sandbox".into());
+        };
+        assert_eq!(err.0, "monitor refused");
         Ok(())
     }
 
