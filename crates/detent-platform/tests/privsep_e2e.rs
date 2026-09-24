@@ -409,10 +409,7 @@ fn replace_binary_rejects_a_missing_staged_file() -> TestResult {
         sha256: Sha256Digest::of(b"binary"),
     })?;
     let response: Response = client.channel_mut().recv()?;
-    assert!(matches!(
-        response,
-        Response::Error(ProtoError::Io(_))
-    ));
+    assert!(matches!(response, Response::Error(ProtoError::Io(_))));
 
     client.shutdown()?;
     join_shutdown(handle);

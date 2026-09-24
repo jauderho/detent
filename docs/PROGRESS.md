@@ -4,6 +4,17 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-24 - H20 CI acceptance repairs
+
+Rejected sandbox tests that self-skipped in unprivileged environments. The
+Linux jobs now run the unprivileged workspace suite with those tests excluded,
+then run the `detent-platform` sandbox suite as root; coverage has the same
+split and merges both profiles. The macOS job installs the `clippy` component,
+and the rejected Rust test-policy WIP was reverted.
+
+Verify: `cargo fmt --all --check` (0); `cargo clippy --workspace --all-targets
+--all-features -- -D warnings` (0); `cargo test --workspace --all-features`
+(1738 passed, 6 ignored, exit 0).
 
 ## 2026-09-24 - STAGE3 §11.3 step 0 a010 provisioning
 
