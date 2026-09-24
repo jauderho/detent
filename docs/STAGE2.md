@@ -218,7 +218,7 @@ removing the diff text may remove the signal.
 3. **Go criteria** (all required):
    - ≥ 90 % of risky plans land on `confirm` or `hold`;
    - **zero** benign plans land on `hold`;
-   - p95 latency ≤ 1 s from a009 and k001;
+   - p95 latency ≤ 1 s from a010 (the only Linux host allowed for implementing agents);
    - no WAF 403 on any corpus request;
    - Choice confidence < 0.6 on ≤ 30 % of the corpus.
 4. **Kill conditions:** any criterion failing, or a Noul inversion on a

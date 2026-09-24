@@ -9,7 +9,78 @@ before you edit it** — the tree is moving.
 
 This file is written for an implementor that did not see the review. Each
 item is self-contained: problem, evidence, fix, test, acceptance. Read
-§0 before starting any item. **§11 tracks what is done.**
+**§00 and §0** before starting any item. **§11 tracks what is done.**
+
+---
+
+## 00. Orchestrator steering — binding on every implementing agent
+
+The orchestrator (Claude) owns this file and the work order. Implementing
+agents (oh-my-pi and any sub-agent it spawns) execute it. The orchestrator
+audits every commit against this section. Work that breaks it is reopened,
+whether or not the code is correct.
+
+### 00.1 Authority and scope
+- **This file is the work order.** Do only STAGE3 items. No PLAN.md feature work, no refactors, no "while I'm here" edits, and no STAGE2 work until the orchestrator marks STAGE3 complete in §11.
+- **You may edit only §11 (status) and §12 (questions)** of this file. §00–§10 belong to the orchestrator. If an item is wrong or cannot be done as written, stop that item, write the reason in §12, and move to the next item.
+- **Never** delete, rename, revert, stash, `git checkout --`, `git restore`, `git clean` or regenerate `docs/STAGE2.md` or `docs/STAGE3.md`. Both are committed. If either is missing or changed without your edit, run `git restore --source=HEAD docs/STAGE2.md docs/STAGE3.md` and log it in §12.
+- `DECISION` items: build the non-decision parts. For the decision itself, stop and list it in §12 with the documented default. Do not pick a default yourself unless §12 records the owner's answer.
+
+### 00.2 Where to start
+Start at **§11.3 step 1** and go in order. Items reopened by the orchestrator jump the queue. Within a batch you may choose the order, including with Jev, but Jev must never decide whether something is ready, done, or pushable.
+
+### 00.3 The loop — one item at a time
+1. Read the item in full. Re-locate every cited line at HEAD; the line numbers are old.
+2. **Test first.** Write the named test (or an equivalent with the same assertion) and run it. It must **fail**.
+   - For items already changed by `dc3a279` or other earlier commits, prove the test is not vacuous: revert only the relevant hunk locally, show the test fails, then restore the hunk.
+   - Paste the failing output into the commit body.
+3. Make the smallest fix that makes the test pass. Touch only files the item names, plus tests, Fluent ids, and the docs the item says to correct.
+4. Run **all** gates from §0.4 on the whole workspace with `--all-features`. For `web/` changes, also run the web gates. If you touch `sandbox/`, `privsep/`, seccomp, Landlock or caps, run the Linux check on **a010** (§00.5).
+5. Commit **one item per commit** (`git commit -S -s`), with this body format:
+   ```
+   <imperative ASD-STE100 subject, ≤72 chars> (<ITEM-ID>)
+
+   Item: <ITEM-ID>
+   Test: <test name(s)> — failed before fix: yes (<one-line failure>)
+   Gates: fmt=0 clippy=0 test=0 (<N> passed) [web=0]
+   Linux: a010 <exact command> -> <result>   |   n/a
+   Allows added: none   |   <lint> at <file:line> because <reason>
+   ```
+6. Update this file's §11: move the item to "Done — verified by implementor" with the commit hash. Add one PROGRESS.md entry per item.
+7. **Push after every 1–3 items**, then run `gh run watch` on the resulting CI run. If CI goes red, fixing it becomes the next item, before anything else.
+
+### 00.4 Hard prohibitions (any one of these gets the commit reopened)
+- **Batch commits.** More than one item ID per commit is forbidden (`dc3a279` is the example not to follow). A commit touching more than ~400 changed lines outside tests or fixtures needs a §12 note first.
+- **New lint suppressions.** No new `#[allow]`, `#![allow]`, `#[expect]`, `#[ignore]`, `// biome-ignore`, `eslint-disable` or `@ts-*`. The count is 116 at `6c1d723` and may only go down. If a suppression is truly unavoidable, write the §12 note first and name it in the commit body.
+- **Weakening checks.** No lowering coverage floors, relaxing assertions, deleting tests, special-casing `cfg(test)`, adding `|| true` in CI, or `continue-on-error`.
+- **Unverified pins.** Never invent versions, tags or digests. Resolve them first (`docker manifest inspect`, `gh api`, `cargo search`, `npm view`) and paste the proof in the commit body. New dependencies follow ADR-011: a 7-day cooldown and a `deny.toml` check.
+- **History rewriting.** No force-push, `rebase -i`, `reset --hard` on pushed commits, or amending pushed commits.
+- **Other hosts.** No Linux host other than **a010**: not a009, not k001, not CI runners over ssh.
+- **Claims without evidence.** "Done", "clean" or "green" must be backed by the command and its exit code in the commit body. A macOS-only run never counts as Linux verification.
+- **Scratch files in the repo.** Throwaway files go in `/tmp`. Remove stray worktrees when done (`git worktree list`; `/private/tmp/wt-f3309b6` exists now).
+
+### 00.5 Linux host: a010 only
+a010 is Ubuntu (development release) on x86_64, kernel 7.3, with Landlock present (`/sys/kernel/security/lsm` lists `landlock`), `fs.protected_hardlinks=1`, passwordless sudo, 2 CPUs, 3 GB RAM, and 66 GB free.
+
+**One-time provisioning is allowed. Record each command in PROGRESS.md.** At audit time a010 lacked the build tools and most target daemons. Install only these:
+- Rust via rustup, user-level, using the toolchain from `rust-toolchain.toml` plus `nightly` for fuzz.
+- `cargo-llvm-cov`, `cargo-fuzz`, and bun (user-level).
+- apt: `build-essential pkg-config clang lld strace samba unbound nfs-kernel-server dnsmasq kea-dhcp4-server chrony`.
+
+Do not change a010's network config, users, firewall, sysctls or kernel params. Do not enable or start any installed daemon beyond what a single test needs, and stop it afterwards.
+
+**Resource limits:** build with `CARGO_BUILD_JOBS=2`. Run `cargo test -p <crate>` for the crate under change, then the full workspace once before pushing. Use `-j1` if the linker OOMs. Sync the repo with `git fetch` + `git checkout <sha>` from origin, or `rsync` the working tree. Never edit files directly on a010.
+
+**aarch64:** no aarch64 host is available. For seccomp or arch-specific changes, run `cargo check --target aarch64-unknown-linux-gnu -p detent-platform` locally and add a unit test that pins the aarch64 syscall numbers. Record "aarch64 runtime unverified" in §11. Do not claim it.
+
+### 00.6 Reporting
+- At the end of each session, append a dated block to §11 with:
+  - items done (id + hash);
+  - items opened in §12;
+  - the gate state at HEAD;
+  - the latest CI run URL and conclusion;
+  - the current allow count (`git grep -c -E '#!?\[(allow|expect)\(' HEAD -- crates | awk -F: '{s+=$NF}END{print s}'`).
+- If PROGRESS.md or any doc claims something you find is false, correct it in the same item's commit.
 
 ---
 
@@ -17,7 +88,7 @@ item is self-contained: problem, evidence, fix, test, acceptance. Read
 
 1. **One item = one commit** (`git commit -S -s`, ASD-STE100 message).
    Do not batch items. Do not fix adjacent things you notice; add them to
-   §9 instead.
+   §12 instead.
 2. **Test first.** Write the test named in the item, run it, confirm it
    **fails** on the current tree, then fix, then confirm it passes. If the
    test passes before the fix, stop: the finding or the test is wrong —
@@ -36,9 +107,10 @@ item is self-contained: problem, evidence, fix, test, acceptance. Read
    `--all-features` is mandatory: per-crate or default-feature runs are
    how the current red CI (H20) was missed.
 5. **Linux items** (anything under `sandbox/`, `privsep/`, seccomp,
-   Landlock, caps) must be verified on **a009** (Ubuntu x86_64). macOS
-   cannot run them. Cross-build for **k001** (aarch64) with
-   `cargo zigbuild --target aarch64-unknown-linux-musl`; never build on k001.
+   Landlock, caps) must be verified on **a010**, the only Linux host
+   allowed (§00.5). macOS cannot run them. There is no aarch64 host: use
+   `cargo check --target aarch64-unknown-linux-gnu` plus syscall-number
+   unit tests, and mark aarch64 runtime as unverified.
 6. **Items marked `DECISION` need an owner answer first.** The default
    named in the item is what to do if the owner says "use the default".
 7. New user-facing strings need a Fluent id in `locales/en-US/*.ftl`.
@@ -114,7 +186,7 @@ The tier is given per item.
   - Its bytes are read from that fd, hashed, and those same bytes are written to the target, with no re-open and no hard link.
   - Because the engine materialises the digest file worker-side, the web `UpdateApply` path now **fails closed** on a privileged monitor.
 - **Residual work (do all of these):**
-  - **C1-a — hard-link / downgrade.** Ownership alone is not authenticity. On a host without Landlock (k001) and with `fs.protected_hardlinks=0`, the worker can hard-link any root-owned file on the same filesystem into `staged/<digest>`: an older signed detent (downgrade to a known-vulnerable build), `.prev`, or `/bin/true` (DoS). The owner check passes.
+  - **C1-a — hard-link / downgrade.** Ownership alone is not authenticity. On a host without Landlock (e.g. Raspberry Pi OS) and with `fs.protected_hardlinks=0`, the worker can hard-link any root-owned file on the same filesystem into `staged/<digest>`: an older signed detent (downgrade to a known-vulnerable build), `.prev`, or `/bin/true` (DoS). The owner check passes.
     - Fix: in `read_staged_verified`, refuse unless `meta.nlink() == 1`. Also require the parent directory to be owned by the monitor euid, with mode `& 0o022 == 0` (`fstatat` on the parent before opening the child).
     - Test: `replace_binary_refuses_a_hard_linked_staged_file`. Create the file, `hard_link` it to a second name, dispatch, and assert `Response::Error` with the target unchanged.
   - **C1-b — move staging out of the worker's tree.** `DECISION` (default: yes). Stage into a monitor-owned `root:root 0700` directory that is not under `state_root` (e.g. `/var/lib/detent-monitor/staged`, added to `packaging/tmpfiles.d/detent.conf`). Also add it to the monitor Landlock policy and not the worker's. The worker streams the bytes over the channel in a new chunked `Request::StageUpdate { offset, chunk }`, because frames cap at 1 MiB. The monitor writes them with `O_EXCL|O_NOFOLLOW`.
@@ -187,17 +259,17 @@ The tier is given per item.
   2. If any report has `ran && !passed`, return a new `OpsError::CheckFailed { reports }` (Fluent `ops-check-failed`) and write nothing.
   3. `DECISION` for a validator that is not installed (`!ran`). Default: allow, and include the reports in `ApplyReport.checks` (new field) so the UI shows "not validated".
 - Test: `engine.rs::apply_refuses_when_an_external_check_fails`. Add `FailChecks` beside the existing `OkChecks` runner. Assert `Err(CheckFailed)`, target bytes unchanged, and no backup created.
-- **Dependency:** H6 first, then verify on a009 under `detent serve` that a real `chrony` apply runs `chronyd -p` and the monitor survives.
+- **Dependency:** H6 first, then verify on a010 under `detent serve` that a real `chrony` apply runs `chronyd -p` and the monitor survives.
 
 ### H6 Monitor seccomp filter forbids process creation; the first validator or restart kills it
 - Tier: Opus. Verified: orchestrator (the `MONITOR` table at `sandbox/seccomp.rs:155-218` has no `clone`, `clone3`, `fork`, `vfork`, `execve`, `execveat`, `pipe2`, `dup3` or `kill`; `Role::Monitor => KillProcess`). Reviewer: PLAT-2.
 - Location: `sandbox/seccomp.rs` `MONITOR`, `SYSCALL_NUMBERS`; `serve.rs:170-174`, where the monitor's hooks are the real `ExternalCheckRunner` and `service::for_host`; `service/exec.rs` (`Command::spawn`, reader threads, `child.kill()`).
 - Problem: on a confined `detent serve`, any `RunCheck` (every plan on chrony, samba, dhcp, network or resolver) or `Service` request makes the monitor spawn a process. The filter kills it with SIGSYS and the pair dies. The derivation comment (seccomp.rs:20-25) wrongly calls `execve`/`clone` test-harness noise. Real-hardware testing (PROGRESS 2026-09-16) only ran `host` and `doctor`, so this was never exercised.
 - Fix:
-  1. On a009, run a confined `detent serve` under `strace -f -o /tmp/mon.trace`. Drive one real `plan` on chrony (runs `chronyd -p`) and one `systemctl restart` through the API. Collect every syscall the monitor and its children use.
+  1. On a010, run a confined `detent serve` under `strace -f -o /tmp/mon.trace`. Drive one real `plan` on chrony (runs `chronyd -p`) and one `systemctl restart` through the API. Collect every syscall the monitor and its children use.
   2. Add the missing ones to `MONITOR` with both arch numbers: at least `clone`, `clone3`, `execve`, `execveat`, `pipe2`, `dup3`, `kill`, `tgkill`, `rseq`, `set_robust_list`, `sched_getaffinity`, plus whatever strace shows.
   3. Keep `KillProcess`. Rewrite the derivation comment.
-  4. Repeat on k001 (aarch64) with a cross-built binary.
+  4. aarch64: no host. Run `cargo check --target aarch64-unknown-linux-gnu -p detent-platform` and pin the aarch64 numbers in the unit test below. Mark the aarch64 runtime unverified in §11.
 - Tests:
   - `sandbox/linux.rs::enforce_mode_monitor_can_spawn_a_validator`: in the existing `in_forked_child` helper, call `confine(Role::Monitor, &Policy::monitor(&allow))`, then `RealProcessRunner.run("/bin/true", &[], 5s)`. The parent asserts exit 0. It must fail on the current tree.
   - `seccomp.rs::monitor_table_allows_process_creation_on_both_arches`.
@@ -414,14 +486,14 @@ Each item: location → fix → test. Tier in brackets.
     - Add `SandboxError::CapsRequired`.
     - Add `caps_verdict(required, &Outcome)`, mirroring `seccomp_verdict`, and call it after `drop_capabilities`.
     - For the worker: drop the bounding set **before** `setuid` in `become_worker`, or treat "effective and permitted already empty" as `Applied`.
-  - Test: `caps_that_do_not_drop_are_fatal_only_when_required`. Verify on a009.
+  - Test: `caps_that_do_not_drop_are_fatal_only_when_required`. Verify on a010, both as root under `detent serve` and in the forked-pair test that CI runs.
 - **M2 `serve` never reports degraded confinement** [Sonnet] (PLAT-5).
   - Location: `serve.rs`. `hooks.confinement()` is never read, and `confine` never logs.
   - Fix:
     - After `spawn_pair`, in both the monitor and worker branches, read `hooks.confinement()`.
     - For each field that is not `Applied`/`FullyEnforced`, emit a renderer note `cli-serve-confinement-degraded` plus `tracing::warn!`.
     - Persist the result to `<state_root>/state/confinement.json` so doctor and the UI show the real outcome.
-  - Test: a pure `degradation_notes(&Confinement)` helper; `a_missing_landlock_is_reported_at_startup`. This matters on k001, which has no Landlock.
+  - Test: a pure `degradation_notes(&Confinement)` helper; `a_missing_landlock_is_reported_at_startup`. This matters on hosts without Landlock, such as Raspberry Pi OS.
 - **M3 Audit log is not tamper-evident** [Opus] (OPS-7).
   - Location: `detent-ops/src/audit.rs:220-236`. The worker owns the file, and there is no chain.
   - Fix:
@@ -791,7 +863,7 @@ STAGE2 was re-read in full against the code. **Accepted:**
 
 ## 10. Out of scope, noted for later
 
-- Upstream daemon parsing (smb.conf continuation, exportfs `-opts`, unbound multi-statement lines, deSEC rdata) was taken from man pages and memory, not executed. H13, H14, H15 and L-SUP16 should each start with a quick live confirmation on a009 before the fix: run `testparm`, `exportfs -v` and `unbound-checkconf` against the crafted file.
+- Upstream daemon parsing (smb.conf continuation, exportfs `-opts`, unbound multi-statement lines, deSEC rdata) was taken from man pages and memory, not executed. H13, H14, H15 and L-SUP16 should each start with a quick live confirmation on a010 before the fix: run `testparm`, `exportfs -v` and `unbound-checkconf` against the crafted file.
 - The coverage floors were measured on macOS. CI measures on Linux (detent-platform is known to differ by about 5 points).
 
 ---
@@ -825,7 +897,7 @@ Method:
 **Process violations to stop now:**
 1. `dc3a279` is one ~4,000-line commit (70+ files) spanning dozens of items, with a vague message. Its "clippy clean" claim was false by the next push. This breaks §0.1 (one item per commit) and §0.8.
 2. Lint suppressions rose from **97 to 116** since the baseline (e.g. `a77c3ae` adds `#![allow(clippy::expect_used, clippy::unwrap_used)]` to `real_transport.rs`). This breaks §0.3. Each new `allow` must be justified in its commit or removed.
-3. None of the Linux sandbox items (H6, M1, M2) were verified on a009/k001 (§0.5), and M1 broke Linux CI.
+3. None of the Linux sandbox items (H6, M1, M2) were verified on a Linux host (§0.5), and M1 broke Linux CI.
 4. `docs/STAGE2.md` was reverted and `docs/STAGE3.md` deleted in the working tree. §0.10 now forbids that.
 5. A stray worktree, `/private/tmp/wt-f3309b6`, exists. Remove it when done.
 
@@ -839,8 +911,8 @@ L-OPS19, L-WEB14, L-WEB17, L-BIN11, L-BIN12, L-BIN13, L-MODB8, L-ORC1.
 
 **Landed but broken or partial — fix before anything new:**
 - **H20:** see the gate table above. This is the top priority.
-- **M1:** breaks Linux CI. Drop the bounding set **before** `setuid` in `become_worker`, or treat "effective and permitted already empty" as `Applied` for the worker. Verify on a009.
-- **H6:** exec syscalls were added to `MONITOR` but never run confined on a009/k001. Do the strace step and add the `enforce_mode_monitor_can_spawn_a_validator` test.
+- **M1:** breaks Linux CI. Drop the bounding set **before** `setuid` in `become_worker`, or treat "effective and permitted already empty" as `Applied` for the worker. Verify on a010.
+- **H6:** exec syscalls were added to `MONITOR` but never run confined on Linux. Do the strace step and add the `enforce_mode_monitor_can_spawn_a_validator` test.
 - **H10:** web stores refresh and revoke sessions (done). MCP is still open: `detent-mcp` `check_auth` still reads `DETENT_MCP_TOKEN` from the env, and there is no per-request `StoreVerifier`. Revoked tokens keep working in MCP.
 - **H17:** the payload type and `verificationMaterial.certificate` are accepted. There is no evidence of a **captured real bundle** fixture test, and M16 (negative tests) is open. Treat as unproven until a real release bundle verifies.
 - **H18:** redirects are implemented, but `caps_redirect_loop` fails on macOS CI. Fix the test or the code; do not `#[ignore]` it.
@@ -869,8 +941,21 @@ packaging.
 ~34 batch-only and unverified, 12 open.
 
 ### 11.3 Next steps, in order
+0. Provision a010 (§00.5), record it in PROGRESS.md, and remove the stray `/private/tmp/wt-f3309b6` worktree. Commit or discard your own uncommitted WIP **one item at a time**. Do not commit it as a batch; if a WIP hunk cannot be tied to a single item, discard it and redo it under the loop in §00.3.
 1. Make CI green on a **pushed** commit (H20, M1, L-SUP18, H18, clippy, Codespell, Checkov, fuzz). No new items until it is green.
 2. Remove the new lint suppressions or justify each one.
 3. Close H3, M4, H19, and H10's MCP half. These are safety items still open.
 4. Verification pass: a fresh reviewer re-checks the 45 "done" items and the 34 batch-only items against each item's Test/Acceptance line in this file. Mark each one ✅ here, or reopen it.
 5. Then the remaining open items. Then PLAN.md.
+
+---
+
+## 12. Questions and blocked items (implementor writes here; orchestrator answers)
+
+Format: `- <date> <ITEM-ID>: <what is blocked or wrong> — proposed: <default or fix> — owner/orchestrator answer: <blank until answered>`
+
+Open decisions carried from the review (owner answers pending):
+- C1-b: move staging to a monitor-owned root directory outside `state_root`. Proposed: yes (default).
+- C1-c / H17: bundle format for releases. Proposed: the `actions/attest` DSSE bundle (default).
+- M5: plan-with-checks scope. Proposed: stays Read scope, audited when checks ran (default).
+- H1.4: one-shot CLI apply on a commit-confirm module. Check what 13e4f10/462e9bf chose and record it here.
