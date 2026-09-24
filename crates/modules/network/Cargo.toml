@@ -7,7 +7,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Network module: systemd-networkd, NetworkManager keyfiles, ifupdown, netplan, (BSD rc.conf)."
+description = "Network module: systemd-networkd, NetworkManager keyfiles, ifupdown, and netplan."
 publish = false
 
 # Required by Appendix A: every module crate inherits the workspace lint set

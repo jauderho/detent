@@ -33,6 +33,7 @@
 //! trailing newline, tabs, unknown sections/keys per backend, YAML
 //! comments/anchors left opaque).
 
+use detent_core::descriptor::{HostProfile, ValidationCtx};
 use detent_core::module::ConfigModule;
 use detent_module_network::{Interface, Model, NetworkModule, Route, Vlan};
 use proptest::prelude::{Just, Strategy, prop_oneof};
@@ -395,6 +396,39 @@ fn unknown_directives_are_not_modeled_but_survive() {
     let rendered = NetworkModule::render(&doc);
     assert!(rendered.contains("UnknownSection"));
     assert!(rendered.contains("UnknownKey"));
+}
+
+/// Static routes traverse the same parse/model/validate/apply/render path as
+/// every backend that represents them. NetworkManager is intentionally absent:
+/// its modeled keyfile subset has no route representation.
+#[test]
+fn route_models_validate_and_round_trip_through_real_backends() -> Result<(), String> {
+    let sources = [
+        "[Match]\nName=eth0\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.254\n",
+        "auto eth0\niface eth0 inet static\n\tup ip route add 10.0.0.0/24 via 192.168.1.254\n",
+        "network:\n  version: 2\n  ethernets:\n    eth0:\n      routes:\n        - to: 10.0.0.0/24\n          via: 192.168.1.254\n",
+    ];
+    let profile = HostProfile::default_for_tests();
+    for source in sources {
+        let mut doc = NetworkModule::parse(source).map_err(|e| e.to_string())?;
+        let model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        let route = model
+            .interfaces
+            .iter()
+            .find_map(|iface| iface.routes.first())
+            .ok_or_else(|| format!("route missing from parsed model: {model:?}"))?;
+        assert_eq!(route.to, "10.0.0.0/24");
+        assert_eq!(route.via, "192.168.1.254");
+        assert!(!NetworkModule::validate(&model, &ValidationCtx::new(&profile)).has_errors());
+        NetworkModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let reparsed =
+            NetworkModule::parse(&NetworkModule::render(&doc)).map_err(|e| e.to_string())?;
+        assert_eq!(
+            NetworkModule::to_model(&reparsed).map_err(|e| e.to_string())?,
+            model
+        );
+    }
+    Ok(())
 }
 
 #[test]
