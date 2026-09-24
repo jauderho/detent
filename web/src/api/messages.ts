@@ -40,6 +40,8 @@ export const API_MESSAGE_IDS = [
   'ops-invalid-model',
   'ops-no-service',
   'ops-no-target',
+  'ops-commit-pending',
+  'ops-no-backup',
   'ops-privsep-failed',
   'ops-service-failed',
   'ops-unknown-module',

@@ -170,6 +170,44 @@
         }
       }
     },
+    "/api/v1/commits/pending": {
+      "get": {
+        "tags": [
+          "commits"
+        ],
+        "summary": "`GET /api/v1/commits/pending`.",
+        "operationId": "pending",
+        "responses": {
+          "200": {
+            "description": "The active commit-confirm window, if any",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/PendingCommit"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/commits/{id}/confirm": {
       "post": {
         "tags": [
@@ -2473,7 +2511,7 @@
     },
     {
       "name": "commits",
-      "description": "Confirm or roll back a commit-confirm window"
+      "description": "Read, confirm or roll back a commit-confirm window"
     },
     {
       "name": "backups",

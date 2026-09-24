@@ -256,6 +256,8 @@ pub trait DynModule: Send + Sync {
 
     /// The module's static metadata.
     fn descriptor(&self) -> &'static ModuleDescriptor;
+    /// Clone this adapter for a second consumer, such as the monitor and ops engine.
+    fn clone_box(&self) -> Box<dyn DynModule>;
 
     /// JSON Pointers to secret-bearing model fields.
     fn secret_pointers(&self) -> &'static [&'static str] {
@@ -367,6 +369,9 @@ impl<M: ConfigModule> DynModule for Dyn<M> {
 
     fn defaults_json(&self, profile: &HostProfile) -> Result<Value, DynError> {
         Ok(model_to_json(&M::defaults(profile))?)
+    }
+    fn clone_box(&self) -> Box<dyn DynModule> {
+        Box::new(Self::new())
     }
 }
 

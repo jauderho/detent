@@ -1171,6 +1171,7 @@ impl Session {
 
         let init = host.profile.init;
         let profile = host.profile.clone();
+        let monitor_registry = registry.iter().map(|module| module.clone_box()).collect();
         let monitor = std::thread::spawn(move || {
             // Both collaborators are built inside the thread: `Hooks` borrows
             // them, and `&dyn CheckRunner` is not `Send`, so they cannot be
@@ -1185,6 +1186,7 @@ impl Session {
                     services: &services,
                 },
             );
+            monitor.set_module_registry(monitor_registry);
             monitor.set_host_profile(profile);
             let recovered = monitor.recover_pending();
             let report = recovered.as_ref().map_err(|err| err.to_string()).cloned();

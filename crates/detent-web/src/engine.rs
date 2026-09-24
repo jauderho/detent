@@ -34,18 +34,27 @@ use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 
 use detent_core::diag::MessageId;
+use detent_ops::report::PendingCommit;
 use detent_ops::{Identity, OpOutcome, Operation, OpsEngine, OpsError};
 use tokio::sync::oneshot;
 
 /// One unit of work for the engine thread.
 #[derive(Debug)]
-struct Job {
-    /// What to do.
-    op: Operation,
-    /// On whose behalf.
-    who: Identity,
-    /// Where the answer goes. Dropped when the caller gave up.
-    reply: oneshot::Sender<Result<OpOutcome, OpsError>>,
+enum Job {
+    /// Run an audited operation.
+    Execute {
+        /// What to do.
+        op: Operation,
+        /// On whose behalf.
+        who: Identity,
+        /// Where the answer goes. Dropped when the caller gave up.
+        reply: oneshot::Sender<Result<OpOutcome, OpsError>>,
+    },
+    /// Read the full pending-commit report.
+    PendingCommit {
+        /// Where the answer goes. Dropped when the caller gave up.
+        reply: oneshot::Sender<Result<Option<PendingCommit>, OpsError>>,
+    },
 }
 
 /// Why an operation submitted through an [`EngineHandle`] did not produce an
@@ -111,7 +120,7 @@ impl EngineHandle {
     }
 
     /// A handle whose engine always answers `outcome`: handler success paths
-    /// without a real module, a monitor thread, or a filesystem write.
+    /// without a real module, monitor thread, or filesystem write.
     ///
     /// The replier ends when the last handle is dropped.
     #[cfg(test)]
@@ -119,7 +128,14 @@ impl EngineHandle {
         let (jobs, inbox) = mpsc::channel::<Job>();
         thread::spawn(move || {
             while let Ok(job) = inbox.recv() {
-                let _ = job.reply.send(Ok(outcome.clone()));
+                match job {
+                    Job::Execute { reply, .. } => {
+                        let _ = reply.send(Ok(outcome.clone()));
+                    }
+                    Job::PendingCommit { reply } => {
+                        let _ = reply.send(Ok(None));
+                    }
+                }
             }
         });
         Self::from_sender(jobs)
@@ -134,7 +150,25 @@ impl EngineHandle {
     pub async fn execute(&self, op: Operation, who: Identity) -> Result<OpOutcome, EngineError> {
         let (reply, answer) = oneshot::channel();
         self.jobs
-            .send(Job { op, who, reply })
+            .send(Job::Execute { op, who, reply })
+            .map_err(|_closed| EngineError::Stopped)?;
+        answer
+            .await
+            .map_err(|_dropped| EngineError::Stopped)?
+            .map_err(EngineError::Ops)
+    }
+
+    /// Read the monitor-backed pending commit with its full report fields.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Ops`] when the monitor cannot be reached or the engine
+    /// has no complete report for the monitor's active commit;
+    /// [`EngineError::Stopped`] when the engine thread is gone.
+    pub async fn pending_commit(&self) -> Result<Option<PendingCommit>, EngineError> {
+        let (reply, answer) = oneshot::channel();
+        self.jobs
+            .send(Job::PendingCommit { reply })
             .map_err(|_closed| EngineError::Stopped)?;
         answer
             .await
@@ -193,10 +227,17 @@ pub fn spawn(engine: OpsEngine) -> (EngineHandle, EngineThread) {
     let thread = thread::spawn(move || {
         let mut engine = engine;
         while let Ok(job) = inbox.recv() {
-            let outcome = engine.execute(job.op, &job.who);
-            // The caller may have gone away mid-operation. The work is done
-            // and audited either way, so an unsendable answer is dropped.
-            let _ = job.reply.send(outcome);
+            match job {
+                Job::Execute { op, who, reply } => {
+                    let outcome = engine.execute(op, &who);
+                    // The caller may have gone away mid-operation. The work is done
+                    // and audited either way, so an unsendable answer is dropped.
+                    let _ = reply.send(outcome);
+                }
+                Job::PendingCommit { reply } => {
+                    let _ = reply.send(engine.pending_commit());
+                }
+            }
         }
         engine.shutdown()
     });
@@ -312,6 +353,7 @@ mod tests {
             OpOutcome::Host(report) => assert_eq!(report.profile.hostname, "detent-test"),
             other => return Err(format!("unexpected outcome {other:?}").into()),
         }
+        assert!(handle.pending_commit().await?.is_none());
 
         drop(handle);
         thread.join()?;

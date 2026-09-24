@@ -816,6 +816,7 @@ mod tests {
                     .header(header::COOKIE, format!("{COOKIE_NAME}={old}"))
                     .header(SEC_FETCH_SITE, SAME_ORIGIN)
                     .header(header::ORIGIN, ORIGIN)
+                    .header(header::HOST, "box.example:3333")
                     .header(CSRF_HEADER, &old_csrf)
                     .body(Body::from(credentials("alice", "hunter2")))?,
             )
@@ -1026,6 +1027,7 @@ mod tests {
                     .header(header::COOKIE, format!("{COOKIE_NAME}={id}"))
                     .header(SEC_FETCH_SITE, SAME_ORIGIN)
                     .header(header::ORIGIN, ORIGIN)
+                    .header(header::HOST, "box.example:3333")
                     .header(CSRF_HEADER, &csrf)
                     .body(Body::empty())?,
             )
@@ -1146,6 +1148,7 @@ mod tests {
                     .header(header::COOKIE, format!("{COOKIE_NAME}={id}"))
                     .header(SEC_FETCH_SITE, SAME_ORIGIN)
                     .header(header::ORIGIN, ORIGIN)
+                    .header(header::HOST, "box.example:3333")
                     .header(CSRF_HEADER, &csrf)
                     .body(Body::empty())?,
             )

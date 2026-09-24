@@ -87,6 +87,9 @@ pub struct OpsEngine {
     /// settings before issuing those operations.
     state_root: Option<PathBuf>,
     next_commit: u32,
+    /// Last commit-confirm window armed by this engine, used to rehydrate its
+    /// full report without inventing fields from the protocol's id-only query.
+    pending_commit: Option<PendingCommit>,
 }
 
 impl std::fmt::Debug for OpsEngine {
@@ -122,6 +125,7 @@ impl OpsEngine {
             services,
             state_root: None,
             next_commit: 1,
+            pending_commit: None,
         }
     }
 
@@ -139,6 +143,27 @@ impl OpsEngine {
     #[must_use]
     pub const fn host(&self) -> &Detected {
         &self.host
+    }
+
+    /// Return the full pending-commit report, after checking the monitor's
+    /// authoritative id.
+    ///
+    /// # Errors
+    ///
+    /// [`OpsError::Privsep`] when the monitor cannot be reached, or
+    /// [`OpsError::CommitPending`] if the monitor is pending a commit this
+    /// engine did not arm and therefore has no complete report for.
+    pub fn pending_commit(&mut self) -> Result<Option<PendingCommit>, OpsError> {
+        let active = self.client.pending_commit().map_err(map_client)?;
+        let Some(active) = active else {
+            self.pending_commit = None;
+            return Ok(None);
+        };
+        self.pending_commit
+            .clone()
+            .filter(|pending| pending.commit_id == active)
+            .map(Some)
+            .ok_or(OpsError::CommitPending(active))
     }
 
     /// Ask the monitor to exit. The engine is unusable afterwards.
@@ -259,12 +284,14 @@ impl OpsEngine {
             Operation::ConfirmCommit { commit_id } => {
                 hashes.commit_id = Some(commit_id.get());
                 let commit = self.client.confirm_commit(commit_id).map_err(map_client)?;
+                self.pending_commit = None;
                 Ok(OpOutcome::CommitConfirmed { commit_id: commit })
             }
             Operation::RollbackCommit { commit_id } => {
                 hashes.commit_id = Some(commit_id.get());
                 let (commit, restored) =
                     self.client.rollback_commit(commit_id).map_err(map_client)?;
+                self.pending_commit = None;
                 Ok(OpOutcome::RolledBack {
                     commit_id: commit,
                     restored,
@@ -485,6 +512,7 @@ impl OpsEngine {
 
     // -- mutating operations -------------------------------------------------
 
+    #[allow(clippy::too_many_lines)]
     fn apply(
         &mut self,
         id: &str,
@@ -545,6 +573,11 @@ impl OpsEngine {
             });
         }
         let checks = self.run_checks(&wiring, rendered.as_bytes());
+
+        let commit_required = descriptor.commit_confirm || confirm.is_some();
+        if commit_required && let Some(commit) = self.client.pending_commit().map_err(map_client)? {
+            return Err(OpsError::CommitPending(commit));
+        }
         if let Some(report) = checks.iter().find(|report| !report.ran || !report.passed) {
             return Err(OpsError::CheckFailed {
                 program: report.program.clone(),
@@ -566,19 +599,40 @@ impl OpsEngine {
         };
 
         // 5. Arm commit-confirm immediately after the successful write and
-        //    before touching the service. A timer without a backup could not
-        //    restore the target, so no rollback window is advertised.
-        let commit = if receipt.backed_up && (descriptor.commit_confirm || confirm.is_some()) {
-            Some(self.arm_commit(confirm, pending_service)?)
+        //    before touching the service, including when the monitor made no
+        //    backup so the no-backup refusal below can clear the window.
+        let commit = if commit_required {
+            let commit = self.arm_commit(confirm, pending_service)?;
+            hashes.commit_id = Some(commit.commit_id.get());
+            self.pending_commit = Some(commit.clone());
+            Some(commit)
         } else {
             None
         };
+        if commit_required && !receipt.backed_up {
+            if let Some(commit) = commit.as_ref()
+                && self.client.rollback_commit(commit.commit_id).is_ok()
+            {
+                self.pending_commit = None;
+            }
+            return Err(OpsError::NoBackup);
+        }
 
         // 6. Act on the service. Step 2 established that a binding exists
         //    whenever an action was asked for.
         let service = match (service_action, wiring.binding.as_ref()) {
             (Some(action), Some(&(binding, ref affected))) => {
-                Some(self.act(binding, &affected.unit, action)?)
+                match self.act(binding, &affected.unit, action) {
+                    Ok(service) => Some(service),
+                    Err(err) => {
+                        if let Some(commit) = commit.as_ref()
+                            && self.client.rollback_commit(commit.commit_id).is_ok()
+                        {
+                            self.pending_commit = None;
+                        }
+                        return Err(err);
+                    }
+                }
             }
             _ => None,
         };

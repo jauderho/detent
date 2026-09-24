@@ -393,9 +393,9 @@ mod tests {
         // The 13 `Operation` endpoints PLAN Phase 4 lists, plus cert status
         // (read-only, served from the live `CertStore`), the update check
         // (read-only, served from `detent-update`), the update install
-        // (`POST`, refused as `Unsupported` without a staged binary), and
-        // `/api/v1/openapi.json` itself.
-        assert_eq!(table().len(), 17, "{:?}", table());
+        // (`POST`, refused as `Unsupported` without a staged binary), the
+        // pending commit read, and `/api/v1/openapi.json` itself.
+        assert_eq!(table().len(), 18, "{:?}", table());
         assert!(
             table()
                 .iter()

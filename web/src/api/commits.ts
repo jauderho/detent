@@ -10,8 +10,8 @@
  * deciding.
  */
 
-import type { UseMutationResult } from '@tanstack/react-query'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import type { UseMutationResult, UseQueryResult } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useApiClient } from './ApiProvider'
 import type { ApiClient, ApiResult } from './client'
 import { MODULES_QUERY_KEY } from './modules'
@@ -21,6 +21,26 @@ import type { components } from './schema'
 export type PendingCommit = components['schemas']['PendingCommit']
 export type CommitConfirmedView = components['schemas']['CommitConfirmedView']
 export type RolledBackView = components['schemas']['RolledBackView']
+export const PENDING_COMMIT_QUERY_KEY = ['commits', 'pending'] as const
+export const PENDING_COMMIT_POLL_MS = 5_000
+
+/** `GET /api/v1/commits/pending`. Needs the `read` scope. */
+export function fetchPendingCommit(
+  client: ApiClient,
+  signal?: AbortSignal,
+): Promise<ApiResult<PendingCommit | null>> {
+  return client.get('/api/v1/commits/pending', { ...(signal === undefined ? {} : { signal }) })
+}
+
+/** Loads the monitor's current commit-confirm window and keeps it fresh. */
+export function usePendingCommitQuery(): UseQueryResult<PendingCommit | null, ApiRequestError> {
+  const client = useApiClient()
+  return useQuery({
+    queryKey: PENDING_COMMIT_QUERY_KEY,
+    queryFn: ({ signal }) => unwrap(fetchPendingCommit(client, signal)),
+    refetchInterval: (query) => (query.state.data ? PENDING_COMMIT_POLL_MS : false),
+  })
+}
 
 // ── requests ────────────────────────────────────────────────────────────────
 
