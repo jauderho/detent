@@ -468,11 +468,11 @@ fn has_boot_escape(options: &[String]) -> bool {
 /// Checks one entry against the fstab(5) rules and the hardening conventions.
 ///
 /// * [`Severity::Error`] — the entry is invalid and must not be applied (empty
-///   columns, an fstype shape no filesystem type uses, a fsck pass above 2).
+///   columns, an fstype shape no filesystem type uses, a fsck pass above 2,
+///   or a critical boot mount disabled with `noauto`).
 /// * [`Severity::Warning`] — valid, but likely not what the admin meant (root
-///   not in fsck pass 1, a local mount without `nofail`/`noauto`, critical
-///   mounts disabled with `noauto`, removable media without `nofail`, or data
-///   mounts without guards).
+///   not in fsck pass 1, a local mount without `nofail`/`noauto`, removable
+///   media without `nofail`, or data mounts without guards).
 /// * [`Severity::Recommendation`] — fine, but a better option exists
 ///   (`x-systemd.automount` on network filesystems, `noauto` without `user`).
 fn validate_entry(entry: &Entry, index: usize, diagnostics: &mut Diagnostics) {
@@ -518,7 +518,7 @@ fn validate_entry(entry: &Entry, index: usize, diagnostics: &mut Diagnostics) {
     let boot_critical = is_boot_critical(&entry.mountpoint);
     if boot_critical && has("noauto") {
         diagnostics.push(
-            Diagnostic::new(Severity::Warning, CRITICAL_NO_AUTO)
+            Diagnostic::new(Severity::Error, CRITICAL_NO_AUTO)
                 .with_field(field("options"))
                 .with_arg("mountpoint", entry.mountpoint.clone()),
         );
@@ -1153,7 +1153,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_flags_boot_blockers_and_critical_noauto() {
+    fn validate_flags_boot_blockers_and_rejects_critical_noauto() {
         let blocked = Model {
             entries: vec![entry(
                 "server:/data",
@@ -1187,7 +1187,7 @@ mod tests {
                     1,
                 )],
             };
-            assert!(has(&model, CRITICAL_NO_AUTO, Severity::Warning));
+            assert!(has(&model, CRITICAL_NO_AUTO, Severity::Error));
         }
     }
 
