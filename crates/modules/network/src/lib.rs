@@ -1824,6 +1824,303 @@ fn ips_in_same_subnet(a: std::net::IpAddr, b: std::net::IpAddr, prefix: u8) -> b
 
 // ---------------------------------------------------------------------- defaults
 
+/// Section in force before line `idx`: the last known networkd header above
+/// it, or empty when an unknown header intervenes.
+fn section_of(lines: &[String], idx: usize) -> String {
+    let mut cur = String::new();
+    for r in lines.iter().take(idx) {
+        if let Some(section) = parse_section(r) {
+            cur = if is_networkd_section(&section) {
+                section
+            } else {
+                String::new()
+            };
+        }
+    }
+    cur
+}
+
+/// Scope key of one networkd directive line: `(section, key)`. Headers use an
+/// empty key. Lines outside known sections return `None` and stay verbatim.
+fn networkd_scope(raw: &str, current: &str) -> Option<(String, String)> {
+    if let Some(section) = parse_section(raw) {
+        if is_networkd_section(&section) {
+            return Some((section, String::new()));
+        }
+        return None;
+    }
+    if let Some((k, _)) = parse_kv_equals(raw) {
+        if is_networkd_key(&k) && !current.is_empty() {
+            return Some((current.to_owned(), k));
+        }
+        return None;
+    }
+    None
+}
+
+/// Section-aware minimal edit for networkd documents. Pairs planned
+/// directives with existing ones inside the same `(section, key)` group, in
+/// file order; surplus planned lines insert after their section's last
+/// surviving line; unpaired existing directives are removed. Unknown lines
+/// stay verbatim. Refuses when the result would parse back to a different
+/// model. Returns `None` when the document has no networkd sections so the
+/// caller keeps positional pairing.
+#[allow(
+    clippy::too_many_lines,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::assigning_clones
+)]
+fn apply_networkd_sections(
+    doc: &mut Document,
+    new_lines: &[String],
+    model: &Model,
+) -> Option<Result<EditReport, EditError>> {
+    use std::collections::BTreeMap;
+    let existing_raw: Vec<String> = doc.lines().iter().map(|l| l.raw().to_owned()).collect();
+    if !existing_raw
+        .iter()
+        .any(|r| parse_section(r).is_some_and(|s| is_networkd_section(&s)))
+    {
+        return None;
+    }
+    let planned_raw: Vec<String> = new_lines
+        .iter()
+        .filter(|l| is_directive_like(l))
+        .cloned()
+        .collect();
+    // Scopes of planned lines, tracking the render's own section headers.
+    let mut planned_scopes: Vec<Option<(String, String)>> = Vec::with_capacity(planned_raw.len());
+    {
+        let mut current = String::new();
+        for raw in &planned_raw {
+            let scope = networkd_scope(raw, &current);
+            if let Some((section, key)) = scope.clone()
+                && key.is_empty()
+            {
+                current = section;
+            }
+            planned_scopes.push(scope);
+        }
+    }
+    // Queue of planned indices per scope group, in render order.
+    let mut queue: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+    for (pi, scope) in planned_scopes.iter().enumerate() {
+        if let Some(group) = scope {
+            queue.entry(group.clone()).or_default().push(pi);
+        }
+    }
+    // Pair each existing directive line with the next planned one in its group.
+    // ponytail: linear scan with per-group queues; fine at config-file sizes.
+    let mut partner: Vec<Option<usize>> = vec![None; existing_raw.len()];
+    let mut used = vec![false; planned_raw.len()];
+    {
+        let mut current = String::new();
+        for (ei, raw) in existing_raw.iter().enumerate() {
+            let scope = networkd_scope(raw, &current);
+            if let Some((section, key)) = scope.clone()
+                && key.is_empty()
+            {
+                current = section;
+            }
+            let Some(group) = scope else { continue };
+            let Some(q) = queue.get_mut(&group) else {
+                continue;
+            };
+            if q.is_empty() {
+                continue;
+            }
+            let pi = q.remove(0);
+            partner[ei] = Some(pi);
+            used[pi] = true;
+        }
+    }
+    // Fast path: identical models keep bytes byte-identical.
+    let directive_lines: Vec<String> = doc
+        .lines()
+        .iter()
+        .filter(|l| l.kind() == LineKind::Directive)
+        .map(|l| l.raw().to_owned())
+        .collect();
+    if build_model_from_lines(&directive_lines) == *model {
+        return Some(Ok(EditReport::default()));
+    }
+    // Replacement text per paired existing line (`None` = unchanged).
+    let mut replacement: Vec<Option<String>> = vec![None; existing_raw.len()];
+    for (ei, pi) in partner.iter().enumerate() {
+        let Some(pi) = pi else { continue };
+        let want = planned_raw[*pi].clone();
+        if existing_raw[ei] != want {
+            replacement[ei] = Some(want);
+        }
+    }
+    // Surplus planned indices, in render order.
+    let mut surplus_idx: Vec<usize> = Vec::new();
+    for (pi, raw) in planned_raw.iter().enumerate() {
+        let _ = raw;
+        if used[pi] {
+            continue;
+        }
+        if planned_scopes[pi].is_some() {
+            surplus_idx.push(pi);
+        }
+    }
+    // Rebuild: surviving doc lines (with replacements) + surplus spliced after
+    // each section's last surviving line, in planned order. Sections repeat
+    // per interface, so each surplus line anchors against the live list: after
+    // the last line of its section currently present (or an EOF buffer for
+    // brand-new sections).
+    let mut report = EditReport::default();
+    let mut final_lines: Vec<String> = Vec::with_capacity(doc.len().saturating_add(8));
+    // Planned index of each line pushed to final_lines (`None` = verbatim blank/unknown).
+    let mut final_pi: Vec<Option<usize>> = Vec::new();
+    {
+        // `existing`/`partner`/`replacement` are indexed by doc line (1:1 with
+        // `existing_raw`). Non-directive lines (blanks) are always kept.
+        for (di, raw_e) in existing_raw.iter().enumerate() {
+            let line = doc
+                .lines()
+                .get(di)
+                .map(|l| l.raw().to_owned())
+                .unwrap_or_default();
+            let is_directive =
+                doc.lines().get(di).map(detent_core::doc::Line::kind) == Some(LineKind::Directive);
+            if !is_directive {
+                final_lines.push(line);
+                final_pi.push(None);
+                continue;
+            }
+            if networkd_scope(raw_e, &section_of(&existing_raw, di)).is_none() {
+                final_lines.push(line);
+                final_pi.push(None);
+                continue;
+            }
+            if partner.get(di).copied().flatten().is_none() {
+                report.removed = report.removed.saturating_add(1);
+                continue;
+            }
+            if let Some(want) = replacement.get(di).and_then(Clone::clone) {
+                if line != want {
+                    report.changed_lines = report.changed_lines.saturating_add(1);
+                }
+                final_lines.push(want);
+            } else {
+                final_lines.push(line);
+            }
+            final_pi.push(partner.get(di).copied().flatten());
+        }
+    }
+    // Splice surplus in planned order, each after its planned predecessor's
+    // current position. Predecessors are paired lines (already in final_lines)
+    // or earlier surplus lines (just inserted), so multi-interface sections
+    // keep global render order. Only leading lines with no placed predecessor
+    // go to the EOF buffer (brand-new sections).
+    let mut surplus_pos: Vec<(usize, String)> = surplus_idx
+        .iter()
+        .map(|&pi| (pi, planned_raw[pi].clone()))
+        .collect();
+    surplus_pos.sort();
+    // Position of each planned line currently in final_lines, from pairing.
+    let mut placed: BTreeMap<usize, usize> = BTreeMap::new();
+    for (fi, pi) in final_pi.iter().enumerate() {
+        if let Some(pi) = pi {
+            placed.insert(*pi, fi);
+        }
+    }
+    let mut eof_buf: Vec<(usize, String)> = Vec::new();
+    for (pos, raw) in surplus_pos {
+        // Predecessor: nearest earlier planned index already placed.
+        let mut pred: Option<usize> = None;
+        for back in (0..pos).rev() {
+            if let Some(&fi) = placed.get(&back) {
+                pred = Some(fi);
+                break;
+            }
+        }
+        if let Some(at) = pred {
+            // Insert after predecessor, shifting later placements right.
+            final_lines.insert(at.saturating_add(1), raw.clone());
+            let shifted: Vec<(usize, usize)> = placed.iter().map(|(&k, &v)| (k, v)).collect();
+            for (k, v) in shifted {
+                if v > at {
+                    placed.insert(k, v.saturating_add(1));
+                }
+            }
+            placed.insert(pos, at.saturating_add(1));
+            final_pi.insert(at.saturating_add(1), Some(pos));
+            report.added = report.added.saturating_add(1);
+        } else {
+            eof_buf.push((pos, raw));
+        }
+    }
+    eof_buf.sort();
+    for (pos, raw) in eof_buf {
+        final_lines.push(raw);
+        final_pi.push(Some(pos));
+        placed.insert(pos, final_lines.len().saturating_sub(1));
+        report.added = report.added.saturating_add(1);
+    }
+    // Commit final_lines back into the doc with indexed replace/remove/insert.
+    let mut di = 0usize;
+    while di < final_lines.len() && di < doc.len() {
+        let cur = doc
+            .lines()
+            .get(di)
+            .map(|l| l.raw().to_owned())
+            .unwrap_or_default();
+        if cur != final_lines[di] {
+            match doc.replace_raw(di, &final_lines[di].clone()) {
+                Ok(()) => {}
+                Err(e) => return Some(Err(e)),
+            }
+        }
+        di = di.saturating_add(1);
+    }
+    while doc.len() > final_lines.len() {
+        match doc.remove_line(final_lines.len()) {
+            Ok(()) => {}
+            Err(e) => return Some(Err(e)),
+        }
+        report.removed = report.removed.saturating_add(1);
+    }
+    while di < final_lines.len() {
+        let raw = final_lines[di].clone();
+        match doc.insert_line(di, &raw) {
+            Ok(()) => {}
+            Err(e) => return Some(Err(e)),
+        }
+        di = di.saturating_add(1);
+    }
+    // Refuse an edit that parses back to a different model instead of
+    // silently dropping modeled state.
+    let rendered = doc.render();
+    let reparsed = Document::parse(&rendered, classify);
+    let back = build_model_from_lines(
+        &reparsed
+            .lines()
+            .iter()
+            .map(|l| l.raw().to_owned())
+            .collect::<Vec<_>>(),
+    );
+    // systemd-networkd has no bridge-member primitive (`Bridge=` lives on the
+    // member's `.network` file and enslaves to one bridge), so bridge
+    // membership is lossy here by design — like routes on NM. Compare against
+    // the model with membership stripped; interface shape must still survive.
+    let mut want = model.clone();
+    for iface in &mut want.interfaces {
+        iface.bridge = None;
+    }
+    want.interfaces.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut back = back;
+    back.interfaces.sort_by(|a, b| a.name.cmp(&b.name));
+    if back != want {
+        return Some(Err(EditError::Unsupported {
+            message: "edit would not round-trip; refusing".to_owned(),
+        }));
+    }
+    Some(Ok(report))
+}
+
 // ----------------------------------------------------------------------- module
 
 /// The network config module.
@@ -1907,10 +2204,13 @@ impl ConfigModule for NetworkModule {
             }
         }
 
-        // Pass 2: two-pass minimal edit — pair rendered directive lines with
-        // existing ones (like ChronyModule::apply). Keeps Unknown/Comment/Blank
-        // verbatim, never moves a header past its keys. New lines go after the
-        // last existing directive, not at EOF.
+        // Pass 2: two-pass minimal edit, section-aware for networkd.
+        if flavor == BackendFlavor::Networkd
+            && let Some(result) = apply_networkd_sections(doc, &new_lines, model)
+        {
+            return result;
+        }
+        // Other flavors have no INI sections: legacy positional pairing.
         let planned_directives: Vec<String> = new_lines
             .iter()
             .filter(|l| is_directive_like(l))
