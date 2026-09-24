@@ -4,7 +4,16 @@
 
 import { Localized, useLocalization } from '@fluent/react'
 import { useQueryClient } from '@tanstack/react-query'
-import { createContext, type ReactNode, useCallback, useContext, useMemo } from 'react'
+import {
+  createContext,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import {
   PENDING_COMMIT_QUERY_KEY,
   type PendingCommit,
@@ -30,16 +39,28 @@ const PendingCommitContext = createContext<PendingCommitContextValue | null>(nul
 export function PendingCommitProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient()
   const query = usePendingCommitQuery()
-  const pending = query.data ?? null
+  const [armed, setArmed] = useState<PendingCommit | null>(null)
+  const sawServerPending = useRef(false)
+  const pending = query.data ?? armed
 
+  useEffect(() => {
+    if (query.data !== undefined && query.data !== null) {
+      sawServerPending.current = true
+    } else if (query.data === null && sawServerPending.current) {
+      sawServerPending.current = false
+      setArmed(null)
+    }
+  }, [query.data])
   const arm = useCallback(
     (commit: PendingCommit) => {
       queryClient.setQueryData(PENDING_COMMIT_QUERY_KEY, commit)
+      setArmed(commit)
     },
     [queryClient],
   )
   const clear = useCallback(() => {
     queryClient.setQueryData(PENDING_COMMIT_QUERY_KEY, null)
+    setArmed(null)
   }, [queryClient])
 
   const value = useMemo<PendingCommitContextValue>(

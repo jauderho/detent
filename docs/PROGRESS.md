@@ -4,6 +4,16 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-24 - H21 web E2E commit-window repair
+
+Made the E2E API stub model the pending commit state, scoped alert assertions
+to the intended panel, and kept the armed commit in provider state when the
+TanStack cache update does not trigger a render. The apply flow now verifies
+the commit-confirm banner before and after navigation; the failure-state test
+scopes its assertion to the privileged-helper panel.
+
+Verify: `bun run typecheck` (0); `bun run lint` (0); `bun test
+src/app/__tests__/PendingCommit.test.tsx` (7 passed); `bun run e2e` (22 passed); `bun run test` (443 passed).
 ## 2026-09-24 - H6 Linux monitor syscall repair
 
 Root trace on a010 named the killer: confined child installed the filter, then died at `open("/dev/null")` (`si_syscall=__NR_open`, Trap oracle). Musl `File::open_c` issues raw `open` (nr 2, x86_64-only), not `openat`. MONITOR gains `dup2`, `arch_prctl`, `access`, `readlink`, `readlinkat`, `ppoll`, `poll`, `open` with both-arch number rows; arch-absent entries skip table construction instead of failing it. Resolving test asserts non-empty per arch plus resolves-on-one-arch.
