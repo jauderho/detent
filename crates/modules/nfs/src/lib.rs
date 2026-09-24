@@ -521,10 +521,9 @@ fn sec_flavors(options: &[String]) -> Option<Vec<&str>> {
     Some(sec.split_once('=')?.1.split(':').collect())
 }
 
-/// Whether the flavors are free of `krb5`, `krb5i` and `krb5p`, i.e. the export
-/// negotiates only `sys`.
-fn is_sys_only(flavors: &[&str]) -> bool {
-    !flavors.is_empty() && !flavors.iter().any(|f| f.starts_with("krb5"))
+/// Whether an export negotiates `sys`, the default when no `sec=` is present.
+fn includes_sys(flavors: &[&str]) -> bool {
+    flavors.contains(&"sys")
 }
 
 /// Checks one export's path and every client on its line.
@@ -627,7 +626,7 @@ fn validate_client(client: &Client, index: usize, client_index: usize, out: &mut
                     .with_arg("host", client.host.clone()),
             );
         }
-        if option == "rw" && matches!(client.host.as_str(), "*" | "0.0.0.0/0" | "::/0") {
+        if option == "rw" && matches!(client.host.as_str(), "*" | "*.*" | "0.0.0.0/0" | "::/0") {
             out.push(
                 Diagnostic::new(Severity::Warning, WORLD_EXPORT)
                     .with_field(field)
@@ -635,8 +634,8 @@ fn validate_client(client: &Client, index: usize, client_index: usize, out: &mut
             );
         }
     }
-    let sys_only = sec_flavors(&client.options).is_none_or(|flavors| is_sys_only(&flavors));
-    if sys_only {
+    let includes_sys = sec_flavors(&client.options).is_none_or(|flavors| includes_sys(&flavors));
+    if includes_sys {
         out.push(
             Diagnostic::new(Severity::Warning, SEC_SYS_ONLY)
                 .with_field(FieldPath::new(format!(
@@ -1273,7 +1272,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_flags_sec_sys_only() {
+    fn validate_warns_default_sec_sys() {
         let m = model(vec![export(
             "/srv/a",
             &[client(
@@ -1294,7 +1293,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_allows_sec_with_a_krb5_flavor() {
+    fn validate_warns_sec_sys_with_a_krb5_flavor() {
         let m = model(vec![export(
             "/srv/a",
             &[client(
@@ -1308,12 +1307,12 @@ mod tests {
                 ],
             )],
         )]);
-        assert!(!has(&m, SEC_SYS_ONLY, Severity::Warning));
+        assert!(has(&m, SEC_SYS_ONLY, Severity::Warning));
     }
 
     #[test]
-    fn validate_flags_a_world_writable_export() {
-        for host in ["*", "0.0.0.0/0", "::/0"] {
+    fn validate_flags_cidr_world_export() {
+        for host in ["*", "*.*", "0.0.0.0/0", "::/0"] {
             let m = model(vec![export(
                 "/srv/a",
                 &[client(

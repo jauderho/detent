@@ -7,7 +7,7 @@
 //!                                                        authority to abuse)
 //!   cookie session ─┬─ Sec-Fetch-Site: same-origin ─┐
 //!                   ├─ Sec-Fetch-Site: same-site ───┼─ pass
-//!                   ├─ Origin == configured origin ─┤
+//!                   ├─ Origin == request authority ┤
 //!                   └─ X-Detent-CSRF == token ──────┘
 //!                                          any missing ──▶ 403
 //! ```
@@ -30,7 +30,7 @@
 //!   a cross-site page could have abused.
 
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, HeaderName, Method};
+use axum::http::{HeaderMap, HeaderName, Method, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse as _, Response};
 
@@ -53,11 +53,9 @@ pub const SAME_SITE: &str = "same-site";
 /// An origin, normalized for comparison.
 ///
 /// Normalization is the whole point of the type: a browser sends
-/// `https://box.example` for a request to port 443 and
-/// `https://box.example:3333` for one to port 3333, so the configured value
-/// and the header have to be reduced to the same shape before they are
-/// compared. Scheme and host are lowercased, and a port that is the scheme's
-/// default is dropped.
+/// `https://box.example` for port 443 and `https://box.example:3333` for port
+/// 3333, so the request authority and header must be reduced to the same shape.
+/// Scheme and host are lowercased, and a default port is dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Origin {
     /// `scheme://host[:port]`, lowercase, default port removed.
@@ -203,7 +201,7 @@ fn has_bearer(headers: &HeaderMap) -> bool {
 /// `axum::middleware::from_fn_with_state(state.clone(), csrf_guard)` around
 /// the API router.
 pub async fn csrf_guard(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    if let Err(error) = verdict(&state, request.method(), request.headers()) {
+    if let Err(error) = verdict(&state, request.method(), request.headers(), request.uri()) {
         return ApiError::from(error).into_response();
     }
     next.run(request).await
@@ -216,7 +214,12 @@ pub async fn csrf_guard(State(state): State<AppState>, request: Request, next: N
 ///
 /// [`AuthError::CsrfRejected`] when a cookie-authenticated mutation fails any
 /// of the three checks.
-pub fn verdict(state: &AppState, method: &Method, headers: &HeaderMap) -> Result<(), AuthError> {
+pub fn verdict(
+    state: &AppState,
+    method: &Method,
+    headers: &HeaderMap,
+    uri: &Uri,
+) -> Result<(), AuthError> {
     // Safe methods never mutate, so there is nothing to protect. HEAD and
     // OPTIONS are safe for the same reason GET is.
     if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
@@ -231,9 +234,9 @@ pub fn verdict(state: &AppState, method: &Method, headers: &HeaderMap) -> Result
     // 403 here would tell an unauthenticated caller about a control it never
     // reached.
     let Some(presented) = headers
-        .get(axum::http::header::COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(session::cookie_value)
+        .get_all(axum::http::header::COOKIE)
+        .iter()
+        .find_map(|value| value.to_str().ok().and_then(session::cookie_value))
     else {
         return Ok(());
     };
@@ -254,9 +257,16 @@ pub fn verdict(state: &AppState, method: &Method, headers: &HeaderMap) -> Result
         return Err(AuthError::CsrfRejected);
     }
 
+    let uri_authority = uri.authority().map(axum::http::uri::Authority::as_str);
+    let host_authority = sole_header(headers, &axum::http::header::HOST);
+    let ((Some(authority), None) | (None, Some(authority))) = (uri_authority, host_authority)
+    else {
+        return Err(AuthError::CsrfRejected);
+    };
     let origin =
         sole_header(headers, &axum::http::header::ORIGIN).ok_or(AuthError::CsrfRejected)?;
-    if !state.origin.matches(origin) {
+    let expected = Origin::parse(&format!("https://{authority}")).ok_or(AuthError::CsrfRejected)?;
+    if !expected.matches(origin) {
         return Err(AuthError::CsrfRejected);
     }
     let token = sole_header(headers, &CSRF_HEADER).ok_or(AuthError::CsrfRejected)?;
@@ -297,8 +307,10 @@ mod tests {
     /// The origin the test fixture is configured for.
     const GOOD_ORIGIN: &str = "https://box.example:3333";
 
-    /// The four headers a complete cookie-authenticated mutation carries.
-    ///
+    /// The authority carried by the test fixture's requests.
+    const GOOD_AUTHORITY: &str = "box.example:3333";
+
+    /// The five headers a complete cookie-authenticated mutation carries.
     /// A struct rather than `good(..).header(..)` overrides, because
     /// `Builder::header` **appends** and [`HeaderMap::get`] answers with the
     /// *first* value: `good(..).header(SEC_FETCH_SITE, "cross-site")` leaves
@@ -306,6 +318,7 @@ mod tests {
     /// once makes that mistake unrepresentable. `None` omits the header.
     #[derive(Clone, Copy)]
     struct Mutation<'a> {
+        authority: Option<&'a str>,
         cookie: Option<&'a str>,
         site: Option<&'a str>,
         origin: Option<&'a str>,
@@ -316,6 +329,7 @@ mod tests {
         /// Every header present and correct.
         fn complete(session_id: &'a str, csrf: &'a str) -> Self {
             Self {
+                authority: Some(GOOD_AUTHORITY),
                 cookie: Some(session_id),
                 site: Some(SAME_ORIGIN),
                 origin: Some(GOOD_ORIGIN),
@@ -328,6 +342,9 @@ mod tests {
             let mut builder = Request::builder()
                 .method(Method::POST)
                 .uri("/api/v1/mutate");
+            if let Some(authority) = self.authority {
+                builder = builder.header(header::HOST, authority);
+            }
             if let Some(cookie) = self.cookie {
                 builder = builder.header(header::COOKIE, format!("{COOKIE_NAME}={cookie}"));
             }
@@ -358,6 +375,65 @@ mod tests {
             .oneshot(Mutation::complete(id.expose(), session.csrf_token.expose()).build()?)
             .await?;
         assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_session_cookie_in_a_second_cookie_field_is_found() -> R {
+        let fixture = test_state()?;
+        let state = &fixture.state;
+        let (id, session) = state.auth.sessions.create(
+            "alice",
+            Scopes::read_write(),
+            false,
+            std::time::Instant::now(),
+        )?;
+        let mut request = Mutation::complete(id.expose(), session.csrf_token.expose()).build()?;
+        let cookies = request.headers_mut();
+        let session_cookie = cookies.remove(header::COOKIE).ok_or("no session cookie")?;
+        cookies.append(
+            header::COOKIE,
+            axum::http::HeaderValue::from_static("theme=dark"),
+        );
+        cookies.append(header::COOKIE, session_cookie);
+        *cookies.get_mut(SEC_FETCH_SITE).ok_or("no fetch site")? =
+            axum::http::HeaderValue::from_static("cross-site");
+
+        let response = app(state).oneshot(request).await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_wildcard_listener_accepts_its_own_authority() -> R {
+        let fixture = test_state()?;
+        let state = &fixture.state;
+        let (id, session) = state.auth.sessions.create(
+            "alice",
+            Scopes::read_write(),
+            false,
+            std::time::Instant::now(),
+        )?;
+        let token = session.csrf_token.expose();
+        let mutation = Mutation {
+            authority: Some("192.0.2.10:3333"),
+            origin: Some("https://192.0.2.10:3333"),
+            ..Mutation::complete(id.expose(), token)
+        };
+
+        let response = app(state).oneshot(mutation.build()?).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app(state)
+            .oneshot(
+                Mutation {
+                    origin: Some("https://evil.example:3333"),
+                    ..mutation
+                }
+                .build()?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
         Ok(())
     }
 
@@ -394,11 +470,18 @@ mod tests {
         let wrong_token = "0".repeat(64);
         let complete = Mutation::complete(id.expose(), &token);
 
-        let cases: [(&str, Mutation<'_>); 9] = [
+        let cases: [(&str, Mutation<'_>); 10] = [
             (
                 "missing Sec-Fetch-Site",
                 Mutation {
                     site: None,
+                    ..complete
+                },
+            ),
+            (
+                "missing Host",
+                Mutation {
+                    authority: None,
                     ..complete
                 },
             ),
@@ -495,8 +578,9 @@ mod tests {
         )?;
         let token = session.csrf_token.expose().to_owned();
 
-        let cases: [(&str, axum::http::HeaderName, &str); 3] = [
+        let cases: [(&str, axum::http::HeaderName, &str); 4] = [
             ("Sec-Fetch-Site", SEC_FETCH_SITE, "cross-site"),
+            ("Host", header::HOST, "box.example:4444"),
             (
                 "Origin",
                 axum::http::header::ORIGIN,

@@ -5,6 +5,16 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-23 - STAGE3 H22, L-WEB17, L-MODA8, and L-MODA9
+
+CSRF origin checks now derive the expected origin from exactly one request
+authority (URI authority or Host header), reject ambiguous sources, and find
+session cookies across split Cookie fields. NFS validation warns for default
+`sys`, explicit `sys:krb5p`, and world exports; hosts validation rejects IPv6
+localhost aliases as non-loopback.
+
+Verify: `cargo fmt --all --check`; `cargo test -p detent-web csrf::tests` (15 passed); `cargo clippy -p detent-web --all-targets --all-features -- -D warnings`; `cargo test -p detent-module-nfs validate_` (11 passed); `cargo test -p detent-module-hosts` (67 passed). Jev (`jev-1.13.0`) routing only: root-boundary slice confidence 0.48, destructive noul 0.39; complex reasoning by the default model.
+
 ## 2026-09-23 - STAGE3 H23 step 2: monitor revalidates candidate content
 
 The privileged monitor now parses and validates candidate bytes through the
