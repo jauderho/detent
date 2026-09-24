@@ -15,6 +15,7 @@ use rustls_pki_types::{CertificateDer, UnixTime};
 use sha2::{Digest as _, Sha256};
 use webpki::EndEntityCert;
 use x509_parser::certificate::X509Certificate;
+use x509_parser::extensions::ParsedExtension;
 use x509_parser::prelude::{FromDer as _, GeneralName};
 
 use crate::bundle::{self, Decoded};
@@ -179,12 +180,7 @@ pub fn verify(
     if !modern_issuer && !legacy_issuer {
         return Err(VerificationError::IssuerMismatch);
     }
-    if modern_issuer
-        && !parsed_leaf.extensions().iter().any(|extension| {
-            extension.oid.to_id_string() == SCT_LIST_OID
-                && extension.value.first().is_some_and(|tag| *tag == 0x04)
-        })
-    {
+    if modern_issuer && !has_embedded_sct(&parsed_leaf) {
         return Err(VerificationError::SctInvalid);
     }
 
@@ -250,6 +246,7 @@ impl webpki::ExtendedKeyUsageValidator for PermissiveEku {
 fn verify_inclusion(
     decoded: &Decoded,
     trust: &TrustRoot,
+
     leaf_point: &[u8],
 ) -> Result<(), VerificationError> {
     // The leaf hash covers the canonicalized tlog entry: its fields, JSON,
@@ -343,6 +340,20 @@ fn verify_inclusion(
     // signing key the envelope carries (ADR-014 step 6).
     verify_body_agreement(decoded, leaf_point)?;
     Ok(())
+}
+
+/// Returns true only for a non-empty SCT list parsed by x509-parser.
+///
+/// The DER OCTET STRING tag alone is not evidence of an SCT: malformed or
+/// empty extension contents must not let a modern Fulcio certificate through.
+fn has_embedded_sct(cert: &X509Certificate<'_>) -> bool {
+    cert.extensions().iter().any(|extension| {
+        extension.oid.to_id_string() == SCT_LIST_OID
+            && matches!(
+                extension.parsed_extension(),
+                ParsedExtension::SCT(scts) if !scts.is_empty()
+            )
+    })
 }
 
 /// Verify the Rekor body binds the DSSE signature to this bundle. The
@@ -466,6 +477,46 @@ fn base64_of(bytes: &[u8]) -> String {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_sct_octet_string_must_parse_as_a_nonempty_list() {
+        use rcgen::{CertificateParams, CustomExtension, KeyPair};
+
+        let mut params = CertificateParams::default();
+        params.custom_extensions = vec![CustomExtension::from_oid_content(
+            &[1, 3, 6, 1, 4, 1, 11129, 2, 4, 2],
+            // A DER OCTET STRING containing an empty list: the old
+            // first-byte check accepted this, but x509-parser rejects it.
+            vec![0x04, 0x00],
+        )];
+        let key = KeyPair::generate().expect("fixture key");
+        let cert = params.self_signed(&key).expect("fixture cert");
+        let (_, parsed) = X509Certificate::from_der(cert.der()).expect("parse fixture cert");
+        assert!(!has_embedded_sct(&parsed));
+    }
+
+    #[test]
+    fn a_nonempty_sct_list_is_recognized() {
+        use rcgen::{CertificateParams, CustomExtension, KeyPair};
+
+        let mut entry = vec![0]; // SCT version v1
+        entry.extend_from_slice(&[0; 32]); // log ID
+        entry.extend_from_slice(&[0; 8]); // timestamp
+        entry.extend_from_slice(&[0, 0]); // extensions length
+        entry.extend_from_slice(&[4, 3, 0, 0]); // hash, signature, signature length
+
+        let mut value = vec![0x04, 0x33, 0x00, 0x31, 0x00, 0x2f];
+        value.extend_from_slice(&entry);
+        let mut params = CertificateParams::default();
+        params.custom_extensions = vec![CustomExtension::from_oid_content(
+            &[1, 3, 6, 1, 4, 1, 11129, 2, 4, 2],
+            value,
+        )];
+        let key = KeyPair::generate().expect("fixture key");
+        let cert = params.self_signed(&key).expect("fixture cert");
+        let (_, parsed) = X509Certificate::from_der(cert.der()).expect("parse fixture cert");
+        assert!(has_embedded_sct(&parsed));
+    }
 
     #[test]
     fn pae_matches_dsse_spec_vectors() {
