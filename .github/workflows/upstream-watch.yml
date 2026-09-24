@@ -2,19 +2,13 @@ name: Upstream watch
 
 # Compares each module's `upstream.toml` tracked_version against the latest
 # upstream release and opens an issue when they drift (PLAN §2.3, Phase 7
-# acceptance). Test with a fake old tracked_version: the check script takes
-# an optional override (`UPSTREAM_WATCH_FAKE_VERSION=0.0`) so a run can prove
-# the issue path without touching a checked-in file.
+# acceptance). To exercise the issue path, set the repository variable
+# `UPSTREAM_WATCH_FAKE_VERSION` to `0.0` before dispatching.
 
 on:
   schedule:
     - cron: "23 4 * * 1"
   workflow_dispatch:
-    inputs:
-      fake_version:
-        description: "Override tracked_version to prove the issue path (e.g. 0.0)"
-        required: false
-        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -43,7 +37,7 @@ jobs:
       - name: Check upstream versions
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FAKE_VERSION: ${{ inputs.fake_version }}
+          FAKE_VERSION: ${{ vars.UPSTREAM_WATCH_FAKE_VERSION }}
         run: |
           set -euo pipefail
           # ponytail: linear scan over a handful of tomls; no matrix needed.
