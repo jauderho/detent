@@ -1239,6 +1239,7 @@ fn a_commit_confirm_module_arms_a_window_that_confirm_closes() -> TestResult {
     assert_eq!(records.get(3).map(|r| r.op), Some(OpKind::ConfirmCommit));
     assert_eq!(records.get(3).map(|r| r.result), Some(AuditResult::Ok));
     assert_eq!(records.get(3).and_then(|r| r.commit_id), Some(1));
+    assert_eq!(records.get(1).and_then(|r| r.commit_id), Some(1));
     fx.finish()
 }
 
