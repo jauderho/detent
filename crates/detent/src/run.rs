@@ -1189,7 +1189,7 @@ impl Session {
             monitor.set_module_registry(monitor_registry);
             monitor.set_host_profile(profile);
             let recovered = monitor.recover_pending();
-            let report = recovered.as_ref().map_err(|err| err.to_string()).cloned();
+            let report = recovered.as_ref().map_err(ToString::to_string).cloned();
             let _ = recovery_tx.send(report);
             recovered.and_then(|_| monitor.serve_locked(&mut channel, state_lock))
         });
