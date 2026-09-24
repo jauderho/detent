@@ -739,6 +739,16 @@ fn build_model_from_lines(lines: &[String]) -> Model {
                             via: String::new(),
                         });
                     }
+                    "VLAN" if !v.is_empty() => {
+                        if let Some((link, id)) = v.split_once(':')
+                            && let Ok(id) = id.trim().parse::<u16>()
+                        {
+                            entry.vlan = Some(Vlan {
+                                link: link.trim().to_owned(),
+                                id,
+                            });
+                        }
+                    }
                     "Id" if current_section == "VLAN" => {
                         if let Ok(id) = v.parse::<u16>() {
                             let link = entry
@@ -1890,6 +1900,11 @@ impl ConfigModule for NetworkModule {
                     message: format!("VLAN id {} out of range", vlan.id),
                 });
             }
+            if iface.name.is_empty() || iface.name.contains(char::is_whitespace) {
+                return Err(EditError::Unsupported {
+                    message: "interface name cannot round-trip".to_owned(),
+                });
+            }
         }
 
         // Pass 2: two-pass minimal edit — pair rendered directive lines with
@@ -1967,6 +1982,13 @@ impl ConfigModule for NetworkModule {
         let mut seen: BTreeSet<String> = BTreeSet::new();
         for (idx, iface) in model.interfaces.iter().enumerate() {
             let base = format!("interfaces/{idx}");
+            if iface.name.is_empty() || iface.name.contains(char::is_whitespace) {
+                diagnostics.push(
+                    Diagnostic::new(Severity::Error, INVALID_CIDR)
+                        .with_field(FieldPath::new(format!("{base}/name")))
+                        .with_arg("value", iface.name.clone()),
+                );
+            }
             // Injection
             for (field, value) in [
                 ("name", iface.name.as_str()),
