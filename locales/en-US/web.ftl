@@ -39,6 +39,7 @@ core-model-shape = the supplied configuration does not have the expected shape.
 core-model-unrepresentable = this file contains something the editor cannot represent.
 core-parse-malformed = this file does not match the format its module expects.
 ops-audit-failed = the audit log could not be read.
+ops-audit-unavailable = the audit log could not be written, so the operation was refused.
 ops-denied = you are not permitted to do that.
 ops-hash-conflict = the file changed on disk since it was read; re-read it and try again.
 ops-check-failed = the external validator refused the candidate.
