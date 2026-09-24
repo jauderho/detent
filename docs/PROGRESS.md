@@ -5,6 +5,72 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-24 - STAGE3 §11.3 step 0 a010 provisioning
+
+Provisioned the only permitted Linux host, `a010`, with the packages and
+user-level tools required by STAGE3 §00.5. The host reports kernel `7.3.0-5`,
+Landlock present, `fs.protected_hardlinks=1`, 2 CPUs, 3.3 GiB RAM, and 66 GiB
+free. No network, firewall, user, sysctl, or kernel settings were changed.
+
+Commands run on `a010`, in order:
+
+```text
+uname -srm
+command -v rustup cargo cargo-llvm-cov cargo-fuzz bun
+dpkg-query -W build-essential pkg-config clang lld strace samba unbound nfs-kernel-server dnsmasq kea-dhcp4-server chrony
+grep landlock /sys/kernel/security/lsm; sysctl fs.protected_hardlinks; nproc; free -h; df -h /
+sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential pkg-config clang lld strace samba unbound nfs-kernel-server dnsmasq kea-dhcp4-server chrony
+sudo apt-get check
+apt-cache policy libbz2-1.0 bzip2 make dpkg-dev clang-21 lld-21
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade libbz2-1.0
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libbz2-1.0=1.0.8-6build2
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades libbz2-1.0=1.0.8-6build2 build-essential pkg-config clang lld strace samba unbound nfs-kernel-server dnsmasq kea-dhcp4-server chrony
+curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.98.1 --component clippy --component rustfmt --component llvm-tools-preview
+. "$HOME/.cargo/env" && rustup toolchain install nightly --profile minimal
+. "$HOME/.cargo/env" && cargo install cargo-llvm-cov cargo-fuzz
+curl -fsSL https://bun.sh/install | bash
+version=$(curl -fsSL https://api.github.com/repos/oven-sh/bun/releases/latest | python3 -c "import json,sys; print(json.load(sys.stdin)[\"tag_name\"])" ) && curl -fL "https://github.com/oven-sh/bun/releases/download/${version}/bun-linux-x64.zip" -o /tmp/bun-linux-x64.zip && python3 -c "import zipfile; zipfile.ZipFile(\"/tmp/bun-linux-x64.zip\").extractall(\"/tmp/bun-install\")" && install -d "$HOME/.bun/bin" && install -m755 /tmp/bun-install/bun-linux-x64/bun "$HOME/.bun/bin/bun" && ln -sf "$HOME/.bun/bin/bun" "$HOME/.bun/bin/bunx" && rm -rf /tmp/bun-linux-x64.zip /tmp/bun-install
+```
+
+The first apt install exposed a base-library version conflict; the documented
+retry with `--allow-downgrades` completed the requested package set. The first
+rustup command used an invalid repeated-component form and was corrected. The
+Bun installer required `unzip`, so the exact latest release asset was resolved
+from the official GitHub API and unpacked with Python's standard library. Bun
+verified as `1.4.2`; Rust `1.98.1` and nightly are installed. The cargo tools
+also verified: `cargo-llvm-cov 0.9.1` and `cargo-fuzz 0.13.2`.
+
+## 2026-09-23 - STAGE3 acceptance hardening follow-up
+
+Capability-user packaging now transfers `/run/detent` and its staging child to
+`detent` before startup, matching the monitor's euid ownership check while the
+default root-confined mode remains root-owned. Monitor staging tests now prove
+the directory is monitor-owned, rejects group-writable permissions, and keeps
+materialized update bytes outside the worker-writable state tree. SCT coverage
+now includes a valid non-empty certificate-transparency list as well as the
+empty-list rejection.
+
+Verify: `cargo test -p detent-platform --lib` (245 passed); `cargo test -p detent-update --lib` (61 passed); `cargo fmt --all -- --check`; `git diff --check`; `bash packaging/install.sh --dryrun --mode capability-user --binary target/debug/detent`.
+
+## 2026-09-23 - STAGE3 platform, operations, and module hardening close-out
+
+The monitor now writes materialized update images and external-check
+candidates under its private `/run/detent/staging` runtime directory instead
+of the worker-writable state tree. The systemd unit and tmpfiles configuration
+create that directory, while Landlock grants it only to the monitor. Spawn
+startup now reaps a worker when monitor confinement or the startup handshake
+fails. Update verification accepts the real Sigstore certificate-object and
+in-toto payload shape and requires a parsed, non-empty SCT list. ACME fallback
+ignores unusable stored pairs and renews bootstrap certificates within seven
+days of expiry. Module conformance now runs validation/apply/render/reparse;
+network routes and Samba security diagnostics have focused coverage. Audit
+queries are bounded and newest-first; no-op applies do not write, arm commits,
+or audit; unknown module ids are omitted from audit records; missing targets
+remain fail-closed.
+
+Verify: `cargo fmt --all --check`; `cargo clippy -p detent-platform -p detent-ops -p detent-update -p detent-core -p detent-web -p detent-module-network -p detent-module-samba --all-targets --all-features -- -D warnings`; `cargo test --workspace --all-features` (1736 passed, 6 ignored); `bun run api:check`; `bun run i18n:check`; `bun run typecheck`; `cargo build -p detent`. Jev (`jev-1.13.0`) was used only for classification/routing; complex reasoning used the default model.
+
+
 ## 2026-09-23 - STAGE3 H2 commit arming and H21 pending rehydration
 
 Commit-confirm applies now preflight the monitor's pending id, arm only after
