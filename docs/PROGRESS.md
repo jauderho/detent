@@ -4,6 +4,16 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-24 - L-SUP18 Pebble pin verification
+
+Resolved and pulled the digest-only Pebble and challtestsrv images. Started
+Pebble with the CI `pebble-config.json` shape, including
+`domainBlocklist`; the ACME directory responded. Corrected the live-test
+documentation to state that missing `PEBBLE_URL` is an error.
+
+Verify: `docker pull ghcr.io/letsencrypt/pebble@sha256:ddf230642b1a584f519f32e347de1b05a6e4c1f6c35c1863b33effeab5f78199` (0);
+`docker pull ghcr.io/letsencrypt/pebble-challtestsrv@sha256:12ce21884def456bcf9786542113949e1f19dc7738d2c70e156c2d0c38a1405b` (0).
+
 ## 2026-09-24 - H20 CI acceptance repairs
 
 Rejected sandbox tests that self-skipped in unprivileged environments. The
