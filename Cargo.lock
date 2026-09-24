@@ -669,14 +669,19 @@ name = "detent-acme"
 version = "0.0.1"
 dependencies = [
  "base64 0.22.1",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
  "instant-acme",
  "rcgen",
+ "rustls",
  "rustls-pki-types",
  "serde_json",
  "tempfile",
  "thiserror",
  "time",
  "tokio",
+ "webpki-roots",
  "x509-parser",
 ]
 
@@ -825,6 +830,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "detent-module-template"
+version = "0.0.1"
+dependencies = [
+ "arbitrary",
+ "detent-core",
+ "proptest",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "detent-modules"
 version = "0.0.1"
 dependencies = [
@@ -845,6 +862,7 @@ version = "0.0.1"
 dependencies = [
  "detent-core",
  "detent-platform",
+ "detent-update",
  "proptest",
  "serde",
  "serde_json",
@@ -862,6 +880,7 @@ dependencies = [
  "arbitrary",
  "caps",
  "detent-core",
+ "detent-update",
  "landlock",
  "postcard",
  "rustix",
@@ -1525,11 +1544,8 @@ dependencies = [
  "http-body",
  "http-body-util",
  "httpdate",
- "hyper",
  "hyper-rustls",
- "hyper-util",
  "rcgen",
- "rustls",
  "rustls-pki-types",
  "serde",
  "serde_json",

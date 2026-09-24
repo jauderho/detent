@@ -110,10 +110,8 @@ fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
 #[test]
 #[ignore = "needs a live Pebble: run with PEBBLE_URL (+PEBBLE_CA) set and `-- --ignored`"]
 fn pebble_dns01_issuance() -> Result<(), Box<dyn std::error::Error>> {
-    let Ok(directory) = std::env::var("PEBBLE_URL") else {
-        eprintln!("PEBBLE_URL not set; skipping live Pebble issuance");
-        return Ok(());
-    };
+    let directory = std::env::var("PEBBLE_URL")
+        .map_err(|_| "PEBBLE_URL must be set when running the ignored Pebble live test")?;
     let ca = std::env::var("PEBBLE_CA").ok().map(PathBuf::from);
     let challtestsrv =
         std::env::var("CHALLTESTSRV").unwrap_or_else(|_| "http://localhost:8055".to_owned());

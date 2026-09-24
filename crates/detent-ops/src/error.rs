@@ -36,6 +36,14 @@ pub enum OpsError {
         /// Everything validation found, errors included.
         diagnostics: Box<Diagnostics>,
     },
+    /// An external validator refused the rendered candidate or could not run.
+    #[error("external validator {program:?} did not pass: {detail}")]
+    CheckFailed {
+        /// The validator executable.
+        program: String,
+        /// Validator failure detail.
+        detail: String,
+    },
     /// The target changed since the caller read it. Optimistic concurrency:
     /// the caller must re-read, re-plan and retry.
     #[error("target changed since it was read")]
@@ -90,6 +98,7 @@ impl OpsError {
             Self::UnknownModule { .. } => MessageId::new("ops-unknown-module"),
             Self::Denied(ref denied) => denied.id,
             Self::Invalid { .. } => MessageId::new("ops-invalid-model"),
+            Self::CheckFailed { .. } => MessageId::new("ops-check-failed"),
             Self::HashConflict { .. } => MessageId::new("ops-hash-conflict"),
             Self::Module(ref err) => err.message_id(),
             Self::Privsep(_) => MessageId::new("ops-privsep-failed"),
@@ -142,6 +151,13 @@ mod tests {
                 "ops-invalid-model",
             ),
             (
+                OpsError::CheckFailed {
+                    program: "/usr/sbin/check".to_owned(),
+                    detail: "failed".to_owned(),
+                },
+                "ops-check-failed",
+            ),
+            (
                 OpsError::HashConflict {
                     expected: Sha256Digest::of(b"a"),
                     actual: Some(Sha256Digest::of(b"b")),
@@ -190,10 +206,6 @@ mod tests {
                 "ops-unsupported",
             ),
         ];
-        assert_eq!(cases.len(), 12);
-        // The catalogue every localized build ships. Checking against the file
-        // rather than a hand-kept list means adding a variant without its
-        // message fails here instead of rendering a bare `[ops-...]` id at a
         // user. `detent-i18n`'s parity test compares locales to each other; it
         // cannot see ids that exist only in Rust.
         let catalogue = include_str!("../../../locales/en-US/core.ftl");

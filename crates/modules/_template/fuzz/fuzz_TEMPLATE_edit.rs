@@ -12,7 +12,7 @@
 
 use arbitrary::Arbitrary;
 use detent_core::module::ConfigModule;
-use detent_module_TEMPLATE::{Model, TemplateModule};
+use detent_module_template::{Model, TemplateModule};
 use libfuzzer_sys::fuzz_target;
 
 /// One fuzz case: an arbitrary starting document and the model to apply to it.

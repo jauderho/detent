@@ -64,12 +64,13 @@ fn module_list_round_trips_through_json() {
 }
 
 #[test]
-fn detent_last_error_message_returns_null_on_success() {
+fn detent_last_error_is_reset_on_success() {
     let ptr = detent_module_list();
     unsafe {
         detent_free(ptr);
     }
     assert!(detent_last_error_message().is_null());
+    assert_eq!(detent_last_error(), DETENT_OK);
 }
 
 #[test]
@@ -245,7 +246,7 @@ fn validate_json_returns_diagnostics_array() {
 }
 
 #[test]
-fn parse_with_unknown_module_returns_null_and_sets_last_error() {
+fn parse_with_unknown_module_sets_code_and_message() {
     let module_id = c_str("does-not-exist");
     // SAFETY: module_id is a live NUL-terminated CString; FIXTURE is a valid
     // slice readable for its length.
@@ -257,6 +258,7 @@ fn parse_with_unknown_module_returns_null_and_sets_last_error() {
         )
     };
     assert!(ptr.is_null());
+    assert_eq!(detent_last_error(), DETENT_ERR_UNKNOWN_MODULE);
     let msg = detent_last_error_message();
     assert!(!msg.is_null());
     let s = unsafe { CStr::from_ptr(msg) }
@@ -266,10 +268,41 @@ fn parse_with_unknown_module_returns_null_and_sets_last_error() {
 }
 
 #[test]
-fn free_null_is_a_no_op() {
+fn last_error_state_is_thread_local() {
+    let module_id = c_str("does-not-exist");
+    // SAFETY: both pointers are live for the duration of the call.
+    let ptr = unsafe {
+        detent_parse(
+            module_id.as_ptr().cast::<c_char>(),
+            FIXTURE.as_ptr().cast::<c_char>(),
+            FIXTURE.len(),
+        )
+    };
+    assert!(ptr.is_null());
+    assert_eq!(detent_last_error(), DETENT_ERR_UNKNOWN_MODULE);
+    let other_thread = std::thread::spawn(|| detent_last_error()).join();
+    assert_eq!(other_thread.unwrap(), DETENT_OK);
+    assert_eq!(detent_last_error(), DETENT_ERR_UNKNOWN_MODULE);
+}
+
+#[test]
+fn free_null_preserves_the_current_error() {
+    let module_id = c_str("does-not-exist");
+    // SAFETY: both pointers are live for the duration of the call.
+    let ptr = unsafe {
+        detent_parse(
+            module_id.as_ptr().cast::<c_char>(),
+            FIXTURE.as_ptr().cast::<c_char>(),
+            FIXTURE.len(),
+        )
+    };
+    assert!(ptr.is_null());
+    let message = err_msg();
     unsafe {
         detent_free(std::ptr::null_mut());
     }
+    assert_eq!(detent_last_error(), DETENT_ERR_UNKNOWN_MODULE);
+    assert_eq!(err_msg(), message);
 }
 
 #[test]
@@ -294,19 +327,19 @@ fn hostile_inputs_never_panic_and_report_errors() {
     unsafe {
         // NULL pointers on every pointer-taking entry point.
         assert!(detent_parse(null(), null(), 0).is_null());
-        assert!(!detent_last_error_message().is_null());
+        assert_eq!(detent_last_error(), DETENT_ERR_NULL_ARGUMENT);
         assert!(detent_render(null_mut()).is_null());
-        assert!(!detent_last_error_message().is_null());
+        assert_eq!(detent_last_error(), DETENT_ERR_NULL_ARGUMENT);
         assert!(detent_to_model_json(null_mut()).is_null());
-        assert!(!detent_last_error_message().is_null());
+        assert_eq!(detent_last_error(), DETENT_ERR_NULL_ARGUMENT);
         assert!(detent_apply_json(null(), null(), 0, null(), 0).is_null());
-        assert!(!detent_last_error_message().is_null());
+        assert_eq!(detent_last_error(), DETENT_ERR_NULL_ARGUMENT);
         assert!(detent_validate_json(null(), null(), 0, 0, 0, null(), 0, 0).is_null());
-        assert!(!detent_last_error_message().is_null());
+        assert_eq!(detent_last_error(), DETENT_ERR_NULL_ARGUMENT);
         assert!(detent_defaults_json(null(), null(), 0).is_null());
-        assert!(!detent_last_error_message().is_null());
+        assert_eq!(detent_last_error(), DETENT_ERR_NULL_ARGUMENT);
         assert!(detent_schema_json(null()).is_null());
-        assert!(!detent_last_error_message().is_null());
+        assert_eq!(detent_last_error(), DETENT_ERR_NULL_ARGUMENT);
         let bad = [0xFFu8, 0xFE];
         let module_id = c_str("hosts");
         assert!(
@@ -317,7 +350,7 @@ fn hostile_inputs_never_panic_and_report_errors() {
             )
             .is_null()
         );
-        assert!(!detent_last_error_message().is_null());
+        assert_eq!(detent_last_error(), DETENT_ERR_INVALID_UTF8);
         // Use-after-free: freed handle renders to NULL, double free is silent.
         let doc = detent_parse(
             module_id.as_ptr().cast::<c_char>(),
@@ -328,7 +361,7 @@ fn hostile_inputs_never_panic_and_report_errors() {
         detent_free(doc);
         detent_free(doc);
         assert!(detent_render(doc).is_null());
-        assert!(!detent_last_error_message().is_null());
+        assert_eq!(detent_last_error(), DETENT_ERR_NULL_ARGUMENT);
     }
 }
 
@@ -350,8 +383,6 @@ fn oversized_length_is_refused() {
         )
     };
     assert!(ptr.is_null(), "oversized len must be refused with NULL");
-    assert!(
-        !detent_last_error_message().is_null(),
-        "oversized len must set last-error"
-    );
+    assert_eq!(detent_last_error(), DETENT_ERR_INTERNAL);
+    assert!(!detent_last_error_message().is_null());
 }

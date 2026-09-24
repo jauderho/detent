@@ -456,6 +456,10 @@ const REC_SERVER_SIGNING: MessageId = MessageId::new("samba-rec-server-signing")
 const REC_LOAD_PRINTERS: MessageId = MessageId::new("samba-rec-load-printers");
 /// Fluent id: no `interfaces` directive binds samba to explicit addresses.
 const REC_INTERFACES: MessageId = MessageId::new("samba-rec-interfaces");
+/// Fluent id: a share exposes writes through a writable alias.
+const WRITABLE_EXPOSURE: MessageId = MessageId::new("samba-writable-exposure");
+/// Fluent id: a share runs a command with root privileges.
+const ROOT_COMMAND: MessageId = MessageId::new("samba-root-command");
 
 /// Checks one entry's shape: a directive needs a key, a header a name. Both
 /// can only fail for a model that arrived through the JSON API — `parse_entry`
@@ -507,16 +511,44 @@ fn validate_entry(entry: &Entry, index: usize, out: &mut Diagnostics) {
     }
 }
 
-/// The value of the last directive named `key`, or `None` when the model does
-/// not set it. smb.conf takes the last occurrence of a parameter (smb.conf(5)),
-/// so an explicit repeat is the one in force. Key matching is
-/// case-insensitive: smb.conf parameter names are case-insensitive too.
-fn value_of<'a>(entries: &'a [Entry], key: &str) -> Option<&'a str> {
-    entries
-        .iter()
-        .rev()
-        .find(|entry| entry.section.is_none() && entry.key.eq_ignore_ascii_case(key))
-        .map(|entry| entry.value.as_str())
+/// The last matching directive in `section`, with the global value as fallback.
+fn value_of_in_section<'a>(
+    entries: &'a [Entry],
+    section: Option<&str>,
+    keys: &[&str],
+) -> Option<&'a str> {
+    let find = |wanted: Option<&str>| {
+        let mut current = None;
+        entries.iter().rev().find_map(|entry| {
+            if let Some(name) = &entry.section {
+                current = Some(name.as_str());
+                return None;
+            }
+            let in_section = match (current, wanted) {
+                (None, None) => true,
+                (Some(current), Some(wanted)) => current.eq_ignore_ascii_case(wanted),
+                _ => false,
+            };
+            (in_section && keys.iter().any(|key| entry.key.eq_ignore_ascii_case(key)))
+                .then_some(entry.value.as_str())
+        })
+    };
+    let is_global = section.is_none_or(|name| name.eq_ignore_ascii_case("global"));
+    if is_global {
+        find(Some("global")).or_else(|| find(None))
+    } else {
+        find(section).or_else(|| find(Some("global")).or_else(|| find(None)))
+    }
+}
+
+/// Whether the effective value in `section` differs from `wanted`.
+fn offending<'a>(
+    entries: &'a [Entry],
+    section: Option<&str>,
+    keys: &[&str],
+    wanted: &str,
+) -> Option<&'a str> {
+    value_of_in_section(entries, section, keys).filter(|value| !value.eq_ignore_ascii_case(wanted))
 }
 
 /// The rank of a `server min protocol` token, lowest first, or `None` when it
@@ -542,30 +574,22 @@ fn protocol_rank(value: &str) -> Option<u8> {
 /// parameter the model does not set at all.
 const UNSET: &str = "(unset)";
 
-/// Whether `key` is set to anything other than `wanted`, case-insensitively —
-/// `Some(OffendingValue)` when it is set but wrong, `None` when it is absent
-/// or correct.
-fn offending<'a>(entries: &'a [Entry], key: &str, wanted: &str) -> Option<&'a str> {
-    value_of(entries, key).filter(|value| !value.eq_ignore_ascii_case(wanted))
-}
-
-/// Checks the model as a whole. Shape errors live in [`validate_entry`]; this
-/// one reads the effective values — the classic footguns (`guest ok`, `map to
-/// guest`, the protocol floor, encryption, anonymous enumeration), then the
-/// hardening recommendations. Absent parameters keep upstream's defaults, so a
-/// warning is only justified for a value the file actually sets.
-fn validate_values(entries: &[Entry], out: &mut Diagnostics) {
-    if let Some(value) = offending(entries, "guest ok", "no") {
-        // Anything looser than `no` invites guest connections; upstream's own
-        // default sample sets `no` on every share.
+/// Checks effective values in one section. Share values inherit `[global]`.
+fn validate_scope(
+    entries: &[Entry],
+    section: Option<&str>,
+    recommendations: bool,
+    out: &mut Diagnostics,
+) {
+    if let Some(value) = offending(entries, section, &["guest ok", "public"], "no") {
         out.push(Diagnostic::new(Severity::Warning, GUEST_OK).with_arg("value", value.to_owned()));
     }
-    if let Some(value) = offending(entries, "map to guest", "Never") {
+    if let Some(value) = offending(entries, section, &["map to guest"], "Never") {
         out.push(
             Diagnostic::new(Severity::Warning, MAP_TO_GUEST).with_arg("value", value.to_owned()),
         );
     }
-    if let Some(value) = value_of(entries, "server min protocol")
+    if let Some(value) = value_of_in_section(entries, section, &["server min protocol"])
         && let Some(rank) = protocol_rank(value)
         && rank < SMB3_BASE_RANK
     {
@@ -573,12 +597,12 @@ fn validate_values(entries: &[Entry], out: &mut Diagnostics) {
             Diagnostic::new(Severity::Warning, MIN_PROTOCOL).with_arg("value", value.to_owned()),
         );
     }
-    if let Some(value) = offending(entries, "smb encrypt", "required") {
+    if let Some(value) = offending(entries, section, &["smb encrypt"], "required") {
         out.push(
             Diagnostic::new(Severity::Warning, SMB_ENCRYPT).with_arg("value", value.to_owned()),
         );
     }
-    if let Some(value) = value_of(entries, "restrict anonymous")
+    if let Some(value) = value_of_in_section(entries, section, &["restrict anonymous"])
         && let Ok(count) = value.trim().parse::<u32>()
         && count < 2
     {
@@ -587,32 +611,67 @@ fn validate_values(entries: &[Entry], out: &mut Diagnostics) {
                 .with_arg("value", value.to_owned()),
         );
     }
-    match value_of(entries, "server signing") {
-        // Set but weaker than mandatory.
-        Some(value) if !value.eq_ignore_ascii_case("mandatory") => out.push(
-            Diagnostic::new(Severity::Recommendation, REC_SERVER_SIGNING)
-                .with_arg("value", value.to_owned()),
-        ),
-        // Not set at all: upstream's default is not mandatory either.
-        None => out.push(
-            Diagnostic::new(Severity::Recommendation, REC_SERVER_SIGNING)
-                .with_arg("value", UNSET.to_owned()),
-        ),
-        _ => {}
+    let writable = value_of_in_section(entries, section, &["writeable", "read only"]);
+    let write_list = value_of_in_section(entries, section, &["write list"]);
+    if writable.is_some_and(|value| value.eq_ignore_ascii_case("yes") || value.is_empty())
+        || write_list.is_some_and(|value| !value.is_empty())
+    {
+        out.push(Diagnostic::new(Severity::Warning, WRITABLE_EXPOSURE));
     }
-    match value_of(entries, "load printers") {
-        Some(value) if !value.eq_ignore_ascii_case("no") => out.push(
-            Diagnostic::new(Severity::Recommendation, REC_LOAD_PRINTERS)
-                .with_arg("value", value.to_owned()),
-        ),
-        None => out.push(
-            Diagnostic::new(Severity::Recommendation, REC_LOAD_PRINTERS)
-                .with_arg("value", UNSET.to_owned()),
-        ),
-        _ => {}
+    if recommendations {
+        match value_of_in_section(entries, section, &["server signing"]) {
+            Some(value) if !value.eq_ignore_ascii_case("mandatory") => out.push(
+                Diagnostic::new(Severity::Recommendation, REC_SERVER_SIGNING)
+                    .with_arg("value", value.to_owned()),
+            ),
+            None => out.push(
+                Diagnostic::new(Severity::Recommendation, REC_SERVER_SIGNING)
+                    .with_arg("value", UNSET.to_owned()),
+            ),
+            _ => {}
+        }
+        match value_of_in_section(entries, section, &["load printers"]) {
+            Some(value) if !value.eq_ignore_ascii_case("no") => out.push(
+                Diagnostic::new(Severity::Recommendation, REC_LOAD_PRINTERS)
+                    .with_arg("value", value.to_owned()),
+            ),
+            None => out.push(
+                Diagnostic::new(Severity::Recommendation, REC_LOAD_PRINTERS)
+                    .with_arg("value", UNSET.to_owned()),
+            ),
+            _ => {}
+        }
+        if value_of_in_section(entries, section, &["interfaces"]).is_none() {
+            out.push(Diagnostic::new(Severity::Recommendation, REC_INTERFACES));
+        }
     }
-    if value_of(entries, "interfaces").is_none() {
-        out.push(Diagnostic::new(Severity::Recommendation, REC_INTERFACES));
+}
+
+fn validate_values(entries: &[Entry], out: &mut Diagnostics) {
+    let mut sections: Vec<&str> = Vec::new();
+    for entry in entries {
+        if let Some(section) = entry.section.as_deref()
+            && !section.eq_ignore_ascii_case("global")
+            && !sections
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(section))
+        {
+            sections.push(section);
+        }
+        if entry.section.is_none()
+            && !entry.value.is_empty()
+            && ["root preexec", "root postexec", "preexec", "postexec"]
+                .iter()
+                .any(|key| entry.key.eq_ignore_ascii_case(key))
+        {
+            out.push(
+                Diagnostic::new(Severity::Warning, ROOT_COMMAND).with_arg("key", entry.key.clone()),
+            );
+        }
+    }
+    validate_scope(entries, None, true, out);
+    for section in sections {
+        validate_scope(entries, Some(section), false, out);
     }
 }
 
@@ -784,8 +843,9 @@ mod tests {
     use super::{
         BAD_KEY, BAD_SECTION, BAD_VALUE, EMPTY_KEY, EMPTY_SECTION, Entry, GUEST_OK, MAP_TO_GUEST,
         MIN_PROTOCOL, Model, REC_INTERFACES, REC_LOAD_PRINTERS, REC_SERVER_SIGNING,
-        RESTRICT_ANONYMOUS, SMB_ENCRYPT, SambaModule, classify, entry, hardened_global,
-        parse_entry, protocol_rank, render_line, schema_with_hints, value_of,
+        RESTRICT_ANONYMOUS, ROOT_COMMAND, SMB_ENCRYPT, SambaModule, WRITABLE_EXPOSURE, classify,
+        entry, hardened_global, parse_entry, protocol_rank, render_line, schema_with_hints,
+        value_of_in_section,
     };
     use detent_core::descriptor::{
         ArgTemplate, CheckExpectation, ExternalCheck, HostProfile, InitSystem, Os, ValidationCtx,
@@ -823,6 +883,8 @@ mod tests {
             "samba-rec-server-signing",
             "samba-rec-load-printers",
             "samba-rec-interfaces",
+            "samba-writable-exposure",
+            "samba-root-command",
         ] {
             assert!(
                 CORE_FTL.contains(&format!("{id} =")),
@@ -1228,6 +1290,32 @@ mod tests {
     }
 
     #[test]
+    fn validate_walks_share_sections_and_parameter_synonyms() {
+        let m = model(vec![
+            entry(Some("global"), "", ""),
+            entry(None, "public", "no"),
+            entry(Some("public-share"), "", ""),
+            entry(None, "PUBLIC", "yes"),
+            entry(None, "write list", "alice"),
+            entry(None, "root preexec", "/usr/bin/hook"),
+        ]);
+        assert!(has(&m, GUEST_OK, Severity::Warning));
+        assert!(has(&m, WRITABLE_EXPOSURE, Severity::Warning));
+        assert!(has(&m, ROOT_COMMAND, Severity::Warning));
+    }
+
+    #[test]
+    fn share_override_replaces_dangerous_global_value() {
+        let m = model(vec![
+            entry(Some("global"), "", ""),
+            entry(None, "public", "yes"),
+            entry(Some("safe"), "", ""),
+            entry(None, "public", "no"),
+        ]);
+        assert!(has(&m, GUEST_OK, Severity::Warning));
+    }
+
+    #[test]
     fn validate_flags_map_to_guest() {
         let m = model(vec![entry(None, "map to guest", "Bad User")]);
         assert!(has(&m, MAP_TO_GUEST, Severity::Warning));
@@ -1293,9 +1381,15 @@ mod tests {
             entry(None, "guest ok", "no"),
             entry(None, "GUEST OK", "yes"),
         ]);
-        assert_eq!(value_of(&m.entries, "guest ok"), Some("yes"));
-        assert_eq!(value_of(&m.entries, "GUEST OK"), Some("yes"));
-        assert_eq!(value_of(&m.entries, "missing"), None);
+        assert_eq!(
+            value_of_in_section(&m.entries, None, &["guest ok"]),
+            Some("yes")
+        );
+        assert_eq!(
+            value_of_in_section(&m.entries, None, &["GUEST OK"]),
+            Some("yes")
+        );
+        assert_eq!(value_of_in_section(&m.entries, None, &["missing"]), None);
     }
 
     #[test]
@@ -1453,6 +1547,9 @@ mod tests {
             "\r\n",
             long_line.as_str(),
             many.as_str(),
+            "\u{feff}[global]\nname = café\n",
+            "[global]\rkey = value",
+            "[global]\n[not-a-section\nkey = value\n",
         ] {
             let mut doc = SambaModule::parse(src).map_err(|e| e.to_string())?;
             assert_eq!(SambaModule::render(&doc), src);

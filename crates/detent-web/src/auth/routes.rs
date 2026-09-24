@@ -34,15 +34,11 @@
 //!   the rate limiter's keys, so a 256 KiB body cannot become a 256 KiB map key
 //!   and a control character cannot reach a log line.
 //!
-//! # Cost of a login
-//!
-//! Argon2id runs on the request's own task rather than on
-//! `tokio::task::spawn_blocking`. At the configured cost that is tens of
-//! milliseconds of a runtime worker per attempt; the bounds on it are
-//! `listen.max_connections` and the per-address and per-user limiters in front.
-//! Moving it to the blocking pool would mean copying the password into another
-//! task, and is a change to make deliberately with a measurement, not in
-//! passing.
+// # Cost of a login
+//
+// Argon2id runs in Tokio's blocking pool behind a semaphore, so a slow KDF
+// never occupies an async worker and a burst cannot allocate one Argon2 block
+// per request without bound.
 
 use std::fmt;
 use std::net::IpAddr;
@@ -65,7 +61,7 @@ use crate::state::AppState;
 
 use super::AuthError;
 use super::audit::{AuthEvent, AuthRecord};
-use super::extract::{Caller, ClientIp, unix_now};
+use super::extract::{Caller, ClientIp, cookie_id, unix_now};
 use super::secret::Secret;
 use super::session::{self, SessionView};
 use super::users::{self, MAX_NAME_LEN, VerifiedUser};
@@ -207,7 +203,7 @@ async fn login(
     let now = Instant::now();
     let subject = principal_name(&request.username);
 
-    match attempt(&state, &request, subject, &headers, ip, now) {
+    match attempt(&state, &request, subject, &headers, ip, now).await {
         Ok((id, view)) => {
             state.auth.limiter.record_success(ip, subject);
             state.auth.record(
@@ -290,7 +286,7 @@ type Established = (Secret, SessionView);
 /// [`AuthError::RateLimited`] when this address or this name is locked out,
 /// [`AuthError::InvalidCredentials`] for every credential failure, and the
 /// store variants when the session or the replay counter cannot be recorded.
-fn attempt(
+async fn attempt(
     state: &AppState,
     request: &LoginRequest,
     subject: &str,
@@ -302,22 +298,39 @@ fn attempt(
     if !request.within_limits() {
         return Err(AuthError::InvalidCredentials);
     }
-    let verified =
-        state
-            .auth
-            .users
-            .verify_password(&state.auth.hasher, subject, &request.password)?;
+    let presented = cookie_id(headers);
+    let permit = state
+        .auth
+        .argon2_permits
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| AuthError::Hash)?;
+    let auth = state.auth.clone();
+    let subject = subject.to_owned();
+    let password = request.password.clone();
+    let verified = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        auth.users
+            .verify_password(&auth.hasher, &subject, &password)
+    })
+    .await
+    .map_err(|_| AuthError::Hash)??;
     let totp_satisfied = check_totp(state, &verified, request.totp_code.as_deref())?;
 
-    // Session fixation: whatever id the request arrived with stops working
-    // before the new one is issued. A fresh id also restarts the absolute
-    // timer, which `SessionStore::rotate` deliberately does not.
-    if let Some(presented) = headers
-        .get(header::COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(session::cookie_value)
+    // Session fixation: a live pre-login id and CSRF token are replaced before
+    // the response is built. Rotation deliberately keeps the original absolute
+    // deadline; an invalid or expired presented id simply creates a new session.
+    if let Some(presented) = presented.as_ref().map(super::secret::Secret::expose)
+        && let Some((id, session)) = state.auth.sessions.rotate(
+            presented,
+            Some(Scopes::read_write()),
+            Some(totp_satisfied),
+            now,
+        )?
     {
-        state.auth.sessions.logout(presented.expose());
+        let view = state.auth.sessions.view(&session, now);
+        return Ok((id, view));
     }
     // Every account this build knows is an administrator: `users.json` carries
     // no per-user scopes, and `read` alone would make the UI useless. Scoping

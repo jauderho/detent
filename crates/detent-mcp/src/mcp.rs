@@ -15,8 +15,7 @@
 use std::sync::Arc;
 
 use detent_ops::{
-    OpOutcome, OpsEngine, OpsError, ServiceCommand, audit::AuditQuery, identity::Identity,
-    op::Operation,
+    OpOutcome, OpsError, ServiceCommand, audit::AuditQuery, identity::Identity, op::Operation,
 };
 use detent_platform::fs::Sha256Digest;
 use detent_platform::privsep::proto::{BackupId, CommitId};
@@ -166,12 +165,11 @@ pub trait Authz: Send + Sync {
     fn permit(&self, who: &Identity, op: &Operation) -> Result<(), AuthError>;
 }
 
-/// Permit everything — the same default the CLI takes (PLAN §2.5).
-///
-/// Kept crate-visible for tests; production binaries wire a real policy.
-#[cfg_attr(not(test), expect(dead_code))]
+/// Permit everything in the router tests; production wires a real policy.
+#[cfg(test)]
 pub struct AllowAllAuthz;
 
+#[cfg(test)]
 impl Authz for AllowAllAuthz {
     fn permit(&self, _who: &Identity, _op: &Operation) -> Result<(), AuthError> {
         Ok(())
@@ -184,7 +182,7 @@ impl Authz for AllowAllAuthz {
 
 /// Runs one [`Operation`] and returns its outcome, or refuses it.
 ///
-/// The trait object form means the real [`OpsEngine`] can sit behind a lock
+/// The trait object form means the real `OpsEngine` can sit behind a lock
 /// in one binary and a fixture executor can sit behind it in tests, without
 /// this crate having to pick a single shape.
 pub trait EngineExecutor: Send + Sync {
@@ -196,42 +194,18 @@ pub trait EngineExecutor: Send + Sync {
     fn execute(&self, op: Operation) -> Result<OpOutcome, OpsError>;
 }
 
-/// Wraps a real [`OpsEngine`] behind a mutex so the handlers can take the
-/// engine mutably without an actor loop.
-pub struct LockedEngine {
-    engine: std::sync::Mutex<OpsEngine>,
-}
-
-impl LockedEngine {
-    /// Wrap `engine`; the executor hands the same identity to every tool call.
-    #[must_use]
-    pub const fn new(engine: OpsEngine) -> Self {
-        Self {
-            engine: std::sync::Mutex::new(engine),
-        }
-    }
-}
-
-impl EngineExecutor for LockedEngine {
-    fn execute(&self, op: Operation) -> Result<OpOutcome, OpsError> {
-        let mut guard = self.engine.lock().map_err(|_| OpsError::Unsupported {
-            what: "engine_locked",
-        })?;
-        let who = Identity::new("mcp", detent_ops::identity::IdentityKind::Token);
-        guard.execute(op, &who)
-    }
-}
-
 /// A fake executor that records every operation it is asked to run.
 ///
 /// Used by the test path: the router is asserted to hold one tool per
 /// [`Operation`] variant, and tools execute against this to prove the router
 /// wires them through to the executor.
 #[derive(Default)]
+#[cfg(test)]
 pub struct RecordingExecutor {
     recorded: std::sync::Mutex<Vec<Operation>>,
 }
 
+#[cfg(test)]
 impl RecordingExecutor {
     /// Build an empty recorder.
     #[must_use]
@@ -248,6 +222,7 @@ impl RecordingExecutor {
     }
 }
 
+#[cfg(test)]
 impl EngineExecutor for RecordingExecutor {
     fn execute(&self, op: Operation) -> Result<OpOutcome, OpsError> {
         let mut guard = self.recorded.lock().map_err(|_| OpsError::Unsupported {
@@ -329,6 +304,11 @@ pub struct RestoreParams {
     pub id: String,
     /// Index into the listing `list_backups` returned.
     pub backup_id: u32,
+    /// Digest the caller last read for the target, as 64 lowercase hex.
+    /// Required (409 on mismatch): a stale caller must `get` then `plan`
+    /// before it may restore, so a concurrent `apply` is never silently
+    /// overwritten.
+    pub expected_hash: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
@@ -784,9 +764,11 @@ mod tools {
     }
     impl SyncTool<McpServer> for Restore {
         fn invoke(server: &McpServer, p: Self::Parameter) -> Result<Self::Output, Self::Error> {
+            let expected_hash = parse_hash(&p.expected_hash).map_err(|e| bad_request(&e))?;
             let op = Operation::Restore {
                 id: p.id,
                 backup_id: BackupId(p.backup_id),
+                expected_hash: Some(expected_hash),
             };
             server.check_auth(&op)?;
             let outcome = server.executor.execute(op).map_err(|e| op_err(&e))?;

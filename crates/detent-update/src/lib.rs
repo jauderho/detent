@@ -31,18 +31,27 @@
 //! download ever touches the network.
 
 pub mod bundle;
+#[cfg(feature = "client")]
 pub mod fetch;
+#[cfg(feature = "client")]
 pub mod health;
+#[cfg(feature = "client")]
 pub mod install;
+#[cfg(feature = "client")]
 pub mod policy;
 pub mod trust;
+#[cfg(feature = "client")]
 pub mod update;
 pub mod verify;
 
 pub use bundle::{Decoded, Statement, Subject, SubjectDigest};
+#[cfg(feature = "client")]
 pub use fetch::{FetchError, Transport};
+#[cfg(feature = "client")]
 pub use install::Installed;
+#[cfg(feature = "client")]
 pub use policy::{Candidate, Policy, PolicyError};
 pub use trust::TrustRoot;
+#[cfg(feature = "client")]
 pub use update::{Candidate as StagedUpdate, CheckReport, FeatureSet, UpdateError};
 pub use verify::VerificationError;

@@ -63,14 +63,19 @@ uint32_t detent_abi_version(void);
 
 /**
  * Returns the message of the last error raised on this thread, or NULL when
- * the most recent call on this thread succeeded.
+ * the most recent operation on this thread succeeded.
  *
- * The pointer is a borrow of the thread-local error slot: **any** later FFI
- * call on this thread invalidates it — including successful calls, which
- * clear the slot on entry — and may free the underlying buffer. Copy the
- * string immediately if you need to retain it.
+ * The pointer is a borrow of the thread-local error slot. Any later call that
+ * updates or clears the error invalidates it and may free the underlying
+ * buffer. Copy the string immediately if you need to retain it.
  */
 const char *detent_last_error_message(void);
+
+/**
+ * Returns the code of the last error raised on this thread, or
+ * [`DETENT_OK`] when the most recent operation succeeded.
+ */
+int32_t detent_last_error(void);
 
 /**
  * Lists the module ids this build was compiled with, as a JSON array of
@@ -81,8 +86,9 @@ char *detent_module_list(void);
 
 /**
  * Parses `src` with the module identified by `module_id` and returns a
- * document handle. The handle must be released with `detent_free`. Returns
- * NULL on error; the code is in `detent_last_error_message()`.
+ * document handle. The handle must be released with `detent_free`.
+ * NULL on error; the code is in `detent_last_error()` and the message in
+ * `detent_last_error_message()`.
  * # Safety
  *
  * `module_id` must point to a readable NUL-terminated C string;

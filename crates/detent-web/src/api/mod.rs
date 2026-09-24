@@ -54,10 +54,12 @@ use axum::Router;
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::http::StatusCode;
 use detent_core::diag::MessageId;
+use detent_ops::audit::AuditResult;
 use detent_ops::authz::Authz as _;
 use detent_ops::{Operation, OpsError};
 use serde::{Deserialize, Serialize};
 
+use crate::auth::audit::{AuthEvent, AuthRecord};
 use crate::auth::extract::Caller;
 use crate::auth::routes::Route;
 use crate::error::ApiError;
@@ -216,11 +218,21 @@ pub fn check_depth(model: &serde_json::Value) -> Result<(), ApiError> {
 /// # Errors
 ///
 /// [`ApiError`] (403) when the policy refuses.
-pub fn authorize(caller: &Caller, op: &Operation) -> Result<(), ApiError> {
+pub fn authorize(state: &AppState, caller: &Caller, op: &Operation) -> Result<(), ApiError> {
     caller
         .authz()
         .permit(caller.identity(), op)
-        .map_err(|denied| ApiError::from(OpsError::Denied(denied)))
+        .map_err(|denied| {
+            state.auth.record(
+                &AuthRecord::new(
+                    AuthEvent::ScopeDenied,
+                    &caller.identity().subject,
+                    AuditResult::Error,
+                )
+                .with_detail(denied.id),
+            );
+            ApiError::from(OpsError::Denied(denied))
+        })
 }
 
 /// A [`ServiceCommand`](detent_ops::ServiceCommand), as a request body may
@@ -445,25 +457,18 @@ mod tests {
                     assert_ne!(
                         status,
                         StatusCode::NOT_FOUND,
-                        "{} {path} should be routed (table allows {:?})",
-                        probe,
-                        methods
+                        "{probe} {path} should be routed (table allows {methods:?})"
                     );
                     assert_ne!(
                         status,
                         StatusCode::METHOD_NOT_ALLOWED,
-                        "{} {path} should be routed (table allows {:?})",
-                        probe,
-                        methods
+                        "{probe} {path} should be routed (table allows {methods:?})"
                     );
                 } else {
                     assert_eq!(
                         status,
                         StatusCode::METHOD_NOT_ALLOWED,
-                        "{} {path} should be 405 (table allows {:?}, got {})",
-                        probe,
-                        methods,
-                        status
+                        "{probe} {path} should be 405 (table allows {methods:?}, got {status})"
                     );
                 }
             }
@@ -479,8 +484,7 @@ mod tests {
             assert_eq!(
                 res.status(),
                 StatusCode::NOT_FOUND,
-                "{} /api/v1/unknown should be 404",
-                probe
+                "{probe} /api/v1/unknown should be 404"
             );
         }
 

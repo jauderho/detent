@@ -5,12 +5,15 @@
 import { describe, expect, it } from 'bun:test'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { renderWithProviders, jsonResponse, stubFetchByUrl } from '@/test/providers'
+import { PendingCommitSlot } from '../PendingCommit'
+
 import type { PendingCommit } from '@/api/commits'
 import { PendingCommitProvider, usePendingCommit } from '../PendingCommit'
 
 const COMMIT: PendingCommit = {
   commit_id: 7,
-  deadline: '2025-10-21T07:28:00Z',
+  deadline: '2999-10-21T07:28:00Z',
   rollback_targets: 1,
   timeout_s: 300,
 }
@@ -50,5 +53,24 @@ describe('PendingCommitProvider', () => {
     expect(() => render(<Controller />)).toThrow(
       'usePendingCommit must be used inside <PendingCommitProvider>',
     )
+  })
+
+  it('confirms the pending commit through the API', async () => {
+    const user = userEvent.setup()
+    const stub = stubFetchByUrl([
+      ['/api/v1/auth/session', () => jsonResponse({ csrf_token: 'csrf-abc', expires_in_secs: 900, scopes: ['read', 'write'], subject: 'operator', totp_satisfied: false })],
+      ['/api/v1/commits/7/confirm', () => jsonResponse({ commit_id: 7 })],
+    ])
+    renderWithProviders(
+      <>
+        <Controller />
+        <PendingCommitSlot />
+      </>,
+      { fetch: stub.fetch },
+    )
+    await user.click(screen.getByRole('button', { name: 'arm' }))
+    await user.click(screen.getByRole('button', { name: 'confirm change' }))
+    expect(stub.calls.some((call) => call.url === '/api/v1/commits/7/confirm')).toBe(true)
+    expect(screen.queryByText(/waiting to be confirmed/)).toBeNull()
   })
 })

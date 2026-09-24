@@ -13,8 +13,8 @@ use crate::fs::atomic::Sha256Digest;
 
 use super::proto::{
     BackupId, BackupInfo, BindingId, BindingInfo, CheckId, CheckOutcome, CommitId, HelloAck,
-    ModuleId, PROTO_VERSION, PathKind, ProtoError, Request, Response, ServiceAction,
-    ServiceOutcome, TargetContents, TargetId, TargetInfo, WriteReceipt,
+    ModuleId, PROTO_VERSION, PathKind, PendingService, ProtoError, Request, Response,
+    ServiceAction, ServiceOutcome, TargetContents, TargetId, TargetInfo, WriteReceipt,
 };
 use super::transport::{Channel, ChannelError};
 
@@ -282,8 +282,13 @@ impl Client {
         &mut self,
         commit: CommitId,
         timeout_s: u16,
+        service: Option<PendingService>,
     ) -> Result<(u16, u16), ClientError> {
-        match self.checked_call(&Request::StartConfirmTimer { commit, timeout_s })? {
+        match self.checked_call(&Request::StartConfirmTimer {
+            commit,
+            timeout_s,
+            service,
+        })? {
             Response::ConfirmTimerStarted {
                 timeout_s,
                 rollback_targets,
@@ -297,9 +302,10 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// As [`Client::read_target`]; [`ProtoError::UnknownId`] when nothing is
-    /// armed under that id — which is what a caller sees if the deadline
-    /// already expired.
+    /// As [`Client::read_target`]; [`ProtoError::CommitExpired`] when the
+    /// deadline passed, in which case the monitor rolls the commit back before
+    /// replying, or [`ProtoError::UnknownId`] when nothing is armed under that
+    /// id.
     pub fn confirm_commit(&mut self, commit: CommitId) -> Result<CommitId, ClientError> {
         match self.checked_call(&Request::ConfirmCommit { commit })? {
             Response::Committed { commit } => Ok(commit),
@@ -323,27 +329,28 @@ impl Client {
         }
     }
 
-    /// Atomically swap the staged replacement image over the running binary.
+    /// Ask the monitor to authenticate and atomically install a staged release.
     ///
-    /// `len` and `sha256` identify the verified staged file at
-    /// `<state_root>/update/staged/<hex sha256>`; the monitor opens it
-    /// `O_NOFOLLOW`, requires ownership by its own euid, and refuses any
-    /// request whose file is missing, symlinked, untrusted, sized
-    /// differently, or carries a different digest.
+    /// `tag` names both worker-staged inputs under `<state_root>/update/staged`:
+    /// the binary itself and `<tag>.sigstore.json`. `len` and `sha256` bind
+    /// the binary; the monitor still hashes the same bytes it opens and verifies
+    /// their Sigstore bundle before swapping.
     ///
     /// # Errors
     ///
-    /// As [`Client::read_target`]; [`ProtoError::Io`] when the staged file
-    /// is missing, symlinked, untrusted, or the size does not match, and
-    /// [`ProtoError::Conflict`] when the on-disk digest differs. The
-    /// returned `String` is the installed version (the hex sha256 of the
-    /// staged image).
+    /// As [`Client::read_target`]. Authenticity failures are reported coarsely
+    /// as [`ProtoError::VerificationFailed`].
     pub fn replace_binary(
         &mut self,
+        tag: &str,
         len: u64,
         sha256: Sha256Digest,
     ) -> Result<String, ClientError> {
-        match self.checked_call(&Request::ReplaceBinary { len, sha256 })? {
+        match self.checked_call(&Request::ReplaceBinary {
+            tag: tag.to_owned(),
+            len,
+            sha256,
+        })? {
             Response::Replaced { version } => Ok(version),
             other => Err(unexpected("Replaced", &other)),
         }
@@ -692,7 +699,7 @@ mod tests {
             new_digest: Sha256Digest::of(b"x"),
         })?;
         assert!(matches!(
-            client.start_confirm_timer(CommitId(0), 1),
+            client.start_confirm_timer(CommitId(0), 1, None),
             Err(ClientError::Unexpected {
                 want: "ConfirmTimerStarted",
                 got: "Restored"

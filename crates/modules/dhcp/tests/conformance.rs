@@ -379,8 +379,8 @@ fn edge_fixtures_parse_to_their_exact_models() {
             },
         ]
     );
-    // Garbage: `Unknown` lines stay out of the model; recognized lines stay
-    // in; `conf-file`/`conf-dir` are refused on purpose.
+    // Garbage: `Unknown` lines stay out of the model; external-file
+    // directives stay modeled so validation can flag them.
     let model = model_of(GARBAGE);
     assert_eq!(
         model.dnsmasq,
@@ -388,6 +388,14 @@ fn edge_fixtures_parse_to_their_exact_models() {
             DnsmasqSetting {
                 key: "domain-needed".to_owned(),
                 value: None,
+            },
+            DnsmasqSetting {
+                key: "conf-file".to_owned(),
+                value: Some("/etc/dnsmasq/includes.conf".to_owned()),
+            },
+            DnsmasqSetting {
+                key: "conf-dir".to_owned(),
+                value: Some("/etc/dnsmasq.d".to_owned()),
             },
             DnsmasqSetting {
                 key: "dhcp-authoritative".to_owned(),

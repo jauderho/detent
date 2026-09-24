@@ -102,7 +102,7 @@ pub(super) async fn cert(
     // resolver `AppState` already holds, the same `Arc` handshakes answer
     // from — so nothing is audited on success, exactly as every other
     // read-only operation behaves (PLAN §2.5).
-    authorize(&caller, &Operation::CertStatus)?;
+    authorize(&state, &caller, &Operation::CertStatus)?;
     Ok(Json(cert_report(&state)))
 }
 
@@ -172,9 +172,12 @@ pub(super) async fn update(
     // `detent-update`), but the policy decision and the audit label for a
     // refusal must still be this endpoint's. No engine call happens, and a
     // read-only operation writes no audit record on success (PLAN §2.5).
-    authorize(&caller, &Operation::UpdateStatus)?;
+    authorize(&state, &caller, &Operation::UpdateStatus)?;
+    let _update_lookup = state.update_check.lock().await;
+    let now = OffsetDateTime::now_utc();
     let stamp = state.update_stamp();
     let rejected = state.bad_stamp();
+    let live_stamp = stamp.clone();
     let (cached, bad) = tokio::task::spawn_blocking(move || {
         let cached = detent_update::update::read_cached(&stamp);
         let bad = detent_update::update::read_bad(&rejected);
@@ -182,7 +185,9 @@ pub(super) async fn update(
     })
     .await
     .map_err(|_| update_check_failed())?;
-    if let Some(cached) = cached {
+    if let Some(cached) = cached
+        && detent_update::update::is_fresh(cached.checked_at, now)
+    {
         let poisoned = cached
             .report
             .tag
@@ -201,11 +206,14 @@ pub(super) async fn update(
     let report = tokio::task::spawn_blocking(move || {
         let transport =
             detent_update::fetch::RealTransport::new().map_err(|_| update_check_failed())?;
-        update_report(&transport, &policy, &bad)
+        let report = update_report(&transport, &policy, &bad)?;
+        detent_update::update::write_cached(&live_stamp, &report, now, true)
+            .map_err(|_| update_check_failed())?;
+        Ok::<_, ApiError>(report)
     })
     .await
     .map_err(|_| update_check_failed())?;
-    Ok(Json(report?))
+    Ok(Json(report?.into()))
 }
 /// `POST /api/v1/system/update`.
 ///
@@ -233,7 +241,7 @@ pub(super) async fn apply_update(
     let op = Operation::UpdateApply {
         version: request.version,
     };
-    authorize(caller.caller(), &op)?;
+    authorize(&state, caller.caller(), &op)?;
     let outcome = state
         .engine
         .execute(op, caller.caller().identity().clone())
@@ -320,11 +328,10 @@ pub(super) fn update_report(
     transport: &dyn Transport,
     policy: &Policy,
     bad: &[String],
-) -> Result<UpdateReport, ApiError> {
+) -> Result<CheckReport, ApiError> {
     let current =
         semver::Version::parse(env!("CARGO_PKG_VERSION")).map_err(|_| update_check_failed())?;
     detent_update::update::check(transport, &current, policy, OffsetDateTime::now_utc(), bad)
-        .map(UpdateReport::from)
         .map_err(|_| update_check_failed())
 }
 
@@ -376,7 +383,7 @@ pub(super) async fn profile(
     caller: Caller,
 ) -> Result<Json<Box<HostReport>>, ApiError> {
     let op = Operation::HostProfile;
-    authorize(&caller, &op)?;
+    authorize(&state, &caller, &op)?;
     let outcome = state.engine.execute(op, caller.identity().clone()).await?;
     render_host(outcome)
 }
@@ -408,7 +415,7 @@ pub(super) async fn audit(
         return Err(bad_request());
     }
     let op = Operation::AuditQuery(params.into());
-    authorize(&caller, &op)?;
+    authorize(&state, &caller, &op)?;
     let outcome = state.engine.execute(op, caller.identity().clone()).await?;
     render_audit(outcome)
 }

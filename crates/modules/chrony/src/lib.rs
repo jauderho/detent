@@ -362,6 +362,8 @@ const MISSING_RTCSYNC: MessageId = MessageId::new("chrony-missing-rtcsync");
 const REC_NTS: MessageId = MessageId::new("chrony-rec-nts");
 /// Fluent id: `cmdport` is left enabled.
 const CMDPORT_OPEN: MessageId = MessageId::new("chrony-cmdport-open");
+/// Fluent id: a directive loads external files or runs an external program.
+const EXTERNAL_DIRECTIVE: MessageId = MessageId::new("chrony-external-directive");
 
 /// Above this many settings, `validate` recommends drop-in files instead.
 const SETTING_COUNT_ADVICE_THRESHOLD: usize = 100;
@@ -537,6 +539,16 @@ impl ConfigModule for ChronyModule {
                         .with_arg("key", item.key.clone()),
                 );
             }
+            if ["include", "includedir", "confdir", "sourcedir", "script"]
+                .iter()
+                .any(|key| item.key.eq_ignore_ascii_case(key))
+            {
+                diagnostics.push(
+                    Diagnostic::new(Severity::Error, EXTERNAL_DIRECTIVE)
+                        .with_field(FieldPath::new(format!("settings/{index}/key")))
+                        .with_arg("key", item.key.clone()),
+                );
+            }
             if !seen.insert(item.key.to_ascii_lowercase()) {
                 diagnostics.push(
                     Diagnostic::new(Severity::Warning, DUPLICATE_KEY)
@@ -637,9 +649,10 @@ fn default_settings() -> Vec<Setting> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ALLOW_OPEN, CMDPORT_OPEN, ChronyModule, DESCRIPTOR, DUPLICATE_KEY, INVALID_KEY,
-        MISSING_MAKESTEP, MISSING_RTCSYNC, Model, REC_NTS, Setting, TOO_MANY_SETTINGS, classify,
-        is_bare_directive, is_valid_key, parse_setting, render_line, schema_with_hints, setting,
+        ALLOW_OPEN, CMDPORT_OPEN, ChronyModule, DESCRIPTOR, DUPLICATE_KEY, EXTERNAL_DIRECTIVE,
+        INVALID_KEY, MISSING_MAKESTEP, MISSING_RTCSYNC, Model, REC_NTS, Setting, TOO_MANY_SETTINGS,
+        classify, is_bare_directive, is_valid_key, parse_setting, render_line, schema_with_hints,
+        setting,
     };
     use detent_core::descriptor::{HostProfile, InitSystem, Os, ValidationCtx};
     use detent_core::diag::{MessageId, Severity};
@@ -674,6 +687,7 @@ mod tests {
             "chrony-missing-makestep",
             "chrony-missing-rtcsync",
             "chrony-cmdport-open",
+            "chrony-external-directive",
         ] {
             assert!(
                 CORE_FTL.contains(&format!("{id} =")),
@@ -944,6 +958,16 @@ mod tests {
             settings: vec![setting("2fast", "v")],
         };
         assert!(has(&model, INVALID_KEY, Severity::Error));
+    }
+
+    #[test]
+    fn validate_rejects_external_file_and_script_directives() {
+        for key in ["include", "includedir", "confdir", "sourcedir", "script"] {
+            let model = Model {
+                settings: vec![setting(key, "/tmp/untrusted")],
+            };
+            assert!(has(&model, EXTERNAL_DIRECTIVE, Severity::Error), "{key}");
+        }
     }
 
     #[test]

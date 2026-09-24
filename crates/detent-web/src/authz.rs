@@ -222,6 +222,7 @@ mod tests {
             Operation::Restore {
                 id: "hosts".to_owned(),
                 backup_id: BackupId(0),
+                expected_hash: None,
             },
             Operation::ServiceStatus {
                 id: "hosts".to_owned(),

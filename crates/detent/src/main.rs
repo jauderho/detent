@@ -209,7 +209,8 @@ mod tests {
             .filter(|key| key.starts_with(PREFIX))
             .collect();
 
-        assert!(!used.is_empty() && !defined.is_empty());
+        assert!(used.contains("cli-no-command"));
+        assert!(defined.contains("cli-no-command"));
         let missing: Vec<&String> = used.difference(&defined).collect();
         let unused: Vec<&String> = defined.difference(&used).collect();
         assert!(missing.is_empty(), "undefined in cli.ftl: {missing:?}");

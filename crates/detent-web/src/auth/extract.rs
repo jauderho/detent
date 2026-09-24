@@ -91,13 +91,20 @@ pub fn bearer(headers: &HeaderMap) -> Option<Secret> {
     (!token.is_empty()).then(|| Secret::from_presented(token))
 }
 
-/// The session id a `Cookie` header carries, if it carries one.
+/// The session id carried by all `Cookie` header field lines.
+///
+/// HTTP/2 may split one logical cookie field across repeated field lines.
+/// Joining them with `; ` matches RFC 9110 field-line combination and lets
+/// the existing RFC 6265 pair parser see every cookie exactly once.
 #[must_use]
-fn cookie_id(headers: &HeaderMap) -> Option<Secret> {
-    headers
-        .get(axum::http::header::COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(session::cookie_value)
+pub(crate) fn cookie_id(headers: &HeaderMap) -> Option<Secret> {
+    let cookies = headers
+        .get_all(axum::http::header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect::<Vec<_>>()
+        .join("; ");
+    session::cookie_value(&cookies)
 }
 
 /// Who is making this request, and what they may do.
@@ -255,6 +262,17 @@ impl FromRequestParts<AppState> for WriteCaller {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let caller = Caller::from_request_parts(parts, state).await?;
+        if !caller.scopes().allows(Scope::Write) {
+            state.auth.record(
+                &crate::auth::audit::AuthRecord::new(
+                    crate::auth::audit::AuthEvent::ScopeDenied,
+                    caller.identity().subject.clone(),
+                    detent_ops::audit::AuditResult::Denied,
+                )
+                .with_kind(caller.identity().kind)
+                .with_detail(MessageId::new(DENIED_SCOPE_ID)),
+            );
+        }
         if caller.scopes().allows(Scope::Write) {
             return Ok(Self(caller));
         }
@@ -301,7 +319,7 @@ impl<S: Send + Sync> FromRequestParts<S> for ClientIp {
 
 #[cfg(test)]
 mod tests {
-    use super::{Caller, ClientIp, UNKNOWN_CLIENT_IP, WriteCaller, bearer, unix_now};
+    use super::{Caller, ClientIp, UNKNOWN_CLIENT_IP, WriteCaller, bearer, cookie_id, unix_now};
     use crate::auth::AuthError;
     use crate::auth::session::COOKIE_NAME;
     use crate::authz::{Scope, Scopes};
@@ -336,6 +354,25 @@ mod tests {
     /// Resolve against a fixture's state at the current instant.
     fn resolve(fixture: &TestState, headers: &HeaderMap) -> Result<Caller, AuthError> {
         Caller::resolve(&fixture.state, headers, Instant::now(), unix_now())
+    }
+
+    #[test]
+    fn split_cookie_header_lines_are_combined_before_parsing() -> R {
+        let fixture = test_state()?;
+        let (id, _session) = fixture.state.auth.sessions.create(
+            "alice",
+            Scopes::read_write(),
+            false,
+            Instant::now(),
+        )?;
+        let mut headers = HeaderMap::new();
+        headers.append(header::COOKIE, HeaderValue::from_static("theme=dark"));
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{COOKIE_NAME}={}", id.expose()))?,
+        );
+        assert!(cookie_id(&headers).is_some_and(|presented| presented.ct_eq(id.expose())));
+        Ok(())
     }
 
     #[test]
@@ -556,6 +593,12 @@ mod tests {
             .ok_or("a read-only token was admitted")?;
         assert_eq!(refused.status(), StatusCode::FORBIDDEN);
         assert_eq!(refused.message_id().as_str(), "web-denied-scope");
+        assert!(
+            fixture
+                .audit
+                .events()
+                .contains(&crate::auth::audit::AuthEvent::ScopeDenied)
+        );
 
         // And with no credential the write extractor answers 401, not 403:
         // the scope check is never reached.

@@ -18,6 +18,8 @@
 use std::io::Write as _;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -29,9 +31,10 @@ use detent_core::diag::MessageId;
 use detent_platform::fs::atomic::{Sha256Digest, read_with_digest};
 use detent_platform::privsep::allowlist::{Allowlist, Config};
 use detent_platform::privsep::monitor::{
-    CheckRunner, ExitReason, HookError, Hooks, Monitor, MonitorError, PENDING_COMMIT_MARKER,
-    ServiceControl,
+    CheckRunner, ExitReason, HookError, Hooks, Monitor, MonitorError, NoChecks,
+    PENDING_COMMIT_MARKER, ServiceControl,
 };
+use detent_platform::privsep::proto::PendingService;
 use detent_platform::privsep::proto::{
     BackupId, BindingId, CheckId, CheckOutcome, CommitId, MAX_FRAME, ModuleId, PROTO_VERSION,
     PathKind, ProtoError, Request, Response, ServiceAction, ServiceOutcome, TargetId,
@@ -179,6 +182,23 @@ fn spawn_client(
     let mut client = Client::new(channel);
     client.hello()?;
     Ok((client, handle))
+}
+
+struct CountingServices(Arc<AtomicUsize>);
+
+impl ServiceControl for CountingServices {
+    fn service(
+        &self,
+        _binding: &ServiceBinding,
+        _action: CoreServiceAction,
+    ) -> Result<ServiceOutcome, HookError> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        Ok(ServiceOutcome {
+            binding: BindingId(0),
+            active: true,
+            detail: "counted".to_owned(),
+        })
+    }
 }
 
 /// Join a monitor thread and assert it exited because of `Shutdown`.
@@ -381,6 +401,7 @@ fn replace_binary_rejects_a_missing_staged_file() -> TestResult {
     let (mut client, handle) = spawn_client(fx.allow()?)?;
 
     client.channel_mut().send(&Request::ReplaceBinary {
+        tag: "v0.0.2".to_owned(),
         len: 8,
         sha256: Sha256Digest::of(b"binary"),
     })?;
@@ -420,7 +441,7 @@ fn commit_confirm_expiry_rolls_back_unconfirmed_writes() -> TestResult {
     assert_eq!(std::fs::read(&fx.target)?, b"v2");
 
     let (timeout_s, rollback_targets) =
-        client.start_confirm_timer(CommitId(1), CONFIRM_TIMEOUT_S)?;
+        client.start_confirm_timer(CommitId(1), CONFIRM_TIMEOUT_S, None)?;
     assert_eq!(timeout_s, CONFIRM_TIMEOUT_S);
     assert_eq!(rollback_targets, 1);
 
@@ -440,10 +461,10 @@ fn confirm_commit_within_the_window_keeps_the_change() -> TestResult {
     let v1_digest = read_with_digest(&fx.target)?.1;
 
     client.write_target(target, Some(v1_digest), b"v2".to_vec())?;
-    client.start_confirm_timer(CommitId(7), CONFIRM_TIMEOUT_S)?;
+    client.start_confirm_timer(CommitId(7), CONFIRM_TIMEOUT_S, None)?;
 
     // Only one commit may be pending at a time.
-    let second = client.start_confirm_timer(CommitId(8), CONFIRM_TIMEOUT_S);
+    let second = client.start_confirm_timer(CommitId(8), CONFIRM_TIMEOUT_S, None);
     assert!(matches!(
         second,
         Err(ClientError::Remote(ProtoError::CommitPending(CommitId(7))))
@@ -479,7 +500,7 @@ fn rollback_commit_restores_the_backup_and_clears_the_marker() -> TestResult {
 
     client.write_target(target, Some(v1_digest), b"v2".to_vec())?;
     assert_eq!(std::fs::read(&fx.target)?, b"v2");
-    client.start_confirm_timer(CommitId(9), CONFIRM_TIMEOUT_S)?;
+    client.start_confirm_timer(CommitId(9), CONFIRM_TIMEOUT_S, None)?;
     assert!(state_root.join(PENDING_COMMIT_MARKER).is_file());
 
     let (commit, restored) = client.rollback_commit(CommitId(9))?;
@@ -502,6 +523,74 @@ fn rollback_commit_restores_the_backup_and_clears_the_marker() -> TestResult {
     std::thread::sleep(PAST_CONFIRM_DEADLINE);
     assert_eq!(std::fs::read(&fx.target)?, b"v1");
 
+    client.shutdown()?;
+    join_shutdown(handle);
+    Ok(())
+}
+
+#[test]
+fn rollback_journals_every_write_in_the_commit() -> TestResult {
+    let fx = fixture(b"v1")?;
+    let (mut client, handle) = spawn_client(fx.allow()?)?;
+    let target = target_id(&client, &fx);
+    let v1_digest = read_with_digest(&fx.target)?.1;
+
+    let v2 = client.write_target(target, Some(v1_digest), b"v2".to_vec())?;
+    client.write_target(target, Some(v2.new_digest), b"v3".to_vec())?;
+    let (_, rollback_targets) =
+        client.start_confirm_timer(CommitId(10), CONFIRM_TIMEOUT_S, None)?;
+    assert_eq!(rollback_targets, 2);
+
+    let (_, restored) = client.rollback_commit(CommitId(10))?;
+    assert_eq!(restored, 2);
+    assert_eq!(std::fs::read(&fx.target)?, b"v1");
+    client.shutdown()?;
+    join_shutdown(handle);
+    Ok(())
+}
+
+#[test]
+fn rollback_replays_the_service_after_restoring_files() -> TestResult {
+    let fx = fixture(b"v1")?;
+    let (monitor_end, worker_end) = Channel::pair()?;
+    let allow = fx.allow()?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let monitor_calls = Arc::clone(&calls);
+    let handle = thread::spawn(move || {
+        let mut channel = monitor_end;
+        let services = CountingServices(monitor_calls);
+        Monitor::new(
+            allow,
+            Hooks {
+                checks: &NoChecks,
+                services: &services,
+            },
+        )
+        .serve(&mut channel)
+    });
+    let mut client = Client::new(worker_end);
+    client.hello()?;
+    let target = target_id(&client, &fx);
+    let binding = client
+        .binding_id("fake")
+        .ok_or("the fixture must advertise its service binding")?;
+    let v1_digest = read_with_digest(&fx.target)?.1;
+
+    client.write_target(target, Some(v1_digest), b"v2".to_vec())?;
+    client.start_confirm_timer(
+        CommitId(11),
+        CONFIRM_TIMEOUT_S,
+        Some(PendingService {
+            binding,
+            action: ServiceAction::Restart,
+        }),
+    )?;
+    client.service(binding, ServiceAction::Restart)?;
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+    client.rollback_commit(CommitId(11))?;
+    assert_eq!(std::fs::read(&fx.target)?, b"v1");
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
     client.shutdown()?;
     join_shutdown(handle);
     Ok(())
@@ -531,7 +620,7 @@ fn rollback_commit_after_the_deadline_already_fired_finds_nothing_pending() -> T
     let v1_digest = read_with_digest(&fx.target)?.1;
 
     client.write_target(target, Some(v1_digest), b"v2".to_vec())?;
-    client.start_confirm_timer(CommitId(2), CONFIRM_TIMEOUT_S)?;
+    client.start_confirm_timer(CommitId(2), CONFIRM_TIMEOUT_S, None)?;
 
     // Let the timer itself take the pending state and roll back first.
     std::thread::sleep(PAST_CONFIRM_DEADLINE);
@@ -558,29 +647,38 @@ fn recover_pending_restores_after_a_simulated_crash() -> TestResult {
     let v1_digest = read_with_digest(&fx.target)?.1;
 
     client.write_target(target, Some(v1_digest), b"v2".to_vec())?;
-    client.start_confirm_timer(CommitId(3), CONFIRM_TIMEOUT_S)?;
+    client.start_confirm_timer(CommitId(3), CONFIRM_TIMEOUT_S, None)?;
     assert!(state_root.join(PENDING_COMMIT_MARKER).is_file());
 
-    // Simulate the monitor process dying with the commit still pending: end
-    // it without confirming or waiting for expiry. `Shutdown` is handled
-    // before the deadline is ever re-checked, so the marker is left on disk
-    // exactly as it would be after a real crash.
+    // Stop the monitor before the deadline is re-checked. Its marker must
+    // survive, and the next monitor must recover it before serving requests.
     client.shutdown()?;
     join_shutdown(handle);
     assert_eq!(std::fs::read(&fx.target)?, b"v2");
 
-    let Some(recovered) = Monitor::recover_pending(&state_root)? else {
-        unreachable!("a pending marker was just written and never cleared")
-    };
-    assert_eq!(recovered.commit, CommitId(3));
-    assert_eq!(recovered.restored, 1);
-    assert!(recovered.failures.is_empty());
+    let (mut restarted, restarted_handle) = spawn_client(fx.allow()?)?;
     assert_eq!(std::fs::read(&fx.target)?, b"v1");
     assert!(!state_root.join(PENDING_COMMIT_MARKER).is_file());
+    restarted.shutdown()?;
+    join_shutdown(restarted_handle);
 
-    // Nothing left to recover the second time.
-    assert_eq!(Monitor::recover_pending(&state_root)?, None);
+    Ok(())
+}
 
+#[test]
+fn a_second_monitor_cannot_take_the_pending_commit_lock() -> TestResult {
+    let fx = fixture(b"v1")?;
+    let (mut first, first_handle) = spawn_client(fx.allow()?)?;
+    let (_peer, second_handle) = spawn_monitor(fx.allow()?)?;
+    let Ok(second) = second_handle.join() else {
+        unreachable!("the second monitor only reports its lock failure")
+    };
+    assert!(matches!(
+        second,
+        Err(MonitorError::State { op: "flock", .. })
+    ));
+    first.shutdown()?;
+    join_shutdown(first_handle);
     Ok(())
 }
 
@@ -651,6 +749,7 @@ fn every_request_gets_exactly_one_response() -> TestResult {
         },
         Request::Mount { target },
         Request::ReplaceBinary {
+            tag: "v0.0.2".to_owned(),
             len: 1,
             sha256: Sha256Digest::of(b"x"),
         },

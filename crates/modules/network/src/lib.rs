@@ -589,7 +589,16 @@ fn build_model_from_lines(lines: &[String]) -> Model {
                     && let Some(entry) = ifaces.get_mut(&iface_name)
                     && !value.is_empty()
                 {
-                    entry.addresses.push(value.clone());
+                    if netplan_stack
+                        .iter()
+                        .rev()
+                        .nth(1)
+                        .is_some_and(|(_, key)| key == "nameservers")
+                    {
+                        entry.dns.push(value);
+                    } else {
+                        entry.addresses.push(value);
+                    }
                 }
             } else if parent == "routes" {
                 // `- to: ...` or `- via: ...` or `- to: ... via: ...` simplified:
@@ -1033,9 +1042,6 @@ fn render_networkd(iface: &Interface) -> Vec<String> {
     if let Some(vlan) = iface.vlan.as_ref() {
         out.push(format!("VLAN={}:{}", vlan.link, vlan.id));
     }
-    if iface.bridge.is_some() {
-        // networkd bridge is via [Bridge] section handled elsewhere; emit as comment
-    }
     for route in &iface.routes {
         out.push(String::new());
         out.push("[Route]".to_owned());
@@ -1082,10 +1088,6 @@ fn render_nm(iface: &Interface) -> Vec<String> {
         }
         if !addrs.is_empty() {
             out.push(format!("addresses={}", addrs.join(";")));
-        }
-        if let Some(gw) = iface.gateway_v4.as_deref() {
-            // already in addresses when manual; also emit gateway for clarity
-            let _ = gw;
         }
     }
     if !iface.dns.is_empty() {
@@ -1142,11 +1144,10 @@ fn render_nm(iface: &Interface) -> Vec<String> {
         out.push(format!("id={}", vlan.id));
         out.push(format!("parent={}", vlan.link));
     }
-    if let Some(bridge) = iface.bridge.as_ref() {
+    if iface.bridge.is_some() {
         out.push(String::new());
         out.push("[bridge]".to_owned());
         out.push(format!("interface-name={}", iface.name));
-        let _ = bridge;
     }
     out
 }
@@ -2659,6 +2660,9 @@ mod tests {
             "\r\n",
             long_line.as_str(),
             many.as_str(),
+            "\u{feff}network:\n  ethernets:\n    café:\n      dhcp4: true\n",
+            "[Match]\rName=eth0\n[Network]\nDHCP=yes",
+            "network:\n  ethernets:\n    eth0:\n      nameservers:\n        addresses:\n          - 8.8.8.8\n",
         ] {
             let mut doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
             assert_eq!(NetworkModule::render(&doc), src);
@@ -2842,6 +2846,21 @@ mod tests {
         let mut doc2 = NetworkModule::parse(src).map_err(|e| e.to_string())?;
         let report = NetworkModule::apply(&mut doc2, &model).map_err(|e| e.to_string())?;
         assert_eq!(report, EditReport::default());
+        Ok(())
+    }
+
+    #[test]
+    fn netplan_block_nameservers_are_dns_not_interface_addresses() -> Result<(), String> {
+        let src = "network:\n  ethernets:\n    eth0:\n      addresses:\n        - 192.0.2.10/24\n      nameservers:\n        addresses:\n          - 8.8.8.8\n          - 2001:4860:4860::8888\n";
+        let doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
+        let model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        let eth0 = model
+            .interfaces
+            .iter()
+            .find(|iface| iface.name == "eth0")
+            .unwrap_or_else(|| panic!("eth0 missing"));
+        assert_eq!(eth0.addresses, vec!["192.0.2.10/24"]);
+        assert_eq!(eth0.dns, vec!["8.8.8.8", "2001:4860:4860::8888"]);
         Ok(())
     }
 

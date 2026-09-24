@@ -572,7 +572,7 @@ async fn restore_backup() -> R {
         live.state(),
         "/api/v1/modules/hosts/backups/0/restore",
         None,
-        "",
+        &format!(r#"{{"expected_hash":"{}"}}"#, "0".repeat(64)),
     )
     .await?;
     assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
@@ -581,7 +581,7 @@ async fn restore_backup() -> R {
         live.state(),
         "/api/v1/modules/hosts/backups/0/restore",
         Some(&read),
-        "",
+        &format!(r#"{{"expected_hash":"{}"}}"#, "0".repeat(64)),
     )
     .await?;
     assert_eq!(wrong_scope.status(), StatusCode::FORBIDDEN);
@@ -590,16 +590,22 @@ async fn restore_backup() -> R {
         live.state(),
         "/api/v1/modules/hosts/backups/0/restore",
         Some(&write),
-        "",
+        &format!(r#"{{"expected_hash":"{}"}}"#, "0".repeat(64)),
     )
     .await?;
     assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    assert!(
+        live.state
+            .audit
+            .events()
+            .contains(&crate::auth::audit::AuthEvent::ScopeDenied)
+    );
 
     let malformed_id = post(
         live.state(),
         "/api/v1/modules/hosts/backups/not-a-number/restore",
         Some(&write),
-        "",
+        &format!(r#"{{"expected_hash":"{}"}}"#, "0".repeat(64)),
     )
     .await?;
     assert_eq!(malformed_id.status(), StatusCode::BAD_REQUEST);

@@ -23,8 +23,14 @@ use crate::trust::TrustRoot;
 /// The GitHub Actions OIDC issuer every leaf must carry (ADR-005).
 pub const ISSUER: &str = "https://token.actions.githubusercontent.com";
 
-/// OID of the Fulcio OIDC-issuer certificate extension, dotted.
+/// OID of the deprecated Fulcio OIDC-issuer certificate extension, dotted.
 const ISSUER_OID: &str = "1.3.6.1.4.1.57264.1.1";
+/// OID of the current DER-encoded Fulcio issuer extension.
+const ISSUER_V2_OID: &str = "1.3.6.1.4.1.57264.1.8";
+/// OID of the current Fulcio build-signer URI extension.
+const BUILD_SIGNER_URI_OID: &str = "1.3.6.1.4.1.57264.1.9";
+/// RFC 6962 certificate-transparency signed-certificate-timestamp list.
+const SCT_LIST_OID: &str = "1.3.6.1.4.1.11129.2.4.2";
 
 /// The pinned build identity for `tag` (ADR-005): the release workflow, at
 /// the exact tag being installed.
@@ -39,6 +45,9 @@ pub enum VerificationError {
     /// Step 1: unparsable, oversized, or missing required material.
     #[error("bundle is malformed: {0}")]
     BundleMalformed(#[from] bundle::BundleError),
+    /// Step 2: trust material could not be loaded or is unavailable.
+    #[error("embedded trust material is unavailable")]
+    TrustRootUnavailable,
     /// Step 2: the chain does not verify to an embedded Fulcio root.
     #[error("certificate chain does not verify to the embedded Fulcio roots")]
     CertChainInvalid,
@@ -57,13 +66,12 @@ pub enum VerificationError {
     /// Step 5: no unambiguous subject matches the file digest.
     #[error("statement subject digest does not match the downloaded file (or is ambiguous)")]
     DigestMismatch,
-    /// Step 6: the Rekor inclusion proof or checkpoint fails.
+    /// Step 6: the Rekor inclusion proof, checkpoint, or tlog body fails.
     #[error("Rekor inclusion proof or checkpoint does not verify")]
     SetInvalid,
-    /// No embedded Fulcio root is valid at `integratedTime` (rotation gap,
-    /// or the trust files are still placeholders).
-    #[error("no embedded trust root is available for this verification")]
-    TrustRootUnavailable,
+    /// The signing certificate has no parseable embedded SCT list.
+    #[error("signing certificate has no valid embedded SCT list")]
+    SctInvalid,
 }
 
 /// Verifies a parsed bundle end-to-end (ADR-014 steps 2–6; step 1 is
@@ -75,6 +83,7 @@ pub enum VerificationError {
 /// # Errors
 ///
 /// The first failing step's [`VerificationError`]; no partial state.
+#[allow(clippy::too_many_lines)]
 pub fn verify(
     decoded: &Decoded,
     file_digest: &[u8; 32],
@@ -117,10 +126,6 @@ pub fn verify(
         &anchors,
         &intermediates,
         integrated,
-        // Fulcio leaves are issued for code signing; webpki's built-in
-        // server/client EKU sets would refuse them. The identity pin in step
-        // 3 is what actually constrains this certificate's purpose, so any
-        // EKU the CA put on the leaf is accepted here.
         &PermissiveEku,
         None,
         None,
@@ -132,7 +137,9 @@ pub fn verify(
         _ => VerificationError::CertChainInvalid,
     })?;
 
-    // Step 3: identity pinning, on the parsed leaf.
+    // Step 3: identity pinning, on the parsed leaf. New Fulcio certificates
+    // carry the workflow URI in the build-signer extension; older fixtures
+    // carry it as a URI SAN, so accept either while pinning the exact tag.
     let (_, parsed_leaf) =
         X509Certificate::from_der(leaf_raw).map_err(|_| VerificationError::CertChainInvalid)?;
     let san = parsed_leaf
@@ -146,14 +153,39 @@ pub fn verify(
             .iter()
             .any(|name| matches!(name, GeneralName::URI(uri) if *uri == pinned))
     });
-    if !san_matches {
+    let extension_uri = |oid: &str| {
+        parsed_leaf.extensions().iter().any(|extension| {
+            extension.oid.to_id_string() == oid && extension.value == pinned.as_bytes()
+        })
+    };
+    if !san_matches && !extension_uri(BUILD_SIGNER_URI_OID) {
         return Err(VerificationError::IdentityMismatch);
     }
-    let issuer_ok = parsed_leaf.extensions().iter().any(|extension| {
+    let modern_issuer = parsed_leaf.extensions().iter().any(|extension| {
+        let Some(value) = extension.value.strip_prefix(&[0x0c]) else {
+            return false;
+        };
+        let Some(length) = value.first().copied() else {
+            return false;
+        };
+        let value = value.get(1..).unwrap_or_default();
+        usize::from(length) == value.len()
+            && value == ISSUER.as_bytes()
+            && extension.oid.to_id_string() == ISSUER_V2_OID
+    });
+    let legacy_issuer = parsed_leaf.extensions().iter().any(|extension| {
         extension.oid.to_id_string() == ISSUER_OID && extension.value == ISSUER.as_bytes()
     });
-    if !issuer_ok {
+    if !modern_issuer && !legacy_issuer {
         return Err(VerificationError::IssuerMismatch);
+    }
+    if modern_issuer
+        && !parsed_leaf.extensions().iter().any(|extension| {
+            extension.oid.to_id_string() == SCT_LIST_OID
+                && extension.value.first().is_some_and(|tag| *tag == 0x04)
+        })
+    {
+        return Err(VerificationError::SctInvalid);
     }
 
     // Step 4: DSSE signature, ECDSA P-256 over the PAE, with the leaf's key.
@@ -313,11 +345,35 @@ fn verify_inclusion(
     Ok(())
 }
 
-/// The canonicalized body is a hashedrekord JSON: its `spec.signature` must
-/// carry the DSSE signature bytes and the leaf's public key.
+/// Verify the Rekor body binds the DSSE signature to this bundle. The
+/// synthetic fixture uses `hashedrekord`; production attestations use Rekor's
+/// `dsse` entry, whose canonical body carries the same signature and payload
+/// hash under `spec`.
 fn verify_body_agreement(decoded: &Decoded, leaf_point: &[u8]) -> Result<(), VerificationError> {
     let body: serde_json::Value =
         serde_json::from_slice(&decoded.body).map_err(|_| VerificationError::SetInvalid)?;
+    if matches!(decoded.kind.as_str(), "dsse" | "intoto") {
+        let signature = body
+            .pointer("/spec/signatures/0/signature")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(VerificationError::SetInvalid)?;
+        if BASE64
+            .decode(signature.as_bytes())
+            .map_err(|_| VerificationError::SetInvalid)?
+            != decoded.dsse_signature
+        {
+            return Err(VerificationError::SetInvalid);
+        }
+        let payload_hash = body
+            .pointer("/spec/payloadHash/value")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(VerificationError::SetInvalid)?;
+        let want = Sha256::digest(&decoded.dsse_payload);
+        if payload_hash != hex_lower(&want) {
+            return Err(VerificationError::SetInvalid);
+        }
+        return Ok(());
+    }
     let content = body
         .pointer("/spec/signature/content")
         .and_then(serde_json::Value::as_str)
@@ -354,11 +410,17 @@ fn root_from_path(
     leaf: [u8; 32],
     path: &[[u8; 32]],
 ) -> Result<[u8; 32], VerificationError> {
+    if size == 0 || index >= size {
+        return Err(VerificationError::SetInvalid);
+    }
+    if size == 1 {
+        return if path.is_empty() {
+            Ok(leaf)
+        } else {
+            Err(VerificationError::SetInvalid)
+        };
+    }
     let Some((head, rest)) = path.split_last() else {
-        // Path exhausted: this must be a one-leaf tree.
-        if size == 1 {
-            return Ok(leaf);
-        }
         return Err(VerificationError::SetInvalid);
     };
     let k = size.next_power_of_two() >> 1;
@@ -424,6 +486,14 @@ mod tests {
     fn root_from_path_single_leaf() {
         let leaf = [7_u8; 32];
         assert_eq!(root_from_path(0, 1, leaf, &[]), Ok(leaf));
+    }
+
+    #[test]
+    fn root_from_path_singleton_rejects_extra_nodes() {
+        assert_eq!(
+            root_from_path(0, 1, [0_u8; 32], &[[1_u8; 32]]),
+            Err(VerificationError::SetInvalid)
+        );
     }
 
     #[test]

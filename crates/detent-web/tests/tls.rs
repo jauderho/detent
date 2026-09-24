@@ -24,11 +24,12 @@ use axum::Router;
 use axum::routing::get;
 use detent_web::auth::ClientIp;
 use detent_web::config::Config;
+use detent_web::healthz;
 use detent_web::server::Server;
 use detent_web::tls::{
-    ALPN_H2_HTTP11, CertStore, CertifiedKeyPair, bootstrap_self_signed, server_config_from_store,
+    ALPN_H2_HTTP11, CertStore, CertifiedKeyPair, bootstrap_self_signed, crypto_provider,
+    server_config_from_store,
 };
-use detent_web::{healthz, install_crypto_provider};
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, ProtocolVersion, RootCertStore};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -70,7 +71,6 @@ impl Running {
 
 /// Start a server on an ephemeral loopback port, allowing `max_connections`.
 async fn start(max_connections: u32) -> Result<Running, Box<dyn std::error::Error>> {
-    install_crypto_provider();
     let cert = bootstrap_self_signed(&[HOST.to_owned()])?;
     let store = Arc::new(CertStore::new(&cert)?);
     let tls = server_config_from_store(Arc::clone(&store), ALPN_H2_HTTP11)?;
@@ -107,10 +107,10 @@ fn client_config(
     versions: &[&'static rustls::SupportedProtocolVersion],
     alpn: &[&[u8]],
 ) -> Result<ClientConfig, Box<dyn std::error::Error>> {
-    install_crypto_provider();
     let mut roots = RootCertStore::empty();
     roots.add(CertificateDer::from(cert.cert_der().to_vec()))?;
-    let mut config = ClientConfig::builder_with_protocol_versions(versions)
+    let mut config = ClientConfig::builder_with_provider(crypto_provider())
+        .with_protocol_versions(versions)?
         .with_root_certificates(roots)
         .with_no_client_auth();
     config.alpn_protocols = alpn.iter().map(|protocol| protocol.to_vec()).collect();
@@ -302,7 +302,6 @@ async fn a_swapped_certificate_serves_without_a_restart() -> TestResult {
 }
 #[tokio::test]
 async fn the_peer_address_reaches_the_handlers() -> TestResult {
-    install_crypto_provider();
     let cert = bootstrap_self_signed(&[HOST.to_owned()])?;
     let store = Arc::new(CertStore::new(&cert)?);
     let tls = server_config_from_store(Arc::clone(&store), ALPN_H2_HTTP11)?;
@@ -354,7 +353,6 @@ async fn the_peer_address_reaches_the_handlers() -> TestResult {
 }
 #[tokio::test]
 async fn an_idle_connection_does_not_hold_a_permit() -> TestResult {
-    install_crypto_provider();
     let cert = bootstrap_self_signed(&[HOST.to_owned()])?;
     let store = Arc::new(CertStore::new(&cert)?);
     let tls = server_config_from_store(Arc::clone(&store), ALPN_H2_HTTP11)?;

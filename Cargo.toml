@@ -19,11 +19,9 @@ members = [
     "crates/detent",
     "crates/modules/*",
 ]
-# `crates/modules/_template` is matched by the `crates/modules/*` member glob but
-# excluded here: it is the copy-me skeleton (see its README.md) and its `TEMPLATE`
-# placeholders are not valid everywhere they appear, so it must not take part in
-# `cargo build --workspace`. Exclusion wins over the glob.
-exclude = ["spikes", "fuzz", "web", "crates/modules/_template"]
+# The copy-me skeleton stays in the module glob so workspace builds keep its
+# examples compiling as they evolve.
+exclude = ["spikes", "fuzz", "web"]
 
 [workspace.package]
 version = "0.0.1"

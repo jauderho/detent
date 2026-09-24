@@ -17,8 +17,13 @@ pub const MAX_BUNDLE_BYTES: usize = 1 << 20;
 /// v0.3; unknown major bumps are refused).
 pub const MEDIA_TYPE: &str = "application/vnd.dev.sigstore.bundle.v0.3+json";
 
-/// The DSSE envelope payload type carried by `actions/attest` bundles.
-pub const DSSE_PAYLOAD_TYPE: &str = "application/vnd.dsse.envelope.v1+json";
+/// The in-toto envelope payload type emitted by Sigstore attestations.
+pub const DSSE_PAYLOAD_TYPE: &str = "application/vnd.in-toto+json";
+
+/// Older synthetic fixtures used the generic DSSE media type. Accept it only
+/// for backwards compatibility with those fixtures; production bundles use
+/// [`DSSE_PAYLOAD_TYPE`].
+pub const LEGACY_DSSE_PAYLOAD_TYPE: &str = "application/vnd.dsse.envelope.v1+json";
 
 /// The in-toto statement type the payload must declare.
 pub const STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
@@ -56,21 +61,45 @@ struct BundleJson {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct VerificationMaterialJson {
-    x509_certificate_chain: X509ChainJson,
+    #[serde(default)]
+    x509_certificate_chain: Option<X509ChainJson>,
+    #[serde(default)]
+    certificate: Option<CertificateJson>,
+    #[serde(default)]
     tlog_entries: Vec<TlogEntryJson>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum CertificateJson {
+    Raw(String),
+    Wrapped {
+        #[serde(rename = "rawBytes")]
+        raw_bytes: String,
+    },
+}
+
+impl CertificateJson {
+    fn bytes(&self) -> &str {
+        match self {
+            Self::Raw(raw) | Self::Wrapped { raw_bytes: raw } => raw,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct X509ChainJson {
-    /// Base64 DER, leaf first (ADR-014).
-    certificates: Vec<String>,
+    /// Base64 DER, leaf first (ADR-014). Sigstore v0.3 permits either a raw
+    /// string or an object with `rawBytes` in this list.
+    certificates: Vec<CertificateJson>,
 }
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TlogEntryJson {
+    #[serde(deserialize_with = "de_i64")]
     log_index: i64,
+    #[serde(deserialize_with = "de_i64")]
     integrated_time: i64,
     log_id: LogIdJson,
     kind_version: KindVersionJson,
@@ -94,7 +123,9 @@ struct KindVersionJson {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct InclusionProofJson {
+    #[serde(deserialize_with = "de_i64")]
     log_index: i64,
+    #[serde(deserialize_with = "de_u64")]
     tree_size: u64,
     checkpoint: CheckpointJson,
     hashes: Vec<String>,
@@ -118,6 +149,37 @@ struct DsseEnvelopeJson {
 #[serde(rename_all = "camelCase")]
 struct SignatureJson {
     sig: String,
+}
+fn de_i64<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumberOrString {
+        Number(i64),
+        String(String),
+    }
+    match NumberOrString::deserialize(deserializer)? {
+        NumberOrString::Number(value) => Ok(value),
+        NumberOrString::String(value) => value.parse().map_err(serde::de::Error::custom),
+    }
+}
+
+fn de_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumberOrString {
+        Number(u64),
+        String(String),
+    }
+    match NumberOrString::deserialize(deserializer)? {
+        NumberOrString::Number(value) => Ok(value),
+        NumberOrString::String(value) => value.parse().map_err(serde::de::Error::custom),
+    }
 }
 
 /// The in-toto v1 statement carried in the DSSE payload.
@@ -203,8 +265,24 @@ pub fn parse(bytes: &[u8]) -> Result<Decoded, BundleError> {
     if json.media_type != MEDIA_TYPE {
         return Err(BundleError::BadMediaType(json.media_type));
     }
-    // One tlog entry per bundle is the shape `actions/attest` emits; taking
-    // the first is the same check cosign makes.
+
+    let cert_json = json
+        .verification_material
+        .x509_certificate_chain
+        .as_ref()
+        .map(|chain| chain.certificates.as_slice())
+        .or_else(|| {
+            json.verification_material
+                .certificate
+                .as_ref()
+                .map(std::slice::from_ref)
+        })
+        .unwrap_or_default();
+    if cert_json.is_empty() {
+        return Err(BundleError::Malformed(
+            "bundle carries no X.509 certificate".to_owned(),
+        ));
+    }
     let tlog = json
         .verification_material
         .tlog_entries
@@ -212,11 +290,18 @@ pub fn parse(bytes: &[u8]) -> Result<Decoded, BundleError> {
         .ok_or_else(|| BundleError::Malformed("no tlog entries".to_owned()))?;
 
     let dsse_payload = decode(json.dsse_envelope.payload.as_bytes(), "dsse payload")?;
-    if json.dsse_envelope.payload_type != DSSE_PAYLOAD_TYPE {
+    if json.dsse_envelope.payload_type != DSSE_PAYLOAD_TYPE
+        && json.dsse_envelope.payload_type != LEGACY_DSSE_PAYLOAD_TYPE
+    {
         return Err(BundleError::Malformed(format!(
             "unexpected DSSE payload type: {}",
             json.dsse_envelope.payload_type
         )));
+    }
+    if json.dsse_envelope.signatures.len() != 1 {
+        return Err(BundleError::Malformed(
+            "Sigstore bundles must carry exactly one DSSE signature".to_owned(),
+        ));
     }
     let first_signature = json
         .dsse_envelope
@@ -247,21 +332,9 @@ pub fn parse(bytes: &[u8]) -> Result<Decoded, BundleError> {
         }
     }
 
-    let mut certs = Vec::with_capacity(
-        json.verification_material
-            .x509_certificate_chain
-            .certificates
-            .len(),
-    );
-    for cert in &json
-        .verification_material
-        .x509_certificate_chain
-        .certificates
-    {
-        certs.push(decode(cert.as_bytes(), "certificate")?);
-    }
-    if certs.is_empty() {
-        return Err(BundleError::Malformed("empty certificate chain".to_owned()));
+    let mut certs = Vec::with_capacity(cert_json.len());
+    for cert in cert_json {
+        certs.push(decode(cert.bytes().as_bytes(), "certificate")?);
     }
 
     Ok(Decoded {
@@ -278,13 +351,12 @@ pub fn parse(bytes: &[u8]) -> Result<Decoded, BundleError> {
         body: decode(tlog.canonicalized_body.as_bytes(), "canonicalized body")?,
         tree_size: tlog.inclusion_proof.tree_size,
         proof_log_index: tlog.inclusion_proof.log_index,
-        path_hashes: {
-            let mut out = Vec::with_capacity(tlog.inclusion_proof.hashes.len());
-            for hash in &tlog.inclusion_proof.hashes {
-                out.push(decode(hash.as_bytes(), "inclusion path hash")?);
-            }
-            out
-        },
+        path_hashes: tlog
+            .inclusion_proof
+            .hashes
+            .iter()
+            .map(|hash| decode(hash.as_bytes(), "inclusion path hash"))
+            .collect::<Result<_, _>>()?,
         checkpoint: tlog.inclusion_proof.checkpoint.envelope.clone(),
     })
 }

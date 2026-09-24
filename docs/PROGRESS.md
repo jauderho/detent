@@ -5,6 +5,20 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-23 - M3-M8 audit, concurrency, and conformance hardening
+
+The operations audit file now uses fsynced, sequence-numbered SHA-256 hash
+chains with a verifier and tamper/truncation tests. API scope refusals append
+`ScopeDenied` auth records, plan rejects invalid models before any root
+validator runs, and restore requires the caller's last-read target hash and
+answers 409 on drift. Conformance strategies now generate models containing
+embedded newlines and exercise injection rejection; the existing hosts
+entrypoint and certificate/key/SAN pairing checks remain covered.
+
+## 2026-09-23 - M22-M25 ACME/update hardening
+
+`detent-acme` now redacts `Issued` private keys and provider request headers in `Debug`, requires HTTPS acme-dns endpoints, models deSEC's RRset API (quoted TXT values and 3600-second TTL), and fails the ignored Pebble test when its required environment is absent. ACME documentation and pinned Pebble images reflect the implemented order flow. `detent-update` policy now sorts parsed releases by semver/date before selection, Merkle path verification rejects singleton paths with extra nodes, and install/rollback fsync the parent directory after rename. Scoped unit tests and clippy pass; doctest is blocked by the concurrently owned ACME transport manifest gap.
+
 ## 2026-09-23 - STAGE3 advisories: M12 journald scope, fmt baseline, M13 reopen fix
 
 Per advisory review: STAGE3:467 is M12's binding spec (`tracing-subscriber` fmt + env-filter, serve/mcp only, stderr) — shipped as specified, no second sink. `SECURITY_HARDENING:107` "journald after M12" is forward-looking docs, not M12 scope: journald destination lands with M3/audit work where PLAN §4.1 already names `tracing-journald`. `cargo fmt --check` (unpiped): fails on `detent-update/src/fetch.rs` (H18 file) identically on clean baseline and working tree (`diff` of both outputs empty) — pre-existing, untouched by M12/M13 slices. M13 reopened: STAGE3:473-474's rejection branch requires the FFI.md + lib.rs correction ("panic aborts the host process", `catch_unwind` rejected per ADR-010), now landed in working tree; hostile-input test pins observable half, spec's `guard(|| panic!())` untestable under `panic = "abort"`.

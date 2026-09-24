@@ -73,6 +73,8 @@ pub enum AuthEvent {
     TokenIssued,
     /// An API token was revoked.
     TokenRevoked,
+    /// A valid caller attempted an operation without its required scope.
+    ScopeDenied,
 }
 
 /// One line of the auth log.
@@ -344,12 +346,13 @@ mod tests {
             AuthEvent::TokenIssued,
             AuthEvent::TokenRevoked,
             AuthEvent::LockedOut,
+            AuthEvent::ScopeDenied,
         ] {
             emit(&sink, &AuthRecord::new(event, "alice", AuditResult::Ok));
         }
 
         let raw = std::fs::read_to_string(sink.path())?;
-        assert_eq!(raw.lines().count(), 5);
+        assert_eq!(raw.lines().count(), 6);
         assert_eq!(
             std::fs::metadata(sink.path())?.permissions().mode() & 0o777,
             0o600
@@ -359,10 +362,10 @@ mod tests {
         assert_eq!(back.len(), 2);
         assert_eq!(
             back.first().map(|record| record.event),
-            Some(AuthEvent::LockedOut),
+            Some(AuthEvent::ScopeDenied),
             "the newest record should come first"
         );
-        assert_eq!(sink.query(None).len(), 5);
+        assert_eq!(sink.query(None).len(), 6);
         Ok(())
     }
 

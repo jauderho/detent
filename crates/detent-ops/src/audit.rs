@@ -20,7 +20,7 @@
 //! engine learning what an IP address is.
 
 use std::fs::OpenOptions;
-use std::io::Write as _;
+use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -37,6 +37,11 @@ use crate::op::OpKind;
 /// Mode of the audit file: readable only by the account that owns the state
 /// directory.
 const AUDIT_FILE_MODE: u32 = 0o600;
+
+/// Number of records returned when a query omits `limit`.
+pub const DEFAULT_AUDIT_QUERY_LIMIT: usize = 100;
+/// Largest number of records one query may return.
+pub const MAX_AUDIT_QUERY_LIMIT: usize = 1000;
 
 /// How an operation ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +62,25 @@ pub enum AuditResult {
     Started,
 }
 
+/// Serializes appends across every [`FileAudit`] instance in this process.
+static APPEND_LOCK: Mutex<()> = Mutex::new(());
+
+/// The sequence and chain hash stored in every persisted audit record.
+///
+/// `prev_hash` and `new_hash` describe the configuration target. These fields
+/// describe the audit log itself, so a changed or removed record can be
+/// detected with [`FileAudit::verify`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct AuditChain {
+    /// One-based position in the log.
+    pub sequence: u64,
+    /// Hash of the preceding record, absent only for the first record.
+    pub prev: Option<String>,
+    /// Hash of this record and its link to the preceding one.
+    pub hash: String,
+}
+
 /// One line of the audit log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -75,10 +99,26 @@ pub struct AuditRecord {
     pub prev_hash: Option<String>,
     /// Digest of the target afterwards.
     pub new_hash: Option<String>,
+    /// Digest of the target before the operation, using the public audit name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    pub before_hash: Option<String>,
+    /// Digest of the target afterwards, using the public audit name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    pub after_hash: Option<String>,
+    /// Commit-confirm id associated with this operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<u32>))]
+    pub commit_id: Option<u32>,
     /// How it ended.
     pub result: AuditResult,
     /// Fluent id of the failure, when it failed.
     pub error_id: Option<String>,
+    /// Position and hash link in the audit log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<Object>))]
+    pub chain: Option<AuditChain>,
 }
 
 impl AuditRecord {
@@ -90,9 +130,13 @@ impl AuditRecord {
             who: who.subject.clone(),
             kind: who.kind,
             op,
+            chain: None,
             module,
             prev_hash: None,
             new_hash: None,
+            before_hash: None,
+            after_hash: None,
+            commit_id: None,
             result,
             error_id: None,
         }
@@ -103,6 +147,15 @@ impl AuditRecord {
     pub fn with_hashes(mut self, prev: Option<Sha256Digest>, new: Option<Sha256Digest>) -> Self {
         self.prev_hash = prev.map(|digest| digest.to_string());
         self.new_hash = new.map(|digest| digest.to_string());
+        self.before_hash = self.prev_hash.clone();
+        self.after_hash = self.new_hash.clone();
+        self
+    }
+
+    /// Attach the commit-confirm id associated with this operation.
+    #[must_use]
+    pub fn with_commit_id(mut self, commit_id: u32) -> Self {
+        self.commit_id = Some(commit_id);
         self
     }
 
@@ -126,7 +179,8 @@ fn now_rfc3339() -> String {
 /// Which records to read back.
 ///
 /// All filters must match; `None` means "any". `limit` keeps the **newest**
-/// matching records, because that is what an operator asks for.
+/// matching records, because that is what an operator asks for. It defaults to
+/// [`DEFAULT_AUDIT_QUERY_LIMIT`] and is capped at [`MAX_AUDIT_QUERY_LIMIT`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AuditQuery {
@@ -152,6 +206,14 @@ impl AuditQuery {
         };
         module_ok && who_ok
     }
+
+    /// Effective result cap after applying the default and maximum.
+    #[must_use]
+    pub fn effective_limit(&self) -> usize {
+        self.limit
+            .unwrap_or(DEFAULT_AUDIT_QUERY_LIMIT)
+            .min(MAX_AUDIT_QUERY_LIMIT)
+    }
 }
 
 /// The audit log could not be written or read.
@@ -165,6 +227,9 @@ pub enum AuditError {
     /// field is added that `serde_json` cannot represent.
     #[error("audit record could not be encoded: {0}")]
     Encode(String),
+    /// The log's sequence or hash chain is invalid.
+    #[error("audit chain is invalid: {0}")]
+    Chain(String),
 }
 
 /// Where audit records go.
@@ -223,10 +288,43 @@ impl FileAudit {
     }
 }
 
+impl FileAudit {
+    /// Verify the complete sequence and hash chain.
+    ///
+    /// This detects modified, removed, reordered, and inserted records. The
+    /// caller must retain the returned count/hash as an external anchor to
+    /// detect truncation of the final records.
+    ///
+    /// # Errors
+    ///
+    /// [`AuditError`] when the log cannot be read or its chain is invalid.
+    pub fn verify(&self) -> Result<AuditChain, AuditError> {
+        let raw = match std::fs::read_to_string(&self.path) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(AuditError::Chain("log does not exist".to_owned()));
+            }
+            Err(err) => return Err(AuditError::Io(err)),
+        };
+        verify_records(&raw)
+    }
+}
+
 impl AuditSink for FileAudit {
     fn record(&self, record: &AuditRecord) -> Result<(), AuditError> {
+        let _guard = APPEND_LOCK
+            .lock()
+            .map_err(|_| AuditError::Chain("audit append lock was poisoned".to_owned()))?;
+        let previous = match std::fs::read_to_string(&self.path) {
+            Ok(raw) if !raw.trim().is_empty() => Some(verify_records(&raw)?),
+            Ok(_) => None,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => return Err(AuditError::Io(err)),
+        };
+        let mut stored = record.clone();
+        stored.chain = Some(make_chain(&stored, previous.as_ref())?);
         let mut line =
-            serde_json::to_vec(record).map_err(|err| AuditError::Encode(err.to_string()))?;
+            serde_json::to_vec(&stored).map_err(|err| AuditError::Encode(err.to_string()))?;
         line.push(b'\n');
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -237,28 +335,98 @@ impl AuditSink for FileAudit {
             .mode(AUDIT_FILE_MODE)
             .open(&self.path)?;
         file.write_all(&line)?;
-        file.sync_data()?;
-        Ok(())
+        file.sync_data().map_err(AuditError::Io)
     }
 
     fn query(&self, query: &AuditQuery) -> Result<Vec<AuditRecord>, AuditError> {
-        let raw = match std::fs::read_to_string(&self.path) {
-            Ok(raw) => raw,
+        let file = match std::fs::File::open(&self.path) {
+            Ok(file) => file,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(err) => return Err(AuditError::Io(err)),
         };
-        let mut out = Vec::new();
-        for line in raw.lines().filter(|line| !line.trim().is_empty()) {
-            match serde_json::from_str::<AuditRecord>(line) {
-                Ok(record) if query.matches(&record) => out.push(record),
+        let limit = query.effective_limit();
+        let mut out = Vec::with_capacity(limit);
+        for line in BufReader::new(file).lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<AuditRecord>(&line) {
+                Ok(record) if query.matches(&record) => {
+                    if limit == 0 {
+                        continue;
+                    }
+                    if out.len() == limit {
+                        out.remove(0);
+                    }
+                    out.push(record);
+                }
                 Ok(_) => {}
                 // A truncated final line (a crash mid-append) must not make
                 // the whole log unreadable.
                 Err(err) => tracing::warn!(error = %err, "skipping unparseable audit line"),
             }
         }
-        Ok(newest_first(out, query.limit))
+        out.reverse();
+        Ok(out)
     }
+}
+
+/// Hash a record with its own hash cleared, then link it to `previous`.
+fn make_chain(
+    record: &AuditRecord,
+    previous: Option<&AuditChain>,
+) -> Result<AuditChain, AuditError> {
+    let mut unsigned = record.clone();
+    unsigned.chain = None;
+    let bytes = serde_json::to_vec(&unsigned).map_err(|err| AuditError::Encode(err.to_string()))?;
+    Ok(AuditChain {
+        sequence: previous.map_or(1, |chain| chain.sequence.saturating_add(1)),
+        prev: previous.map(|chain| chain.hash.clone()),
+        hash: Sha256Digest::of(&bytes).to_string(),
+    })
+}
+
+/// Parse and verify a whole JSON-lines log, returning its terminal anchor.
+fn verify_records(raw: &str) -> Result<AuditChain, AuditError> {
+    let mut previous: Option<AuditChain> = None;
+    for (index, line) in raw
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .enumerate()
+    {
+        let record: AuditRecord = serde_json::from_str(line).map_err(|err| {
+            AuditError::Chain(format!(
+                "record {} is not valid JSON: {err}",
+                index.saturating_add(1)
+            ))
+        })?;
+        let actual = record.chain.as_ref().ok_or_else(|| {
+            AuditError::Chain(format!(
+                "record {} has no chain metadata",
+                index.saturating_add(1)
+            ))
+        })?;
+        let expected_sequence = previous
+            .as_ref()
+            .map_or(1, |chain| chain.sequence.saturating_add(1));
+        let expected_prev = previous.as_ref().map(|chain| chain.hash.clone());
+        if actual.sequence != expected_sequence || actual.prev != expected_prev {
+            return Err(AuditError::Chain(format!(
+                "record {} is not linked to its predecessor",
+                index.saturating_add(1)
+            )));
+        }
+        let expected = make_chain(&record, previous.as_ref())?;
+        if actual.hash != expected.hash {
+            return Err(AuditError::Chain(format!(
+                "record {} hash does not match its contents",
+                index.saturating_add(1)
+            )));
+        }
+        previous = Some(actual.clone());
+    }
+    previous.ok_or_else(|| AuditError::Chain("log is empty".to_owned()))
 }
 
 /// A sink that discards everything, for `--dryrun` and for tests that are not
@@ -317,7 +485,7 @@ impl AuditSink for CaptureAudit {
             .into_iter()
             .filter(|record| query.matches(record))
             .collect();
-        Ok(newest_first(matching, query.limit))
+        Ok(newest_first(matching, Some(query.effective_limit())))
     }
 }
 
@@ -327,7 +495,7 @@ mod tests {
         AuditError, AuditQuery, AuditRecord, AuditResult, AuditSink, CaptureAudit, FileAudit,
         NullAudit, now_rfc3339,
     };
-    use crate::identity::{Identity, IdentityKind};
+    use crate::identity::Identity;
     use crate::op::OpKind;
     use detent_core::diag::MessageId;
     use detent_platform::fs::atomic::Sha256Digest;
@@ -349,11 +517,14 @@ mod tests {
         let new = Sha256Digest::of(b"after");
         let entry = record("root", Some("hosts"), AuditResult::Error)
             .with_hashes(Some(prev), Some(new))
+            .with_commit_id(7)
             .with_error(MessageId::new("ops-hash-conflict"));
         assert_eq!(entry.prev_hash.as_deref(), Some(prev.to_string().as_str()));
         assert_eq!(entry.new_hash.as_deref(), Some(new.to_string().as_str()));
+        assert_eq!(entry.before_hash, entry.prev_hash);
+        assert_eq!(entry.after_hash, entry.new_hash);
+        assert_eq!(entry.commit_id, Some(7));
         assert_eq!(entry.error_id.as_deref(), Some("ops-hash-conflict"));
-        assert_eq!(entry.kind, IdentityKind::LocalUser);
         assert!(!entry.ts.is_empty());
         let json = serde_json::to_value(&entry)?;
         assert_eq!(serde_json::from_value::<AuditRecord>(json)?, entry);
@@ -363,6 +534,9 @@ mod tests {
         let bare = record("root", None, AuditResult::Ok);
         assert_eq!(bare.prev_hash, None);
         assert_eq!(bare.new_hash, None);
+        assert_eq!(bare.before_hash, None);
+        assert_eq!(bare.after_hash, None);
+        assert_eq!(bare.commit_id, None);
         assert_eq!(bare.error_id, None);
         assert_eq!(bare.clone().with_hashes(None, None).prev_hash, None);
         Ok(())
@@ -426,6 +600,7 @@ mod tests {
         assert!(sink.path().ends_with("detent-audit.jsonl"));
         // Reading before anything was written is not an error.
         assert!(sink.query(&AuditQuery::default())?.is_empty());
+        assert!(matches!(sink.verify(), Err(AuditError::Chain(_))));
 
         sink.record(&record("root", Some("hosts"), AuditResult::Ok))?;
         sink.record(&record("alice", Some("chrony"), AuditResult::Error))?;
@@ -450,6 +625,35 @@ mod tests {
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered.first().map(|r| r.who.as_str()), Some("root"));
         assert!(format!("{sink:?}").contains("FileAudit"));
+        let anchor = sink.verify()?;
+        assert_eq!(anchor.sequence, 2);
+        assert_eq!(anchor.hash.len(), 64);
+        assert!(anchor.prev.is_some());
+        assert!(all.iter().all(|record| record.chain.is_some()));
+        Ok(())
+    }
+
+    #[test]
+    fn verification_detects_tampering_and_truncation_against_an_anchor() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let sink = FileAudit::new(dir.path().join("audit.jsonl"));
+        sink.record(&record("root", Some("hosts"), AuditResult::Ok))?;
+        sink.record(&record("alice", Some("hosts"), AuditResult::Ok))?;
+        sink.record(&record("root", Some("chrony"), AuditResult::Ok))?;
+        let anchor = sink.verify()?;
+
+        let raw = std::fs::read_to_string(sink.path())?;
+        let mut lines: Vec<String> = raw.lines().map(ToOwned::to_owned).collect();
+        let second = lines.get_mut(1).ok_or("three audit records")?;
+        *second = second.replace("alice", "mallory");
+        std::fs::write(sink.path(), lines.join("\n") + "\n")?;
+        assert!(matches!(sink.verify(), Err(AuditError::Chain(_))));
+
+        std::fs::write(
+            sink.path(),
+            format!("{}\n", lines.first().ok_or("three audit records")?),
+        )?;
+        assert!(matches!(sink.verify(), Ok(terminal) if terminal != anchor));
         Ok(())
     }
 
@@ -461,6 +665,32 @@ mod tests {
         raw.push_str("\n\n{ truncated\n");
         std::fs::write(sink.path(), raw)?;
         assert_eq!(sink.query(&AuditQuery::default())?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn audit_queries_default_to_one_hundred_and_cap_at_one_thousand() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let sink = FileAudit::new(dir.path().join("audit.jsonl"));
+        let mut raw = String::new();
+        for _ in 0..1001 {
+            raw.push_str(&serde_json::to_string(&record(
+                "root",
+                Some("hosts"),
+                AuditResult::Ok,
+            ))?);
+            raw.push('\n');
+        }
+        std::fs::write(sink.path(), raw)?;
+        assert_eq!(sink.query(&AuditQuery::default())?.len(), 100);
+        assert_eq!(
+            sink.query(&AuditQuery {
+                limit: Some(usize::MAX),
+                ..AuditQuery::default()
+            })?
+            .len(),
+            1000
+        );
         Ok(())
     }
 

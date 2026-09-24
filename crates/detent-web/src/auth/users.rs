@@ -442,6 +442,10 @@ impl UserStore {
         if !hasher.verify(password, &record.phc) {
             return Err(AuthError::InvalidCredentials);
         }
+        if hasher.needs_rehash(&record.phc) {
+            let phc = hasher.hash(password)?;
+            self.update(&record.name, |stored| stored.phc.clone_from(&phc))?;
+        }
         let totp = match record.totp_secret {
             Some(ref text) => Some(TotpSecret::from_base32(text)?),
             None => None,
@@ -739,6 +743,37 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn successful_verification_rehashes_at_the_current_cost_without_clearing_the_flag() -> R {
+        let root = tempfile::tempdir()?;
+        let old = hasher()?;
+        let store = open(root.path())?;
+        store.create(&old, "alice", "hunter2", true)?;
+        let current = Hasher::new(
+            Argon2Params {
+                m_kib: Some(16),
+                t: 1,
+                p: 1,
+            },
+            4096,
+        )?;
+
+        let verified = store.verify_password(&current, "alice", "hunter2")?;
+        assert!(verified.must_change_password);
+        let raw = std::fs::read(store.path())?;
+        let stored = serde_json::from_slice::<serde_json::Value>(&raw)?;
+        let phc = stored
+            .get("users")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|u| u.get("phc"))
+            .and_then(|v| v.as_str())
+            .ok_or("missing PHC")?;
+        assert!(!current.needs_rehash(phc));
+        assert!(current.verify("hunter2", phc));
         Ok(())
     }
 

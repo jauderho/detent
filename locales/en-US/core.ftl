@@ -21,6 +21,7 @@ chrony-missing-makestep = makestep is not set; at startup the clock can drift un
 chrony-missing-rtcsync = rtcsync is not set; the hardware clock will drift relative to the system clock.
 chrony-rec-nts = the pool {$pool} is used without the nts option; prefer nts-capable sources so time cannot be spoofed.
 chrony-cmdport-open = cmdport is {$port}; set cmdport 0 unless chronyc must reach this host over the network.
+chrony-external-directive = `{$key}` loads external files or runs an external program; this module refuses directives that cross its configured file boundary.
 
 ## dhcp module — display name, security notes, schema tooltips
 dhcp-name = dhcp
@@ -45,6 +46,7 @@ dhcp-empty-key = a dnsmasq setting has an empty option name.
 dhcp-invalid-key = `{$key}` is not a valid dnsmasq option name; it must be one word without whitespace, `=` or `#`.
 dhcp-malformed-cidr = `{$value}` is not a valid CIDR prefix, e.g. `192.168.1.0/24`.
 dhcp-malformed-pool = `{$value}` is not a valid pool; use a range like `192.168.1.100 - 192.168.1.200` or a CIDR prefix.
+dhcp-external-directive = `{$key}` loads external files or runs commands; this module will not create or modify directives that cross its configured file boundary.
 dhcp-authoritative-set = `dhcp-authoritative` makes dnsmasq the sole DHCP server on the segment; only set it when no other DHCP server exists.
 dhcp-kea-interfaces-empty = {$server} has no interfaces configured and will listen on every interface; name the interfaces explicitly.
 dhcp-rec-rebind = domain-needed and bogus-priv are not both set; they filter rebind attacks and upstream A-for-private queries.
@@ -89,6 +91,8 @@ mounts-invalid-fstype = `{$fstype}` is not a valid filesystem type.
 mounts-pass-too-high = entry {$index} has pass `{$pass}`; fsck runs at most 2 passes.
 mounts-root-pass = the root filesystem should have pass 1, not `{$pass}`.
 mounts-missing-nofail = `{$mountpoint}` is removable media without `nofail`; the boot hangs when it is unplugged.
+mounts-missing-boot-escape = `{$mountpoint}` has neither nofail nor noauto; a failed mount can hold up boot.
+mounts-critical-noauto = `{$mountpoint}` is required for boot but has noauto, so the system may continue without it.
 mounts-missing-guards = `{$mountpoint}` mounts user-writable data without `{$missing}`; add them.
 mounts-network-automount = `{$mountpoint}` is a network filesystem without `x-systemd.automount`; the boot waits for the network.
 mounts-noauto-without-user = `noauto` without `user`: only root can mount it, defeating the point.
@@ -146,7 +150,7 @@ nfs-bad-path = `{$path}` contains syntax that would truncate the export line.
 nfs-bad-continuation = `{$path}` would end with a continuation backslash and fold the next line.
 nfs-invalid-option = `{$option}` is not a valid export option; options are bare tokens with no whitespace or parentheses.
 nfs-no-root-squash = `{$host}` mounts with no_root_squash and keeps root privileges on the export.
-nfs-sec-sys-only = `{$host}` negotiates only sec=sys; add krb5p for cryptographic protection.
+nfs-sec-sys-only = `{$host}` uses the sec=sys default or negotiates only sec=sys; add krb5p for cryptographic protection.
 nfs-world-export = `{$host}` is reachable read-write by every client.
 nfs-subtree-undecided = `{$host}` states neither subtree_check nor no_subtree_check; upstream changed the default, so say which one you want.
 nfs-root-squash-undecided = `{$host}` states neither root_squash nor no_root_squash; say which one you want.
@@ -201,6 +205,19 @@ samba-restrict-anonymous = `restrict anonymous` is {$value}; 2 hides the share l
 samba-rec-server-signing = `server signing` is {$value}; set mandatory so SMB traffic is cryptographically signed.
 samba-rec-load-printers = `load printers` is {$value}; set no unless this host actually shares printers.
 samba-rec-interfaces = no `interfaces` directive is set; bind samba to explicit addresses instead of listening on every interface.
+samba-writable-exposure = this share permits writes through writeable, read only, or write list; confirm every client should have write access.
+samba-root-command = `{$key}` runs a command with root privileges on every matching connection.
+
+## module template — copy-me example
+TEMPLATE-name = module template
+TEMPLATE-note-precedence = this fictional module is a compile-checked example for new config modules.
+TEMPLATE-tip-settings = the settings this fictional module models, in file order.
+TEMPLATE-tip-key = the directive name, one word, with no whitespace.
+TEMPLATE-tip-value = the directive value, up to the end of the line.
+TEMPLATE-rec-value = prefer an explicit value over relying on an upstream default.
+TEMPLATE-invalid-key = `{$key}` is not a valid directive name.
+TEMPLATE-duplicate-key = `{$key}` is set more than once; the last value wins.
+TEMPLATE-too-many-settings = this file has {$count} settings; split large configurations into smaller files.
 
 ## detent-core — parse, model, and edit errors
 ## These are the failures a module's own document model can raise, so they are
@@ -215,6 +232,7 @@ core-edit-unsupported = this edit cannot be expressed in the file's format: {$re
 ## operations layer — errors surfaced by detent-ops
 ops-unknown-module = there is no module named `{$module}` in this build.
 ops-invalid-model = the configuration for `{$module}` is not valid: {$reason}
+ops-check-failed = the external validator `{$program}` refused the candidate: {$reason}
 ops-hash-conflict = `{$path}` changed on disk since it was read; re-read it and try again.
 ops-privsep-failed = the privileged helper refused or could not complete the request: {$reason}
 ops-service-failed = the service action did not complete: {$reason}
@@ -232,7 +250,6 @@ web-config-zero-value = `{$field}` must be greater than zero.
 web-config-weak-argon2 = `auth.argon2.m_kib` is {$m}, below the minimum of {$min} kib.
 web-tls-generate-failed = the bootstrap certificate could not be generated: {$reason}
 web-tls-key-rejected = the certificate and its private key were rejected: {$reason}
-web-tls-no-provider = this build has no usable tls crypto provider.
 web-tls-store-unreadable = `{$path}` could not be read: {$reason}
 web-tls-store-unwritable = `{$path}` could not be prepared for writing: {$reason}
 web-tls-store-write-failed = `{$path}` could not be written: {$reason}

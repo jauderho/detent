@@ -29,10 +29,15 @@ serde_json = { workspace = true }
 # it defaults to aws-lc-rs, matching the workspace crypto stack (no ring).
 # `time` enables Account::renewal_info (ARI, RFC 9773); `x509-parser` reads
 # the AKI/serial the ARI identifier needs out of the issued chain.
-instant-acme = { version = "=0.8.5", features = ["time"] }
+instant-acme = { version = "=0.8.5", default-features = false, features = ["aws-lc-rs", "time"] }
 base64 = { workspace = true }
 rustls-pki-types = { workspace = true }
 time = { workspace = true }
+hyper = { workspace = true }
+hyper-rustls = { workspace = true }
+hyper-util = { workspace = true }
+rustls = { workspace = true }
+webpki-roots = { workspace = true }
 x509-parser = { workspace = true }
 
 [dev-dependencies]

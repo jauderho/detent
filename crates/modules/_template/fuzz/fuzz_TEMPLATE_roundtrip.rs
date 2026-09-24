@@ -7,7 +7,7 @@
 #![no_main]
 
 use detent_core::module::ConfigModule;
-use detent_module_TEMPLATE::TemplateModule;
+use detent_module_template::TemplateModule;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

@@ -21,12 +21,28 @@ use crate::{AcmeError, DnsProvider, DnsRecord, validate_fqdn, validate_value};
 // ---------------------------------------------------------------------------
 
 /// One built-but-unsent request to a provider's HTTP API.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct HttpRequest {
     method: &'static str,
     url: String,
     headers: Vec<(&'static str, String)>,
     body: String,
+}
+
+impl fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let headers = self
+            .headers
+            .iter()
+            .map(|(name, _)| (*name, "[redacted]"))
+            .collect::<Vec<_>>();
+        f.debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("headers", &headers)
+            .field("body", &self.body)
+            .finish()
+    }
 }
 
 /// Sends a built request and returns `(status, body)`.
@@ -249,7 +265,7 @@ impl AcmeDnsProvider {
     ///
     /// # Errors
     ///
-    /// [`AcmeError::Config`] when the server is not an http(s) URL or the
+    /// [`AcmeError::Config`] when the server is not an HTTPS URL or the
     /// credentials are empty or non-printable.
     pub fn new(
         server: impl Into<String>,
@@ -260,9 +276,9 @@ impl AcmeDnsProvider {
         let username = username.into();
         let password = password.into();
         let server = server.trim_end_matches('/').to_owned();
-        if !server.starts_with("https://") && !server.starts_with("http://") {
+        if !server.starts_with("https://") {
             return Err(AcmeError::Config(format!(
-                "acme-dns: server must be an http(s) URL, got {server:?}"
+                "acme-dns: server must be an https:// URL, got {server:?}"
             )));
         }
         validate_value(&username).map_err(|_| {
@@ -405,7 +421,7 @@ impl DeSecProvider {
     }
 
     fn rrset_url(&self, subname: &str) -> String {
-        format!("{DESEC_API}/{}/records/{subname}/TXT/", self.domain)
+        format!("{DESEC_API}/{}/rrsets/{subname}/TXT/", self.domain)
     }
 }
 
@@ -420,7 +436,13 @@ impl DnsProvider for DeSecProvider {
             method: "PUT",
             url: self.rrset_url(subname),
             headers: self.auth().to_vec(),
-            body: serde_json::json!({"records": [record.value()], "ttl": 60}).to_string(),
+            body: serde_json::json!({
+                "subname": subname,
+                "type": "TXT",
+                "records": [format!("\"{}\"", record.value())],
+                "ttl": 3600,
+            })
+            .to_string(),
         };
         let (status, _) = send(&put)?;
         if (200..300).contains(&status) {
@@ -463,7 +485,7 @@ impl DnsProvider for DeSecProvider {
         let get = HttpRequest {
             method: "GET",
             url: format!(
-                "{DESEC_API}/{}/records/?subname={subname}&type=TXT",
+                "{DESEC_API}/{}/rrsets/?subname={subname}&type=TXT",
                 self.domain
             ),
             headers: self.auth().to_vec(),
@@ -487,11 +509,15 @@ impl DnsProvider for DeSecProvider {
 fn rrset_contains(body: &str, value: &str) -> Result<bool, AcmeError> {
     let parsed: serde_json::Value = serde_json::from_str(body)
         .map_err(|e| AcmeError::Config(format!("deSEC: unreadable RRset response: {e}")))?;
+    let quoted = format!("\"{value}\"");
     Ok(parsed.as_array().is_some_and(|rrsets| {
         rrsets.iter().any(|rr| {
             rr.get("records")
                 .and_then(serde_json::Value::as_array)
-                .is_some_and(|vals| vals.iter().any(|v| v.as_str() == Some(value)))
+                .is_some_and(|vals| {
+                    vals.iter()
+                        .any(|v| v.as_str() == Some(value) || v.as_str() == Some(&quoted))
+                })
         })
     }))
 }
@@ -1012,7 +1038,7 @@ mod tests {
         assert_eq!(req.method, "PUT");
         assert_eq!(
             req.url,
-            "https://desec.io/api/v1/domains/example.com/records/_acme-challenge.sub/TXT/"
+            "https://desec.io/api/v1/domains/example.com/rrsets/_acme-challenge.sub/TXT/"
         );
         assert!(
             req.headers
@@ -1023,8 +1049,13 @@ mod tests {
         assert_eq!(
             body.get("records")
                 .and_then(serde_json::Value::as_array)
-                .map(Vec::len),
-            Some(1)
+                .and_then(|records| records.first())
+                .and_then(serde_json::Value::as_str),
+            Some("\"digest-value-42\"")
+        );
+        assert_eq!(
+            body.get("ttl").and_then(serde_json::Value::as_u64),
+            Some(3600)
         );
         Ok(())
     }
@@ -1042,7 +1073,7 @@ mod tests {
     fn desec_wait_propagated_confirms_or_defers() -> R {
         let (send, _) = scripted(&[(
             200,
-            r#"[{"subname":"_acme-challenge","type":"TXT","records":["digest-value-42"],"ttl":60}]"#,
+            r#"[{"subname":"_acme-challenge","type":"TXT","records":["\"digest-value-42\""],"ttl":3600}]"#,
         )]);
         let ds = DeSecProvider::new("tok", "example.com")?.with_transport(send);
         ds.wait_propagated(&record()?)?;
@@ -1339,8 +1370,9 @@ mod tests {
         let ds = DeSecProvider::new("tok", "example.com")?.with_transport(send);
         ds.present(&apex)?;
         assert!(
-            last(&script)?.url.contains("/records/@/TXT/"),
-            "the apex is `@`, not an empty subname"
+            last(&script)?.url.contains("/rrsets/@/TXT/"),
+            "the apex is `@`, not an empty subname: {}",
+            last(&script)?.url
         );
         Ok(())
     }
@@ -1422,5 +1454,26 @@ mod tests {
                 "secret material leaked in debug output: {dump}"
             );
         }
+    }
+
+    #[test]
+    fn http_request_debug_redacts_header_values() {
+        let request = HttpRequest {
+            method: "GET",
+            url: "https://example.test".to_owned(),
+            headers: vec![("Authorization", "Bearer super-secret".to_owned())],
+            body: "visible".to_owned(),
+        };
+        let dump = format!("{request:?}");
+        assert!(!dump.contains("super-secret"));
+        assert!(dump.contains("[redacted]"));
+    }
+
+    #[test]
+    fn acme_dns_rejects_plain_http() {
+        assert!(matches!(
+            AcmeDnsProvider::new("http://dns.example", "user", "pass"),
+            Err(AcmeError::Config(message)) if message.contains("https://")
+        ));
     }
 }

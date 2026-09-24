@@ -158,6 +158,9 @@ pub enum Operation {
         id: String,
         /// Index into the listing [`Operation::ListBackups`] returned.
         backup_id: BackupId,
+        /// Digest the caller last read. A mismatch is refused rather than
+        /// restoring a backup over a newer edit.
+        expected_hash: Option<Sha256Digest>,
     },
     /// The run state of the module's service.
     ServiceStatus {
@@ -363,6 +366,7 @@ mod tests {
             Operation::Restore {
                 id: "hosts".to_owned(),
                 backup_id: BackupId(0),
+                expected_hash: None,
             },
             Operation::ServiceStatus {
                 id: "hosts".to_owned(),

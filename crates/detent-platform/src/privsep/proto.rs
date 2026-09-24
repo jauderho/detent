@@ -204,6 +204,18 @@ impl From<CoreServiceAction> for ServiceAction {
     }
 }
 
+/// Service mutation to repeat after a pending commit's files are restored.
+///
+/// The binding is an allow-list id, never a unit name supplied by the worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+pub struct PendingService {
+    /// Which service binding the action applies to.
+    pub binding: BindingId,
+    /// Which mutating action to replay after restoring the files.
+    pub action: ServiceAction,
+}
+
 // ---------------------------------------------------------------------------
 // Requests
 // ---------------------------------------------------------------------------
@@ -266,6 +278,8 @@ pub enum Request {
         commit: CommitId,
         /// Seconds until automatic rollback.
         timeout_s: u16,
+        /// Service action to replay if the commit rolls back.
+        service: Option<PendingService>,
     },
     /// Confirm a pending commit; the recorded rollback is discarded.
     ConfirmCommit {
@@ -283,13 +297,17 @@ pub enum Request {
         /// Which target.
         target: TargetId,
     },
-    /// Replace the running binary. Reserved for the `update` feature; answered
-    /// with [`ProtoError::Unsupported`] for now, and defined unconditionally
-    /// for the same discriminant-stability reason as [`Request::Mount`].
+    /// Replace the running binary with a staged release.
+    ///
+    /// The monitor materializes `<state_root>/update/staged/<hex sha256>`
+    /// from the tag-named worker input, authenticates those bytes against
+    /// `<tag>.sigstore.json`, and atomically swaps them into place.
     ReplaceBinary {
-        /// Length of the replacement image, streamed separately.
+        /// Release tag, also naming the staged binary and bundle inputs.
+        tag: String,
+        /// Length of the replacement image.
         len: u64,
-        /// Digest the streamed image must have.
+        /// Digest the staged image must have.
         sha256: Sha256Digest,
     },
     /// Ask the monitor to stop serving and exit.
@@ -521,7 +539,8 @@ pub enum Response {
     /// Answer to [`Request::ReplaceBinary`].
     ///
     /// Appended after [`Response::RolledBack`] so every prior discriminant
-    /// keeps its value; [`PROTO_VERSION`] stays `1` because the two ends of
+    /// keeps its value; this is the release-swap path described at
+    /// [`PROTO_VERSION`].
     Replaced {
         /// The version that was installed (hex sha256 of the staged image).
         version: String,
@@ -572,6 +591,9 @@ pub enum ProtoError {
     /// A commit is already pending; only one is allowed at a time.
     #[error("commit {0} is already pending")]
     CommitPending(CommitId),
+    /// A commit-confirm deadline passed; its changes were rolled back.
+    #[error("commit {0} confirmation window expired")]
+    CommitExpired(CommitId),
     /// The functionality exists in the protocol but is not built or not wired
     /// up in this binary.
     #[error("unsupported request: {0}")]
@@ -583,6 +605,9 @@ pub enum ProtoError {
     /// A syscall failed. The message is a short summary with no path in it.
     #[error("i/o error: {0}")]
     Io(String),
+    /// The staged release failed authenticity verification.
+    #[error("staged release verification failed")]
+    VerificationFailed,
 }
 
 /// Which allow-list table an [`ProtoError::UnknownId`] refers to.
@@ -706,8 +731,8 @@ mod tests {
     use super::{
         BackupId, BackupInfo, BindingId, BindingInfo, CheckId, CheckInfo, CheckOutcome, CodecError,
         CommitId, HelloAck, IdKind, MAX_FRAME, ModuleId, ModuleInfo, PROTO_VERSION, PathKind,
-        ProtoError, Request, Response, ServiceAction, ServiceOutcome, TargetContents, TargetId,
-        TargetInfo, WriteReceipt, decode, encode,
+        PendingService, ProtoError, Request, Response, ServiceAction, ServiceOutcome,
+        TargetContents, TargetId, TargetInfo, WriteReceipt, decode, encode,
     };
     use crate::fs::atomic::Sha256Digest;
     use detent_core::descriptor::{ServiceAction as CoreServiceAction, TargetKind};
@@ -756,6 +781,10 @@ mod tests {
             Request::StartConfirmTimer {
                 commit: CommitId(11),
                 timeout_s: 90,
+                service: Some(PendingService {
+                    binding: BindingId(2),
+                    action: ServiceAction::Reload,
+                }),
             },
             Request::ConfirmCommit {
                 commit: CommitId(11),
@@ -764,6 +793,7 @@ mod tests {
                 target: TargetId(4),
             },
             Request::ReplaceBinary {
+                tag: "v1.2.3".to_owned(),
                 len: 4_096,
                 sha256: digest(),
             },
@@ -866,6 +896,7 @@ mod tests {
                 actual: Some(digest()),
             }),
             Response::Error(ProtoError::CommitPending(CommitId(3))),
+            Response::Error(ProtoError::CommitExpired(CommitId(4))),
             Response::Error(ProtoError::Unsupported("mount".to_owned())),
             Response::Error(ProtoError::Unavailable("no service manager".to_owned())),
             Response::Error(ProtoError::Io("openat failed".to_owned())),

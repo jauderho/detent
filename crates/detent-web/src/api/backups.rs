@@ -5,21 +5,23 @@
 //!   POST /modules/{id}/backups/{backup_id}/restore ─▶ Restore    ─▶ writes the target
 //! ```
 
-use axum::Json;
-use axum::Router;
-use axum::extract::rejection::PathRejection;
+use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
+use axum::{Json, Router};
 use detent_ops::{OpOutcome, Operation};
 use detent_platform::fs::atomic::Sha256Digest;
 use detent_platform::privsep::proto::{BackupId, BackupInfo};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::auth::extract::{Caller, WriteCaller};
 use crate::error::ApiError;
 use crate::state::AppState;
 
-use super::{authorize, path_rejection, unexpected_outcome, unknown_module, well_formed_id};
+use super::modules::parse_hash;
+use super::{
+    authorize, json_rejection, path_rejection, unexpected_outcome, unknown_module, well_formed_id,
+};
 
 /// `GET /api/v1/modules/{id}/backups`.
 pub const LIST_PATH: &str = "/api/v1/modules/{id}/backups";
@@ -63,6 +65,16 @@ pub struct RestoredView {
     pub new_hash: String,
 }
 
+/// The body of `POST /api/v1/modules/{id}/backups/{backup_id}/restore`.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RestoreRequest {
+    /// Digest the caller last read, as 64 lowercase hex characters.
+    #[cfg_attr(test, schema(min_length = 64, max_length = 64))]
+    pub expected_hash: String,
+}
+
 /// `GET /api/v1/modules/{id}/backups`.
 #[cfg_attr(test, utoipa::path(
     get,
@@ -86,7 +98,7 @@ pub(super) async fn list(
         return Err(unknown_module(&id));
     }
     let op = Operation::ListBackups { id };
-    authorize(&caller, &op)?;
+    authorize(&state, &caller, &op)?;
     let outcome = state.engine.execute(op, caller.identity().clone()).await?;
     render_backups(outcome)
 }
@@ -111,25 +123,31 @@ fn render_backups(outcome: OpOutcome) -> Result<Json<Vec<BackupInfo>>, ApiError>
         ("id" = String, Path, description = "Module id"),
         ("backup_id" = u32, Path, description = "Index into `GET .../backups`"),
     ),
+    request_body = RestoreRequest,
     responses(
         (status = 200, description = "The backup was put back", body = RestoredView),
         (status = 404, description = "No such module", body = crate::error::ErrorBody),
+        (status = 409, description = "The target changed since `expected_hash` was read", body = crate::error::ErrorBody),
     ),
 ))]
 pub(super) async fn restore(
     State(state): State<AppState>,
     caller: WriteCaller,
     path: Result<Path<(String, u32)>, PathRejection>,
+    body: Result<Json<RestoreRequest>, JsonRejection>,
 ) -> Result<Json<RestoredView>, ApiError> {
     let Path((id, backup_id)) = path.map_err(path_rejection)?;
     if !well_formed_id(&id) {
         return Err(unknown_module(&id));
     }
+    let Json(request) = body.map_err(json_rejection)?;
+    let expected_hash = Some(parse_hash(&request.expected_hash)?);
     let op = Operation::Restore {
         id,
         backup_id: BackupId(backup_id),
+        expected_hash,
     };
-    authorize(caller.caller(), &op)?;
+    authorize(&state, caller.caller(), &op)?;
     let outcome = state
         .engine
         .execute(op, caller.caller().identity().clone())
@@ -149,7 +167,6 @@ fn render_restored(outcome: &OpOutcome) -> Result<Json<RestoredView>, ApiError> 
     }
 }
 
-/// The 64-character lowercase hex a client compares against `expected_hash`.
 fn render_hash(hash: &Sha256Digest) -> String {
     hash.to_string()
 }

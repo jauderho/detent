@@ -470,6 +470,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "description": "The backup was put back",
@@ -483,6 +493,16 @@
           },
           "404": {
             "description": "No such module",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The target changed since `expected_hash` was read",
             "content": {
               "application/json": {
                 "schema": {
@@ -1056,6 +1076,36 @@
           "result"
         ],
         "properties": {
+          "after_hash": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Digest of the target afterwards, using the public audit name."
+          },
+          "before_hash": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Digest of the target before the operation, using the public audit name."
+          },
+          "chain": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Position and hash link in the audit log."
+          },
+          "commit_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Commit-confirm id associated with this operation.",
+            "minimum": 0
+          },
           "error_id": {
             "type": [
               "string",
@@ -1926,6 +1976,22 @@
             "description": "Whether applying would change anything at all."
           }
         }
+      },
+      "RestoreRequest": {
+        "type": "object",
+        "description": "The body of `POST /api/v1/modules/{id}/backups/{backup_id}/restore`.",
+        "required": [
+          "expected_hash"
+        ],
+        "properties": {
+          "expected_hash": {
+            "type": "string",
+            "description": "Digest the caller last read, as 64 lowercase hex characters.",
+            "maxLength": 64,
+            "minLength": 64
+          }
+        },
+        "additionalProperties": false
       },
       "RestoredView": {
         "type": "object",

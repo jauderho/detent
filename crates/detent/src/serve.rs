@@ -478,7 +478,6 @@ async fn bind_web_server(
             );
         };
 
-    detent_web::install_crypto_provider();
     // A renewed pair survives a restart: prefer the stored ACME chain over
     // the bootstrap pair, whose fingerprint stays the TOFU anchor until the
     // first renewal lands.
@@ -491,7 +490,11 @@ async fn bind_web_server(
     };
     let cert = match stored_acme {
         Some(pair) => pair,
-        None => match detent_web::load_or_bootstrap(&config.tls.cert_dir, hostnames) {
+        None => match detent_web::load_or_bootstrap(
+            &config.tls.cert_dir,
+            hostnames,
+            config.tls.bootstrap == detent_web::Bootstrap::Acme,
+        ) {
             Ok(cert) => cert,
             Err(err) => {
                 tls_failed(&err, renderer, streams);
@@ -893,10 +896,19 @@ mod web_tests {
         .await
         .ok_or("bind_web_server must succeed against a fresh temp dir")?;
         assert_ne!(bound.local_addr().port(), 0);
-        assert!(dir.path().join("certs").join("bootstrap.cert.der").exists());
+        let certs = dir.path().join("certs");
+        assert!(
+            certs.join("bootstrap.pair").exists() || certs.join("bootstrap.cert.der").exists(),
+            "bootstrap cert missing in {certs:?}: {:?}",
+            std::fs::read_dir(&certs)
+                .map(|r| r
+                    .filter_map(Result::ok)
+                    .map(|e| e.file_name())
+                    .collect::<Vec<_>>())
+                .unwrap_or_default()
+        );
         let text = String::from_utf8(notes)?;
         assert!(text.contains("fingerprint"), "{text}");
-
         drop(bound);
         thread.join().map_err(|err| format!("{err:?}"))?;
         monitor.join().map_err(|_| "monitor thread panicked")?;

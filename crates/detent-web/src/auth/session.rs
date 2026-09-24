@@ -37,7 +37,9 @@ use sha2::{Digest as _, Sha256};
 use crate::authz::Scopes;
 
 use super::AuthError;
+use super::ratelimit::RateLimiter;
 use super::secret::Secret;
+use super::token::TokenStore;
 
 /// Cookie the session id travels in.
 ///
@@ -406,31 +408,54 @@ fn expired(session: &Session, idle: Duration, absolute: Duration, now: Instant) 
         || now.saturating_duration_since(session.created) >= absolute
 }
 
-/// Run [`SessionStore::sweep`] every `period` until the store is dropped.
+/// Run periodic maintenance for sessions, expired API tokens and idle login
+/// limiter buckets until all three stores are dropped.
 ///
-/// Lazy eviction on lookup is enough for correctness; this is what keeps the
-/// memory of sessions nobody returns to from being held until the next login.
-/// The task ends on its own once the last other reference to the store is
-/// gone, so nothing has to remember to stop it.
-pub fn spawn_sweeper(store: &Arc<SessionStore>, period: Duration) -> tokio::task::JoinHandle<()> {
-    let weak = Arc::downgrade(store);
+/// Lazy eviction on lookup is enough for credential correctness; this is what
+/// keeps memory of sessions and principals nobody returns to from accumulating.
+pub fn spawn_sweeper(
+    store: &Arc<SessionStore>,
+    tokens: &Arc<TokenStore>,
+    limiter: &Arc<RateLimiter>,
+    period: Duration,
+) -> tokio::task::JoinHandle<()> {
+    let store_wk = Arc::downgrade(store);
+    let tokens_wk = Arc::downgrade(tokens);
+    let limiter_wk = Arc::downgrade(limiter);
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(period);
         // The first tick completes immediately; skip it so the task does not
-        // sweep an empty store the moment it starts.
+        // sweep empty stores the moment it starts.
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            let Some(store) = weak.upgrade() else { return };
-            // `tokio::time::Instant` is the system clock in a running
-            // server and a controllable one under `start_paused`, which is
-            // what makes this loop testable without a real minute passing.
-            let dropped = store.sweep(tokio::time::Instant::now().into_std());
-            if dropped > 0 {
-                tracing::debug!(dropped, "expired sessions swept");
+            let now = now_from_tick();
+            let sessions = store_wk.upgrade().map_or(0, |s| s.sweep(now));
+            let token_count = tokens_wk
+                .upgrade()
+                .and_then(|t| {
+                    t.sweep_expired(time::OffsetDateTime::now_utc().unix_timestamp())
+                        .ok()
+                })
+                .unwrap_or(0);
+            if let Some(l) = limiter_wk.upgrade() {
+                l.sweep(now);
+            }
+            if sessions != 0 || token_count != 0 {
+                tracing::debug!(sessions, tokens = token_count, "expired auth state swept");
+            }
+            if store_wk.strong_count() == 0
+                && tokens_wk.strong_count() == 0
+                && limiter_wk.strong_count() == 0
+            {
+                break;
             }
         }
     })
+}
+
+fn now_from_tick() -> std::time::Instant {
+    tokio::time::Instant::now().into_std()
 }
 
 #[cfg(test)]
@@ -440,7 +465,9 @@ mod tests {
         spawn_sweeper,
     };
     use crate::auth::AuthError;
-    use crate::auth::secret::Secret;
+    use crate::auth::RateLimiter;
+    use crate::auth::Secret;
+    use crate::auth::token::TokenStore;
     use crate::authz::Scopes;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -641,14 +668,17 @@ mod tests {
         let (_id, _session) = store.create("alice", Scopes::read_write(), false, Instant::now())?;
         assert_eq!(store.len(), 1);
 
-        let handle = spawn_sweeper(&store, Duration::from_millis(50));
+        let root = tempfile::tempdir()?;
+        let tokens = Arc::new(TokenStore::load(root.path())?);
+        let limiter = Arc::new(RateLimiter::new(5));
+        let handle = spawn_sweeper(&store, &tokens, &limiter, Duration::from_millis(50));
         // Paused time: sleeping advances the clock past both the session's
         // idle limit and several sweep intervals.
         tokio::time::sleep(Duration::from_secs(3)).await;
         tokio::task::yield_now().await;
         assert_eq!(store.len(), 0, "the sweeper did not run");
 
-        drop(store);
+        drop((store, tokens, limiter));
         tokio::time::sleep(Duration::from_millis(100)).await;
         // The task notices the store is gone and ends.
         assert!(handle.await.is_ok());

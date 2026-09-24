@@ -141,6 +141,20 @@ fn creates_new_file_with_create_mode() -> TestResult {
 }
 
 #[test]
+fn create_missing_creates_parent_directories_and_uses_create_mode() -> TestResult {
+    let fx = fixture()?;
+    let target = fx.dir.join("nested").join("deeper").join("conf");
+    let mut req = request(&target, b"new\n", &fx.backups);
+    req.create_missing = true;
+    req.create_mode = 0o600;
+    let out = write_atomic(&req)?;
+    assert!(out.created);
+    assert_eq!(fs::read(&target)?, b"new\n");
+    assert_eq!(mode_of(&target)?, 0o600);
+    Ok(())
+}
+
+#[test]
 fn overwrite_backs_up_and_preserves_mode() -> TestResult {
     let fx = fixture()?;
     fs::write(&fx.target, b"old\n")?;
