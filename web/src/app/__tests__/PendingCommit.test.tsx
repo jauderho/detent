@@ -5,11 +5,9 @@
 import { describe, expect, it } from 'bun:test'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { renderWithProviders, jsonResponse, stubFetchByUrl } from '@/test/providers'
-import { PendingCommitSlot } from '../PendingCommit'
-
 import type { PendingCommit } from '@/api/commits'
-import { PendingCommitProvider, usePendingCommit } from '../PendingCommit'
+import { jsonResponse, renderWithProviders, stubFetchByUrl } from '@/test/providers'
+import { PendingCommitProvider, PendingCommitSlot, usePendingCommit } from '../PendingCommit'
 
 const COMMIT: PendingCommit = {
   commit_id: 7,
@@ -58,7 +56,17 @@ describe('PendingCommitProvider', () => {
   it('confirms the pending commit through the API', async () => {
     const user = userEvent.setup()
     const stub = stubFetchByUrl([
-      ['/api/v1/auth/session', () => jsonResponse({ csrf_token: 'csrf-abc', expires_in_secs: 900, scopes: ['read', 'write'], subject: 'operator', totp_satisfied: false })],
+      [
+        '/api/v1/auth/session',
+        () =>
+          jsonResponse({
+            csrf_token: 'csrf-abc',
+            expires_in_secs: 900,
+            scopes: ['read', 'write'],
+            subject: 'operator',
+            totp_satisfied: false,
+          }),
+      ],
       ['/api/v1/commits/7/confirm', () => jsonResponse({ commit_id: 7 })],
     ])
     renderWithProviders(
