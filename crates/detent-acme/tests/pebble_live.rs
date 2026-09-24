@@ -104,7 +104,7 @@ fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
 /// Proves a full dns-01 issuance against a live Pebble. Requires:
 /// `PEBBLE_URL` (e.g. `https://localhost:14000/dir`), optional `PEBBLE_CA`
 /// (path to `pebble.minica.pem`), optional `CHALLTESTSRV` (default
-/// `http://localhost:8055`). Skips silently without `PEBBLE_URL`.
+/// `http://localhost:8055`). The ignored test errors when `PEBBLE_URL` is absent.
 ///
 /// Run: `PEBBLE_URL=... PEBBLE_CA=... cargo test -p detent-acme -- --ignored --nocapture`
 #[test]
