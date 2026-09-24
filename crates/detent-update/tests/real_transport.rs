@@ -41,32 +41,44 @@ fn follows_302() {
     let port = addr.port();
 
     let handle = thread::spawn(move || {
+        // Same drain-to-end-of-headers discipline as caps_redirect_loop:
+        // answer only after the full request arrived, flush before close.
+        fn serve_once(stream: &mut std::net::TcpStream, server_config: &ServerConfig, resp: &[u8]) {
+            let mut conn =
+                rustls::ServerConnection::new(Arc::new(server_config.clone())).expect("conn");
+            conn.complete_io(stream).expect("handshake");
+            let mut seen = Vec::new();
+            loop {
+                conn.complete_io(stream).expect("drain request");
+                let mut buf = [0u8; 4096];
+                let n = conn.reader().read(&mut buf).expect("read headers");
+                if n == 0 {
+                    break;
+                }
+                seen.extend_from_slice(buf.get(..n).expect("read count within buffer"));
+                if seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            conn.writer().write_all(resp).expect("write");
+            let _ = conn.complete_io(stream);
+            conn.send_close_notify();
+        }
         let (mut stream, _) = listener.accept().expect("accept1");
-        let mut conn =
-            rustls::ServerConnection::new(Arc::new(server_config.clone())).expect("conn");
-        conn.complete_io(&mut stream).expect("handshake1");
-        let mut buf = [0u8; 4096];
-        let _ = conn.reader().read(&mut buf);
-        let _ = conn.complete_io(&mut stream);
-        let resp = format!(
-            "HTTP/1.1 302 Found\r\nLocation: https://localhost:{port}/asset\r\nContent-Length: 0\r\n\r\n"
+        let resp1 = format!(
+            "HTTP/1.1 302 Found\r\nLocation: https://localhost:{port}/asset\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         );
-        conn.writer().write_all(resp.as_bytes()).expect("write1");
-        let _ = conn.complete_io(&mut stream);
-        conn.send_close_notify();
+        serve_once(&mut stream, &server_config, resp1.as_bytes());
         drop(stream);
         let (mut stream2, _) = listener.accept().expect("accept2");
-        let mut conn2 = rustls::ServerConnection::new(Arc::new(server_config)).expect("conn2");
-        conn2.complete_io(&mut stream2).expect("handshake2");
-        let mut buf2 = [0u8; 4096];
-        let _ = conn2.reader().read(&mut buf2);
-        let _ = conn2.complete_io(&mut stream2);
         let body = b"hello-asset";
-        let resp2 = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
-        conn2.writer().write_all(resp2.as_bytes()).expect("write2a");
-        conn2.writer().write_all(body).expect("write2b");
-        let _ = conn2.complete_io(&mut stream2);
-        conn2.send_close_notify();
+        let resp2 = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let mut full = resp2.into_bytes();
+        full.extend_from_slice(body);
+        serve_once(&mut stream2, &server_config, &full);
     });
 
     let transport = detent_update::fetch::RealTransport::with_roots(roots).expect("transport");
@@ -95,11 +107,20 @@ fn refuses_redirect_to_http() {
         let (mut stream, _) = listener.accept().expect("accept");
         let mut conn = rustls::ServerConnection::new(Arc::new(server_config)).expect("conn");
         conn.complete_io(&mut stream).expect("handshake");
-        let mut buf = [0u8; 4096];
-        let _ = conn.reader().read(&mut buf);
-        let _ = conn.complete_io(&mut stream);
-        let resp =
-            "HTTP/1.1 302 Found\r\nLocation: http://example.invalid/\r\nContent-Length: 0\r\n\r\n";
+        let mut seen = Vec::new();
+        loop {
+            conn.complete_io(&mut stream).expect("drain request");
+            let mut buf = [0u8; 4096];
+            let n = conn.reader().read(&mut buf).expect("read headers");
+            if n == 0 {
+                break;
+            }
+            seen.extend_from_slice(buf.get(..n).expect("read count within buffer"));
+            if seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let resp = "HTTP/1.1 302 Found\r\nLocation: http://example.invalid/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         conn.writer().write_all(resp.as_bytes()).expect("write");
         let _ = conn.complete_io(&mut stream);
         conn.send_close_notify();
@@ -130,20 +151,43 @@ fn caps_redirect_loop() {
     let addr = listener.local_addr().expect("addr");
     let port = addr.port();
     let handle = thread::spawn(move || {
-        for _ in 0..6 {
-            let (mut stream, _) = listener.accept().expect("accept");
+        // Read one HTTP request to the end of its headers, then answer.
+        // A single 4 KB read can stop mid-headers and leave the client
+        // blocked writing its request while this side waits to write the
+        // response: a deadlock that surfaces as a 30 s client timeout
+        // (macOS CI). The cap under test is untouched; only the stub drains
+        // the request fully and flushes the response before closing.
+        fn serve_redirect(
+            stream: &mut std::net::TcpStream,
+            server_config: &ServerConfig,
+            port: u16,
+        ) {
             let mut conn =
                 rustls::ServerConnection::new(Arc::new(server_config.clone())).expect("conn");
-            conn.complete_io(&mut stream).expect("handshake");
-            let mut buf = [0u8; 4096];
-            let _ = conn.reader().read(&mut buf);
-            let _ = conn.complete_io(&mut stream);
+            conn.complete_io(stream).expect("handshake");
+            let mut seen = Vec::new();
+            loop {
+                conn.complete_io(stream).expect("drain request");
+                let mut buf = [0u8; 4096];
+                let n = conn.reader().read(&mut buf).expect("read headers");
+                if n == 0 {
+                    break;
+                }
+                seen.extend_from_slice(buf.get(..n).expect("read count within buffer"));
+                if seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
             let resp = format!(
-                "HTTP/1.1 302 Found\r\nLocation: https://localhost:{port}/next\r\nContent-Length: 0\r\n\r\n"
+                "HTTP/1.1 302 Found\r\nLocation: https://localhost:{port}/next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             );
             conn.writer().write_all(resp.as_bytes()).expect("write");
-            let _ = conn.complete_io(&mut stream);
+            let _ = conn.complete_io(stream);
             conn.send_close_notify();
+        }
+        for _ in 0..6 {
+            let (mut stream, _) = listener.accept().expect("accept");
+            serve_redirect(&mut stream, &server_config, port);
         }
     });
     let transport = detent_update::fetch::RealTransport::with_roots(roots).expect("transport");
