@@ -16,6 +16,12 @@ Verify: `cargo fmt --all --check` (0); `cargo clippy --workspace --all-targets
 --all-features -- -D warnings` (0); `cargo test --workspace --all-features`
 (1738 passed, 6 ignored, exit 0).
 
+## 2026-09-24 - H18 web coverage repair
+
+Added the `stubFetch()` no-response rejection test. Before the fix,
+`bun run coverage:check` failed with `src/test/providers.tsx → 98.48%`; after
+the fix, all 73 in-scope files are at 100% lines. `bun test` passes 443 tests.
+
 ## 2026-09-24 - STAGE3 §11.3 step 0 a010 provisioning
 
 Provisioned the only permitted Linux host, `a010`, with the packages and
