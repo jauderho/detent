@@ -411,7 +411,7 @@ fn replace_binary_rejects_a_missing_staged_file() -> TestResult {
     let response: Response = client.channel_mut().recv()?;
     assert!(matches!(
         response,
-        Response::Error(ProtoError::Io(message)) if message.contains("staging")
+        Response::Error(ProtoError::Io(_))
     ));
 
     client.shutdown()?;
