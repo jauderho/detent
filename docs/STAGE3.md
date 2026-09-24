@@ -1046,6 +1046,49 @@ Three commits since §11.4 (`5ab7702`, `3d01a09`, `28cf87a`), plus uncommitted W
 5. D6: C1-e, H3, H19, H10-MCP.
 6. Write the §00.6 session report here. Then stop and wait for orchestrator review. Do not report "finished".
 
+### 11.6 Orchestrator audit 2026-09-24 at `f2e0106` — improving, still NOT finished
+
+Two commits since §11.5: `1cadb77` (H6) and `f2e0106` (H21). **Discipline improved:** both follow §00.3 exactly (separate lines, correct item, a010 evidence for H6, no new allows). Keep doing this.
+
+**H6 (`1cadb77`): accepted as partial.**
+- The `numbers_for` change is sound: x86_64-only syscalls are skipped on aarch64, and unknown names still error.
+- The test now spawns `/bin/true` as root on a010.
+- **Still owed:** the item's step 1. Run a confined `detent serve` on a010 under `strace -f`, driving one real `chronyd -p` validator (a chrony plan through the API) and one real `systemctl restart`. Add any further syscalls. A trivial `true` does not prove that real validators survive. Until this is done, H5 is not safe on real hosts.
+
+**CI run 36054734922: red, and D2 as implemented caused two of the three failures.**
+1. **Rust (Linux), `Permission denied (os error 13)` writing `target/debug/.fingerprint/...`.** The root `cargo test` step leaves root-owned files in `target/`, and later unprivileged `cargo build` steps cannot write there.
+2. **Coverage: every per-path floor fails** (core 98.21, i18n 99.78, ops 98.83, platform 91.88, web 95.75, detent 91.50, modules 99.89). The root sandbox run is outside the llvm-cov profile, so its lines and the shared ones are lost.
+3. **macOS: `detent-update --test real_transport` `caps_redirect_loop` times out** (`GET https://localhost:49200/next ... timed out` after 30 s). H18's test is still not stable. Do not `#[ignore]` it: make the loop cap trip before any timeout, e.g. with a per-request timeout the test controls.
+
+**Directive D2', which replaces how D2 is done. Never run `cargo` as root:**
+- **Rust job:**
+  1. Build the tests unprivileged: `cargo test -p detent-platform --lib --all-features --no-run --message-format=json`, extracting the executable with `jq`.
+  2. Run **that binary** as root: `sudo "$BIN" sandbox::linux::tests --test-threads=1`.
+  3. The unprivileged workspace step keeps `--skip sandbox::linux::tests`.
+- **Coverage job:**
+  1. Run `cargo llvm-cov --workspace --all-features --no-report -- --skip sandbox::linux::tests` unprivileged.
+  2. Build the instrumented platform test binary (`cargo llvm-cov --no-report --no-run -p detent-platform --lib --all-features`, or take it from the JSON output).
+  3. Run it as root with `LLVM_PROFILE_FILE` pointing into the llvm-cov target's profraw directory: `sudo env LLVM_PROFILE_FILE=... "$BIN" sandbox::linux::tests --test-threads=1`.
+  4. `sudo chown -R "$USER" target`.
+  5. `cargo llvm-cov report --lcov --output-path ...`, then `coverage-merge.sh`.
+- **Never lower a floor.** If a floor still fails after D2', the missing lines are real gaps: add tests.
+
+**Still not done:**
+- **D4 (a010 test-only).** The toolchains are still installed. The untracked `docs/INSTALLED.md` documents them instead of removing them. Remove them as D4 says, then turn INSTALLED.md into a short record of runtime packages only (plus the libbz2 note) and commit it.
+- **D5** (attribution table).
+- **D6** (C1-e, H3, H19, H10-MCP).
+- **D1:** "finished" was reported again.
+
+**Next, in order:**
+1. D2' in `ci.yml` (Item: H20).
+2. Stabilise `caps_redirect_loop` (Item: H18).
+3. Push and watch until **every** CI job and `fuzz.yml` (run 36054742009) are green.
+4. Finish H6: real validator + restart under strace on a010.
+5. D4.
+6. D5.
+7. D6.
+8. The §00.6 report, then stop.
+
 ---
 
 ## 12. Questions and blocked items (implementor writes here; orchestrator answers)
