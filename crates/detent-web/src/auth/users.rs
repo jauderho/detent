@@ -976,7 +976,7 @@ mod tests {
         store.create(&hasher, "alice", "hunter2", false)?;
         store.set_totp("alice", Some(&TotpSecret::generate()?))?;
         store.note_totp_counter("alice", 10)?;
-        // Re-using the same counter is a replay.
+        // Reusing the same counter is a replay.
         match store.note_totp_counter("alice", 10) {
             Err(AuthError::InvalidCredentials) => {}
             other => return Err(format!("reused counter not rejected: {other:?}").into()),

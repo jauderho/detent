@@ -13,7 +13,7 @@
 //! `confirm_secs`, `commit_id`, `backup_id`, `audit_query` — so the JSON
 //! Schema a client sees over MCP and the one it sees over REST come from
 //! the same set of fields. The [`detent_ops::Operation`] enum is the shared
-//! truth; nothing here re-declares it.
+//! truth; nothing here redeclares it.
 //!
 //! Drift detection is the responsibility of the consuming binary
 //! (`crates/detent`): a snapshot test that compares the list of registered
