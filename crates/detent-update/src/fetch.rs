@@ -280,6 +280,7 @@ impl RealTransport {
             .build();
         let client =
             hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+                .pool_max_idle_per_host(0)
                 .build(https);
         Ok(Self { runtime, client })
     }

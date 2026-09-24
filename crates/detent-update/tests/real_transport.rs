@@ -52,8 +52,8 @@ fn follows_302() {
             "HTTP/1.1 302 Found\r\nLocation: https://localhost:{port}/asset\r\nContent-Length: 0\r\n\r\n"
         );
         conn.writer().write_all(resp.as_bytes()).expect("write1");
-        conn.send_close_notify();
         let _ = conn.complete_io(&mut stream);
+        conn.send_close_notify();
         drop(stream);
         let (mut stream2, _) = listener.accept().expect("accept2");
         let mut conn2 = rustls::ServerConnection::new(Arc::new(server_config)).expect("conn2");
@@ -65,8 +65,8 @@ fn follows_302() {
         let resp2 = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
         conn2.writer().write_all(resp2.as_bytes()).expect("write2a");
         conn2.writer().write_all(body).expect("write2b");
-        conn2.send_close_notify();
         let _ = conn2.complete_io(&mut stream2);
+        conn2.send_close_notify();
     });
 
     let transport = detent_update::fetch::RealTransport::with_roots(roots).expect("transport");
@@ -101,8 +101,8 @@ fn refuses_redirect_to_http() {
         let resp =
             "HTTP/1.1 302 Found\r\nLocation: http://example.invalid/\r\nContent-Length: 0\r\n\r\n";
         conn.writer().write_all(resp.as_bytes()).expect("write");
-        conn.send_close_notify();
         let _ = conn.complete_io(&mut stream);
+        conn.send_close_notify();
     });
     let transport = detent_update::fetch::RealTransport::with_roots(roots).expect("transport");
     let url = format!("https://localhost:{}/releases", addr.port());
@@ -142,8 +142,8 @@ fn caps_redirect_loop() {
                 "HTTP/1.1 302 Found\r\nLocation: https://localhost:{port}/next\r\nContent-Length: 0\r\n\r\n"
             );
             conn.writer().write_all(resp.as_bytes()).expect("write");
-            conn.send_close_notify();
             let _ = conn.complete_io(&mut stream);
+            conn.send_close_notify();
         }
     });
     let transport = detent_update::fetch::RealTransport::with_roots(roots).expect("transport");
