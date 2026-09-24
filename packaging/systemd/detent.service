@@ -86,10 +86,12 @@ ReadWritePaths=/etc/hosts /etc/resolv.conf /etc/fstab /etc/exports /etc/samba \
   /etc/chrony.conf -/etc/chrony \
   -/etc/systemd/network -/etc/NetworkManager/system-connections -/etc/network -/etc/netplan \
   -/etc/dnsmasq.conf -/etc/dnsmasq.d -/etc/kea \
-  /var/lib/detent
+  /var/lib/detent /run/detent/staging
 
 StateDirectory=detent
 StateDirectoryMode=0700
+RuntimeDirectory=detent
+RuntimeDirectoryMode=0700
 ConfigurationDirectory=detent
 
 Restart=always

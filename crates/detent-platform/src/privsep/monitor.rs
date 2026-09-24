@@ -294,6 +294,9 @@ pub struct Monitor<'a> {
     greeted: bool,
     journal: Vec<RollbackEntry>,
     pending: Option<Pending>,
+    /// Monitor-only base for content-addressed update images. Production uses
+    /// the systemd runtime directory; tests may override it per monitor.
+    staging_dir: PathBuf,
     /// Test-only swap target. `None` (production) swaps `current_exe()`; the
     /// engine tests point it at their temp target instead. A field — not a
     /// global — so parallel tests cannot steer each other.
@@ -326,6 +329,7 @@ impl<'a> Monitor<'a> {
             greeted: false,
             journal: Vec::new(),
             pending: None,
+            staging_dir: PathBuf::from(DEFAULT_STAGING_DIR),
             binary_override: None,
             update_trust: None,
             host_profile: HostProfile::default(),
@@ -356,6 +360,16 @@ impl<'a> Monitor<'a> {
     /// gate would hide it exactly where it is needed.
     pub fn set_binary_override(&mut self, path: PathBuf) {
         self.binary_override = Some(path);
+    }
+
+    /// Override the monitor-only base for materialized update images.
+    ///
+    /// Production uses [`DEFAULT_STAGING_DIR`], created by systemd. This is
+    /// public rather than test-gated so the operations integration harness,
+    /// which links this crate without `cfg(test)`, can keep each monitor in
+    /// its own temporary directory.
+    pub fn set_staging_dir(&mut self, path: PathBuf) {
+        self.staging_dir = path;
     }
 
     /// The allow-list this monitor serves.
@@ -535,8 +549,10 @@ impl<'a> Monitor<'a> {
         len: u64,
         sha256: crate::fs::atomic::Sha256Digest,
     ) -> Response {
-        let staged = staged_path(self.allow.state_root(), sha256);
-        if let Err(err) = materialize_staged(self.allow.state_root(), tag, len, sha256) {
+        let staged = staged_path(&self.staging_dir, sha256);
+        if let Err(err) =
+            materialize_staged(self.allow.state_root(), &self.staging_dir, tag, len, sha256)
+        {
             return Response::Error(err);
         }
         let bytes = match read_staged_verified(&staged, len, sha256) {
@@ -678,7 +694,7 @@ impl<'a> Monitor<'a> {
         if descriptor.checks.is_empty() {
             return Ok(());
         }
-        let dir = self.allow.check_tmp_dir();
+        let dir = self.staging_dir.clone();
         if let Err(err) = std::fs::create_dir_all(&dir) {
             return Err(Response::Error(ProtoError::Io(format!(
                 "cannot create the candidate directory: {}",
@@ -825,7 +841,7 @@ impl<'a> Monitor<'a> {
         let Some(entry) = self.allow.check(id) else {
             return unknown(IdKind::Check, u32::from(id.get()));
         };
-        let dir = self.allow.check_tmp_dir();
+        let dir = self.staging_dir.clone();
         if let Err(err) = std::fs::create_dir_all(&dir) {
             return Response::Error(ProtoError::Io(format!(
                 "cannot create the candidate directory: {}",
@@ -1328,14 +1344,18 @@ fn unix_millis() -> u128 {
 // ReplaceBinary (PLAN §2.9 step 5's binary swap)
 // ---------------------------------------------------------------------------
 
-/// Directory under the state root where the verifier drops the staged image.
+/// Default monitor-only base for materialized update images. The service unit
+/// creates this as a private systemd runtime directory.
+pub const DEFAULT_STAGING_DIR: &str = "/run/detent/staging";
+
+/// Directory under the state root containing worker-written tag inputs.
 pub(crate) const STAGED_DIR: &str = "update/staged";
 /// Suffix the replaced binary is kept under, next to the target.
 pub(crate) const PREVIOUS_SUFFIX: &str = ".prev";
 
-/// `<state_root>/update/staged/<hex sha256>`.
-fn staged_path(state_root: &Path, sha256: crate::fs::atomic::Sha256Digest) -> PathBuf {
-    state_root.join(STAGED_DIR).join(sha256.to_string())
+/// `<monitor_staging_dir>/<hex sha256>`.
+fn staged_path(monitor_staging_dir: &Path, sha256: crate::fs::atomic::Sha256Digest) -> PathBuf {
+    monitor_staging_dir.join(sha256.to_string())
 }
 
 fn staged_input_path(state_root: &Path, tag: &str) -> Result<PathBuf, ProtoError> {
@@ -1351,31 +1371,35 @@ fn staged_input_path(state_root: &Path, tag: &str) -> Result<PathBuf, ProtoError
     Ok(state_root.join(STAGED_DIR).join(tag))
 }
 
-fn ensure_staged_dir(state_root: &Path) -> Result<PathBuf, ProtoError> {
+fn ensure_staging_dir(monitor_staging_dir: &Path) -> Result<PathBuf, ProtoError> {
     use std::os::unix::fs::MetadataExt as _;
-    let dir = state_root.join(STAGED_DIR);
-    std::fs::create_dir_all(&dir)
-        .map_err(|err| ProtoError::Io(format!("create staged directory: {}", err.kind())))?;
-    let meta = std::fs::symlink_metadata(&dir)
-        .map_err(|err| ProtoError::Io(format!("stat staged directory: {}", err.kind())))?;
+    std::fs::create_dir_all(monitor_staging_dir).map_err(|err| {
+        ProtoError::Io(format!("create monitor staging directory: {}", err.kind()))
+    })?;
+    let meta = std::fs::symlink_metadata(monitor_staging_dir)
+        .map_err(|err| ProtoError::Io(format!("stat monitor staging directory: {}", err.kind())))?;
     if !meta.is_dir()
         || meta.uid() != rustix::process::geteuid().as_raw()
         || meta.mode() & 0o022 != 0
     {
-        return Err(ProtoError::Io("staged directory is not trusted".to_owned()));
+        return Err(ProtoError::Io(
+            "monitor staging directory is not trusted".to_owned(),
+        ));
     }
-    Ok(dir)
+    Ok(monitor_staging_dir.to_path_buf())
 }
 
 fn materialize_staged(
     state_root: &Path,
+    monitor_staging_dir: &Path,
     tag: &str,
     len: u64,
     expected: crate::fs::atomic::Sha256Digest,
 ) -> Result<(), ProtoError> {
     use rustix::fs::{Mode, OFlags};
     let source = staged_input_path(state_root, tag)?;
-    let destination = staged_path(state_root, expected);
+    let dir = ensure_staging_dir(monitor_staging_dir)?;
+    let destination = staged_path(&dir, expected);
     if source == destination {
         return Err(ProtoError::VerificationFailed);
     }
@@ -1408,7 +1432,6 @@ fn materialize_staged(
             actual: Some(actual),
         });
     }
-    let dir = ensure_staged_dir(state_root)?;
     let fd = rustix::fs::open(
         &destination,
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
@@ -1420,7 +1443,7 @@ fn materialize_staged(
         .map_err(|err| ProtoError::Io(format!("materialize staged binary: {}", err.kind())))?;
     std::fs::File::open(dir)
         .and_then(|directory| directory.sync_all())
-        .map_err(|err| ProtoError::Io(format!("sync staged directory: {}", err.kind())))?;
+        .map_err(|err| ProtoError::Io(format!("sync staging directory: {}", err.kind())))?;
     Ok(())
 }
 
@@ -1486,10 +1509,10 @@ fn read_staged_verified(
         tracing::warn!("staged binary refused: hard link");
         return Err(ProtoError::Io("staged binary is not trusted".to_owned()));
     }
-    // The staged directory itself must belong to whoever the monitor runs as
-    // and must not be group- or world-writable: otherwise the worker can
-    // rename its own file over the staged path between the check and the
-    // swap. `fstatat` on the parent runs before the child opens above.
+    // The monitor staging directory itself must belong to whoever the monitor
+    // runs as and must not be group- or world-writable: otherwise a worker
+    // could replace the materialized path between the check and the swap.
+    // `fstatat` on the parent runs before the child opens above.
     let parent_meta = match std::fs::symlink_metadata(
         path.parent()
             .ok_or_else(|| ProtoError::Io("staged binary is not trusted".to_owned()))?,
@@ -1606,10 +1629,9 @@ fn swap_running_binary(bytes: &[u8], staged: &Path, target: &Path) -> Result<(),
             copy_err.kind()
         )));
     }
-    // Stage into the target's own directory first: `staged` lives under the
-    // state root (e.g. `/var/lib/detent`), while `target` is the running
-    // binary (e.g. `/usr/local/bin`) — a cross-filesystem `rename` would fail
-    // with EXDEV in production. Write the verified `bytes` there, chmod,
+    // Stage into the target's own directory first: the monitor staging base is
+    // on a separate filesystem from the running binary, so a cross-filesystem
+    // `rename` would fail with EXDEV. Write the verified `bytes` there, chmod,
     // then rename; same convention as `detent_update::install::stage`.
     let target_dir = target.parent().map_or_else(
         || std::path::PathBuf::from("/"),
@@ -1940,7 +1962,9 @@ mod tests {
         hooks: Hooks<'_>,
         registry: Option<Vec<Box<dyn DynModule>>>,
     ) -> Monitor<'_> {
+        let staging_dir = allow.state_root().with_file_name("monitor-staging");
         let mut monitor = Monitor::new(allow, hooks);
+        monitor.set_staging_dir(staging_dir);
         if let Some(registry) = registry {
             monitor.set_module_registry(registry);
         }
@@ -2075,16 +2099,22 @@ mod tests {
     }
 
     #[test]
-    fn run_check_places_the_candidate_under_the_configured_state_root()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn run_check_places_the_candidate_in_monitor_staging() -> Result<(), Box<dyn std::error::Error>>
+    {
         let fx = fixture()?;
         let allow = fx.allow()?;
-        let checks = CandidateChecks(allow.check_tmp_dir());
+        let staging_dir = fx
+            .state_root
+            .parent()
+            .unwrap_or(&fx.root)
+            .join("monitor-staging");
+        let checks = CandidateChecks(staging_dir.clone());
         let hooks = Hooks {
             checks: &checks,
             services: &super::NoServices,
         };
         let mut monitor = greeted(allow, hooks);
+        monitor.set_staging_dir(staging_dir);
         let response = monitor.dispatch(Request::RunCheck {
             check: CheckId(0),
             bytes: b"candidate".to_vec(),
@@ -2128,11 +2158,11 @@ mod tests {
     fn run_check_reports_io_error_when_the_candidate_directory_cannot_be_created()
     -> Result<(), Box<dyn std::error::Error>> {
         let fx = fixture()?;
-        // Plant a plain file where the candidate directory needs to go, so
-        // `create_dir_all` fails with `ENOTDIR` instead of succeeding.
         assert!(std::fs::create_dir_all(&fx.state_root).is_ok());
-        assert!(std::fs::write(fx.state_root.join("tmp"), b"not a directory").is_ok());
+        let staging_dir = fx.state_root.join("staging");
+        assert!(std::fs::write(&staging_dir, b"not a directory").is_ok());
         let mut monitor = greeted(fx.allow()?, Hooks::default());
+        monitor.set_staging_dir(staging_dir);
         let response = monitor.dispatch(Request::RunCheck {
             check: CheckId(0),
             bytes: Vec::new(),
@@ -2149,10 +2179,11 @@ mod tests {
             return Ok(());
         }
         let fx = fixture()?;
-        let tmp_dir = fx.state_root.join("tmp");
+        let tmp_dir = fx.state_root.join("staging");
         assert!(std::fs::create_dir_all(&tmp_dir).is_ok());
         assert!(std::fs::set_permissions(&tmp_dir, std::fs::Permissions::from_mode(0o500)).is_ok());
         let mut monitor = greeted(fx.allow()?, Hooks::default());
+        monitor.set_staging_dir(tmp_dir.clone());
         let response = monitor.dispatch(Request::RunCheck {
             check: CheckId(0),
             bytes: Vec::new(),
@@ -3202,10 +3233,12 @@ mod tests {
 
     fn update_monitor(
         state_root: &Path,
+        staging_dir: &Path,
         target: PathBuf,
     ) -> Result<Monitor<'static>, Box<dyn std::error::Error>> {
         let config = Config::with_state_root(state_root);
         let mut monitor = Monitor::new(Allowlist::from_modules(&[], &config)?, Hooks::default());
+        monitor.set_staging_dir(staging_dir.to_path_buf());
         monitor.set_binary_override(target);
         monitor.set_update_trust(fixture_trust()?);
         let _ = monitor.dispatch(Request::Hello {
@@ -3222,7 +3255,8 @@ mod tests {
         std::fs::create_dir_all(&state_root)?;
         let target = swap_target(work.path(), "detent-old", b"old-binary")?;
         let (digest, bytes) = plant_release(&state_root, "valid.json")?;
-        let mut monitor = update_monitor(&state_root, target.clone())?;
+        let staging_dir = work.path().join("monitor-staging");
+        let mut monitor = update_monitor(&state_root, &staging_dir, target.clone())?;
 
         let response = monitor.dispatch(Request::ReplaceBinary {
             tag: FIXTURE_TAG.to_owned(),
@@ -3245,10 +3279,49 @@ mod tests {
         let state_root = work.path().join("state");
         std::fs::create_dir_all(&state_root)?;
         let (digest, bytes) = plant_release(&state_root, "valid.json")?;
-        materialize_staged(&state_root, FIXTURE_TAG, bytes.len() as u64, digest)?;
-        let meta = std::fs::metadata(staged_path(&state_root, digest))?;
+        let staging_dir = work.path().join("monitor-staging");
+        materialize_staged(
+            &state_root,
+            &staging_dir,
+            FIXTURE_TAG,
+            bytes.len() as u64,
+            digest,
+        )?;
+        let materialized = staged_path(&staging_dir, digest);
+        assert!(!materialized.starts_with(&state_root));
+        let meta = std::fs::metadata(&materialized)?;
         assert_eq!(meta.uid(), rustix::process::geteuid().as_raw());
         assert_eq!(meta.mode() & 0o777, 0o600);
+        let staging_meta = std::fs::metadata(&staging_dir)?;
+        assert_eq!(staging_meta.uid(), rustix::process::geteuid().as_raw());
+        assert_eq!(staging_meta.mode() & 0o022, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn monitor_rejects_group_writable_staging_permissions() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let work = TempDir::new()?;
+        let state_root = work.path().join("state");
+        std::fs::create_dir_all(&state_root)?;
+        let (digest, bytes) = plant_release(&state_root, "valid.json")?;
+        let staging_dir = work.path().join("monitor-staging");
+        std::fs::create_dir(&staging_dir)?;
+        std::fs::set_permissions(&staging_dir, std::fs::Permissions::from_mode(0o770))?;
+
+        let error = match materialize_staged(
+            &state_root,
+            &staging_dir,
+            FIXTURE_TAG,
+            bytes.len() as u64,
+            digest,
+        ) {
+            Ok(()) => return Err("group-writable staging must be rejected".into()),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, ProtoError::Io(message) if message == "monitor staging directory is not trusted")
+        );
         Ok(())
     }
 
@@ -3259,7 +3332,8 @@ mod tests {
         std::fs::create_dir_all(&state_root)?;
         let target = swap_target(work.path(), "detent-identity", b"old-binary")?;
         let (digest, bytes) = plant_release(&state_root, "wrong-identity.json")?;
-        let mut monitor = update_monitor(&state_root, target.clone())?;
+        let staging_dir = work.path().join("monitor-staging");
+        let mut monitor = update_monitor(&state_root, &staging_dir, target.clone())?;
         let response = monitor.dispatch(Request::ReplaceBinary {
             tag: FIXTURE_TAG.to_owned(),
             len: bytes.len() as u64,
@@ -3282,7 +3356,8 @@ mod tests {
         let target = swap_target(work.path(), "detent-digest", b"old-binary")?;
         let (_, bytes) = plant_release(&state_root, "valid.json")?;
         let claimed = Sha256Digest::of(b"different bytes");
-        let mut monitor = update_monitor(&state_root, target.clone())?;
+        let staging_dir = work.path().join("monitor-staging");
+        let mut monitor = update_monitor(&state_root, &staging_dir, target.clone())?;
         let response = monitor.dispatch(Request::ReplaceBinary {
             tag: FIXTURE_TAG.to_owned(),
             len: bytes.len() as u64,

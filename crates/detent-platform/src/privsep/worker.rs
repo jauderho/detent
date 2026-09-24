@@ -344,9 +344,10 @@ impl Client {
     /// Ask the monitor to authenticate and atomically install a staged release.
     ///
     /// `tag` names both worker-staged inputs under `<state_root>/update/staged`:
-    /// the binary itself and `<tag>.sigstore.json`. `len` and `sha256` bind
-    /// the binary; the monitor still hashes the same bytes it opens and verifies
-    /// their Sigstore bundle before swapping.
+    /// the binary itself and `<tag>.sigstore.json`. The monitor copies and
+    /// verifies the binary in its private runtime staging base; `len` and
+    /// `sha256` bind the binary, and the monitor hashes the same bytes it opens
+    /// before verifying their Sigstore bundle and swapping.
     ///
     /// # Errors
     ///

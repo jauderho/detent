@@ -18,7 +18,7 @@ PLAN §1.6) and are intentionally not present here yet.
 | `systemd/detent.service` | The monitor unit, **root-confined** privilege mode (ADR-001 default). `User=root`, confined via capability bounding set, Landlock, seccomp, and the systemd sandboxing directives in PLAN §2.4/Appendix C. |
 | `systemd/detent.service.d/capability-user.conf` | Drop-in for the **capability-user** hardened mode (Phase 12): switches to `User=detent` with ambient capabilities instead of root, adds `RemoveIPC=yes`. Only installed with `--mode capability-user`. |
 | `sysusers.d/detent.conf` | Creates the unprivileged `detent` system user (`systemd-sysusers`). |
-| `tmpfiles.d/detent.conf` | Creates `/var/lib/detent` (0700 detent:detent), `/var/lib/detent/backups` (0700 root:root), `/etc/detent` (0750 root:detent) (`systemd-tmpfiles --create`). |
+| `tmpfiles.d/detent.conf` | Creates `/var/lib/detent` (0700 detent:detent), `/var/lib/detent/backups` and `/run/detent/staging` (0700 root:root monitor-only), plus `/etc/detent` (0750 root:detent) (`systemd-tmpfiles --create`). The capability-user drop-in hands the runtime tree to `detent` before startup. |
 | `polkit/50-detent.rules` | polkit JS rule granting the `detent` user `org.freedesktop.systemd1.manage-units` (start/stop/restart/reload only) for an explicit unit allow-list. Only takes effect in capability-user mode (root already bypasses polkit); harmless to install unconditionally. |
 | `install.sh` | Installs/uninstalls the above plus the `detent` binary. |
 

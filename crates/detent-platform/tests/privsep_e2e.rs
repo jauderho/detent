@@ -167,9 +167,12 @@ fn spawn_monitor(
     allow: Allowlist,
 ) -> Result<(Channel, thread::JoinHandle<ServeResult>), Box<dyn std::error::Error>> {
     let (monitor_end, worker_end) = Channel::pair()?;
+    let staging_dir = allow.state_root().with_file_name("monitor-staging");
     let handle = thread::spawn(move || {
         let mut channel = monitor_end;
-        Monitor::new(allow, Hooks::default()).serve(&mut channel)
+        let mut monitor = Monitor::new(allow, Hooks::default());
+        monitor.set_staging_dir(staging_dir);
+        monitor.serve(&mut channel)
     });
     Ok((worker_end, handle))
 }
@@ -845,6 +848,7 @@ static OK_SERVICES: OkServices = OkServices;
 fn run_check_and_service_succeed_through_working_collaborators() -> TestResult {
     let fx = fixture(b"v1")?;
     let allow = fx.allow()?;
+    let staging_dir = allow.state_root().with_file_name("monitor-staging");
     let (monitor_end, worker_end) = Channel::pair()?;
     let handle = thread::spawn(move || {
         let mut channel = monitor_end;
@@ -852,7 +856,9 @@ fn run_check_and_service_succeed_through_working_collaborators() -> TestResult {
             checks: &OK_CHECKS,
             services: &OK_SERVICES,
         };
-        Monitor::new(allow, hooks).serve(&mut channel)
+        let mut monitor = Monitor::new(allow, hooks);
+        monitor.set_staging_dir(staging_dir);
+        monitor.serve(&mut channel)
     });
     let mut client = Client::new(worker_end);
     client.hello()?;

@@ -300,9 +300,10 @@ pub enum Request {
     },
     /// Replace the running binary with a staged release.
     ///
-    /// The monitor materializes `<state_root>/update/staged/<hex sha256>`
-    /// from the tag-named worker input, authenticates those bytes against
-    /// `<tag>.sigstore.json`, and atomically swaps them into place.
+    /// The worker-written tag input remains under
+    /// `<state_root>/update/staged`; the monitor materializes a digest-named
+    /// copy in its private runtime staging base, authenticates those bytes
+    /// against `<tag>.sigstore.json`, and atomically swaps them into place.
     ReplaceBinary {
         /// Release tag, also naming the staged binary and bundle inputs.
         tag: String,

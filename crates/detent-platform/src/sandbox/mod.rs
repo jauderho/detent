@@ -59,6 +59,7 @@ use serde::Serialize;
 pub use seccomp::{Arch, SeccompError, SeccompMode};
 
 use crate::privsep::allowlist::Allowlist;
+use crate::privsep::monitor::DEFAULT_STAGING_DIR;
 use crate::privsep::proto::TargetId;
 use crate::privsep::spawn::{SandboxError as SpawnSandboxError, SandboxHooks};
 
@@ -230,9 +231,9 @@ impl Policy {
     /// The monitor's policy: write access to every enabled target's parent
     /// directory, each target's backup directory, the state root
     /// (`Allowlist::state_root`, which also covers the check-tmp and
-    /// pending-commit-marker paths), and the running binary's own directory
-    /// so `ReplaceBinary`'s `rename(staged → current_exe)` can succeed
-    /// under Landlock confinement.
+    /// pending-commit-marker paths), the monitor-only update staging base,
+    /// and the running binary's own directory so `ReplaceBinary`'s final
+    /// `rename(staged → current_exe)` can succeed under Landlock confinement.
     #[must_use]
     pub fn monitor(allowlist: &Allowlist) -> Self {
         let mut paths: BTreeSet<PathBuf> = BTreeSet::new();
@@ -243,6 +244,7 @@ impl Policy {
             paths.insert(target.backup_dir.clone());
         }
         paths.insert(allowlist.state_root().to_path_buf());
+        paths.insert(PathBuf::from(DEFAULT_STAGING_DIR));
         // The binary swap (PLAN §2.9 step 5b) renames the staged file over
         // `current_exe`. Without its parent in the writable set the rename
         // fails with EACCES once the Landlock ruleset is installed — and
@@ -401,7 +403,8 @@ impl SandboxHooks for Hooks {
 #[cfg(test)]
 mod tests {
     use super::{
-        Capability, LandlockOutcome, LandlockStatus, Outcome, Policy, SandboxError, caps_verdict,
+        Capability, DEFAULT_STAGING_DIR, LandlockOutcome, LandlockStatus, Outcome, Policy,
+        SandboxError, caps_verdict,
     };
     // Only the non-Linux tests below construct a `Confinement`/call `confine`
     // directly: on Linux, `confine` is the real thing (irreversible — see
@@ -519,12 +522,28 @@ mod tests {
     }
 
     #[test]
+    fn only_the_monitor_policy_grants_the_runtime_staging_base()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = Path::new("/tmp/detent-sandbox-test-staging");
+        let allow = fixture(root)?;
+        let staging = PathBuf::from(DEFAULT_STAGING_DIR);
+        assert!(Policy::monitor(&allow).writable_paths.contains(&staging));
+        assert!(!Policy::worker(&allow).writable_paths.contains(&staging));
+        Ok(())
+    }
+
+    #[test]
     fn worker_policy_is_state_root_only_with_no_capabilities()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = Path::new("/tmp/detent-sandbox-test-worker");
         let allow = fixture(root)?;
         let policy = Policy::worker(&allow);
         assert_eq!(policy.writable_paths, vec![root.to_path_buf()]);
+        assert!(
+            !policy
+                .writable_paths
+                .contains(&PathBuf::from("/run/detent/staging"))
+        );
         assert!(policy.retained_caps.is_empty());
         assert!(!policy.require_landlock);
         Ok(())
@@ -538,7 +557,7 @@ mod tests {
         // Plus the running binary's own directory (PLAN §2.9 step 5b): the
         // swap renames the staged file over `current_exe`, which Landlock
         // would otherwise deny.
-        let mut expected = vec![root.to_path_buf()];
+        let mut expected = vec![root.to_path_buf(), PathBuf::from(DEFAULT_STAGING_DIR)];
         if let Ok(exe) = std::env::current_exe()
             && let Some(parent) = exe.parent()
             && !parent.as_os_str().is_empty()
