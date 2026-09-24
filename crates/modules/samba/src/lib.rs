@@ -597,7 +597,12 @@ fn validate_scope(
             Diagnostic::new(Severity::Warning, MIN_PROTOCOL).with_arg("value", value.to_owned()),
         );
     }
-    if let Some(value) = offending(entries, section, &["smb encrypt"], "required") {
+    if let Some(value) = offending(
+        entries,
+        section,
+        &["smb encrypt", "server smb encrypt"],
+        "required",
+    ) {
         out.push(
             Diagnostic::new(Severity::Warning, SMB_ENCRYPT).with_arg("value", value.to_owned()),
         );
@@ -611,9 +616,11 @@ fn validate_scope(
                 .with_arg("value", value.to_owned()),
         );
     }
-    let writable = value_of_in_section(entries, section, &["writeable", "read only"]);
+    let writable = value_of_in_section(entries, section, &["writeable", "writable"]);
+    let read_only = value_of_in_section(entries, section, &["read only"]);
     let write_list = value_of_in_section(entries, section, &["write list"]);
     if writable.is_some_and(|value| value.eq_ignore_ascii_case("yes") || value.is_empty())
+        || read_only.is_some_and(|value| value.eq_ignore_ascii_case("no") || value.is_empty())
         || write_list.is_some_and(|value| !value.is_empty())
     {
         out.push(Diagnostic::new(Severity::Warning, WRITABLE_EXPOSURE));
@@ -660,7 +667,7 @@ fn validate_values(entries: &[Entry], out: &mut Diagnostics) {
         }
         if entry.section.is_none()
             && !entry.value.is_empty()
-            && ["root preexec", "root postexec", "preexec", "postexec"]
+            && ["root preexec", "root postexec"]
                 .iter()
                 .any(|key| entry.key.eq_ignore_ascii_case(key))
         {
@@ -1298,10 +1305,43 @@ mod tests {
             entry(None, "PUBLIC", "yes"),
             entry(None, "write list", "alice"),
             entry(None, "root preexec", "/usr/bin/hook"),
+            entry(None, "writable", "yes"),
+            entry(None, "server smb encrypt", "desired"),
         ]);
         assert!(has(&m, GUEST_OK, Severity::Warning));
         assert!(has(&m, WRITABLE_EXPOSURE, Severity::Warning));
         assert!(has(&m, ROOT_COMMAND, Severity::Warning));
+        assert!(has(&m, SMB_ENCRYPT, Severity::Warning));
+        let exposed_read_only = model(vec![entry(None, "read only", "no")]);
+        assert!(has(
+            &exposed_read_only,
+            WRITABLE_EXPOSURE,
+            Severity::Warning
+        ));
+        let safe_read_only = model(vec![entry(None, "read only", "yes")]);
+        assert!(!has(&safe_read_only, WRITABLE_EXPOSURE, Severity::Warning));
+        let safe = model(vec![
+            entry(Some("share"), "", ""),
+            entry(None, "writable", "no"),
+            entry(None, "server smb encrypt", "required"),
+        ]);
+        assert!(!has(&safe, WRITABLE_EXPOSURE, Severity::Warning));
+        assert!(!has(&safe, SMB_ENCRYPT, Severity::Warning));
+    }
+
+    #[test]
+    fn root_command_warning_only_matches_root_hooks() {
+        let root = model(vec![
+            entry(None, "root preexec", "/usr/bin/root-hook"),
+            entry(None, "preexec", "/usr/bin/user-hook"),
+            entry(None, "postexec", "/usr/bin/user-hook"),
+        ]);
+        assert!(has(&root, ROOT_COMMAND, Severity::Warning));
+        let user = model(vec![
+            entry(None, "preexec", "/usr/bin/user-hook"),
+            entry(None, "postexec", "/usr/bin/user-hook"),
+        ]);
+        assert!(!has(&user, ROOT_COMMAND, Severity::Warning));
     }
 
     #[test]
