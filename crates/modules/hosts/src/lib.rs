@@ -384,20 +384,21 @@ fn validate_hostnames(entry: &Entry, index: usize, diagnostics: &mut Diagnostics
     }
 }
 
-/// Reports a canonical name that two entries both claim.
+/// Reports a canonical name that two entries both claim **within the same
+/// address family**.
 ///
-/// `localhost` is exempt: a standard dual-stack hosts file has `127.0.0.1
-/// localhost` and `::1 localhost` and both entries are expected.
+/// A standard dual-stack file has `127.0.0.1 localhost` and `::1 localhost` —
+/// same canonical, different families — and must not error. Keying by
+/// `(name, family)` fixes that for free and still errors true duplicates
+/// (`192.0.2.1 dup` + `192.0.2.2 dup`).
 fn validate_canonical_uniqueness(model: &Model, diagnostics: &mut Diagnostics) {
-    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut seen: std::collections::BTreeSet<(String, bool)> = std::collections::BTreeSet::new();
     for (index, entry) in model.entries.iter().enumerate() {
         let Some(canonical) = entry.hostnames.first() else {
             continue;
         };
-        if canonical.eq_ignore_ascii_case("localhost") {
-            continue;
-        }
-        if !seen.insert(canonical.to_ascii_lowercase()) {
+        let key = (canonical.to_ascii_lowercase(), entry.ip.is_ipv6());
+        if !seen.insert(key) {
             diagnostics.push(
                 Diagnostic::new(Severity::Error, DUPLICATE_CANONICAL)
                     .with_field(FieldPath::new(format!("entries/{index}/hostnames/0")))
@@ -902,6 +903,20 @@ mod tests {
             Severity::Recommendation
         ));
         assert!(!has(&model, LOCALHOST_NOT_LOOPBACK, Severity::Error));
+    }
+
+    #[test]
+    fn validate_accepts_dual_stack_localhost() {
+        let model = Model {
+            entries: vec![
+                entry("127.0.0.1", &["localhost"], None),
+                entry("::1", &["localhost"], None),
+            ],
+        };
+        assert!(
+            !has(&model, DUPLICATE_CANONICAL, Severity::Error),
+            "127.0.0.1 localhost + ::1 localhost must not be a duplicate (per-family key)"
+        );
     }
 
     #[test]
