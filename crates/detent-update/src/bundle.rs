@@ -420,6 +420,17 @@ mod tests {
     }
 
     #[test]
+    fn accepts_sigstore_certificate_objects_and_in_toto_payload_type() {
+        let mut value = minimal();
+        value["verificationMaterial"]["x509CertificateChain"]["certificates"] =
+            serde_json::json!([{ "rawBytes": "AAAA" }]);
+        value["dsseEnvelope"]["payloadType"] = serde_json::json!(DSSE_PAYLOAD_TYPE);
+        let decoded = parse_json(&value).expect("real Sigstore envelope shape parses");
+        assert_eq!(decoded.certs, vec![vec![0, 0, 0]]);
+        assert_eq!(decoded.dsse_payload_type, DSSE_PAYLOAD_TYPE);
+    }
+
+    #[test]
     fn refuses_oversized() {
         let filler = vec![b'a'; MAX_BUNDLE_BYTES + 1];
         assert!(matches!(parse(&filler), Err(BundleError::Oversized)));
