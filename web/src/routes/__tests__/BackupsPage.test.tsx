@@ -99,8 +99,14 @@ describe('BackupsPage — per-module panels', () => {
     const modules = [buildModule('alpha'), buildModule('beta')]
     const stub = stubFetchByUrl([
       ['/api/v1/auth/session', () => jsonResponse(READ_WRITE_SESSION)],
-      ['/api/v1/modules/alpha/backups', () => errorResponse(500, 'ops-unknown-module', 'server_error')],
-      ['/api/v1/modules/beta/backups', () => jsonResponse([buildBackup({ name: 'beta-backup.tar' })])],
+      [
+        '/api/v1/modules/alpha/backups',
+        () => errorResponse(500, 'ops-unknown-module', 'server_error'),
+      ],
+      [
+        '/api/v1/modules/beta/backups',
+        () => jsonResponse([buildBackup({ name: 'beta-backup.tar' })]),
+      ],
       ['/api/v1/modules/alpha', () => jsonResponse(buildView('alpha'))],
       ['/api/v1/modules/beta', () => jsonResponse(buildView('beta'))],
       ['/api/v1/modules', () => jsonResponse(modules)],
@@ -114,11 +120,15 @@ describe('BackupsPage — per-module panels', () => {
     await waitFor(() => {
       expect(container.querySelectorAll('section.panel')).toHaveLength(2)
     })
-    const [alphaPanel, betaPanel] = Array.from(container.querySelectorAll<HTMLElement>('section.panel'))
+    const [alphaPanel, betaPanel] = Array.from(
+      container.querySelectorAll<HTMLElement>('section.panel'),
+    )
     if (alphaPanel === undefined || betaPanel === undefined) throw new Error('unreachable')
 
     await waitFor(() => {
-      expect(within(alphaPanel).getByText('there is no module by that name in this build.')).toBeInTheDocument()
+      expect(
+        within(alphaPanel).getByText('there is no module by that name in this build.'),
+      ).toBeInTheDocument()
     })
     await waitFor(() => {
       expect(within(betaPanel).getByText('beta-backup.tar')).toBeInTheDocument()
@@ -134,13 +144,21 @@ describe('BackupsPage — per-module panels', () => {
     ])
     renderWithProviders(<BackupsPage />, { fetch: stub.fetch })
 
-    expect(await screen.findByText('nothing has been backed up for this module yet.')).toBeInTheDocument()
+    expect(
+      await screen.findByText('nothing has been backed up for this module yet.'),
+    ).toBeInTheDocument()
   })
 
   it('renders the populated columns', async () => {
     const stub = stubFetchByUrl([
       ['/api/v1/auth/session', () => jsonResponse(READ_WRITE_SESSION)],
-      ['/api/v1/modules/alpha/backups', () => jsonResponse([buildBackup({ name: 'alpha-1.tar', len: 2048, digest: 'b'.repeat(64), id: 1 })])],
+      [
+        '/api/v1/modules/alpha/backups',
+        () =>
+          jsonResponse([
+            buildBackup({ name: 'alpha-1.tar', len: 2048, digest: 'b'.repeat(64), id: 1 }),
+          ]),
+      ],
       ['/api/v1/modules/alpha', () => jsonResponse(buildView('alpha'))],
       ['/api/v1/modules', () => jsonResponse([buildModule('alpha')])],
     ])
@@ -160,7 +178,10 @@ describe('BackupsPage — restoring a backup', () => {
     const stub = stubFetchByUrl([
       ['/api/v1/auth/session', () => jsonResponse(READ_WRITE_SESSION)],
       ['POST /api/v1/modules/alpha/backups/7/restore', () => jsonResponse(restored)],
-      ['/api/v1/modules/alpha/backups', () => jsonResponse([buildBackup({ name: 'alpha-1.tar', id: 7 })])],
+      [
+        '/api/v1/modules/alpha/backups',
+        () => jsonResponse([buildBackup({ name: 'alpha-1.tar', id: 7 })]),
+      ],
       ['/api/v1/modules/alpha', () => jsonResponse(buildView('alpha', CURRENT_HASH))],
       ['/api/v1/modules', () => jsonResponse([buildModule('alpha')])],
     ])
@@ -194,7 +215,10 @@ describe('BackupsPage — restoring a backup', () => {
   it('disables the restore control and states the reason for a read-only session', async () => {
     const stub = stubFetchByUrl([
       ['/api/v1/auth/session', () => jsonResponse(READ_ONLY_SESSION)],
-      ['/api/v1/modules/alpha/backups', () => jsonResponse([buildBackup({ name: 'alpha-1.tar', id: 7 })])],
+      [
+        '/api/v1/modules/alpha/backups',
+        () => jsonResponse([buildBackup({ name: 'alpha-1.tar', id: 7 })]),
+      ],
       ['/api/v1/modules/alpha', () => jsonResponse(buildView('alpha'))],
       ['/api/v1/modules', () => jsonResponse([buildModule('alpha')])],
     ])
@@ -203,7 +227,10 @@ describe('BackupsPage — restoring a backup', () => {
     const restoreButton = await screen.findByRole('button', { name: 'restore' })
     expect(restoreButton).toBeDisabled()
     await waitFor(() => {
-      expect(restoreButton).toHaveAttribute('title', 'this session carries read access only; it cannot change anything on this host.')
+      expect(restoreButton).toHaveAttribute(
+        'title',
+        'this session carries read access only; it cannot change anything on this host.',
+      )
     })
   })
 
@@ -211,7 +238,10 @@ describe('BackupsPage — restoring a backup', () => {
     const user = userEvent.setup()
     const stub = stubFetchByUrl([
       ['/api/v1/auth/session', () => jsonResponse(READ_WRITE_SESSION)],
-      ['/api/v1/modules/alpha/backups', () => jsonResponse([buildBackup({ name: 'alpha-1.tar', id: 7 })])],
+      [
+        '/api/v1/modules/alpha/backups',
+        () => jsonResponse([buildBackup({ name: 'alpha-1.tar', id: 7 })]),
+      ],
       ['/api/v1/modules/alpha', () => jsonResponse(buildView('alpha'))],
       ['/api/v1/modules', () => jsonResponse([buildModule('alpha')])],
     ])
@@ -231,7 +261,10 @@ describe('BackupsPage — restoring a backup', () => {
     const user = userEvent.setup()
     const stub = stubFetchByUrl([
       ['/api/v1/auth/session', () => jsonResponse(READ_WRITE_SESSION)],
-      ['/api/v1/modules/alpha/backups', () => jsonResponse([buildBackup({ name: 'alpha-1.tar', id: 7 })])],
+      [
+        '/api/v1/modules/alpha/backups',
+        () => jsonResponse([buildBackup({ name: 'alpha-1.tar', id: 7 })]),
+      ],
       ['/api/v1/modules/alpha', () => jsonResponse(buildView('alpha'))],
       ['/api/v1/modules', () => jsonResponse([buildModule('alpha')])],
     ])
@@ -251,8 +284,14 @@ describe('BackupsPage — restoring a backup', () => {
     const user = userEvent.setup()
     const stub = stubFetchByUrl([
       ['/api/v1/auth/session', () => jsonResponse(READ_WRITE_SESSION)],
-      ['POST /api/v1/modules/alpha/backups/7/restore', () => errorResponse(500, 'ops-unknown-module', 'server_error')],
-      ['/api/v1/modules/alpha/backups', () => jsonResponse([buildBackup({ name: 'alpha-1.tar', id: 7 })])],
+      [
+        'POST /api/v1/modules/alpha/backups/7/restore',
+        () => errorResponse(500, 'ops-unknown-module', 'server_error'),
+      ],
+      [
+        '/api/v1/modules/alpha/backups',
+        () => jsonResponse([buildBackup({ name: 'alpha-1.tar', id: 7 })]),
+      ],
       ['/api/v1/modules/alpha', () => jsonResponse(buildView('alpha', CURRENT_HASH))],
       ['/api/v1/modules', () => jsonResponse([buildModule('alpha')])],
     ])
