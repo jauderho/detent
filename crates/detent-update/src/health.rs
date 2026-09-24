@@ -43,7 +43,6 @@ pub fn wait_healthy(
     pinned_cert_der: &[u8],
     deadline: Duration,
 ) -> Result<(), UpdateError> {
-    ensure_provider();
     let tls = client_config(pinned_cert_der)?;
     let started = Instant::now();
     // `>=` on the elapsed time, so a zero deadline still makes exactly one
@@ -76,25 +75,17 @@ fn client_config(pinned_cert_der: &[u8]) -> Result<Arc<rustls::ClientConfig>, Up
             waited_secs: 0,
             reason: format!("the serving certificate is not usable as a trust anchor: {err}"),
         })?;
-    let config = rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .map_err(|err| UpdateError::Unhealthy {
+        waited_secs: 0,
+        reason: format!("TLS 1.3 client config: {err}"),
+    })?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
     Ok(Arc::new(config))
-}
-
-/// Install the process-wide rustls `CryptoProvider` once (first call wins).
-///
-/// `rustls::ClientConfig` needs a process default when both `aws-lc-rs` and
-/// `ring` are compiled in (`--all-features`); without one every health probe
-/// panics. `fetch.rs` builds its client with an explicit provider, so only
-/// this pinned-loopback path needs the default.
-fn ensure_provider() {
-    use std::sync::Once;
-    static PROVIDER: Once = Once::new();
-    PROVIDER.call_once(|| {
-        let provider = rustls::crypto::aws_lc_rs::default_provider();
-        let _ = provider.install_default();
-    });
 }
 
 /// One `GET /healthz`. `Ok(())` only on a 2xx.
@@ -144,19 +135,21 @@ mod tests {
     /// A self-signed `localhost` certificate, and a server that speaks TLS
     /// 1.3 on a loopback port and answers `status` once.
     fn server(status: &'static str) -> (SocketAddr, Vec<u8>, std::thread::JoinHandle<()>) {
-        ensure_provider();
         let cert = rcgen::generate_simple_self_signed([SERVER_NAME.to_owned()])
             .expect("self-signed fixture");
         let cert_der = cert.cert.der().to_vec();
         let key = rustls_pki_types::PrivateKeyDer::Pkcs8(cert.signing_key.serialize_der().into());
-        let config =
-            rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-                .with_no_client_auth()
-                .with_single_cert(
-                    vec![rustls_pki_types::CertificateDer::from(cert_der.clone())],
-                    key,
-                )
-                .expect("server config");
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("TLS 1.3 server config")
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![rustls_pki_types::CertificateDer::from(cert_der.clone())],
+            key,
+        )
+        .expect("server config");
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
