@@ -15,6 +15,8 @@ import {
   jsonResponse,
   renderWithProviders,
   stubFetch,
+  stubFetchByUrl,
+  type UrlFetchStub,
 } from '@/test/providers'
 import { useAuth } from '../AuthProvider'
 
@@ -64,8 +66,7 @@ function Probe() {
   )
 }
 
-/** The client the provider will use, so a test can inspect the token it holds. */
-function clientFor(stub: FetchStub): ApiClient {
+function clientFor(stub: FetchStub | UrlFetchStub): ApiClient {
   return createApiClient({ fetch: stub.fetch })
 }
 
@@ -90,7 +91,13 @@ describe('AuthProvider — session probe', () => {
   })
 
   it('treats a 401 from the probe as "nobody is signed in", not as a failure', async () => {
-    const stub = stubFetch([errorResponse(401, 'web-auth-unauthenticated', 'unauthorized')])
+    const stub = stubFetchByUrl([
+      ['/api/v1/commits/pending', () => jsonResponse(null)],
+      [
+        '/api/v1/auth/session',
+        () => errorResponse(401, 'web-auth-unauthenticated', 'unauthorized'),
+      ],
+    ])
     const client = clientFor(stub)
     renderWithProviders(<Probe />, { client })
 
@@ -99,7 +106,7 @@ describe('AuthProvider — session probe', () => {
       expect(client.hasCsrfToken()).toBe(false)
     })
     // One probe, and nothing that would probe again: no loop.
-    expect(stub.calls).toHaveLength(1)
+    expect(stub.calls.filter((call) => call.url === '/api/v1/auth/session')).toHaveLength(1)
   })
 })
 
