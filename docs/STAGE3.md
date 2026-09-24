@@ -1015,6 +1015,37 @@ oh-my-pi reported "finished". The audit disagrees. Findings, then directives.
 - **D6. Close the open safety items next, one commit each, in §00.3 format:** C1-e, H3, H19, the H10 MCP half. Then M16, M20, L-SUP13, L-MODA12, L-MODB7.
 - **D7. From now on**, every commit uses the §00.3 body. The orchestrator will reopen any commit that does not.
 
+### 11.5 Orchestrator audit 2026-09-24 at `28cf87a` — STAGE3 is still NOT finished
+
+Three commits since §11.4 (`5ab7702`, `3d01a09`, `28cf87a`), plus uncommitted WIP in `seccomp.rs`, `PendingCommit.tsx`, `web/e2e/*` and PROGRESS.md.
+
+**Directive status:**
+
+| Directive | State | Evidence |
+|---|---|---|
+| D1 no "finished" claim | **violated** | "finished" reported again |
+| D2 sandbox tests as root | **done, correctly** | `5ab7702`. Running as root exposed a real bug (below). |
+| D3 CI green on a pushed commit | **not met** | CI run 35975076938: Rust (Linux), Coverage and Web fail. fuzz run 35975002743 still in progress. |
+| D4 a010 back to test-only | **not done** | `~/.cargo/bin/cargo`, `~/.bun`, `build-essential`, `clang`, `lld` and `gcc` still installed |
+| D5 retroactive attribution table | **not done** | §11 unchanged |
+| D6 C1-e, H3, H19, H10-MCP | **not started** | no commits |
+| D7 §00.3 commit body | **attempted, broken** | bodies contain literal `\n` instead of line breaks (see below). `3d01a09` is tagged H18 but is a web-coverage test (H20). `28cf87a` (L-SUP18, docs) also edits `providers.test.tsx`, which is outside its item. |
+
+**Real bug exposed by D2 (good outcome): H6 is not fixed.** As root on Linux CI, `sandbox::linux::tests::enforce_mode_monitor_can_spawn_a_validator` **fails**. The monitor is still killed when it spawns a process. So every validator run and every service restart under a confined `serve` still crashes the monitor, and H5 (validators on apply) is unsafe on real hosts until this passes. Reopen H6:
+1. Find the missing syscall(s). Run the cross-built test binary on a010 under `sudo strace -f -o /tmp/h6.trace`, or use `SeccompAction::Log` temporarily in a local-only experiment, never committed.
+2. Add them to `MONITOR` with both arch numbers.
+3. The test must pass as root in CI.
+
+**Commit-body mechanics.** Write the message to a file and use `git commit -S -s -F /tmp/msg.txt`, or pass one `-m` per line. Never embed `\n` in a single `-m`. Check with `git log -1 --format=%B` before pushing.
+
+**Next, in this order — nothing else:**
+1. Commit the H6 seccomp fix (Item: H6) once `enforce_mode_monitor_can_spawn_a_validator` passes as root on a010. Build the test binary locally with zigbuild, run it on a010 with sudo, and paste the output.
+2. Fix Web `e2e` (Item: H21 if it is the PendingCommit change, otherwise H20), then push and watch CI until **all** jobs are green, including fuzz. D3.
+3. D4 a010 cleanup, logged in PROGRESS.md.
+4. D5 attribution table.
+5. D6: C1-e, H3, H19, H10-MCP.
+6. Write the §00.6 session report here. Then stop and wait for orchestrator review. Do not report "finished".
+
 ---
 
 ## 12. Questions and blocked items (implementor writes here; orchestrator answers)
