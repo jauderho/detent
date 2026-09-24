@@ -18,7 +18,7 @@
 //! );
 //! ```
 
-use crate::descriptor::HostProfile;
+use crate::descriptor::{HostProfile, ValidationCtx};
 use crate::module::ConfigModule;
 
 /// Whether a conformance check's central assertion actually ran, or the input
@@ -202,13 +202,22 @@ pub fn check_injection_rejected<M: ConfigModule>(
     probe: &M::Model,
 ) -> Result<(), String> {
     let mut doc = M::parse(src).map_err(|e| format!("{}: parse failed: {e}", M::ID))?;
-    if M::apply(&mut doc, probe).is_err() {
-        return Ok(());
+    let profile = HostProfile::default_for_tests();
+    let diagnostics = M::validate(probe, &ValidationCtx::new(&profile));
+    if M::apply(&mut doc, probe).is_ok() {
+        return Err(format!(
+            "{}: apply accepted an injection probe: {probe:?}; validation returned {diagnostics:?}",
+            M::ID
+        ));
     }
-    Err(format!(
-        "{}: apply accepted an injection probe: {probe:?}",
-        M::ID
-    ))
+    let rendered = M::render(&doc);
+    M::parse(&rendered).map_err(|e| {
+        format!(
+            "{}: rejecting an injection probe left unparsable text {rendered:?}: {e}",
+            M::ID
+        )
+    })?;
+    Ok(())
 }
 
 /// Add an embedded newline to the first string in a serialized model.
