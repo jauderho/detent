@@ -230,14 +230,17 @@ fn run_monitor(
             ("dropped", if dropped_privileges { "1" } else { "0" }),
         ],
     )?;
-    let served = Monitor::new(
+    let checks = ExternalCheckRunner::new();
+    let services = ServiceControlAdapter(service::for_host(host.profile.init));
+    let mut monitor = Monitor::new(
         allow,
         Hooks {
-            checks: &ExternalCheckRunner::new(),
-            services: &ServiceControlAdapter(service::for_host(host.profile.init)),
+            checks: &checks,
+            services: &services,
         },
-    )
-    .serve(&mut handle.channel);
+    );
+    monitor.set_host_profile(host.profile.clone());
+    let served = monitor.serve(&mut handle.channel);
     let status = handle.wait();
     match (served, status) {
         (Ok(ExitReason::Shutdown), Ok(Some(0))) => Ok(Exit::Ok),

@@ -32,6 +32,7 @@ multiple_crate_versions = "allow"
 [dependencies]
 arbitrary = { workspace = true, optional = true }
 detent-core = { path = "../detent-core" }
+detent-modules = { path = "../detent-modules" }
 detent-update = { path = "../detent-update", default-features = false }
 postcard = { workspace = true }
 # Adds the `thread` feature on top of the workspace default (`fs`, `process`,
@@ -52,6 +53,7 @@ xattr = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+detent-modules = { path = "../detent-modules", features = ["module-samba"] }
 tempfile = { workspace = true }
 
 [features]

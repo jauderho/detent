@@ -114,7 +114,7 @@ fn build_descriptor(target_path: &Path) -> &'static ModuleDescriptor {
     }])
     .as_slice();
     leak(ModuleDescriptor {
-        id: "fake",
+        id: "samba",
         display_name_id: MessageId::new("fake-name"),
         targets,
         upstream: UPSTREAM,
@@ -182,10 +182,10 @@ fn monitor_runs_with_real_check_and_service_hooks() -> TestResult {
     let mut client = Client::new(worker_end);
     client.hello()?;
     let check = client
-        .check_id("fake")
+        .check_id("samba")
         .ok_or("the fixture's own module must advertise its own check")?;
     let binding = client
-        .binding_id("fake")
+        .binding_id("samba")
         .ok_or("the fixture's own module must advertise its own binding")?;
 
     let checked = client.run_check(check, b"candidate".to_vec())?;

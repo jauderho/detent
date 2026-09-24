@@ -30,11 +30,15 @@
 //! [`ProtoError::Unavailable`]. `Mount` answers [`ProtoError::Unsupported`]
 //! until the `module-mounts` feature exists.
 
+use std::fmt;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use detent_core::descriptor::{ExternalCheck, ServiceAction as CoreServiceAction, ServiceBinding};
+use detent_core::descriptor::{
+    ExternalCheck, HostProfile, ServiceAction as CoreServiceAction, ServiceBinding, ValidationCtx,
+};
+use detent_core::module::DynModule;
 use serde::{Deserialize, Serialize};
 
 use super::allowlist::Allowlist;
@@ -281,7 +285,6 @@ struct Pending {
 // ---------------------------------------------------------------------------
 
 /// The privileged request server.
-#[derive(Debug)]
 pub struct Monitor<'a> {
     allow: Allowlist,
     hooks: Hooks<'a>,
@@ -294,6 +297,20 @@ pub struct Monitor<'a> {
     binary_override: Option<PathBuf>,
     /// Test-only trust material; production uses [`detent_update::trust::embedded`].
     update_trust: Option<detent_update::trust::TrustRoot>,
+    /// Host facts used by the module validators.
+    host_profile: HostProfile,
+    /// Optional injected registry for synthetic descriptors. Production leaves
+    /// this unset and resolves only compiled modules.
+    module_registry: Option<Vec<Box<dyn DynModule>>>,
+}
+impl fmt::Debug for Monitor<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Monitor")
+            .field("allow", &self.allow)
+            .field("hooks", &self.hooks)
+            .field("greeted", &self.greeted)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a> Monitor<'a> {
@@ -308,13 +325,25 @@ impl<'a> Monitor<'a> {
             pending: None,
             binary_override: None,
             update_trust: None,
+            host_profile: HostProfile::default(),
+            module_registry: None,
         }
+    }
+
+    /// Inject the module registry used for synthetic descriptors.
+    pub fn set_module_registry(&mut self, registry: Vec<Box<dyn DynModule>>) {
+        self.module_registry = Some(registry);
     }
 
     /// Use explicit Sigstore trust material instead of the embedded roots.
     /// This keeps synthetic verifier fixtures out of production trust files.
     pub fn set_update_trust(&mut self, trust: detent_update::trust::TrustRoot) {
         self.update_trust = Some(trust);
+    }
+
+    /// Supply the detected host facts used by module validation.
+    pub fn set_host_profile(&mut self, profile: HostProfile) {
+        self.host_profile = profile;
     }
 
     /// Point the binary swap at `path` instead of `current_exe()`. Test-only:
@@ -517,6 +546,18 @@ impl<'a> Monitor<'a> {
         let Some(entry) = self.allow.target(id).cloned() else {
             return unknown(IdKind::Target, u32::from(id.get()));
         };
+        let previous = match read_with_digest(&entry.path) {
+            Ok((contents, _)) => contents,
+            Err(AtomicError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Vec::new()
+            }
+            Err(err) => return Response::Error(atomic_to_proto(&err)),
+        };
+        if let Err(response) = self.revalidate(entry.module, &previous, bytes) {
+            return response;
+        }
         let request = WriteRequest {
             path: &entry.path,
             contents: bytes,
@@ -530,24 +571,6 @@ impl<'a> Monitor<'a> {
             Ok(outcome) => outcome,
             Err(err) => return Response::Error(atomic_to_proto(&err)),
         };
-        let post_write = std::fs::read(&entry.path).map_err(|err| {
-            Response::Error(ProtoError::Io(format!(
-                "cannot read written target: {}",
-                err.kind()
-            )))
-        });
-        let validation = match post_write {
-            Ok(contents) => self.revalidate(entry.module, &contents),
-            Err(response) => Err(response),
-        };
-        if let Err(response) = validation {
-            if let Some(backup) = outcome.backup.as_deref() {
-                let _ = restore_backup(backup, &entry.path);
-            } else {
-                let _ = std::fs::remove_file(&entry.path);
-            }
-            return response;
-        }
         if let Some(backup) = outcome.backup.clone() {
             self.journal.push(RollbackEntry {
                 target: id.get(),
@@ -565,17 +588,33 @@ impl<'a> Monitor<'a> {
         })
     }
 
-    /// Re-run every configured validator against the bytes just written. The
-    /// monitor repeats the worker's validation and rolls back on failure.
-    fn revalidate(&self, module: ModuleId, bytes: &[u8]) -> Result<(), Response> {
+    /// Re-run module and external validators before installing candidate bytes.
+    fn revalidate(&self, module: ModuleId, previous: &[u8], bytes: &[u8]) -> Result<(), Response> {
         let Some(descriptor) = self.allow.module(module) else {
             return Err(unknown(IdKind::Module, u32::from(module.get())));
         };
-        if Self::content_has_exec_directive(descriptor.id, bytes) {
+        if Self::has_new_forbidden_exec_directive(descriptor.id, previous, bytes) {
             return Err(Response::Error(ProtoError::Io(
-                "module content contains a forbidden execution directive".to_owned(),
+                "module content adds a forbidden execution directive".to_owned(),
             )));
         }
+        let validation = if let Some(registry) = &self.module_registry {
+            let Some(module) = registry.iter().find(|module| module.id() == descriptor.id) else {
+                return Err(Response::Error(ProtoError::Io(
+                    "module parser is unavailable".to_owned(),
+                )));
+            };
+            Self::validate_candidate(module.as_ref(), bytes, &self.host_profile)
+        } else {
+            let modules = detent_modules::modules();
+            let Some(module) = modules.iter().find(|module| module.id() == descriptor.id) else {
+                return Err(Response::Error(ProtoError::Io(
+                    "module parser is unavailable".to_owned(),
+                )));
+            };
+            Self::validate_candidate(module.as_ref(), bytes, &self.host_profile)
+        };
+        validation?;
         if !self.hooks.checks.configured() {
             return Ok(());
         }
@@ -619,46 +658,110 @@ impl<'a> Monitor<'a> {
         Ok(())
     }
 
-    /// Reject directives that ask a privileged daemon to execute worker-controlled
-    /// content. This is deliberately a small per-module deny-list; the monitor
-    /// does not duplicate every module's config grammar.
-    fn content_has_exec_directive(module: &str, bytes: &[u8]) -> bool {
-        let text = String::from_utf8_lossy(bytes);
-        let lower = text.to_ascii_lowercase();
-        if ["exec", "sh ", "bash", "system(", "`"]
-            .iter()
-            .any(|needle| lower.contains(needle))
-        {
-            return true;
+    fn validate_candidate(
+        module: &dyn DynModule,
+        bytes: &[u8],
+        host_profile: &HostProfile,
+    ) -> Result<(), Response> {
+        let source = std::str::from_utf8(bytes).map_err(|_| {
+            Response::Error(ProtoError::Io(
+                "module content is not valid UTF-8".to_owned(),
+            ))
+        })?;
+        let model = module.parse_to_model_json(source).map_err(|err| {
+            Response::Error(ProtoError::Io(format!(
+                "module parser rejected candidate content: {err}"
+            )))
+        })?;
+        let diagnostics = module
+            .validate_json(&model, &ValidationCtx::new(host_profile))
+            .map_err(|err| {
+                Response::Error(ProtoError::Io(format!(
+                    "module validation rejected candidate content: {err}"
+                )))
+            })?;
+        if diagnostics.has_errors() {
+            return Err(Response::Error(ProtoError::Io(
+                "module validation rejected candidate content".to_owned(),
+            )));
         }
-        let text = String::from_utf8_lossy(bytes);
-        text.lines().any(|line| {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-                return false;
+        Ok(())
+    }
+
+    /// Reject only newly introduced directives that ask a privileged daemon to
+    /// execute content. Existing directives remain editable in place.
+    fn has_new_forbidden_exec_directive(module: &str, previous: &[u8], candidate: &[u8]) -> bool {
+        fn directives(text: &[u8], names: &[&str]) -> usize {
+            String::from_utf8_lossy(text)
+                .lines()
+                .filter_map(|line| {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                        return None;
+                    }
+                    line.split_once('=')
+                        .map_or_else(
+                            || line.split_whitespace().next(),
+                            |(key, _)| Some(key.trim()),
+                        )
+                        .map(str::to_ascii_lowercase)
+                })
+                .filter(|key| names.iter().any(|name| key == *name))
+                .count()
+        }
+
+        fn words(text: &[u8], prefix: &str) -> usize {
+            String::from_utf8_lossy(text)
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .filter(|word| word.starts_with(prefix))
+                .count()
+        }
+
+        let added = |names: &[&str]| directives(candidate, names) > directives(previous, names);
+        match module {
+            "samba" => added(&[
+                "root preexec",
+                "root postexec",
+                "preexec",
+                "postexec",
+                "add user script",
+                "include",
+            ]),
+            "dhcp" => added(&["dhcp-script", "dhcp-luascript", "conf-file", "conf-dir"]),
+            "chrony" => added(&["include", "confdir", "sourcedir", "pidfile"]),
+            "resolver" => added(&["include:", "python-script:"]),
+            "network" => {
+                let forbidden = |text: &[u8]| {
+                    String::from_utf8_lossy(text)
+                        .lines()
+                        .filter(|line| {
+                            let (key, value) = line
+                                .split_once('=')
+                                .or_else(|| line.split_once(char::is_whitespace))
+                                .unwrap_or((line, ""));
+                            match key.trim().to_ascii_lowercase().as_str() {
+                                "up" => {
+                                    let words: Vec<&str> = value.split_whitespace().collect();
+                                    if words.len() < 5 {
+                                        return true;
+                                    }
+                                    !matches!(
+                                        words.as_slice(),
+                                        ["ip", "route", "add", .., "via", _]
+                                    )
+                                }
+                                "down" | "pre-up" | "post-down" => true,
+                                _ => false,
+                            }
+                        })
+                        .count()
+                };
+                forbidden(candidate) > forbidden(previous)
             }
-            let lower = line.to_ascii_lowercase();
-            let directive = |name: &str| {
-                lower == name
-                    || lower.starts_with(&format!("{name} "))
-                    || lower.starts_with(&format!("{name}="))
-                    || lower.starts_with(&format!("{name}:"))
-            };
-            match module {
-                "samba" => ["root preexec", "root postexec", "preexec", "postexec"]
-                    .iter()
-                    .any(|name| directive(name)),
-                "dhcp" => ["dhcp-script", "script"].iter().any(|name| directive(name)),
-                "mounts" => directive("exec"),
-                "nfs" => lower
-                    .split(|c: char| c == ',' || c.is_whitespace())
-                    .any(|word| word == "no_root_squash"),
-                "network" => ["up", "pre-up", "post-up", "down", "pre-down", "post-down"]
-                    .iter()
-                    .any(|name| directive(name)),
-                _ => false,
-            }
-        })
+            "mounts" => words(candidate, "x-systemd.") > words(previous, "x-systemd."),
+            "nfs" => words(candidate, "no_root_squash") > words(previous, "no_root_squash"),
+            _ => false,
+        }
     }
 
     fn run_check(&self, id: CheckId, bytes: &[u8]) -> Response {
@@ -1588,7 +1691,9 @@ mod tests {
         PathSpec, ServiceAction as CoreServiceAction, ServiceBinding, Target, TargetKind,
         UnitNames, Upstream,
     };
-    use detent_core::diag::MessageId;
+    use detent_core::diag::{Diagnostics, MessageId};
+    use detent_core::module::{DynError, DynModule};
+    use serde_json::{Value, json};
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
@@ -1647,6 +1752,13 @@ mod tests {
     /// kept local so this module's white-box tests do not depend on an
     /// integration test crate.
     fn descriptor(target_path: &Path) -> &'static ModuleDescriptor {
+        descriptor_with_id(target_path, "fake")
+    }
+
+    fn descriptor_with_id(
+        target_path: &Path,
+        module_id: &'static str,
+    ) -> &'static ModuleDescriptor {
         let target_path = leak_str(target_path.display().to_string());
         let targets: &'static [Target] = leak(vec![Target {
             path: PathSpec::new(target_path),
@@ -1676,7 +1788,7 @@ mod tests {
         }])
         .as_slice();
         leak(ModuleDescriptor {
-            id: "fake",
+            id: module_id,
             display_name_id: MessageId::new("fake-name"),
             targets,
             upstream: UPSTREAM,
@@ -1685,6 +1797,44 @@ mod tests {
             commit_confirm: false,
             security_notes: &[],
         })
+    }
+
+    struct SyntheticModule {
+        descriptor: &'static ModuleDescriptor,
+    }
+
+    impl DynModule for SyntheticModule {
+        fn id(&self) -> &'static str {
+            self.descriptor.id
+        }
+
+        fn descriptor(&self) -> &'static ModuleDescriptor {
+            self.descriptor
+        }
+
+        fn schema_json(&self) -> Value {
+            Value::Null
+        }
+
+        fn parse_to_model_json(&self, src: &str) -> Result<Value, DynError> {
+            Ok(json!({ "text": src }))
+        }
+
+        fn apply_json(&self, src: &str, _model_json: &Value) -> Result<String, DynError> {
+            Ok(src.to_owned())
+        }
+
+        fn validate_json(
+            &self,
+            _model_json: &Value,
+            _ctx: &detent_core::descriptor::ValidationCtx<'_>,
+        ) -> Result<Diagnostics, DynError> {
+            Ok(Diagnostics::new())
+        }
+
+        fn defaults_json(&self, _profile: &HostProfile) -> Result<Value, DynError> {
+            Ok(Value::Null)
+        }
     }
 
     struct Fixture {
@@ -1717,7 +1867,25 @@ mod tests {
     /// A monitor that has already completed the handshake, so `dispatch` can
     /// be called directly with any other request.
     fn greeted(allow: Allowlist, hooks: Hooks<'_>) -> Monitor<'_> {
+        let registry = allow
+            .module(ModuleId(0))
+            .map(|descriptor| vec![Box::new(SyntheticModule { descriptor }) as Box<dyn DynModule>]);
+        greeted_with_registry(allow, hooks, registry)
+    }
+
+    fn greeted_real(allow: Allowlist, hooks: Hooks<'_>) -> Monitor<'_> {
+        greeted_with_registry(allow, hooks, None)
+    }
+
+    fn greeted_with_registry(
+        allow: Allowlist,
+        hooks: Hooks<'_>,
+        registry: Option<Vec<Box<dyn DynModule>>>,
+    ) -> Monitor<'_> {
         let mut monitor = Monitor::new(allow, hooks);
+        if let Some(registry) = registry {
+            monitor.set_module_registry(registry);
+        }
         let _ = monitor.dispatch(Request::Hello {
             proto: PROTO_VERSION,
         });
@@ -1741,13 +1909,15 @@ mod tests {
     }
 
     #[test]
-    fn monitor_rejects_baseline_execution_constructs() {
-        assert!(Monitor::content_has_exec_directive("fake", b"exec /tmp/x"));
-        assert!(Monitor::content_has_exec_directive("fake", b"system('id')"));
-        assert!(Monitor::content_has_exec_directive("fake", b"value `id`"));
-        assert!(!Monitor::content_has_exec_directive(
-            "fake",
-            b"ordinary configuration"
+    fn monitor_allows_existing_execution_directives() {
+        let content = b"root preexec = /bin/true\n";
+        assert!(!Monitor::has_new_forbidden_exec_directive(
+            "samba", content, content
+        ));
+        assert!(Monitor::has_new_forbidden_exec_directive(
+            "samba",
+            b"[global]\n",
+            b"[global]\nroot preexec = /bin/true\n"
         ));
     }
 
@@ -1808,7 +1978,6 @@ mod tests {
             Err(HookError::Failed("boom".to_owned()))
         }
     }
-
     // -- getters and formatting ----------------------------------------------
 
     #[test]
@@ -2063,6 +2232,29 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn write_target_refuses_new_root_exec_directives() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TempDir::new()?;
+        let target = dir.path().join("smb.conf");
+        let original = b"[global]\nworkgroup = EXAMPLE\n";
+        std::fs::write(&target, original)?;
+        let allow = Allowlist::from_modules(
+            &[descriptor_with_id(&target, "samba")],
+            &Config::with_state_root(dir.path().join("state")),
+        )?;
+        let mut monitor = greeted_real(allow, Hooks::default());
+        let candidate = b"[global]\nworkgroup = EXAMPLE\nroot preexec = /bin/sh\n";
+
+        let response = monitor.dispatch(Request::WriteTarget {
+            target: TargetId(0),
+            expected_prev: None,
+            bytes: candidate.to_vec(),
+        })?;
+
+        assert!(matches!(response, Response::Error(_)));
+        assert_eq!(std::fs::read(&target)?, original);
+        Ok(())
+    }
     // -- backups and restore ------------------------------------------------
 
     #[test]

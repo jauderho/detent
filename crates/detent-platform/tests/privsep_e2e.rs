@@ -112,7 +112,7 @@ fn build_descriptor(target_path: &Path) -> &'static ModuleDescriptor {
     }])
     .as_slice();
     leak(ModuleDescriptor {
-        id: "fake",
+        id: "samba",
         display_name_id: MessageId::new("fake-name"),
         targets,
         upstream: UPSTREAM,
@@ -218,7 +218,7 @@ fn join_expect(handle: thread::JoinHandle<ServeResult>, expected: ExitReason) {
 /// an already-greeted client. These can only be `None` if the fixture and the
 /// lookup disagree about the module id, which would be a bug in this file.
 fn target_id(client: &Client, fx: &Fixture) -> TargetId {
-    let Some(id) = client.target_id("fake", &fx.target.display().to_string(), PathKind::File)
+    let Some(id) = client.target_id("samba", &fx.target.display().to_string(), PathKind::File)
     else {
         unreachable!("the fixture's own module must advertise its own target")
     };
@@ -226,7 +226,7 @@ fn target_id(client: &Client, fx: &Fixture) -> TargetId {
 }
 
 fn module_id(client: &Client) -> ModuleId {
-    let Some(id) = client.module_id("fake") else {
+    let Some(id) = client.module_id("samba") else {
         unreachable!("the fixture's own module must advertise its own id")
     };
     id
@@ -349,10 +349,10 @@ fn list_backups_and_restore_round_trip() -> TestResult {
 fn run_check_and_service_report_unavailable_with_no_collaborators() -> TestResult {
     let fx = fixture(b"v1")?;
     let (mut client, handle) = spawn_client(fx.allow()?)?;
-    let Some(check) = client.check_id("fake") else {
+    let Some(check) = client.check_id("samba") else {
         unreachable!("the fixture's own module must advertise its own check")
     };
-    let Some(binding) = client.binding_id("fake") else {
+    let Some(binding) = client.binding_id("samba") else {
         unreachable!("the fixture's own module must advertise its own binding")
     };
 
@@ -572,7 +572,7 @@ fn rollback_replays_the_service_after_restoring_files() -> TestResult {
     client.hello()?;
     let target = target_id(&client, &fx);
     let binding = client
-        .binding_id("fake")
+        .binding_id("samba")
         .ok_or("the fixture must advertise its service binding")?;
     let v1_digest = read_with_digest(&fx.target)?.1;
 
@@ -780,7 +780,12 @@ fn every_request_gets_exactly_one_response() -> TestResult {
 #[test]
 fn an_oversize_response_terminates_the_session_with_a_protocol_violation() -> TestResult {
     let fx = fixture(b"v1")?;
-    let backup_dir = fx.root.join("state").join("backups").join("fake").join("0");
+    let backup_dir = fx
+        .root
+        .join("state")
+        .join("backups")
+        .join("samba")
+        .join("0");
     std::fs::create_dir_all(&backup_dir)?;
     let stamp = "2026-01-01T00:00:00.000000000Z";
     for i in 0..12_000_u32 {
@@ -861,10 +866,10 @@ fn run_check_and_service_succeed_through_working_collaborators() -> TestResult {
     });
     let mut client = Client::new(worker_end);
     client.hello()?;
-    let Some(check) = client.check_id("fake") else {
+    let Some(check) = client.check_id("samba") else {
         unreachable!("the fixture's own module must advertise its own check")
     };
-    let Some(binding) = client.binding_id("fake") else {
+    let Some(binding) = client.binding_id("samba") else {
         unreachable!("the fixture's own module must advertise its own binding")
     };
 
