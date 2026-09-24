@@ -58,6 +58,9 @@ pub const BOOTSTRAP_PAIR_FILE: &str = "bootstrap.pair";
 /// File holding one complete ACME certificate-chain/key pair inside `cert_dir`.
 pub const ACME_PAIR_FILE: &str = "acme.pair";
 
+/// Regenerate a bootstrap certificate once it has less than this much life left.
+const BOOTSTRAP_RENEWAL_WINDOW_SECS: i64 = 7 * 24 * 60 * 60;
+
 const LEGACY_BOOTSTRAP_CERT_FILE: &str = "bootstrap.cert.der";
 const LEGACY_BOOTSTRAP_KEY_FILE: &str = "bootstrap.key.der";
 const LEGACY_ACME_CERT_FILE: &str = "acme.cert.der";
@@ -75,15 +78,11 @@ const CERT_DIR_MODE: u32 = 0o700;
 const GROUP_AND_OTHER: u32 = 0o077;
 
 /// Whether a bootstrap certificate should be replaced at `now_unix`.
-fn bootstrap_rotation_due(pair: &CertifiedKeyPair, acme_configured: bool, now_unix: i64) -> bool {
-    let Some((not_before, not_after)) = validity_unix(pair.cert_der()) else {
+fn bootstrap_rotation_due(pair: &CertifiedKeyPair, now_unix: i64) -> bool {
+    let Some((_not_before, not_after)) = validity_unix(pair.cert_der()) else {
         return true;
     };
-    if acme_configured {
-        now_unix >= not_after
-    } else {
-        renewal_due_at(not_before, not_after, now_unix)
-    }
+    not_after < now_unix.saturating_add(BOOTSTRAP_RENEWAL_WINDOW_SECS)
 }
 
 /// Names every bootstrap certificate carries, whatever the operator
@@ -862,38 +861,46 @@ fn decode_pair(encoded: &[u8]) -> Result<CertifiedKeyPair, TlsError> {
     Ok(CertifiedKeyPair::from_der_chain(leaf, certs, key))
 }
 
-/// Read one ACME pair, preferring the atomic file and accepting the legacy
-/// length-framed chain/key files for migration.
+/// Read one usable ACME pair, preferring the atomic file and accepting the
+/// legacy length-framed chain/key files for migration.
+///
+/// Malformed, mismatched, or otherwise unusable stored material is reported as
+/// absent so the caller falls back to its bootstrap certificate. An I/O error
+/// other than `NotFound` is still propagated and fails closed.
 ///
 /// # Errors
 ///
-/// [`TlsError::Read`] when a file cannot be read, or [`TlsError::Pem`] when
-/// stored bytes do not parse as a complete certificate/key pair.
+/// [`TlsError::Read`] when an existing file cannot be read.
 pub fn load_acme(cert_dir: &Path) -> Result<Option<CertifiedKeyPair>, TlsError> {
-    if let Some(encoded) = read_optional(&cert_dir.join(ACME_PAIR_FILE))? {
-        return decode_pair(&encoded).map(Some);
-    }
-    let Some(chain) = read_optional(&cert_dir.join(LEGACY_ACME_CERT_FILE))? else {
-        return Ok(None);
+    let pair = if let Some(encoded) = read_optional(&cert_dir.join(ACME_PAIR_FILE))? {
+        match decode_pair(&encoded) {
+            Ok(pair) => pair,
+            Err(TlsError::Pem) => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    } else {
+        let Some(chain) = read_optional(&cert_dir.join(LEGACY_ACME_CERT_FILE))? else {
+            return Ok(None);
+        };
+        let Some(key) = read_optional(&cert_dir.join(LEGACY_ACME_KEY_FILE))? else {
+            return Ok(None);
+        };
+        let mut certs = Vec::new();
+        let mut rest = chain.as_slice();
+        while !rest.is_empty() {
+            match take_len_prefixed(&mut rest) {
+                Ok(cert) => certs.push(cert.to_vec()),
+                Err(TlsError::Pem) => return Ok(None),
+                Err(error) => return Err(error),
+            }
+        }
+        let mut certs = certs.into_iter();
+        let Some(leaf) = certs.next() else {
+            return Ok(None);
+        };
+        CertifiedKeyPair::from_der_chain(leaf, certs.collect(), key)
     };
-    let Some(key) = read_optional(&cert_dir.join(LEGACY_ACME_KEY_FILE))? else {
-        return Ok(None);
-    };
-    let mut certs = Vec::new();
-    let mut rest = chain.as_slice();
-    while !rest.is_empty() {
-        let cert = take_len_prefixed(&mut rest)?;
-        certs.push(cert.to_vec());
-    }
-    let mut certs = certs.into_iter();
-    let Some(leaf) = certs.next() else {
-        return Err(TlsError::Pem);
-    };
-    Ok(Some(CertifiedKeyPair::from_der_chain(
-        leaf,
-        certs.collect(),
-        key,
-    )))
+    Ok(pair.to_certified_key().ok().map(|_| pair))
 }
 
 /// Make sure `cert_dir` grants nothing to group or other, whether this call
@@ -948,8 +955,8 @@ fn write_key_file(path: &Path, contents: &[u8]) -> Result<(), TlsError> {
 /// Return a usable bootstrap pair, rotating it when its lifecycle requires it.
 ///
 /// A valid stored pair keeps its fingerprint across ordinary restarts. It is
-/// replaced when unreadable, when expired, or — in self-signed-only mode — at
-/// the same two-thirds-lifetime renewal point used by ACME scheduling.
+/// replaced when unreadable, when unparseable, or when it has less than seven
+/// days of validity left.
 ///
 /// # Errors
 ///
@@ -957,14 +964,10 @@ fn write_key_file(path: &Path, contents: &[u8]) -> Result<(), TlsError> {
 pub fn load_or_bootstrap(
     cert_dir: &Path,
     hostnames: &[String],
-    acme_configured: bool,
+    _acme_configured: bool,
 ) -> Result<CertifiedKeyPair, TlsError> {
     if let Some(pair) = load_bootstrap(cert_dir)?
-        && !bootstrap_rotation_due(
-            &pair,
-            acme_configured,
-            OffsetDateTime::now_utc().unix_timestamp(),
-        )
+        && !bootstrap_rotation_due(&pair, OffsetDateTime::now_utc().unix_timestamp())
     {
         return Ok(pair);
     }
@@ -1368,7 +1371,7 @@ mod tests {
     }
 
     #[test]
-    fn self_signed_rotation_obeys_the_acme_configuration_and_expiry() -> R {
+    fn an_expiring_bootstrap_pair_is_regenerated() -> R {
         use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
         use time::{Duration, OffsetDateTime};
 
@@ -1389,25 +1392,42 @@ mod tests {
 
         let now = OffsetDateTime::now_utc();
         let dir = tempfile::tempdir()?;
-        let cert_dir = dir.path().join("certs");
         let names = vec!["box.example".to_owned()];
-        let rotation_due = custom_pair(
-            now.checked_sub(Duration::days(80))
-                .ok_or("time underflow")?,
-            now.checked_add(Duration::days(10)).ok_or("time overflow")?,
-        )?;
-        store_bootstrap(&cert_dir, &rotation_due)?;
-        assert_eq!(load_or_bootstrap(&cert_dir, &names, true)?, rotation_due);
-        assert_ne!(load_or_bootstrap(&cert_dir, &names, false)?, rotation_due);
 
-        let expired_dir = dir.path().join("expired");
-        let expired = custom_pair(
-            now.checked_sub(Duration::days(10))
-                .ok_or("time underflow")?,
+        let fresh_dir = dir.path().join("fresh");
+        let fresh = custom_pair(
             now.checked_sub(Duration::days(1)).ok_or("time underflow")?,
+            now.checked_add(Duration::days(8)).ok_or("time overflow")?,
         )?;
-        store_bootstrap(&expired_dir, &expired)?;
-        assert_ne!(load_or_bootstrap(&expired_dir, &names, true)?, expired);
+        store_bootstrap(&fresh_dir, &fresh)?;
+        assert_eq!(load_or_bootstrap(&fresh_dir, &names, true)?, fresh);
+
+        let expiring_dir = dir.path().join("expiring");
+        let expiring = custom_pair(
+            now.checked_sub(Duration::days(84))
+                .ok_or("time underflow")?,
+            now.checked_add(Duration::days(6)).ok_or("time overflow")?,
+        )?;
+        store_bootstrap(&expiring_dir, &expiring)?;
+        assert_ne!(load_or_bootstrap(&expiring_dir, &names, false)?, expiring);
+        Ok(())
+    }
+
+    #[test]
+    fn a_mismatched_stored_acme_pair_falls_back_to_bootstrap() -> R {
+        let dir = tempfile::tempdir()?;
+        let cert_dir = dir.path().join("certs");
+        let bootstrap = pair()?;
+        let mismatched =
+            CertifiedKeyPair::new(bootstrap.cert_der().to_vec(), pair()?.key_pkcs8_der.clone());
+        store_bootstrap(&cert_dir, &bootstrap)?;
+        store_acme(&cert_dir, &mismatched)?;
+
+        assert!(load_acme(&cert_dir)?.is_none());
+        assert_eq!(
+            load_or_bootstrap(&cert_dir, &["box.example".to_owned()], true)?,
+            bootstrap
+        );
         Ok(())
     }
 
