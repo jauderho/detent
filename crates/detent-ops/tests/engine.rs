@@ -675,6 +675,23 @@ fn an_unknown_module_id_is_refused_before_any_io() -> TestResult {
 }
 
 #[test]
+fn an_unknown_module_is_sanitized_in_audit_records() -> TestResult {
+    let mut fx = harness(b"v1\n", Setup::default())?;
+    let err = fx.run(Operation::Apply {
+        id: "private/module id\nforged".to_owned(),
+        model: json!({}),
+        expected_hash: None,
+        service_action: None,
+        confirm: None,
+    });
+    assert!(matches!(err, Err(OpsError::UnknownModule { .. })));
+    let records = fx.records();
+    assert_eq!(records.len(), 2);
+    assert!(records.iter().all(|record| record.module.is_none()));
+    fx.finish()
+}
+
+#[test]
 fn a_module_the_monitor_does_not_know_is_reported_as_unknown() -> TestResult {
     let mut fx = harness(
         b"v1\n",
