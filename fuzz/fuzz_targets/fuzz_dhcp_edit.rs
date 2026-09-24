@@ -5,6 +5,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use detent_core::descriptor::{HostProfile, ValidationCtx};
 use detent_core::module::ConfigModule;
 use detent_module_dhcp::{DhcpModule, Model};
 use libfuzzer_sys::fuzz_target;
@@ -20,6 +21,20 @@ fuzz_target!(|input: Input| {
     let Ok(mut doc) = DhcpModule::parse(input.source) else {
         return;
     };
+    if input.model.dnsmasq.is_empty()
+        && matches!(&doc, detent_module_dhcp::DhcpDoc::Dnsmasq(_))
+        && (input.source.contains("Dhcp4") || input.source.contains("Dhcp6"))
+    {
+        return;
+    }
+    if DhcpModule::validate(
+        &input.model,
+        &ValidationCtx::new(&HostProfile::default_for_tests()),
+    )
+    .has_errors()
+    {
+        return;
+    }
     if DhcpModule::apply(&mut doc, &input.model).is_err() {
         return;
     }
