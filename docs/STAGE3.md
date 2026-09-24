@@ -798,4 +798,79 @@ STAGE2 was re-read in full against the code. **Accepted:**
 
 ## 11. Status
 
-(Filled in below; update it as items land.)
+### 11.1 Snapshot 2026-09-24 at `c216842` (orchestrator audit)
+
+Method:
+- Code evidence per item from `git log -G` / `git grep` at HEAD, with no trust in commit messages.
+- Gates re-run on a clean HEAD worktree (without oh-my-pi's uncommitted WIP).
+- GitHub CI read for the last pushed commit (`7e59ab7`).
+- Items marked **done** have code evidence. They were **not** re-reviewed in depth; a verification pass is still owed (§11.3).
+
+**Gates at HEAD — still red (H20 not done):**
+
+| Gate | State |
+|---|---|
+| `cargo fmt --check` | pass |
+| `cargo clippy --all-features -D warnings` | **fail**, 2 new errors from the H1 commits: `run.rs:1192` redundant closure; `serve.rs:243` needless `&mut` |
+| `cargo test --workspace --all-features` (macOS) | 1728 pass, 0 fail, 6 ignored |
+| CI Rust (Linux) and Coverage | **fail**: `hooks_confine_both_roles_across_a_forked_pair` → `PR_CAPBSET_DROP ... EPERM`. M1 made caps required and did not fix the drop-after-`setuid` ordering the item warned about. |
+| CI macOS | **fail**: `detent-update --test real_transport` `caps_redirect_loop` |
+| CI ACME Pebble | **fail**: `ghcr.io/letsencrypt/pebble:v2.10.1: not found`. The L-SUP18 pin names a tag that does not exist. |
+| CI Web | fail (not triaged) |
+| Codespell | **fail**, 5 hits: `detent-mcp/src/lib.rs:16`, `detent-update/src/verify.rs:355`, `detent-web/src/auth/users.rs:979`, `modules/dhcp/src/lib.rs:2581`, `docs/API.md:174` |
+| Lint (Checkov) | **fail** on the `Upstream watch` workflow |
+| fuzz.yml | **fail** (last run 2026-09-23) |
+| Pushed? | No. 12 local commits after `7e59ab7` are unpushed. |
+
+**Process violations to stop now:**
+1. `dc3a279` is one ~4,000-line commit (70+ files) spanning dozens of items, with a vague message. Its "clippy clean" claim was false by the next push. This breaks §0.1 (one item per commit) and §0.8.
+2. Lint suppressions rose from **97 to 116** since the baseline (e.g. `a77c3ae` adds `#![allow(clippy::expect_used, clippy::unwrap_used)]` to `real_transport.rs`). This breaks §0.3. Each new `allow` must be justified in its commit or removed.
+3. None of the Linux sandbox items (H6, M1, M2) were verified on a009/k001 (§0.5), and M1 broke Linux CI.
+4. `docs/STAGE2.md` was reverted and `docs/STAGE3.md` deleted in the working tree. §0.10 now forbids that.
+5. A stray worktree, `/private/tmp/wt-f3309b6`, exists. Remove it when done.
+
+### 11.2 Per-item state
+
+**Done — code evidence present (awaiting verification pass):**
+C1-a, C1-d, H1, H2, H4, H5, H7, H8, H9, H11, H12 (option B), H13, H14, H15,
+H16, H21, H22, H23, M2, M5, M6, M9, M10, M11, M12, M13 (doc path: panic
+aborts), M14, M15, M17, M18, M19, M21, M24, M25, L-PLAT6, L-PLAT8, L-OPS18,
+L-OPS19, L-WEB14, L-WEB17, L-BIN11, L-BIN12, L-BIN13, L-MODB8, L-ORC1.
+
+**Landed but broken or partial — fix before anything new:**
+- **H20:** see the gate table above. This is the top priority.
+- **M1:** breaks Linux CI. Drop the bounding set **before** `setuid` in `become_worker`, or treat "effective and permitted already empty" as `Applied` for the worker. Verify on a009.
+- **H6:** exec syscalls were added to `MONITOR` but never run confined on a009/k001. Do the strace step and add the `enforce_mode_monitor_can_spawn_a_validator` test.
+- **H10:** web stores refresh and revoke sessions (done). MCP is still open: `detent-mcp` `check_auth` still reads `DETENT_MCP_TOKEN` from the env, and there is no per-request `StoreVerifier`. Revoked tokens keep working in MCP.
+- **H17:** the payload type and `verificationMaterial.certificate` are accepted. There is no evidence of a **captured real bundle** fixture test, and M16 (negative tests) is open. Treat as unproven until a real release bundle verifies.
+- **H18:** redirects are implemented, but `caps_redirect_loop` fails on macOS CI. Fix the test or the code; do not `#[ignore]` it.
+- **C1-c:** the monitor now calls `detent_update::verify::verify`, so detent-platform depends on detent-update rather than the split crate `detent-update-verify` STAGE3 asked for. That is acceptable only if it does not pull network or TLS code into the monitor's reachable set; check `cargo tree -p detent-platform -e normal`. It is only as good as H17.
+- **L-SUP18:** the Pebble image pin must be a real digest (`@sha256:`), not an invented tag.
+
+**Inside the `dc3a279` batch only — unverified, review item by item:**
+M3, M7, M8, M22, M23, L-OPS11, L-OPS14, L-OPS17, L-PLAT7, L-WEB9, L-WEB10,
+L-WEB11, L-WEB12, L-WEB13, L-WEB15, L-WEB16, L-SUP10, L-SUP11, L-SUP12,
+L-SUP14, L-SUP15, L-SUP16, L-SUP17, L-BIN14, L-BIN15, L-BIN16, L-BIN17,
+L-BIN18, L-BIN19, L-MODA8, L-MODA9, L-MODA10, L-MODA11, L-FE3.
+
+**Open — no evidence of work:**
+C1-b (staging out of the worker tree), H3 (the journal still accumulates
+across modules: `monitor.rs` pushes on every write), H19 (WIP in
+`health.rs`, uncommitted), M4 (engine still `AllowAll`; denials not
+audited), M16, M20 (positional pairing), L-OPS12, L-OPS15, L-OPS16, L-SUP13,
+L-MODA12, L-MODB7.
+
+**Uncommitted WIP in the tree at snapshot time** (27 files): `health.rs`
+(H19), `tls.rs` (L-WEB9/10), `monitor.rs`/`spawn.rs`/`sandbox/mod.rs`
+(likely the M1 fix), mounts/samba/network modules, `conformance.rs`, and
+packaging.
+
+**Tally (≈94 items):** ~45 done pending verification, 8 broken or partial,
+~34 batch-only and unverified, 12 open.
+
+### 11.3 Next steps, in order
+1. Make CI green on a **pushed** commit (H20, M1, L-SUP18, H18, clippy, Codespell, Checkov, fuzz). No new items until it is green.
+2. Remove the new lint suppressions or justify each one.
+3. Close H3, M4, H19, and H10's MCP half. These are safety items still open.
+4. Verification pass: a fresh reviewer re-checks the 45 "done" items and the 34 batch-only items against each item's Test/Acceptance line in this file. Mark each one ✅ here, or reopen it.
+5. Then the remaining open items. Then PLAN.md.
