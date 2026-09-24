@@ -964,6 +964,57 @@ packaging.
 4. Verification pass: a fresh reviewer re-checks the 45 "done" items and the 34 batch-only items against each item's Test/Acceptance line in this file. Mark each one ✅ here, or reopen it.
 5. Then the remaining open items. Then PLAN.md.
 
+### 11.4 Orchestrator audit 2026-09-24 at `a5d06a1` — STAGE3 is NOT finished
+
+oh-my-pi reported "finished". The audit disagrees. Findings, then directives.
+
+**Gates (CI run 35967845615 on `a5d06a1`) — red, 4 jobs:**
+- Rust (Linux): `cargo fmt --check` fails. Unformatted code was pushed, so the §0.4 gates were not run before the push.
+- Coverage (Linux): 6 `sandbox::linux::tests` fail with `PR_CAPBSET_DROP ... EPERM`. The runner is unprivileged and the monitor policy now requires caps.
+- macOS: the `clippy` component is missing from the toolchain.
+- Web: `coverage:check` fails.
+- `fuzz.yml` has not run since 2026-09-23 (last run: failure). Its fix in `6e50880` is unproven.
+- The allow count stays at 116. Good: it did not grow.
+
+**Process violations:**
+1. **0 of 24 commits** (`d0cffe1..a5d06a1`) follow the §00.3 body format. None carries an `Item:` id, failing-test evidence, gate exit codes, or an a010 line, so none can be attributed or verified from history.
+2. **§11 was never updated** and no §00.6 session report was written. The status lives only in PROGRESS.md, which also contradicts CI ("1736 passed" on macOS against a red Linux run).
+3. **a010 provisioning broke §00.5:**
+   - It installed build-essential, clang, lld, rustup, nightly, cargo-llvm-cov, cargo-fuzz and bun, all through `curl | sh`.
+   - It ran `apt-get install --allow-downgrades libbz2-1.0=1.0.8-6build2`, which downgraded a base system library.
+   - The owner's rule is that a010 is test-only and that nothing is compiled there.
+4. **C1-b (a `DECISION`) was implemented without an owner answer.** Staging moved to `/run/detent/staging` (`4b098d0`). The design matches the proposed default, so it may stand if the owner confirms it in §12.
+5. **Uncommitted WIP weakens a check.** It makes sandbox tests disable the caps requirement and "skip with a diagnostic" when `CAP_SETPCAP` is absent. A test that silently passes in CI is exactly what §00.4 forbids. **Rejected** — see directive D2.
+
+**Item state after this audit (changes to §11.2 only):**
+- **Now done (code evidence):** C1-b (pending owner confirmation), C1-c (the monitor verifies the Sigstore bundle before every swap; there is no fallback), L-OPS12, L-OPS15, L-OPS16, L-OPS11 (commit id), M4 partially (the web layer now audits `ScopeDenied`; the engine is still `AllowAll`, which is acceptable for now).
+- **Still open:**
+  - **H3**: `monitor.rs` `write_target` still pushes every write into `journal`, and nothing clears it outside `start_confirm_timer`.
+  - **H19**: `run.rs` still pins `load_bootstrap` with a webpki root store and the `localhost` name, so every update on an ACME host still rolls back.
+  - **H10 (MCP half)**: `detent-mcp` `check_auth` still reads `DETENT_MCP_TOKEN` from the env.
+  - Also open: M16, M20, L-SUP13, L-MODA12, L-MODB7.
+- **New finding C1-e (high) — monitor-side downgrade.**
+  - Problem: `replace_binary` verifies the bundle for the **worker-supplied** `tag` but never checks that tag against the running version. A compromised worker can stage an **older, genuinely signed** release plus its bundle and have root install it, i.e. downgrade to a build with known holes. Update policy refuses downgrades only in the worker (`policy.rs`), and the worker is the party we are defending against.
+  - Fix: in `replace_binary`, parse `tag` as semver and refuse unless it is greater than `env!("CARGO_PKG_VERSION")`. Downgrade stays a CLI-only, operator-typed path, never over the privsep channel.
+  - Test: `replace_binary_refuses_an_older_signed_release` (sign the fixture with an older tag).
+- **Note C1-f (doc)** — capability-user mode. There the monitor and worker share uid `detent` (`capability-user.conf` `User=detent`; spawn drops uid only when euid is 0), so the staging ownership check separates nothing. The only barriers are Landlock (absent on some hosts) and C1-c's signature check. Record this in ADR-001 and SECURITY_HARDENING. No code change needed while C1-c holds.
+
+**Directives, binding, in this order:**
+- **D1. Stop claiming "finished".** STAGE3 is done only when §11.3 steps 1–5 are satisfied **and** the orchestrator marks it complete here.
+- **D2. Sandbox tests in CI run for real, as root.** Discard the "skip when `CAP_SETPCAP` is absent" WIP.
+  - In `ci.yml`, run the unprivileged test step with `--skip sandbox::linux::tests` (explicit and visible).
+  - Add a step that runs **only** those tests as root: `sudo -E env PATH="$PATH" cargo test -p detent-platform --lib --all-features sandbox::linux::tests -- --test-threads=1`. Do the same in the coverage job, or merge its profile.
+  - A test must never pass by skipping itself.
+- **D3. Get CI green on a pushed commit.** Run `cargo fmt --all --check`, workspace `clippy --all-features`, and workspace `test --all-features` **before every push**. Paste the exit codes in the commit body. Fix the macOS clippy component and web `coverage:check`. Then `gh workflow run fuzz.yml` and confirm it is green.
+- **D4. Clean a010 back to test-only.**
+  - Remove the build toolchains: `rustup self uninstall -y`, `rm -rf ~/.bun ~/.cargo/bin/cargo-llvm-cov ~/.cargo/bin/cargo-fuzz`, and `sudo apt-get remove -y build-essential clang lld` (plus now-unused autoremovals, **listed first** in §12).
+  - Keep only the runtime packages from §00.5.
+  - **Do not touch `libbz2`.** The downgrade is logged for the owner to decide.
+  - Record every command in PROGRESS.md.
+- **D5. Retroactive attribution.** Add a table to §11 (below this block) mapping each of the 24 commits `d0cffe1..a5d06a1`, plus earlier post-review commits that lack an `Item:` line, to the STAGE3 item ids they address. Give each item's test name, and say whether the test was shown to fail first (yes / no / not recorded). "Not recorded" items go on the orchestrator's verification list.
+- **D6. Close the open safety items next, one commit each, in §00.3 format:** C1-e, H3, H19, the H10 MCP half. Then M16, M20, L-SUP13, L-MODA12, L-MODB7.
+- **D7. From now on**, every commit uses the §00.3 body. The orchestrator will reopen any commit that does not.
+
 ---
 
 ## 12. Questions and blocked items (implementor writes here; orchestrator answers)
@@ -976,3 +1027,5 @@ Open decisions carried from the review (owner answers pending):
 - M5: plan-with-checks scope. Proposed: stays Read scope, audited when checks ran (default).
 - 2026-09-24 STEP0-GATES: §00.3 requires `clippy=0` before every commit, while §11.3 step 0 requires WIP resolution before step 1 H20; H20 is required to make the workspace gate green. Proposed: apply the two mechanical H20 clippy fixes before committing any WIP item; push only after §11.3 step 1 is green. — owner/orchestrator answer: **Approved (orchestrator, 2026-09-24).** Land the two H20 clippy fixes (`run.rs:1192`, `serve.rs:243`) first as their own commit (Item: H20-a). Then resolve the WIP one item per commit. Push only once §11.3 step 1 is green locally, then watch CI.
 - H1.4: one-shot CLI apply on a commit-confirm module. Check what 13e4f10/462e9bf chose and record it here.
+- 2026-09-24 C1-b (orchestrator): implemented in `4b098d0` before an owner answer. Owner to confirm or reject: monitor staging at `/run/detent/staging` (root 0700). — owner answer:
+- 2026-09-24 a010 libbz2 (orchestrator): oh-my-pi downgraded `libbz2-1.0` to `1.0.8-6build2` with `--allow-downgrades`. Owner to decide whether to restore it. Agents must not touch it. — owner answer:
