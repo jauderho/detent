@@ -161,8 +161,24 @@ mod tests {
                 return;
             };
             let mut stream = rustls::Stream::new(&mut session, &mut socket);
+            // Drain the request to the end of its headers before answering.
+            // A single read can stop mid-headers (loaded CI splits the
+            // flight); answering and closing early RSTs the client, whose
+            // next handshake write surfaces as EPIPE from its own read.
+            let mut seen = Vec::new();
             let mut buf = [0_u8; 256];
-            let _ = stream.read(&mut buf);
+            loop {
+                let Ok(n) = stream.read(&mut buf) else {
+                    return;
+                };
+                if n == 0 {
+                    return;
+                }
+                seen.extend_from_slice(buf.get(..n).unwrap_or_default());
+                if seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
             let _ = write!(stream, "{status}\r\nContent-Length: 0\r\n\r\n");
             let _ = stream.flush();
         });
