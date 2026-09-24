@@ -448,6 +448,7 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
 
     let allow_descriptor = build_descriptor("fake", &target, setup.shape);
     let mut config = Config::with_state_root(root.join("state"));
+    let staging_dir = root.join("monitor-staging");
     if setup.disable_backups {
         config.keep_backups = 0;
     }
@@ -474,6 +475,7 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
         monitor.set_module_registry(vec![Box::new(FakeModule {
             descriptor: allow_descriptor,
         })]);
+        monitor.set_staging_dir(staging_dir);
         monitor.set_binary_override(binary_target);
         monitor.set_update_trust(trust);
         monitor.serve(&mut channel)
@@ -1940,8 +1942,13 @@ fn update_apply_refuses_a_preexisting_digest_path() -> TestResult {
     fx.engine.set_state_root(&state_root);
     let bytes = plant_update(&state_root)?;
     let digest = Sha256Digest::of(&bytes);
-    let staged_dir = state_root.join("update").join("staged");
-    std::fs::write(staged_dir.join(digest.to_string()), b"worker-planted")?;
+    let staging_dir = fx
+        .target
+        .parent()
+        .ok_or("harness missing parent")?
+        .join("monitor-staging");
+    std::fs::create_dir_all(&staging_dir)?;
+    std::fs::write(staging_dir.join(digest.to_string()), b"worker-planted")?;
 
     let err = fx.run(Operation::UpdateApply {
         version: UPDATE_FIXTURE_TAG.to_owned(),
