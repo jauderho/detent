@@ -1,5 +1,11 @@
-//! H18: RealTransport follows 302 to the asset, refuses redirect to http, caps redirects.
+//! H18: `RealTransport` follows 302 to the asset, refuses redirect to http, caps redirects.
 
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::doc_markdown,
+    clippy::cast_possible_truncation
+)]
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::Arc;
