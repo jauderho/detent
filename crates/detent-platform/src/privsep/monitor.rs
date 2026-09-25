@@ -549,6 +549,23 @@ impl<'a> Monitor<'a> {
         len: u64,
         sha256: crate::fs::atomic::Sha256Digest,
     ) -> Response {
+        // C1-e: refuse downgrades over privsep. The worker is untrusted; only
+        // a CLI-typed operator path may downgrade. Parse `tag` as semver
+        // (strip leading `v`, same as `detent-update::policy::version_of`)
+        // and require it to be strictly greater than the running version.
+        let current = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+            .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
+        let Ok(tag_version) = semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag)) else {
+            return Response::Error(ProtoError::Io(
+                "release tag is not a semver version".to_owned(),
+            ));
+        };
+        if tag_version <= current {
+            return Response::Error(ProtoError::Io(format!(
+                "refusing downgrade to {tag} from {}",
+                env!("CARGO_PKG_VERSION")
+            )));
+        }
         let staged = staged_path(&self.staging_dir, sha256);
         if let Err(err) =
             materialize_staged(self.allow.state_root(), &self.staging_dir, tag, len, sha256)
@@ -3219,14 +3236,22 @@ mod tests {
         state_root: &Path,
         bundle_name: &str,
     ) -> Result<(Sha256Digest, Vec<u8>), Box<dyn std::error::Error>> {
+        plant_release_for(state_root, bundle_name, FIXTURE_TAG)
+    }
+
+    fn plant_release_for(
+        state_root: &Path,
+        bundle_name: &str,
+        tag: &str,
+    ) -> Result<(Sha256Digest, Vec<u8>), Box<dyn std::error::Error>> {
         let bytes = std::fs::read(fixture_dir().join("binary.bin"))?;
         let digest = Sha256Digest::of(&bytes);
         let dir = state_root.join(STAGED_DIR);
         std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join(FIXTURE_TAG), &bytes)?;
+        std::fs::write(dir.join(tag), &bytes)?;
         std::fs::copy(
             fixture_dir().join(bundle_name),
-            dir.join(format!("{FIXTURE_TAG}.sigstore.json")),
+            dir.join(format!("{tag}.sigstore.json")),
         )?;
         Ok((digest, bytes))
     }
@@ -3368,6 +3393,34 @@ mod tests {
             Response::Error(ProtoError::Conflict { .. })
         ));
         assert_eq!(std::fs::read(&target)?, b"old-binary");
+        Ok(())
+    }
+
+    #[test]
+    fn replace_binary_refuses_an_older_signed_release() -> Result<(), Box<dyn std::error::Error>> {
+        // `older-tag.json` is a valid Sigstore bundle for v0.0.0 (< 0.0.1),
+        // so only the monitor-side downgrade check can refuse it.
+        let work = TempDir::new()?;
+        let state_root = work.path().join("state");
+        std::fs::create_dir_all(&state_root)?;
+        let target = swap_target(work.path(), "detent-downgrade", b"old-binary")?;
+        let (digest, bytes) = plant_release_for(&state_root, "older-tag.json", "v0.0.0")?;
+        let staging_dir = work.path().join("monitor-staging");
+        let mut monitor = update_monitor(&state_root, &staging_dir, target.clone())?;
+        let response = monitor.dispatch(Request::ReplaceBinary {
+            tag: "v0.0.0".to_owned(),
+            len: bytes.len() as u64,
+            sha256: digest,
+        })?;
+        assert!(
+            matches!(response, Response::Error(_)),
+            "older signed tag must be refused, got {response:?}"
+        );
+        assert_eq!(
+            std::fs::read(&target)?,
+            b"old-binary",
+            "target must be unchanged on downgrade refusal"
+        );
         Ok(())
     }
 

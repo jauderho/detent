@@ -35,6 +35,7 @@ detent-core = { path = "../detent-core" }
 detent-modules = { path = "../detent-modules" }
 detent-update = { path = "../detent-update", default-features = false }
 postcard = { workspace = true }
+semver = { workspace = true }
 # Adds the `thread` feature on top of the workspace default (`fs`, `process`,
 # `std`): `spawn::harden` calls `rustix::thread::set_no_new_privs` on Linux,
 # which that module gates behind `cfg(feature = "thread")`. Additive per
@@ -52,8 +53,8 @@ utoipa = { workspace = true, optional = true }
 xattr = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 detent-modules = { path = "../detent-modules", features = ["module-samba"] }
+serde_json = { workspace = true }
 tempfile = { workspace = true }
 
 [features]

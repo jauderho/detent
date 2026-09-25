@@ -4,6 +4,12 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-24 - C1-e monitor downgrade refusal (STAGE3)
+
+`replace_binary` now parses the staged `tag` as semver (stripping leading `v`, same as `detent-update::policy::version_of`) and refuses unless the version is strictly greater than `env!("CARGO_PKG_VERSION")`. Downgrade stays CLI-only, never over the privsep channel. Test `replace_binary_refuses_an_older_signed_release` plants `older-tag.json` (a valid Sigstore bundle for `v0.0.0`, minted by `gen-fixtures`, older than `0.0.1`) and dispatches tag `v0.0.0`, so only the downgrade check can refuse it.
+
+Verify: `cargo test -p detent-platform replace_binary_refuses_an_older_signed_release` failed before fix (`Replaced` instead of `Error`) and passes after; `cargo test -p detent-platform --all-features` 247+27+22+9 passed; `cargo fmt --all --check` 0; `cargo clippy -p detent-platform --all-targets --all-features -- -D warnings` 0. Standalone check proved `older-tag.json` verifies outside the gate (`OLDER_BUNDLE_VALID`).
+
 ## 2026-09-24 - H21 web E2E commit-window repair
 
 Made the E2E API stub model the pending commit state, scoped alert assertions
