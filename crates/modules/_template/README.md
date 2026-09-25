@@ -4,11 +4,12 @@ The skeleton for a new `detent` config module (PLAN §2.3, ADR-004).
 `docs/MODULE_GUIDE.md` is the walkthrough; this file is only the mechanical
 instantiation recipe.
 
-`_template` is **not** a workspace member: it is listed in the root
-`Cargo.toml` `[workspace] exclude`, because its `TEMPLATE` placeholders are not
-valid Rust identifiers everywhere they appear and `cargo build --workspace`
-must stay green. Your copy *is* a member automatically — `crates/modules/*`
-is a member glob.
+`_template` is a workspace member (package `detent-module-template`, matched
+by the `crates/modules/*` glob), so workspace builds, lints and tests keep its
+code compiling as the core traits change. Your copy is a member too, which is
+why the recipe renames the package: two members may not share a name. CI runs
+this recipe on a throwaway copy of the tree (`scripts/template-check.sh`) and
+tests the result.
 
 ## Instantiate
 
@@ -32,7 +33,9 @@ done
 find "crates/modules/${ID}" -type f \
      \( -name '*.rs' -o -name '*.toml' -o -name '*.ftl' -o -name '*.md' \) -print0 |
   while IFS= read -r -d '' f; do
-    sed -e "s/TemplateModule/${TYPE}/g" -e "s/TEMPLATE/${ID}/g" "$f" >"${f}.new"
+    sed -e "s/detent-module-template/detent-module-${ID}/g" \
+        -e "s/detent_module_template/detent_module_${ID}/g" \
+        -e "s/TemplateModule/${TYPE}/g" -e "s/TEMPLATE/${ID}/g" "$f" >"${f}.new"
     mv "${f}.new" "$f"
   done
 
@@ -47,8 +50,8 @@ cargo fmt -p "detent-module-${ID}"
 The final `cargo fmt` re-wraps the lines whose width changed with the name: the
 template is formatted for the word `TEMPLATE`, your id is a different length.
 
-`sed` is run twice per file on purpose: `TemplateModule` first, then the bare
-`TEMPLATE` id. Nothing else in the tree is touched — `locales/en-US/core.ftl`
+`sed` applies its rules in order on purpose: the package and crate names
+first, then `TemplateModule`, then the bare `TEMPLATE` id. Nothing else in the tree is touched — `locales/en-US/core.ftl`
 is the only file outside `crates/modules/${ID}/` the recipe appends to.
 
 ## Verify the copy before writing any code
