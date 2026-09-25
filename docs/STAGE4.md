@@ -28,13 +28,14 @@ oh-my-pi. Read this file, then `docs/STAGE3.md` §00 (still binding), §11.8 and
 - **A test must not skip itself** when it is not root (D2). One such test was removed from a delivery this session.
 - **CI job logs and artifacts** (blob storage) are blocked from the cloud container. To find a fuzz crash, run it locally: `cargo +nightly fuzz run --target=x86_64-unknown-linux-gnu <target> -- -max_total_time=60` (cargo-fuzz 0.13.2).
 - **Branch CI:** `ci.yml`, `codespell.yml`, `linter.yml` and `fuzz.yml` run on a branch only through `workflow_dispatch`.
+- **Shared `CARGO_TARGET_DIR` across worktrees is unsafe.** Cargo decides freshness by mtime, and its hash ignores the worktree path. So a run in the main tree can reuse a test binary built from another worktree's mutated source (seen this session: false failures at HEAD). For negative checks, give the worktree its own target dir, or `touch` the crate's sources and rebuild before trusting a main-tree result. **After you pull, run `make realclean` once.**
 - **Codespell:** smb.conf words (e.g. `browseable`) go in `.codespellignore`.
 
 ## 4. Work queue, in order
 
 ### 4.1 STAGE3 §11.3 step 4 — verification pass (IN PROGRESS, results not yet recorded)
 
-Five reviewers were started at `733d6e0`'s parent. **Groups A, C, D and E are recorded in STAGE3 §11.9; group B may be missing — redo it if it has no table.** Also fix the vacuous tests found: M18 and L-SUP12 (group D). Fix the REOPEN items first, in this order:
+Five reviewers were started at `733d6e0`'s parent. **All five groups are recorded in STAGE3 §11.9**, with a summary at its end. Also fix the vacuous tests it lists (M5, M18, L-SUP12, H16's named test, C1-d). After the list below, fix the other REOPEN items: M8, M23, M25, L-OPS17, L-OPS18. Fix the REOPEN items first, in this order:
   1. **H6**: every validator and `systemctl` call under a confined `serve` is killed by the inherited seccomp filter.
   2. **H23**: the root-exec deny-list is bypassed, e.g. samba `rootpreexec` and indented ifupdown `up`.
   3. **H9**: an idle connection holds a permit for 600 s.
@@ -46,7 +47,7 @@ Group A's negative checks did not run: a permission classifier refused the workt
 For each item: read its Fix/Test/Acceptance lines in STAGE3 §3–§6, then:
 1. Confirm the fix is present at HEAD (file:line).
 2. Run the pinning test.
-3. **Prove non-vacuity**: in a throwaway worktree, remove the fix and see the test fail. Command: `git worktree add --detach <scratch> HEAD`, with `CARGO_TARGET_DIR=<repo>/target` so the target is shared.
+3. **Prove non-vacuity**: in a throwaway worktree, remove the fix and see the test fail. Command: `git worktree add --detach <scratch> HEAD`. Give the worktree its **own** target dir (see §3), and delete it afterwards.
 4. Give a verdict: VERIFIED / VERIFIED-NO-NEG (with reason) / PARTIAL / REOPEN.
 5. Record the results in a new STAGE3 §11.9 table, and fix REOPEN items one per commit.
 
