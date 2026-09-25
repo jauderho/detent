@@ -1310,6 +1310,35 @@ fn an_explicit_confirm_window_opts_a_plain_module_in() -> TestResult {
 }
 
 #[test]
+fn an_unrelated_earlier_write_is_not_rolled_back_by_a_later_commit() -> TestResult {
+    let mut fx = harness(b"v1\n", Setup::default())?;
+    fx.run(Operation::Apply {
+        id: MODULE.to_owned(),
+        model: json!({ "text": "v2\n" }),
+        expected_hash: None,
+        service_action: None,
+        confirm: None,
+    })?;
+    assert_eq!(fx.contents()?, "v2\n");
+    let outcome = fx.run(Operation::Apply {
+        id: MODULE.to_owned(),
+        model: json!({ "text": "v3\n" }),
+        expected_hash: None,
+        service_action: None,
+        confirm: Some(CONFIRM_WINDOW),
+    })?;
+    let OpOutcome::Applied(report) = outcome else {
+        return Err("Apply must answer with an apply report".into());
+    };
+    let commit = report.commit.ok_or("a commit-confirm window was armed")?;
+    assert_eq!(commit.rollback_targets, 1);
+    assert_eq!(fx.contents()?, "v3\n");
+    std::thread::sleep(PAST_DEADLINE);
+    assert_eq!(fx.contents()?, "v2\n");
+    fx.finish()
+}
+
+#[test]
 fn a_commit_confirm_apply_without_a_backup_is_refused() -> TestResult {
     let mut fx = harness(
         b"v1\n",
