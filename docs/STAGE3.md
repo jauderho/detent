@@ -1104,3 +1104,11 @@ Open decisions carried from the review (owner answers pending):
 - 2026-09-24 C1-b (orchestrator): implemented in `4b098d0` before an owner answer. Owner to confirm or reject: monitor staging at `/run/detent/staging` (root 0700). — owner answer:
 - 2026-09-24 a010 libbz2 (orchestrator): oh-my-pi downgraded `libbz2-1.0` to `1.0.8-6build2` with `--allow-downgrades`. Owner to decide whether to restore it. Agents must not touch it. — owner answer:
 - 2026-09-24 H6: root proof done on a010 with operator sudo. Trap oracle named `__NR_open` (`open("/dev/null")`, musl `File::open_c`); fix adds `open` (2,-1) plus `dup2 arch_prctl access readlink readlinkat ppoll poll`. `enforce_mode_monitor_can_spawn_a_validator` passes as root, zero SIGSYS. - owner/orchestrator answer:
+
+### 11.7 Session report 2026-09-25 at `0f69392` — D6 landed (C1-e, H3, H10-MCP), H19 committed earlier
+- Items done: H19-health `8bd105b`; H19 `7332e50`; C1-e `35fdd42`; H3 `5d651be`; H10-MCP `0f69392`. (H16 `2febdc8`, H18 `7f1df06`, H20-fuzz `b21461e`, H20 `3a9d1cc` also on this stack, outside D6.)
+- Items opened in §12: none this session.
+- Gates at HEAD: `cargo fmt --all --check` 0; `cargo clippy --workspace --all-targets --all-features -- -D warnings` 0 errors; `cargo test --workspace --all-features` 0 failures (full run, no FAILED lines).
+- Latest CI: run 36074875296 (push of H19-health `8bd105b`): Rust/Web/macOS/FFI/ACME green; Coverage and Size check fail. Fuzz run 36074883068: cargo-fuzz failure. D6 commits unpushed, CI not yet watched.
+- Allow count: 117 (`git grep -c -E '#!?\[(allow|expect)\(' HEAD -- crates`).
+- Still owed per §11.5/§11.6: D3 (push + all-green CI incl. fuzz), H6 real-validator strace on a010, D4 a010 cleanup, D5 attribution table. Stopping for orchestrator review; STAGE3 not finished.
