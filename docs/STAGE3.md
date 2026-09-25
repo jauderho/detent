@@ -1184,3 +1184,30 @@ Worked by the orchestrator in a cloud container (Linux x86_64, root), with Opus/
 - The §12 follow-ups.
 
 STAGE3 is not marked complete; that is for the orchestrator audit.
+
+### 11.9 Verification pass (§11.3 step 4), started 2026-09-25 at `733d6e0`
+
+Method: reviewer per group; each item is checked against its Fix/Test/Acceptance lines; non-vacuity is shown by removing the fix in a throwaway worktree. Verdicts: VERIFIED, VERIFIED-NO-NEG, PARTIAL, REOPEN. Groups without a table here are **not yet done**; see `docs/STAGE4.md` §4.1.
+
+**Group C (web) — 7 VERIFIED, 8 PARTIAL, 3 REOPEN.** `cargo test -p detent-web --all-features` 340 + 9 pass; the web tests named below pass; `bun run api:check` OK.
+
+| Item | Verdict | Evidence / what is missing |
+|---|---|---|
+| H8 | VERIFIED | `server.rs:384-390` ConnectInfo, `ratelimit.rs:44-57` /64; `the_peer_address_reaches_the_handlers`, `ipv6_addresses_in_one_slash64_share_a_bucket` fail without the fix |
+| H9 | **REOPEN** | The header timeout does not free an idle post-handshake connection: it holds a permit until the 600 s lifetime (the auto builder sniffs the protocol with no deadline). `an_idle_connection_does_not_hold_a_permit` passes only because it sets lifetime 450 ms. Fix: a deadline on the first read (timeout, or ALPN → `http1_only`/`http2_only`); the test must use the default lifetime |
+| H10 (web) | PARTIAL | The refresh in `authenticate`/`verify_password` is pinned. The refresh inside `mutate()` (`users.rs:567`, `token.rs:443`) is **unpinned** (removing it keeps all tests green). Add: store A, not yet refreshed, writes after store B removed a user / revoked a token; assert no resurrection |
+| H21 | PARTIAL | Confirm/rollback UI pinned (`PendingCommit.test.tsx` fails without onClick). The e2e test (apply → reload → banner → confirm) is missing |
+| H22 | VERIFIED | `csrf.rs:260-271`; `a_wildcard_listener_accepts_its_own_authority` fails with the old origin. Note: `Sec-Fetch-Site: same-site` is also accepted |
+| M6 | VERIFIED | `modules.rs:216-245`, `module.rs` `secret_pointers`; `a_read_token_never_sees_a_rendered_file` fails without `blank_plan`. No module overrides `secret_pointers` (heuristic only) |
+| M9 | VERIFIED | `users.rs:506`; `totp_counter_cannot_be_reused_or_go_backwards` fails without the check |
+| M10 | PARTIAL | No audit for RateLimited is pinned. The 16 MiB rotation (`audit.rs:203-208`) has no test |
+| L-WEB9 | VERIFIED | `tls.rs:786`, `:874-904`; `a_mismatched_stored_acme_pair_falls_back_to_bootstrap` |
+| L-WEB10 | VERIFIED | `tls.rs:81-86`; `an_expiring_bootstrap_pair_is_regenerated` |
+| L-WEB11 | VERIFIED | `users.rs:445-448`; `successful_verification_rehashes_at_the_current_cost_without_clearing_the_flag` |
+| L-WEB12 | PARTIAL | The cap is 4, not 2; logins queue instead of 503 `web-auth-busy` (id missing); test `logins_beyond_the_hashing_cap_are_refused_not_queued` absent |
+| L-WEB13 | PARTIAL | No 10-minute in-process guard for a failed live check; test `a_second_uncached_check_does_not_reach_the_network` absent |
+| L-WEB14 | PARTIAL | `the_router_answers_exactly_the_table` checks one direction only; auth routes are not compared with the router |
+| L-WEB15 | PARTIAL | No `tls12` in the tree today, but the CI step (`cargo tree -e features -i rustls` fails on `tls12`) is missing |
+| L-WEB16 | **REOPEN** | `spawn_sweeper` starts only if a Tokio runtime exists (`state.rs:81`). `serve` calls `AuthState::open` (`serve.rs:433`) before it builds the runtime (`:447`), so the sweeper never runs in production. Fix: start it after the runtime exists; add a serve-level test |
+| L-WEB17 | VERIFIED | `csrf.rs:236-239`, `extract.rs:100-107`; both tests fail with `.get(COOKIE)` |
+| L-FE3 | VERIFIED | `api:check` exits 1 when `schema.d.ts` JSDoc is edited |
