@@ -107,6 +107,15 @@ Measured on a working checkout; yours will differ.
 
 ## Cleaning up
 
+`make clean` runs the cheap sweeps below in one step: incremental caches,
+coverage builds, release and cross-compiled output, fuzz builds and crash
+files, generated fuzz corpus, test reports, and debug files not touched for two
+days (`STALE_DAYS=N` to change). It keeps the warm debug build and
+`web/node_modules`, so the next build stays fast. `make realclean` removes
+every ignored file except `.sops/` and `.mcp.json*`, plus the generated fuzz
+corpus: the tree as if just cloned. Both take `DRYRUN=1` and `VERBOSE=1`;
+`make du` shows what takes the space. The logic is in `scripts/clean.sh`.
+
 Everything below is regenerable. The cost of a sweep is a slower next build,
 never lost work. Ordered cheapest-to-recover-from first — stop when you have
 enough space back.
