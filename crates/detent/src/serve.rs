@@ -343,6 +343,7 @@ fn run_worker(
         runtime,
         server,
         engine_thread,
+        sweeper: _sweeper,
     } = prepared;
     let _ = renderer.line(
         streams.notes,
@@ -383,6 +384,8 @@ struct PreparedWorker {
     server: detent_web::Server,
     /// Joined once `server.serve(..)` returns.
     engine_thread: detent_web::EngineThread,
+    /// The auth-state sweep, spawned on `runtime`; it ends with the stores.
+    sweeper: tokio::task::JoinHandle<()>,
 }
 
 /// The handshake, the operations engine, the account/token/session stores,
@@ -460,6 +463,12 @@ fn prepare_worker(
         }
     };
 
+    // The auth state was opened before this runtime existed, so its sweep
+    // starts here, on the runtime that will drive `serve`.
+    let sweeper = {
+        let _entered = runtime.enter();
+        auth_state.start_sweeper()
+    };
     let server = runtime.block_on(bind_web_server(
         config,
         &hostnames,
@@ -473,6 +482,7 @@ fn prepare_worker(
         runtime,
         server,
         engine_thread,
+        sweeper,
     })
 }
 
@@ -1204,6 +1214,16 @@ mod web_tests {
         )
         .ok_or("prepare_worker must succeed against a fresh temp dir")?;
         assert_ne!(prepared.server.local_addr().port(), 0);
+        // The auth-state sweep runs in production, not only under tests that
+        // happen to open the stores inside a runtime (STAGE3 L-WEB16). Drive
+        // the runtime once so a task that ends at once would show as finished.
+        prepared
+            .runtime
+            .block_on(async { tokio::time::sleep(std::time::Duration::from_millis(20)).await });
+        assert!(
+            !prepared.sweeper.is_finished(),
+            "the auth-state sweeper must be running"
+        );
 
         // `run_worker` itself drops `server`/`state` before joining, releasing
         // the last `EngineHandle`; do the same here rather than calling the
