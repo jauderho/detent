@@ -314,11 +314,6 @@ fn render_line(export: &Export) -> Result<String, EditError> {
             raw.push(')');
         }
     }
-    if raw.trim_end().ends_with('\\') {
-        return Err(EditError::Unsupported {
-            message: format!("export would end with continuation: {raw:?}"),
-        });
-    }
     if raw.contains(['\n', '\r', '\0']) {
         return Err(EditError::LineBreakInValue { value: raw });
     }
@@ -589,12 +584,6 @@ fn validate_client(client: &Client, index: usize, client_index: usize, out: &mut
     } else if client.host.starts_with('-') || client.host.contains(['#', '"', '\\']) {
         out.push(
             Diagnostic::new(Severity::Error, BAD_HOST)
-                .with_field(host_field)
-                .with_arg("host", client.host.clone()),
-        );
-    } else if client.host.trim_end().ends_with('\\') {
-        out.push(
-            Diagnostic::new(Severity::Error, BAD_CONTINUATION)
                 .with_field(host_field)
                 .with_arg("host", client.host.clone()),
         );
