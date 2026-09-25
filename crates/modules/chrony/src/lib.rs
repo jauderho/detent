@@ -347,6 +347,7 @@ fn schema_with_hints() -> serde_json::Value {
 // ------------------------------------------------------------------- validation
 
 /// Fluent id: a key is not a valid directive name.
+const PRIVILEGED_DIRECTIVE: MessageId = MessageId::new("chrony-privileged-directive");
 const INVALID_KEY: MessageId = MessageId::new("chrony-invalid-key");
 /// Fluent id: the same key is set twice.
 const DUPLICATE_KEY: MessageId = MessageId::new("chrony-duplicate-key");
@@ -549,6 +550,16 @@ impl ConfigModule for ChronyModule {
                         .with_arg("key", item.key.clone()),
                 );
             }
+            if ["pidfile", "user"]
+                .iter()
+                .any(|key| item.key.eq_ignore_ascii_case(key))
+            {
+                diagnostics.push(
+                    Diagnostic::new(Severity::Warning, PRIVILEGED_DIRECTIVE)
+                        .with_field(FieldPath::new(format!("settings/{index}/key")))
+                        .with_arg("key", item.key.clone()),
+                );
+            }
             if !seen.insert(item.key.to_ascii_lowercase()) {
                 diagnostics.push(
                     Diagnostic::new(Severity::Warning, DUPLICATE_KEY)
@@ -650,9 +661,9 @@ fn default_settings() -> Vec<Setting> {
 mod tests {
     use super::{
         ALLOW_OPEN, CMDPORT_OPEN, ChronyModule, DESCRIPTOR, DUPLICATE_KEY, EXTERNAL_DIRECTIVE,
-        INVALID_KEY, MISSING_MAKESTEP, MISSING_RTCSYNC, Model, REC_NTS, Setting, TOO_MANY_SETTINGS,
-        classify, is_bare_directive, is_valid_key, parse_setting, render_line, schema_with_hints,
-        setting,
+        INVALID_KEY, MISSING_MAKESTEP, MISSING_RTCSYNC, Model, PRIVILEGED_DIRECTIVE, REC_NTS,
+        Setting, TOO_MANY_SETTINGS, classify, is_bare_directive, is_valid_key, parse_setting,
+        render_line, schema_with_hints, setting,
     };
     use detent_core::descriptor::{HostProfile, InitSystem, Os, ValidationCtx};
     use detent_core::diag::{MessageId, Severity};
@@ -968,6 +979,25 @@ mod tests {
             };
             assert!(has(&model, EXTERNAL_DIRECTIVE, Severity::Error), "{key}");
         }
+    }
+
+    /// `pidfile` names a file chronyd writes as root and `user` picks the
+    /// account it runs as: both are flagged for review at plan time.
+    #[test]
+    fn validate_warns_on_include_directive() {
+        for key in ["pidfile", "PidFile", "user"] {
+            let model = Model {
+                settings: vec![setting(key, "/tmp/x")],
+            };
+            assert!(
+                has(&model, PRIVILEGED_DIRECTIVE, Severity::Warning),
+                "{key}"
+            );
+        }
+        let model = Model {
+            settings: vec![setting("makestep", "1 3")],
+        };
+        assert!(!has(&model, PRIVILEGED_DIRECTIVE, Severity::Warning));
     }
 
     #[test]

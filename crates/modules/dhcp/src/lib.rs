@@ -173,7 +173,16 @@ pub struct Model {
 // --------------------------------------------------------------- dnsmasq format
 
 /// External-file directives are modeled for diagnostics but never rendered.
-const INCLUDE_KEYS: &[&str] = &["conf-file", "conf-dir", "include", "includedir", "script"];
+const INCLUDE_KEYS: &[&str] = &[
+    "conf-file",
+    "conf-dir",
+    "include",
+    "includedir",
+    "script",
+    "dhcp-script",
+    "dhcp-luascript",
+    "dhcp-scriptuser",
+];
 
 /// Parses one dnsmasq line as a setting, or `None` when it is not one.
 ///
@@ -2478,6 +2487,16 @@ mod tests {
                 parse_dnsmasq(&line),
                 Some(dnsmasq_setting(key, Some("/tmp/untrusted")))
             );
+        }
+    }
+
+    /// A dnsmasq DHCP script runs as root on every lease event; setting one,
+    /// or the user it runs as, is refused like an external file.
+    #[test]
+    fn validate_warns_on_dhcp_script() {
+        for key in ["dhcp-script", "dhcp-luascript", "dhcp-scriptuser"] {
+            assert!(INCLUDE_KEYS.contains(&key), "{key}");
+            assert!(parse_dnsmasq(&format!("{key}=/tmp/x")).is_some(), "{key}");
         }
     }
 

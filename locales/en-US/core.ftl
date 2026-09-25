@@ -13,6 +13,7 @@ chrony-tip-value = the value of this directive, up to the end of the line; empty
 chrony-rec-value = prefer an explicit value over relying on the compiled-in default.
 
 ## chrony module — validation diagnostics
+chrony-privileged-directive = `{$key}` sets a file chronyd writes as root, or the user it runs as. Check the value before you apply.
 chrony-invalid-key = `{$key}` is not a valid chrony directive name.
 chrony-duplicate-key = `{$key}` is set more than once; the last value wins.
 chrony-too-many-settings = this file has {$count} settings; split it into drop-in files under /etc/chrony/conf.d.
