@@ -124,8 +124,12 @@ impl TokenVerifier for ConstantTimeTokenVerifier {
         let presented = Sha256Digest::of(token.as_bytes());
         for d in &self.digests {
             if bool::from(presented.as_bytes().ct_eq(d)) {
+                // The digest, never the token: a short handle for the audit
+                // log that cannot leak the secret and cannot panic on a
+                // non-ASCII boundary (STAGE3 H10). The store-backed
+                // verifier labels with the record's public id instead.
                 return AuthOutcome::Authenticated(Identity::new(
-                    format!("mcp-token:{}", &token[..8.min(token.len())]),
+                    format!("token:{}", presented.short_hex()),
                     detent_ops::identity::IdentityKind::Token,
                 ));
             }
@@ -389,50 +393,60 @@ pub struct EmptyParams {}
 // Server
 // ---------------------------------------------------------------------------
 
-/// The MCP server. Holds the tool router, an executor, and an authenticator.
+/// The MCP server. Holds the tool router, an executor, an authenticator,
+/// and the bearer every tool call is checked against.
 #[derive(Clone)]
 pub struct McpServer {
     tool_router: ToolRouter<Self>,
     executor: Arc<dyn EngineExecutor>,
     authz: Arc<dyn Authz>,
     tokens: Arc<dyn TokenVerifier>,
+    presented: Option<Arc<str>>,
 }
 
 impl McpServer {
     /// Build a server. Both `authz` and `tokens` may be permissive defaults
-    /// while a real verifier is wired in.
+    /// while a real verifier is wired in; `presented` is the bearer the
+    /// owning binary resolved once at startup (its env var, read once), not
+    /// something this crate reads back out of the environment per request.
+    /// `None` means no credential was ever resolved, and every call then
+    /// fails closed.
     pub fn new(
         executor: Arc<dyn EngineExecutor>,
         authz: Arc<dyn Authz>,
         tokens: Arc<dyn TokenVerifier>,
+        presented: Option<Arc<str>>,
     ) -> Self {
         Self {
             tool_router: Self::tool_router(),
             executor,
             authz,
             tokens,
+            presented,
         }
     }
 
     /// Authn + authz in one place, called by every tool's `invoke`.
     ///
-    /// The token comes from the `DETENT_MCP_TOKEN` env var, read fresh on
-    /// every call. The owning binary reads it once at startup into a
-    /// [`ConstantTimeTokenVerifier`] (stdio) and, for streamable HTTP,
-    /// additionally rejects requests whose bearer does not constant-time
-    /// match that same startup value in axum/tower middleware before the
-    /// Streamable HTTP service runs — never by mutating the process env per
-    /// request. Token rotation is a process restart.
-    fn check_auth(&self, op: &Operation) -> Result<Identity, ErrorData> {
-        let token = std::env::var("DETENT_MCP_TOKEN").ok();
-        self.check_auth_with(token.as_deref(), op)
-    }
-
-    /// [`check_auth`] with the token passed explicitly, so a test can pin
-    /// the authn/authz decision without mutating the process env (which
-    /// would race parallel tests and needs `unsafe` under edition 2024).
-    fn check_auth_with(&self, token: Option<&str>, op: &Operation) -> Result<Identity, ErrorData> {
-        let who = match token {
+    /// `presented` is passed in explicitly by the caller — never read from
+    /// `DETENT_MCP_TOKEN` here — and handed to the verifier, which re-checks
+    /// it against the credential store on every call, so a token revoked or
+    /// expired after startup is refused on the next call without a restart
+    /// (STAGE3 H10). For streamable HTTP the axum/tower middleware has
+    /// already rejected a wrong or stale bearer before the Streamable HTTP
+    /// service runs; this is the gate that runs per tool call. Token
+    /// rotation is a process restart.
+    ///
+    /// # Errors
+    ///
+    /// An `ErrorData` of `-32003` when `presented` is missing or does not
+    /// authenticate, `-32004` when the caller is not authorized for `op`.
+    pub fn check_auth(
+        &self,
+        presented: Option<&str>,
+        op: &Operation,
+    ) -> Result<Identity, ErrorData> {
+        let who = match presented {
             Some(t) => self.tokens.authenticate(t),
             None => AuthOutcome::Denied(AuthError::Missing),
         };
@@ -549,11 +563,9 @@ mod tools {
     }
     impl SyncTool<McpServer> for ListModules {
         fn invoke(server: &McpServer, _p: Self::Parameter) -> Result<Self::Output, Self::Error> {
-            server.check_auth(&Operation::ListModules)?;
-            let outcome = server
-                .executor
-                .execute(Operation::ListModules)
-                .map_err(|e| op_err(&e))?;
+            let op = Operation::ListModules;
+            server.check_auth(server.presented.as_deref(), &op)?;
+            let outcome = server.executor.execute(op).map_err(|e| op_err(&e))?;
             Ok(json_text(&outcome))
         }
     }
@@ -575,7 +587,7 @@ mod tools {
     impl SyncTool<McpServer> for GetModule {
         fn invoke(server: &McpServer, p: Self::Parameter) -> Result<Self::Output, Self::Error> {
             let op = Operation::GetModule { id: p.id };
-            server.check_auth(&op)?;
+            server.check_auth(server.presented.as_deref(), &op)?;
             let outcome = server.executor.execute(op).map_err(|e| op_err(&e))?;
             Ok(json_text(&outcome))
         }
@@ -601,7 +613,7 @@ mod tools {
                 id: p.id,
                 model: p.model,
             };
-            server.check_auth(&op)?;
+            server.check_auth(server.presented.as_deref(), &op)?;
             let outcome = server.executor.execute(op).map_err(|e| op_err(&e))?;
             Ok(json_text(&outcome))
         }
@@ -630,7 +642,7 @@ mod tools {
                 id: p.id,
                 model: p.model,
             };
-            server.check_auth(&op)?;
+            server.check_auth(server.presented.as_deref(), &op)?;
             let outcome = server.executor.execute(op).map_err(|e| op_err(&e))?;
             Ok(json_text(&outcome))
         }
@@ -669,7 +681,7 @@ mod tools {
                 service_action: p.service_action.map(ServiceCommand::from),
                 confirm,
             };
-            server.check_auth(&op)?;
+            server.check_auth(server.presented.as_deref(), &op)?;
             let outcome = server.executor.execute(op).map_err(|e| op_err(&e))?;
             Ok(json_text(&outcome))
         }
@@ -694,7 +706,7 @@ mod tools {
             let op = Operation::ConfirmCommit {
                 commit_id: CommitId(p.commit_id),
             };
-            server.check_auth(&op)?;
+            server.check_auth(server.presented.as_deref(), &op)?;
             let outcome = server.executor.execute(op).map_err(|e| op_err(&e))?;
             Ok(json_text(&outcome))
         }
@@ -719,7 +731,7 @@ mod tools {
             let op = Operation::RollbackCommit {
                 commit_id: CommitId(p.commit_id),
             };
-            server.check_auth(&op)?;
+            server.check_auth(server.presented.as_deref(), &op)?;
             let outcome = server.executor.execute(op).map_err(|e| op_err(&e))?;
             Ok(json_text(&outcome))
         }
@@ -742,7 +754,7 @@ mod tools {
     impl SyncTool<McpServer> for ListBackups {
         fn invoke(server: &McpServer, p: Self::Parameter) -> Result<Self::Output, Self::Error> {
             let op = Operation::ListBackups { id: p.id };
-            server.check_auth(&op)?;
+            server.check_auth(server.presented.as_deref(), &op)?;
             let outcome = server.executor.execute(op).map_err(|e| op_err(&e))?;
             Ok(json_text(&outcome))
         }
@@ -770,7 +782,7 @@ mod tools {
                 backup_id: BackupId(p.backup_id),
                 expected_hash: Some(expected_hash),
             };
-            server.check_auth(&op)?;
+            server.check_auth(server.presented.as_deref(), &op)?;
             let outcome = server.executor.execute(op).map_err(|e| op_err(&e))?;
             Ok(json_text(&outcome))
         }
@@ -793,7 +805,7 @@ mod tools {
     impl SyncTool<McpServer> for ServiceStatus {
         fn invoke(server: &McpServer, p: Self::Parameter) -> Result<Self::Output, Self::Error> {
             let op = Operation::ServiceStatus { id: p.id };
-            server.check_auth(&op)?;
+            server.check_auth(server.presented.as_deref(), &op)?;
             let outcome = server.executor.execute(op).map_err(|e| op_err(&e))?;
             Ok(json_text(&outcome))
         }
@@ -819,7 +831,7 @@ mod tools {
                 id: p.id,
                 action: p.action.into(),
             };
-            server.check_auth(&op)?;
+            server.check_auth(server.presented.as_deref(), &op)?;
             let outcome = server.executor.execute(op).map_err(|e| op_err(&e))?;
             Ok(json_text(&outcome))
         }
@@ -842,7 +854,7 @@ mod tools {
     impl SyncTool<McpServer> for HostProfile {
         fn invoke(server: &McpServer, _p: Self::Parameter) -> Result<Self::Output, Self::Error> {
             let op = Operation::HostProfile;
-            server.check_auth(&op)?;
+            server.check_auth(server.presented.as_deref(), &op)?;
             let outcome = server.executor.execute(op).map_err(|e| op_err(&e))?;
             Ok(json_text(&outcome))
         }
@@ -865,7 +877,7 @@ mod tools {
     impl SyncTool<McpServer> for AuditQueryTool {
         fn invoke(server: &McpServer, p: Self::Parameter) -> Result<Self::Output, Self::Error> {
             let op = Operation::AuditQuery(p.into());
-            server.check_auth(&op)?;
+            server.check_auth(server.presented.as_deref(), &op)?;
             let outcome = server.executor.execute(op).map_err(|e| op_err(&e))?;
             Ok(json_text(&outcome))
         }
@@ -888,7 +900,7 @@ mod tools {
     impl SyncTool<McpServer> for UpdateStatus {
         fn invoke(server: &McpServer, _p: Self::Parameter) -> Result<Self::Output, Self::Error> {
             let op = Operation::UpdateStatus;
-            server.check_auth(&op)?;
+            server.check_auth(server.presented.as_deref(), &op)?;
             let outcome = server.executor.execute(op).map_err(|e| op_err(&e))?;
             Ok(json_text(&outcome))
         }
@@ -911,7 +923,7 @@ mod tools {
     impl SyncTool<McpServer> for CertStatus {
         fn invoke(server: &McpServer, _p: Self::Parameter) -> Result<Self::Output, Self::Error> {
             let op = Operation::CertStatus;
-            server.check_auth(&op)?;
+            server.check_auth(server.presented.as_deref(), &op)?;
             let outcome = server.executor.execute(op).map_err(|e| op_err(&e))?;
             Ok(json_text(&outcome))
         }
@@ -934,7 +946,7 @@ mod tools {
     impl SyncTool<McpServer> for CertRenew {
         fn invoke(server: &McpServer, _p: Self::Parameter) -> Result<Self::Output, Self::Error> {
             let op = Operation::CertRenew;
-            server.check_auth(&op)?;
+            server.check_auth(server.presented.as_deref(), &op)?;
             let outcome = server.executor.execute(op).map_err(|e| op_err(&e))?;
             Ok(json_text(&outcome))
         }
@@ -957,7 +969,7 @@ mod tools {
     impl SyncTool<McpServer> for UpdateApply {
         fn invoke(server: &McpServer, p: Self::Parameter) -> Result<Self::Output, Self::Error> {
             let op = Operation::UpdateApply { version: p.version };
-            server.check_auth(&op)?;
+            server.check_auth(server.presented.as_deref(), &op)?;
             let outcome = server.executor.execute(op).map_err(|e| op_err(&e))?;
             Ok(json_text(&outcome))
         }
@@ -991,7 +1003,12 @@ mod tests {
         let executor = Arc::new(RecordingExecutor::new());
         let authz = Arc::new(AllowAllAuthz);
         let tokens = Arc::new(ConstantTimeTokenVerifier::from_token("test-token"));
-        let server = McpServer::new(executor.clone(), authz, tokens);
+        let server = McpServer::new(
+            executor.clone(),
+            authz,
+            tokens,
+            Some(Arc::from("test-token")),
+        );
         (server, executor)
     }
 
@@ -1240,19 +1257,15 @@ mod tests {
         assert!(tools.iter().any(|t| t.name == "get_module"));
         assert!(
             server
-                .check_auth_with(Some("test-token"), &Operation::ListModules)
+                .check_auth(Some("test-token"), &Operation::ListModules)
                 .is_ok()
         );
         assert!(
             server
-                .check_auth_with(Some("wrong"), &Operation::ListModules)
+                .check_auth(Some("wrong"), &Operation::ListModules)
                 .is_err()
         );
-        assert!(
-            server
-                .check_auth_with(None, &Operation::ListModules)
-                .is_err()
-        );
+        assert!(server.check_auth(None, &Operation::ListModules).is_err());
         assert!(matches!(
             server.executor.execute(Operation::ListModules)?,
             OpOutcome::Modules(_)

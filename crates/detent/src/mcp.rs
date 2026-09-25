@@ -5,10 +5,18 @@
 //! and the bearer comes from `DETENT_MCP_TOKEN` in the child's own env.
 //! **HTTP** (`--transport http`) binds streamable HTTP on loopback
 //! (`127.0.0.1:3334` unless `--bind` overrides); each request's
-//! `Authorization: Bearer` is constant-time compared against the same startup
-//! value in axum middleware before the rmcp service runs. No
+//! `Authorization: Bearer` must be that startup token — constant-time
+//! compared — *and* still be live in the on-disk `TokenStore`. No
 //! `std::env::set_var` anywhere: the token is read once at startup into an
-//! `Arc`, so rotation is a process restart.
+//! `Arc`, so rotation is a process restart, and nothing reads the
+//! environment again per request.
+//!
+//! Liveness is [`StoreVerifier`]: `TokenStore::load` + `authenticate` on
+//! every check, so `detent token revoke` in another process (or a passed
+//! deadline) is refused on the next call without a restart (STAGE3 H10).
+//! Both the HTTP middleware and every tool call go through it, and the
+//! identity it authenticates is labelled `token:<id>` — the record's public
+//! id, never a slice of the secret.
 //!
 //! Authz reuses the web layer's `ScopedAuthz`: the startup token's scopes are
 //! resolved once from the on-disk `TokenStore` shared with the REST API, and
@@ -24,12 +32,14 @@
 
 use axum::response::IntoResponse as _;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use detent_core::diag::MessageId;
 use detent_mcp::{
-    AuthOutcome, ConstantTimeTokenVerifier, EngineExecutor, LocalSessionManager, McpServer,
-    ServiceExt as _, StreamableHttpServerConfig, StreamableHttpService, TokenVerifier, stdio,
+    AuthError, AuthOutcome, ConstantTimeTokenVerifier, EngineExecutor, LocalSessionManager,
+    McpServer, ServiceExt as _, StreamableHttpServerConfig, StreamableHttpService, TokenVerifier,
+    stdio,
 };
 use detent_ops::authz::Authz as _;
 use detent_ops::{Identity, IdentityKind, OpOutcome, Operation, OpsError};
@@ -96,10 +106,15 @@ pub fn run(
         return Ok(Exit::Ok);
     }
 
-    let verifier = Arc::new(ConstantTimeTokenVerifier::from_token(&presented));
+    let store = Arc::new(StoreVerifier::new(settings.state_root.clone()));
     let authz: Arc<dyn detent_mcp::Authz> = Arc::new(ScopeAuthz::new(scopes));
     let executor: Arc<dyn EngineExecutor> = Arc::new(SessionExecutor::new(session, dryrun, who));
-    let server = McpServer::new(executor.clone(), authz, verifier.clone());
+    let server = McpServer::new(
+        executor.clone(),
+        authz,
+        store.clone(),
+        Some(Arc::from(presented.as_str())),
+    );
 
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -130,7 +145,8 @@ pub fn run(
                 MessageId::new("cli-mcp-listening"),
                 &[("transport", &bind.to_string())],
             );
-            runtime.block_on(serve_http(server, verifier, bind))
+            let gate = Arc::new(BearerGate::new(&presented, store));
+            runtime.block_on(serve_http(server, gate, bind))
         }
     };
     // The session (engine + monitor thread) is owned by the executor the
@@ -306,13 +322,76 @@ async fn serve_stdio(server: McpServer) -> Exit {
     }
 }
 
+/// Per-request credential check: `tokens.json`, re-read from disk on every
+/// authentication.
+///
+/// This is what makes revocation real for MCP (STAGE3 H10). The startup
+/// value was only ever a digest compared once, so a token revoked or
+/// expired in another process kept working until a restart; here every
+/// check is `TokenStore::load(..)?.authenticate(token, now)`, and the
+/// identity that comes back is labelled `token:<id>` — the record's public
+/// id, never a slice of the presented secret.
+struct StoreVerifier {
+    state_root: PathBuf,
+}
+
+impl StoreVerifier {
+    const fn new(state_root: PathBuf) -> Self {
+        Self { state_root }
+    }
+}
+
+impl TokenVerifier for StoreVerifier {
+    fn authenticate(&self, token: &str) -> AuthOutcome {
+        match TokenStore::load(&self.state_root)
+            .and_then(|store| store.authenticate(token, unix_now()))
+        {
+            Ok(found) => AuthOutcome::Authenticated(Identity::new(
+                format!("token:{}", found.id),
+                IdentityKind::Token,
+            )),
+            // Unknown, revoked and expired share one answer, so the wire
+            // cannot learn which token was once valid.
+            Err(_) => AuthOutcome::Denied(AuthError::Invalid),
+        }
+    }
+}
+
+/// The bearer gate for one HTTP request: the presented token must be the
+/// startup token — constant-time, so a read-scoped REST token cannot borrow
+/// this one's scopes — *and* still be live in the store, re-read for this
+/// request rather than trusted from startup.
+struct BearerGate {
+    startup: ConstantTimeTokenVerifier,
+    store: Arc<StoreVerifier>,
+}
+
+impl BearerGate {
+    fn new(presented: &str, store: Arc<StoreVerifier>) -> Self {
+        Self {
+            startup: ConstantTimeTokenVerifier::from_token(presented),
+            store,
+        }
+    }
+
+    /// Whether `presented` may pass into the rmcp service.
+    fn admits(&self, presented: &str) -> bool {
+        !presented.is_empty()
+            && matches!(
+                self.startup.authenticate(presented),
+                AuthOutcome::Authenticated(_)
+            )
+            && matches!(
+                self.store.authenticate(presented),
+                AuthOutcome::Authenticated(_)
+            )
+    }
+}
+
 /// Streamable-HTTP transport: axum listener with a bearer gate in front of
-/// the rmcp service. A wrong or missing token is 401 before MCP runs.
-async fn serve_http(
-    server: McpServer,
-    verifier: Arc<ConstantTimeTokenVerifier>,
-    bind: SocketAddr,
-) -> Exit {
+/// the rmcp service. A wrong, missing or no-longer-valid token is 401
+/// before MCP runs.
+async fn serve_http(server: McpServer, gate: Arc<BearerGate>, bind: SocketAddr) -> Exit {
     let make_server = move || Ok(server.clone());
     let config = http_config();
     let http = StreamableHttpService::new(
@@ -320,7 +399,6 @@ async fn serve_http(
         Arc::new(LocalSessionManager::default()),
         config,
     );
-    let gate = verifier.clone();
     let app = axum::Router::new()
         .route_service("/mcp", http)
         .layer(axum::middleware::from_fn(move |req, next| {
@@ -339,19 +417,14 @@ async fn serve_http(
     Exit::Ok
 }
 
-/// Bearer gate for HTTP: constant-time match against the startup token.
+/// Bearer gate for HTTP: constant-time match against the startup token,
+/// then a fresh read of the credential store for this request.
 async fn check_bearer(
     req: axum::extract::Request,
     next: axum::middleware::Next,
-    verifier: Arc<ConstantTimeTokenVerifier>,
+    gate: Arc<BearerGate>,
 ) -> axum::response::Response {
-    let presented = bearer_of(req.headers());
-    if presented.is_empty()
-        || !matches!(
-            verifier.authenticate(presented),
-            AuthOutcome::Authenticated(_)
-        )
-    {
+    if !gate.admits(bearer_of(req.headers())) {
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }
     next.run(req).await
@@ -423,7 +496,95 @@ fn http_config() -> StreamableHttpServerConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{bearer_of, check_bind, http_config, http_transport_allowed};
+    use super::{
+        EngineExecutor, McpServer, OpOutcome, Operation, OpsError, Scope, ScopeAuthz,
+        StoreVerifier, TokenStore, TokenVerifier, bearer_of, check_bind, http_config,
+        http_transport_allowed, unix_now,
+    };
+    use std::sync::Arc;
+
+    /// The engine stand-in: these tests exercise auth, so no operation ever
+    /// reaches an engine.
+    struct NoEngine;
+    impl EngineExecutor for NoEngine {
+        fn execute(&self, _op: Operation) -> Result<OpOutcome, OpsError> {
+            Err(OpsError::Unsupported {
+                what: "mcp_auth_test",
+            })
+        }
+    }
+
+    /// The auth wiring `run()` hands to the server: a verifier that re-reads
+    /// `tokens.json` on every check, and the bearer presented to it.
+    fn mcp_server(state_root: &std::path::Path, token: &str) -> McpServer {
+        let verifier: Arc<dyn TokenVerifier> =
+            Arc::new(StoreVerifier::new(state_root.to_path_buf()));
+        let authz = Arc::new(ScopeAuthz::new(detent_web::authz::Scopes::of(Scope::Write)));
+        McpServer::new(Arc::new(NoEngine), authz, verifier, Some(Arc::from(token)))
+    }
+
+    /// STAGE3 H10: a tool call re-checks the token, so a token revoked
+    /// through a second handle on the same file — what `detent token revoke`
+    /// does from another process — is refused on the very next call, with no
+    /// restart and no re-read of the environment.
+    #[test]
+    fn a_revoked_token_is_refused_on_the_next_call() -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let store = TokenStore::load(root.path())?;
+        let (secret, view) = store.issue("mcp", Scope::Write, None)?;
+        let server = mcp_server(root.path(), secret.expose());
+
+        assert!(
+            server
+                .check_auth(Some(secret.expose()), &Operation::ListModules)
+                .is_ok(),
+            "the fresh token should authenticate"
+        );
+
+        TokenStore::load(root.path())?.revoke(&view.id)?;
+
+        assert!(
+            server
+                .check_auth(Some(secret.expose()), &Operation::ListModules)
+                .is_err(),
+            "a revoked token was still accepted on the next call"
+        );
+        Ok(())
+    }
+
+    /// STAGE3 H10: expiry is checked at use, not once at startup.
+    #[test]
+    fn an_expired_token_is_refused_on_the_next_call() -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let store = TokenStore::load(root.path())?;
+        let (secret, _view) =
+            store.issue("stale", Scope::Write, Some(unix_now().saturating_sub(1)))?;
+        let server = mcp_server(root.path(), secret.expose());
+
+        assert!(
+            server
+                .check_auth(Some(secret.expose()), &Operation::ListModules)
+                .is_err(),
+            "an expired token was accepted"
+        );
+        Ok(())
+    }
+
+    /// STAGE3 H10: the audit label is the token's public id — never a slice
+    /// of the secret, which would leak it to the audit log and panic on a
+    /// non-ASCII boundary.
+    #[test]
+    fn the_identity_label_is_the_token_id() -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let store = TokenStore::load(root.path())?;
+        let (secret, view) = store.issue("mcp", Scope::Write, None)?;
+        let server = mcp_server(root.path(), secret.expose());
+
+        let who = server.check_auth(Some(secret.expose()), &Operation::ListModules)?;
+        assert_eq!(who.subject, format!("token:{}", view.id));
+        Ok(())
+    }
+
     fn headers(
         value: Option<&str>,
     ) -> Result<axum::http::HeaderMap, axum::http::header::InvalidHeaderValue> {

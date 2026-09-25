@@ -4,6 +4,36 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-24 - H10 MCP half: per-request token verification
+
+Closed the MCP side of H10. `detent-mcp`'s `check_auth` no longer reads
+`DETENT_MCP_TOKEN` per call: the bearer the binary resolves once at startup
+is an `McpServer` field and arrives as an explicit `check_auth(presented, op)`
+argument at all 17 tool sites. The verifier behind it is now
+`StoreVerifier { state_root }` (`crates/detent/src/mcp.rs`), which runs
+`TokenStore::load(..)?.authenticate(token, now)` on every check — every tool
+call, and every HTTP request through the axum bearer gate — so a token
+revoked through another store handle (what `detent token revoke` does from a
+second process) or past its deadline is refused on the next call, with no
+restart. The HTTP gate keeps the constant-time comparison against the
+startup token as well, so a read-scoped REST token still cannot borrow the
+MCP token's scopes. Identity labels are `token:<id>`;
+`ConstantTimeTokenVerifier` no longer slices the presented token
+(`mcp-token:<prefix>` leaked eight characters of the secret and panicked on
+a non-ASCII boundary) and labels from the SHA-256 handle instead.
+
+Verify: `cargo test -p detent --features mcp mcp::tests` (7 passed);
+`cargo test -p detent-mcp --features mcp` (8 passed);
+`cargo test -p detent --features mcp --test binary mcp` (2 passed);
+`rustfmt --edition 2024 --check` on both touched files = 0;
+`cargo clippy -p detent --features mcp --no-deps -- -D warnings` = 0 and
+`cargo clippy -p detent-mcp --features mcp --no-deps -- -D warnings` = 0.
+Failing-first: `a_revoked_token_is_refused_on_the_next_call` failed against
+the pre-fix wiring ("a revoked token was still accepted on the next call"),
+`an_expired_token_is_refused_on_the_next_call` ("an expired token was
+accepted"), `the_identity_label_is_the_token_id` (left `mcp-token:<8-char
+slice of the secret>`, right `token:<id>`).
+
 ## 2026-09-24 - H3 journal flag on WriteTarget (STAGE3)
 
 `Request::WriteTarget` now carries `journal: bool`. The engine sets it only for commit-confirm applies (`descriptor.commit_confirm || confirm.is_some()`); the monitor pushes to the rollback journal only when `journal` is true, and when `pending` is `None` clears the journal before pushing so one commit equals one write. `PROTO_VERSION` bumped 1→2. Test `an_unrelated_earlier_write_is_not_rolled_back_by_a_later_commit` applies plain A v1→v2 then commit-confirm B with 1 s window, lets it expire, asserts A still v2 and `rollback_targets==1`.
