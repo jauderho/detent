@@ -3,7 +3,8 @@
 //! This is the one command that really forks:
 //!
 //! ```text
-//! detent serve ──spawn_pair──▶ monitor (this process, privileged, confined)
+//! detent serve ──spawn_runner──▶ runner (child, privileged, not confined)
+//!              ──spawn_pair──▶ monitor (this process, privileged, confined)
 //!                              worker  (child, unprivileged, confined)
 //!                                 │
 //!                                 ├─ OpsEngine::new (client, registry, host)
@@ -29,16 +30,23 @@
 //! process lifetime where it is possible. That is irreversible for both
 //! processes, which is exactly why no other command does it and why `doctor`
 //! only reads what the kernel advertises.
+//!
+//! A seccomp filter also binds every child of the process that installed it,
+//! so the monitor does not start validators or service commands itself. The
+//! runner, forked before any confinement, runs them for it by allow-list id
+//! (STAGE3 H6, [`detent_platform::privsep::runner`]).
 
 use detent_core::diag::MessageId;
 use detent_platform::privsep::allowlist::{Allowlist, Config};
-use detent_platform::privsep::monitor::{ExitReason, Hooks, Monitor};
-use detent_platform::privsep::spawn::{Role, SpawnConfig, SpawnError, abort_child, spawn_pair};
+use detent_platform::privsep::monitor::{DEFAULT_STAGING_DIR, ExitReason, Hooks, Monitor};
+use detent_platform::privsep::runner::RunnerClient;
+use detent_platform::privsep::spawn::{
+    Role, RunnerHandle, SpawnConfig, SpawnError, abort_child, reap_child, spawn_pair, spawn_runner,
+};
 use detent_platform::sandbox::{
     Confinement, Hooks as SandboxHooks, LandlockOutcome, LandlockStatus, Outcome, Policy,
 };
-use detent_platform::service::checks::ExternalCheckRunner;
-use detent_platform::service::{self, ServiceControlAdapter};
+use detent_platform::service;
 
 use crate::output::{Exit, Renderer};
 use crate::run::{Settings, Streams};
@@ -102,6 +110,13 @@ pub fn run(
     streams.out.flush()?;
     streams.notes.flush()?;
 
+    // Before the pair, so the monitor's confinement never reaches the
+    // runner or the validators and service commands it starts.
+    let runner = match start_runner(&allow, host.profile.init, renderer, streams)? {
+        Ok(runner) => runner,
+        Err(exit) => return Ok(exit),
+    };
+
     let spawned = match spawn_pair(&SpawnConfig::default(), &hooks) {
         Ok(spawned) => spawned,
         Err(err) => {
@@ -116,6 +131,8 @@ pub fn run(
 
     match spawned.role {
         Role::Worker(client) => {
+            // The worker must hold no way to reach the runner.
+            drop(runner);
             // The child. It must never return into `main`, or the process tree
             // ends up with two copies of the CLI.
             #[cfg(feature = "web")]
@@ -148,10 +165,31 @@ pub fn run(
                 &host,
                 allow,
                 handle,
+                runner,
                 spawned.dropped_privileges,
                 renderer,
                 streams,
             )
+        }
+    }
+}
+
+/// Forks the runner (STAGE3 H6), or reports why it could not.
+fn start_runner(
+    allow: &Allowlist,
+    init: detent_core::descriptor::InitSystem,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Result<RunnerHandle, Exit>> {
+    match spawn_runner(allow, std::path::Path::new(DEFAULT_STAGING_DIR), init) {
+        Ok(runner) => Ok(Ok(runner)),
+        Err(err) => {
+            renderer.line(
+                streams.notes,
+                MessageId::new("cli-serve-failed"),
+                &[("reason", &err.to_string())],
+            )?;
+            Ok(Err(exit_for_spawn(&err)))
         }
     }
 }
@@ -218,6 +256,7 @@ fn run_monitor(
     host: &detent_platform::host::Detected,
     allow: Allowlist,
     mut handle: detent_platform::privsep::spawn::MonitorHandle,
+    runner: RunnerHandle,
     dropped_privileges: bool,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
@@ -231,19 +270,23 @@ fn run_monitor(
         ],
     )?;
     let state_lock = Monitor::lock(allow.state_root()).map_err(std::io::Error::other)?;
-    let checks = ExternalCheckRunner::new();
-    let services = ServiceControlAdapter(service::for_host(host.profile.init));
+    let runner_pid = runner.child_pid;
+    let client = RunnerClient::new(runner.channel, &allow);
     let mut monitor = Monitor::new(
         allow,
         Hooks {
-            checks: &checks,
-            services: &services,
+            checks: &client,
+            services: &client,
         },
     );
     report_recovery(renderer, streams, &monitor)?;
     monitor.set_host_profile(host.profile.clone());
     let served = monitor.serve_locked(&mut handle.channel, state_lock);
     let status = handle.wait();
+    // Closing the channel stops the runner.
+    drop(monitor);
+    drop(client);
+    reap_child(runner_pid);
     match (served, status) {
         (Ok(ExitReason::Shutdown), Ok(Some(0))) => Ok(Exit::Ok),
         (served, status) => {
@@ -806,7 +849,7 @@ mod web_tests {
     use detent_platform::host::Detected;
     use detent_platform::privsep::allowlist::{Allowlist, Config as AllowConfig};
     use detent_platform::privsep::monitor::{Hooks as MonitorHooks, Monitor};
-    use detent_platform::privsep::spawn::MonitorHandle;
+    use detent_platform::privsep::spawn::{MonitorHandle, RunnerHandle};
     use detent_platform::privsep::transport::Channel;
     use detent_platform::privsep::worker::Client;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -1280,6 +1323,17 @@ mod web_tests {
     /// test`). A `true` child spawned by `std::process::Command` is real and
     /// reapable without that hazard — `run_monitor` only cares that the pid
     /// exists and exits 0, not what process it is.
+    /// A runner handle with a real, reapable pid (see the test below for why
+    /// not a fork) whose channel nobody answers; these tests run no checks.
+    fn idle_runner() -> Result<RunnerHandle, Box<dyn std::error::Error>> {
+        let (monitor_end, _runner_end) = Channel::pair()?;
+        let child = std::process::Command::new("true").spawn()?;
+        Ok(RunnerHandle {
+            child_pid: i32::try_from(child.id())?,
+            channel: monitor_end,
+        })
+    }
+
     #[test]
     fn run_monitor_reports_success_when_the_worker_shuts_down_cleanly() -> R {
         let dir = tempfile::TempDir::new()?;
@@ -1304,6 +1358,7 @@ mod web_tests {
             &Detected::default(),
             allow,
             handle,
+            idle_runner()?,
             true,
             &renderer,
             &mut crate::run::Streams {
@@ -1370,6 +1425,7 @@ mod web_tests {
             &Detected::default(),
             allow,
             handle,
+            idle_runner()?,
             false,
             &renderer,
             &mut crate::run::Streams {

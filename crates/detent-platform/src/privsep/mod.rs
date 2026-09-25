@@ -11,6 +11,7 @@ pub mod allowlist;
 pub(crate) mod exec_deny;
 pub mod monitor;
 pub mod proto;
+pub mod runner;
 pub mod spawn;
 pub mod transport;
 pub mod users;

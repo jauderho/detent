@@ -35,6 +35,11 @@ Positive:
    parser and refuses a new or changed execution directive from a
    per-daemon deny-list (STAGE3 H23, `privsep/exec_deny.rs`). That list is
    best effort: a directive it does not name still reaches root.
+ - A seccomp filter binds every child of the process that installs it, so
+   the confined monitor does not start programs itself. A third process,
+   the runner, is forked before any confinement and runs the declared
+   validators and service actions for the monitor, by allow-list id only
+   (STAGE3 H6, `privsep/runner.rs`).
 
 Negative:
 - Two-process architecture adds IPC overhead and a protocol to version and
