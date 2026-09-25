@@ -34,7 +34,7 @@ oh-my-pi. Read this file, then `docs/STAGE3.md` §00 (still binding), §11.8 and
 
 ### 4.1 STAGE3 §11.3 step 4 — verification pass (IN PROGRESS, results not yet recorded)
 
-Five reviewers were started at `733d6e0`'s parent. **Groups A and C are recorded in STAGE3 §11.9.** Fix the REOPEN items first, in this order:
+Five reviewers were started at `733d6e0`'s parent. **Groups A, C, D and E are recorded in STAGE3 §11.9; group B may be missing — redo it if it has no table.** Also fix the vacuous tests found: M18 and L-SUP12 (group D). Fix the REOPEN items first, in this order:
   1. **H6**: every validator and `systemctl` call under a confined `serve` is killed by the inherited seccomp filter.
   2. **H23**: the root-exec deny-list is bypassed, e.g. samba `rootpreexec` and indented ifupdown `up`.
   3. **H9**: an idle connection holds a permit for 600 s.
