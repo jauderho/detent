@@ -574,4 +574,19 @@ mod tests {
         assert_eq!(never_served.status, Status::Fail);
         assert!(never_served.detail.contains("marker"), "{never_served:?}");
     }
+
+    /// A kernel interface that is readable but does not list the feature is
+    /// a warning quoting what the kernel does list — the operator sees why.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_kernel_feature_the_kernel_does_not_list_is_a_warning() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let lsm = dir.path().join("lsm");
+        std::fs::write(&lsm, "capability,yama\n")?;
+        let check = super::kernel_feature("landlock", &lsm.display().to_string(), "landlock");
+        assert_eq!(check.name, "landlock");
+        assert_eq!(check.status, Status::Warn);
+        assert_eq!(check.detail, "capability,yama");
+        Ok(())
+    }
 }

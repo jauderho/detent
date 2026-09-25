@@ -1106,4 +1106,27 @@ mod tests {
         assert!(notes.contains(&path), "{notes}");
         Ok(())
     }
+
+    /// `UpdateApplied` has no text rendering yet: it is an error, never a
+    /// blank line that would read as success.
+    #[test]
+    fn an_update_applied_outcome_is_not_rendered_as_text() {
+        let messages = Messages::new(Some("en-US"));
+        let renderer = Renderer {
+            messages: &messages,
+            json: false,
+            verbose: false,
+        };
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let result = renderer.outcome(
+            &mut out,
+            &mut notes,
+            &OpOutcome::UpdateApplied {
+                version: "0.0.2".to_owned(),
+            },
+        );
+        assert!(result.is_err());
+        assert!(out.is_empty());
+    }
 }

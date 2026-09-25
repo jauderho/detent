@@ -1362,6 +1362,56 @@ mod web_tests {
         assert!(!notes.is_empty());
         Ok(())
     }
+
+    /// A restart reuses the certificate the first start stored: the same
+    /// fingerprint is logged both times, so the operator's trust-on-first-use
+    /// pin survives a restart.
+    #[tokio::test]
+    async fn bind_web_server_reuses_the_stored_certificate_on_restart() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let messages = Messages::new(Some("en-US"));
+        let renderer = renderer(&messages);
+        let mut fingerprints = Vec::new();
+        for _ in 0..2 {
+            let (handle, thread, monitor) = engine_fixture(dir.path())?;
+            let auth_state =
+                detent_web::AuthState::open(dir.path(), &detent_web::AuthConfig::default(), 4096)?;
+            let mut out = Vec::new();
+            let mut notes = Vec::new();
+            let mut input = std::io::empty();
+            let bound = bind_web_server(
+                cheap_web_config(dir.path()),
+                &["box.example".to_owned()],
+                handle,
+                auth_state,
+                dir.path().to_path_buf(),
+                &renderer,
+                &mut crate::run::Streams {
+                    input: &mut input,
+                    out: &mut out,
+                    notes: &mut notes,
+                },
+            )
+            .await
+            .ok_or("bind_web_server must succeed")?;
+            drop(bound);
+            thread.join().map_err(|err| format!("{err:?}"))?;
+            monitor.join().map_err(|_| "monitor thread panicked")?;
+            let text = String::from_utf8(notes)?;
+            let line = text
+                .lines()
+                .find(|line| line.contains("fingerprint"))
+                .ok_or_else(|| format!("no fingerprint note in {text}"))?
+                .to_owned();
+            fingerprints.push(line);
+        }
+        assert_eq!(
+            fingerprints.first(),
+            fingerprints.get(1),
+            "{fingerprints:?}"
+        );
+        Ok(())
+    }
 }
 #[cfg(test)]
 mod dry_run_tests {

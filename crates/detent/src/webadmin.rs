@@ -2020,4 +2020,72 @@ mod tests {
         assert!(!notes.is_empty());
         Ok(())
     }
+
+    /// A fresh pseudo-terminal: the controller end and the terminal end.
+    fn pty() -> Result<(File, File), Box<dyn std::error::Error>> {
+        use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
+        let controller = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)?;
+        grantpt(&controller)?;
+        unlockpt(&controller)?;
+        let name = ptsname(&controller, Vec::new())?;
+        let terminal = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(name.as_bytes()))?;
+        Ok((File::from(controller), terminal))
+    }
+
+    /// The guard turns local echo off for exactly its lifetime, so a typed
+    /// password never appears on screen, and puts the terminal back as it
+    /// found it when dropped.
+    #[test]
+    fn the_echo_guard_hides_input_and_restores_the_terminal() -> R {
+        let (_controller, terminal) = pty()?;
+        let echoing = |tty: &File| -> std::io::Result<bool> {
+            Ok(termios::tcgetattr(tty)?
+                .local_modes
+                .contains(LocalModes::ECHO))
+        };
+        assert!(echoing(&terminal)?, "a fresh pty echoes");
+        let guard = EchoGuard::new(&terminal)?;
+        assert!(!echoing(&terminal)?, "echo must be off while prompting");
+        drop(guard);
+        assert!(echoing(&terminal)?, "echo must come back on drop");
+        Ok(())
+    }
+
+    /// Something that is not a terminal cannot be guarded: an error, never a
+    /// silently echoing prompt.
+    #[test]
+    fn the_echo_guard_refuses_a_file_that_is_not_a_terminal() -> R {
+        let file = tempfile::tempfile()?;
+        assert!(EchoGuard::new(&file).is_err());
+        Ok(())
+    }
+
+    /// The prompt goes to the terminal, the answer comes from the reader
+    /// without its newline, and the cursor moves to the next line.
+    #[test]
+    fn prompt_tty_writes_the_prompt_and_reads_one_line() -> R {
+        let (mut controller, terminal) = pty()?;
+        let mut input = std::io::Cursor::new(b"s3cret\nleftover".to_vec());
+        let password = prompt_tty(
+            &terminal,
+            &mut input,
+            &messages(),
+            MessageId::new("cli-password-prompt"),
+        )?;
+        assert_eq!(password.as_str(), "s3cret");
+        // Both writes already happened; read until the trailing newline.
+        let mut shown = Vec::new();
+        let mut chunk = [0_u8; 64];
+        while !shown.ends_with(b"\n") {
+            let read = controller.read(&mut chunk)?;
+            shown.extend_from_slice(chunk.get(..read).unwrap_or_default());
+        }
+        let shown = String::from_utf8(shown)?;
+        assert!(shown.starts_with("password:"), "{shown:?}");
+        assert!(shown.ends_with('\n'), "{shown:?}");
+        Ok(())
+    }
 }

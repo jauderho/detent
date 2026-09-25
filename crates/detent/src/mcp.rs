@@ -497,9 +497,9 @@ fn http_config() -> StreamableHttpServerConfig {
 #[cfg(test)]
 mod tests {
     use super::{
-        EngineExecutor, McpServer, OpOutcome, Operation, OpsError, Scope, ScopeAuthz,
-        StoreVerifier, TokenStore, TokenVerifier, bearer_of, check_bind, http_config,
-        http_transport_allowed, unix_now,
+        BearerGate, EngineExecutor, Exit, Identity, IdentityKind, McpServer, OpOutcome, Operation,
+        OpsError, Scope, ScopeAuthz, SessionExecutor, StoreVerifier, TokenStore, TokenVerifier,
+        bearer_of, check_bind, http_config, http_transport_allowed, serve_http, unix_now,
     };
     use std::sync::Arc;
 
@@ -628,5 +628,234 @@ mod tests {
             debug.contains("validate_empty_origin_allowlist: true"),
             "{debug}"
         );
+    }
+
+    fn token_identity() -> Identity {
+        Identity::new("token:t1", IdentityKind::Token)
+    }
+
+    fn apply(text: &str) -> Operation {
+        Operation::Apply {
+            id: crate::tests_support::MODULE.to_owned(),
+            model: serde_json::json!({ "text": text }),
+            expected_hash: None,
+            service_action: None,
+            confirm: None,
+        }
+    }
+
+    /// A tool call runs through the CLI's own session: a mutation really
+    /// writes, the audit log names the token identity rather than the local
+    /// user, and an operations error comes back as that error.
+    #[test]
+    fn the_executor_runs_tools_through_the_session_as_the_token()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Bound first so the rest of the harness (its temp dir) outlives
+        // the session moved out of it.
+        let harness = crate::tests_support::Harness::start(b"v1\n", false)?;
+        let crate::tests_support::Harness {
+            session, target, ..
+        } = harness;
+        let executor = SessionExecutor::new(session, false, token_identity());
+
+        let applied = executor.execute(apply("v2\n"))?;
+        assert!(matches!(applied, OpOutcome::Applied(_)), "{applied:?}");
+        assert_eq!(std::fs::read(&target)?, b"v2\n");
+
+        let audit = executor.execute(Operation::AuditQuery(detent_ops::AuditQuery {
+            module: None,
+            who: None,
+            limit: None,
+        }))?;
+        let records = crate::tests_support::records_of(audit).ok_or("audit answers records")?;
+        assert!(
+            records
+                .iter()
+                .any(|record| record.who == "token:t1" && record.op == detent_ops::OpKind::Apply),
+            "{records:?}"
+        );
+
+        let missing = executor.execute(Operation::GetModule {
+            id: "no-such-module".to_owned(),
+        });
+        assert!(
+            matches!(missing, Err(OpsError::UnknownModule { ref id }) if id == "no-such-module"),
+            "{missing:?}"
+        );
+        Ok(())
+    }
+
+    /// Under `--dryrun` a mutating tool is refused outright — MCP has no
+    /// plan preview to show instead — while a read still answers, and the
+    /// target is left untouched.
+    #[test]
+    fn a_dry_run_executor_refuses_mutations_and_still_answers_reads()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Bound first so the rest of the harness (its temp dir) outlives
+        // the session moved out of it.
+        let harness = crate::tests_support::Harness::start(b"v1\n", true)?;
+        let crate::tests_support::Harness {
+            session, target, ..
+        } = harness;
+        let executor = SessionExecutor::new(session, true, token_identity());
+
+        let refused = executor.execute(apply("v2\n"));
+        assert!(
+            matches!(
+                refused,
+                Err(OpsError::Unsupported {
+                    what: "dryrun_mutation"
+                })
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(std::fs::read(&target)?, b"v1\n");
+
+        let listed = executor.execute(Operation::ListModules)?;
+        assert!(
+            matches!(listed, OpOutcome::Modules(ref modules) if modules.len() == 1),
+            "{listed:?}"
+        );
+        Ok(())
+    }
+
+    /// A read-scoped token may read and is denied every mutation.
+    #[test]
+    fn a_read_scope_permits_reads_and_denies_mutations() {
+        use detent_mcp::Authz as _;
+        let authz = ScopeAuthz::new(detent_web::authz::Scopes::of(Scope::Read));
+        let who = token_identity();
+        assert!(authz.permit(&who, &Operation::ListModules).is_ok());
+        assert!(matches!(
+            authz.permit(&who, &apply("x\n")),
+            Err(detent_mcp::AuthError::Denied)
+        ));
+    }
+
+    /// The HTTP gate admits only the startup token, and only while the
+    /// store still holds it: another live token from the same store (which
+    /// may carry other scopes), an empty bearer, and the startup token after
+    /// revocation are all refused.
+    #[test]
+    fn the_bearer_gate_admits_only_the_live_startup_token() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let store = TokenStore::load(root.path())?;
+        let (startup, view) = store.issue("mcp", Scope::Read, None)?;
+        let (other, _) = store.issue("rest", Scope::Write, None)?;
+        let gate = BearerGate::new(
+            startup.expose(),
+            Arc::new(StoreVerifier::new(root.path().to_path_buf())),
+        );
+
+        assert!(gate.admits(startup.expose()));
+        assert!(!gate.admits(other.expose()));
+        assert!(!gate.admits(""));
+        assert!(!gate.admits("not-a-token"));
+
+        TokenStore::load(root.path())?.revoke(&view.id)?;
+        assert!(!gate.admits(startup.expose()));
+        Ok(())
+    }
+
+    /// The status line of one `POST /mcp` initialize to `addr`.
+    async fn post_initialize(
+        addr: std::net::SocketAddr,
+        bearer: Option<&str>,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+        let body = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0.0"}
+            }
+        })
+        .to_string();
+        let auth = bearer.map_or_else(String::new, |token| {
+            format!("Authorization: Bearer {token}\r\n")
+        });
+        let mut stream = tokio::net::TcpStream::connect(addr).await?;
+        let request = format!(
+            "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
+             Accept: application/json, text/event-stream\r\n{auth}Content-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(request.as_bytes()).await?;
+        let mut line = String::new();
+        tokio::io::BufReader::new(stream)
+            .read_line(&mut line)
+            .await?;
+        Ok(line.trim_end().to_owned())
+    }
+
+    /// The HTTP transport in-process: a request without the startup bearer,
+    /// or with a different one, is 401 before MCP runs; the startup token
+    /// reaches the rmcp service and is answered.
+    #[tokio::test]
+    async fn serve_http_answers_401_until_the_startup_bearer_is_presented()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let (secret, _) = TokenStore::load(root.path())?.issue("mcp", Scope::Write, None)?;
+        let store = Arc::new(StoreVerifier::new(root.path().to_path_buf()));
+        let gate = Arc::new(BearerGate::new(secret.expose(), store));
+        let server = mcp_server(root.path(), secret.expose());
+        // A port that was free a moment ago; `serve_http` binds it itself.
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?;
+
+        let client = async {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+            while tokio::net::TcpStream::connect(addr).await.is_err() {
+                if tokio::time::Instant::now() > deadline {
+                    return Err::<_, Box<dyn std::error::Error>>("never listened".into());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Ok((
+                post_initialize(addr, None).await?,
+                post_initialize(addr, Some("wrong")).await?,
+                post_initialize(addr, Some(secret.expose())).await?,
+            ))
+        };
+        let (missing, wrong, right) = tokio::select! {
+            exit = serve_http(server, gate, addr) => {
+                return Err(format!("the server stopped on its own: {exit:?}").into());
+            }
+            statuses = client => statuses?,
+        };
+        assert_eq!(missing, "HTTP/1.1 401 Unauthorized");
+        assert_eq!(wrong, "HTTP/1.1 401 Unauthorized");
+        assert_eq!(right, "HTTP/1.1 200 OK");
+        Ok(())
+    }
+
+    /// An address another socket already holds is an operational failure,
+    /// reported as `Exit::Failed` rather than a panic.
+    #[tokio::test]
+    async fn serve_http_fails_when_the_address_is_taken() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let blocker = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let store = Arc::new(StoreVerifier::new(root.path().to_path_buf()));
+        let gate = Arc::new(BearerGate::new("token", store));
+        let exit = serve_http(
+            mcp_server(root.path(), "token"),
+            gate,
+            blocker.local_addr()?,
+        )
+        .await;
+        assert_eq!(exit, Exit::Failed);
+        Ok(())
+    }
+
+    /// The transport names `--dryrun` reports match the `--transport`
+    /// values that select them.
+    #[test]
+    fn transport_names_match_the_cli_values() {
+        use crate::cli::McpTransport;
+        assert_eq!(super::transport_name(McpTransport::Stdio), "stdio");
+        assert_eq!(super::transport_name(McpTransport::Http), "http");
     }
 }
