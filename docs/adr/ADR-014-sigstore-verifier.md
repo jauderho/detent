@@ -90,8 +90,10 @@ No partial state, no retries with weaker checks.
    root from `hashes` + the leaf hash (RFC 6962), verify the `checkpoint`
    envelope's signature against the **embedded Rekor log public key**, and
    check the checkpoint's tree size ≥ the proof's tree size. The
-   `canonicalizedBody` (hashedrekord) must embed the same signature bytes and
-   certificate hash as the envelope. The Rekor signed entry timestamp (SET)
+   `canonicalizedBody` must agree with the envelope: for `hashedrekord`, the
+   same signature bytes and a public key equal to the leaf certificate's key;
+   for `dsse`/`intoto`, the same signature bytes and a payload hash equal to
+   the SHA-256 of the envelope payload. The Rekor signed entry timestamp (SET)
    is not verified, and embedded SCTs are only checked for presence (a
    non-empty SCT list), not against CT log keys (tracked by STAGE3 H17/M16).
 
