@@ -3389,4 +3389,353 @@ mod tests {
         assert_eq!(exit, Exit::Ok, "{}", String::from_utf8_lossy(&notes));
         Ok(())
     }
+
+    /// A pending-commit marker a crashed monitor could have left in
+    /// `state_root`: commit 7, rolling `target` back to `backup`.
+    fn leave_pending_commit(
+        state_root: &Path,
+        target: &Path,
+        backup: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use detent_platform::privsep::monitor::{
+            PENDING_COMMIT_MARKER, PendingCommitMarker, RollbackEntry,
+        };
+        std::fs::create_dir_all(state_root)?;
+        std::fs::write(
+            state_root.join(PENDING_COMMIT_MARKER),
+            serde_json::to_vec(&PendingCommitMarker {
+                commit: 7,
+                deadline_unix_ms: 0,
+                entries: vec![RollbackEntry {
+                    target: 0,
+                    path: target.to_path_buf(),
+                    backup: backup.to_path_buf(),
+                }],
+                service: None,
+            })?,
+        )?;
+        Ok(())
+    }
+
+    /// A one-shot command against a state root a live monitor already owns
+    /// is refused as busy — it never runs a second monitor over the same
+    /// state — and exits 1.
+    #[test]
+    fn a_one_shot_command_on_a_busy_state_root_is_refused() -> R {
+        let fx = crate::tests_support::Harness::start(b"v1\n", false)?;
+        let state = fx.state_root.display().to_string();
+        let (exit, out, notes) = run_with(&["detent", "host", "--state-root", &state])?;
+        assert_eq!(exit, Exit::Failed);
+        assert!(out.is_empty(), "{out}");
+        assert!(
+            notes.contains("another detent monitor already owns this state root"),
+            "{notes}"
+        );
+        assert_eq!(
+            super::SessionStartError::Busy.to_string(),
+            "monitor is busy"
+        );
+        Ok(())
+    }
+
+    /// A commit left pending by a crashed monitor is rolled back before a
+    /// one-shot command runs, and the operator is told which one.
+    #[test]
+    fn a_one_shot_command_first_recovers_a_pending_commit() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let state_root = dir.path().join("state");
+        let target = dir.path().join("target.conf");
+        let backup = dir.path().join("target.conf.v1");
+        std::fs::write(&target, b"v2")?;
+        std::fs::write(&backup, b"v1")?;
+        leave_pending_commit(&state_root, &target, &backup)?;
+
+        let state = state_root.display().to_string();
+        let (exit, out, notes) = run_with(&[
+            "detent",
+            "host",
+            "--json",
+            "--locale",
+            "en-US",
+            "--state-root",
+            &state,
+        ])?;
+        assert_eq!(exit, Exit::Ok, "{notes}");
+        let _: serde_json::Value = serde_json::from_str(&out)?;
+        assert_eq!(std::fs::read(&target)?, b"v1");
+        assert!(
+            notes.contains("recovered unconfirmed commit 7; restored 1 targets with 0 failures."),
+            "{notes}"
+        );
+        Ok(())
+    }
+
+    /// A marker the monitor cannot parse stops the session from starting:
+    /// the command exits 1 without running, and the marker stays for a human.
+    #[test]
+    fn a_corrupt_commit_marker_stops_a_one_shot_command_from_starting() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let state_root = dir.path().join("state");
+        std::fs::create_dir_all(&state_root)?;
+        let marker = state_root.join(detent_platform::privsep::monitor::PENDING_COMMIT_MARKER);
+        std::fs::write(&marker, b"{")?;
+
+        let state = state_root.display().to_string();
+        let (exit, out, notes) = run_with(&[
+            "detent",
+            "host",
+            "--locale",
+            "en-US",
+            "--state-root",
+            &state,
+        ])?;
+        assert_eq!(exit, Exit::Failed);
+        assert!(out.is_empty(), "{out}");
+        assert!(
+            notes.contains("the privileged helper could not be started"),
+            "{notes}"
+        );
+        assert_eq!(std::fs::read(&marker)?, b"{");
+        Ok(())
+    }
+
+    /// Until the first release embeds a trust root, `detent update` refuses
+    /// closed before it fetches anything: exit 1 with the reason, and no
+    /// check stamp written.
+    #[cfg(feature = "update")]
+    #[test]
+    fn update_refuses_closed_without_an_embedded_trust_root() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let state = dir.path().display().to_string();
+        for argv in [
+            vec![
+                "detent",
+                "update",
+                "--check",
+                "--locale",
+                "en-US",
+                "--state-root",
+                &state,
+            ],
+            vec![
+                "detent",
+                "update",
+                "--locale",
+                "en-US",
+                "--state-root",
+                &state,
+            ],
+        ] {
+            let (exit, out, notes) = run_with(&argv)?;
+            assert_eq!(exit, Exit::Failed, "{argv:?}");
+            assert!(out.is_empty(), "{argv:?}: {out}");
+            assert!(
+                notes.contains("update failed: embedded trust material is unavailable"),
+                "{argv:?}: {notes}"
+            );
+        }
+        assert!(!detent_update::update::stamp_path(dir.path()).exists());
+        Ok(())
+    }
+
+    /// The probe compares a candidate against this build's own version and
+    /// compiled feature set — the same list `--self-test` prints.
+    #[cfg(feature = "update")]
+    #[test]
+    fn current_features_describe_this_build() {
+        let features = super::current_features();
+        assert_eq!(features.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(features.features, super::compiled_feature_ids());
+        assert!(features.features.iter().any(|id| id == "update"));
+    }
+
+    /// Before restarting anything, the post-update check needs the config
+    /// and the serving certificate it will pin; a config it cannot read, a
+    /// certificate directory with no certificate, or one it cannot read, are
+    /// each an unhealthy outcome naming the cause — the caller rolls back.
+    #[cfg(feature = "update")]
+    #[test]
+    fn restart_and_check_is_unhealthy_without_a_config_or_a_certificate() -> R {
+        let dir = tempfile::TempDir::new()?;
+
+        let malformed = dir.path().join("malformed.toml");
+        std::fs::write(&malformed, "not toml")?;
+        assert!(
+            matches!(
+                super::restart_and_check(&malformed),
+                super::RestartOutcome::Unhealthy(ref reason) if !reason.is_empty()
+            ),
+            "a malformed config must be unhealthy"
+        );
+
+        let empty = dir.path().join("empty-certs");
+        std::fs::create_dir(&empty)?;
+        let config = dir.path().join("no-cert.toml");
+        std::fs::write(
+            &config,
+            format!("[tls]\ncert_dir = {:?}\n", empty.display().to_string()),
+        )?;
+        assert_eq!(
+            super::restart_and_check(&config),
+            super::RestartOutcome::Unhealthy(format!(
+                "{}: bootstrap certificate is missing",
+                empty.display()
+            ))
+        );
+
+        let not_a_dir = dir.path().join("certs-file");
+        std::fs::write(&not_a_dir, b"x")?;
+        let config = dir.path().join("bad-cert.toml");
+        std::fs::write(
+            &config,
+            format!("[tls]\ncert_dir = {:?}\n", not_a_dir.display().to_string()),
+        )?;
+        let outcome = super::restart_and_check(&config);
+        assert!(
+            matches!(
+                outcome,
+                super::RestartOutcome::Unhealthy(ref reason)
+                    if reason.starts_with(&format!("{}: ", not_a_dir.display()))
+                        && !reason.contains("bootstrap certificate is missing")
+            ),
+            "{outcome:?}"
+        );
+        Ok(())
+    }
+
+    /// A rollback that cannot even put the previous binary back (the kept
+    /// copy is gone) says the host needs attention, fails, and does not
+    /// restart a second time over a binary it could not restore.
+    #[cfg(feature = "update")]
+    #[test]
+    fn a_rollback_without_the_kept_binary_says_so_and_does_not_restart_again() -> R {
+        let calls = probe_log();
+        let swaps = probe_log();
+        let (_home, target) = install_target()?;
+        let kept = target.with_file_name("detent.prev");
+        let attempts = std::rc::Rc::new(std::cell::Cell::new(0));
+        let restart = {
+            let attempts = attempts.clone();
+            let kept = kept.clone();
+            move || {
+                attempts.set(attempts.get() + 1);
+                // The kept binary disappears between the swap and the rollback.
+                let _ = std::fs::remove_file(&kept);
+                super::RestartOutcome::Unhealthy("listener never answered".to_owned())
+            }
+        };
+        let run = run_update_hermetic(
+            &verified_feed()?,
+            &semver::Version::new(0, 0, 1),
+            &detent_update::Policy::default(),
+            &fixture_trust()?,
+            &recording_ok_probe(&calls, &["hosts", "web", "update"]),
+            &recording_swap(&swaps, &target),
+            &restart,
+            false,
+        )?;
+        assert_eq!(run.exit, Exit::Failed);
+        assert!(
+            run.notes.contains(
+                "the update failed (listener never answered) and the rollback also failed"
+            ),
+            "{}",
+            run.notes
+        );
+        assert_eq!(attempts.get(), 1, "no restart after a failed rollback");
+        assert_eq!(std::fs::read(&target)?, binary_fixture()?);
+        assert!(!kept.exists());
+        Ok(())
+    }
+
+    /// A state root whose monitor lock cannot be opened (a directory sits
+    /// where the lock file goes) is a start failure with the reason, not a
+    /// "busy" answer that would send the operator looking for a monitor.
+    #[test]
+    fn an_unopenable_monitor_lock_is_a_start_failure_not_busy() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let state_root = dir.path().join("state");
+        std::fs::create_dir_all(state_root.join(detent_platform::privsep::monitor::MONITOR_LOCK))?;
+        let state = state_root.display().to_string();
+        let (exit, out, notes) = run_with(&[
+            "detent",
+            "host",
+            "--locale",
+            "en-US",
+            "--state-root",
+            &state,
+        ])?;
+        assert_eq!(exit, Exit::Failed);
+        assert!(out.is_empty(), "{out}");
+        assert!(
+            notes.contains("the privileged helper could not be started"),
+            "{notes}"
+        );
+        assert!(!notes.contains("another detent monitor"), "{notes}");
+        Ok(())
+    }
+
+    /// Every refusal is reported on `notes`; when that report cannot be
+    /// written, `dispatch` returns the write error (which `run` turns into
+    /// exit 1) rather than an ordinary exit code that pretends the operator
+    /// was told why. A leftover commit is still rolled back even though the
+    /// note about it is lost.
+    #[test]
+    fn a_refusal_whose_report_cannot_be_written_is_an_error() -> R {
+        let messages = crate::i18n::Messages::new(Some("en-US"));
+        let renderer = crate::output::Renderer {
+            messages: &messages,
+            json: false,
+            verbose: false,
+        };
+        let dispatch = |argv: &[&str], stdin: &[u8]| -> Result<bool, Box<dyn std::error::Error>> {
+            let cli = parse(argv)?;
+            let mut out = Vec::new();
+            let result = super::dispatch(
+                &cli,
+                &renderer,
+                &mut Streams {
+                    input: &mut std::io::Cursor::new(stdin.to_vec()),
+                    out: &mut out,
+                    notes: &mut crate::tests_support::FailAfter::new(0),
+                },
+            );
+            Ok(result.is_err())
+        };
+
+        let busy = crate::tests_support::Harness::start(b"v1\n", false)?;
+        let state = busy.state_root.display().to_string();
+        assert!(
+            dispatch(&["detent", "host", "--state-root", &state], b"")?,
+            "busy"
+        );
+
+        let dir = tempfile::TempDir::new()?;
+        let locked = dir.path().join("locked");
+        std::fs::create_dir_all(locked.join(detent_platform::privsep::monitor::MONITOR_LOCK))?;
+        let state = locked.display().to_string();
+        assert!(
+            dispatch(&["detent", "host", "--state-root", &state], b"")?,
+            "lock"
+        );
+
+        let recovering = dir.path().join("recovering");
+        let target = dir.path().join("target.conf");
+        let backup = dir.path().join("target.conf.v1");
+        std::fs::write(&target, b"v2")?;
+        std::fs::write(&backup, b"v1")?;
+        leave_pending_commit(&recovering, &target, &backup)?;
+        let state = recovering.display().to_string();
+        assert!(
+            dispatch(&["detent", "host", "--state-root", &state], b"")?,
+            "recovered"
+        );
+        assert_eq!(std::fs::read(&target)?, b"v1");
+
+        assert!(
+            dispatch(&["detent", "config", "hosts", "validate"], b"not json")?,
+            "usage"
+        );
+        Ok(())
+    }
 }

@@ -47,6 +47,9 @@ time = { workspace = true, optional = true }
 detent-mcp = { path = "../detent-mcp", optional = true }
 
 [dev-dependencies]
+# `pty`: the password prompt's echo guard is tested against a real
+# pseudo-terminal, since a test process has no controlling terminal.
+rustix = { workspace = true, features = ["pty", "termios"] }
 tempfile = { workspace = true }
 
 [features]

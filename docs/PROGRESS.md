@@ -4,6 +4,22 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-25 - H20 detent crate coverage back over the floor
+
+`crates/detent/` read 91.09% against its 95% floor. New tests, and no production change, bring it to 95.42% (7440/7797) in the full CI measurement, measured as root. CI measures unprivileged, which trades a few root-only lines for the MCP HTTP serve path; all new tests pass as uid 65534. What the tests cover:
+- MCP startup refusals: missing, empty or unreadable token store; corrupt commit marker.
+- MCP pending-commit recovery on startup.
+- MCP stdio and HTTP end to end, including the bearer gate, busy refusal and SIGTERM.
+- The MCP executor's scope and dry-run behaviour.
+- One-shot command start failures.
+- `update` refusing closed without a trust root.
+- Restart health checks.
+- The terminal password prompt and echo guard on a real pty. A dev-only `rustix` `pty`/`termios` feature was added; `Cargo.lock` is unchanged.
+
+The orchestrator removed one delivered test, `serve_as_root_without_the_worker_account_refuses_before_forking`. It returned early when not root, so in CI it would pass without asserting anything (D2). Still uncovered: the real serve fork, which confines the process irreversibly; `run_update` after the trust root, which is unreachable while `trust::embedded()` refuses; the service restart step; and stream-write `?` lines.
+
+Verify: `cargo test -p detent --all-features --no-fail-fast` 183 unit passed (1 known uid-0-only failure) + 18 integration passed; as uid 65534 all pass (implementor run). fmt 0; clippy `-p detent --all-targets --all-features -D warnings` 0. Implementor: Opus subagent; orchestrator reviewed the diff.
+
 ## 2026-09-25 - H20 detent-web coverage back over the floor
 
 detent-web read about 95.7% on Linux against its 97% floor. 25 new tests, and no production change, bring it to 97.75% (9097/9306) in the full CI measurement. The tests cover: secret redaction in module views, scope refusal plus its audit record, pending-commit, commit, backup and service routes through the full stack, malformed module ids, update-check stamps, user and token store refresh after external edits (deleted file, directory in place of the file), redacted `Debug` for user and token records, TLS pair framing errors, legacy two-file bootstrap and ACME chains, rotation of an unparseable bootstrap cert, and GeneralizedTime / misshapen validity parsing. Still uncovered: failure arms inside tests, the already-ignored timing test in `password.rs`, and the live release-feed check. Noted: `UserStore::refresh_locked` is dead code behind an existing `#[allow(dead_code)]` (§12).
