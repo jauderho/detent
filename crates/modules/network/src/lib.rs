@@ -1810,6 +1810,7 @@ const GATEWAY_OUTSIDE_SUBNET: MessageId = MessageId::new("network-gateway-outsid
 const VLAN_RANGE: MessageId = MessageId::new("network-vlan-range");
 /// Fluent id: duplicate interface names.
 const DUPLICATE_INTERFACE: MessageId = MessageId::new("network-duplicate-interface");
+const INTERFACE_ORDER: MessageId = MessageId::new("network-interface-order");
 /// Fluent id: NUL or newline injection (also enforced at render time).
 const INJECTION: MessageId = MessageId::new("network-injection");
 /// Fluent id: static addresses with no gateway/DNS.
@@ -2352,8 +2353,19 @@ impl ConfigModule for NetworkModule {
     fn validate(model: &Self::Model, _ctx: &ValidationCtx<'_>) -> Diagnostics {
         let mut diagnostics = Diagnostics::new();
         let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut previous: Option<&str> = None;
         for (idx, iface) in model.interfaces.iter().enumerate() {
             let base = format!("interfaces/{idx}");
+            // `to_model` reads interfaces back in name order, so only a
+            // model in that order survives apply unchanged.
+            if previous.is_some_and(|name| name > iface.name.as_str()) {
+                diagnostics.push(
+                    Diagnostic::new(Severity::Error, INTERFACE_ORDER)
+                        .with_field(FieldPath::new(format!("{base}/name")))
+                        .with_arg("name", iface.name.clone()),
+                );
+            }
+            previous = Some(iface.name.as_str());
             if iface.name.is_empty() || iface.name.contains(char::is_whitespace) {
                 diagnostics.push(
                     Diagnostic::new(Severity::Error, INVALID_CIDR)
@@ -2900,6 +2912,33 @@ mod tests {
         let mut dup = model.clone();
         dup.interfaces.push(dup.interfaces[0].clone());
         assert!(has(&dup, DUPLICATE_INTERFACE, Severity::Error));
+    }
+
+    /// `to_model` reads interfaces back in name order, so a model in any
+    /// other order cannot survive apply unchanged (invariant 3): validation
+    /// refuses it, and a sorted model passes.
+    #[test]
+    fn interfaces_out_of_name_order_are_an_error() {
+        let iface = |name: &str| super::Interface {
+            name: name.to_owned(),
+            dhcp_v4: true,
+            dhcp_v6: false,
+            addresses: Vec::new(),
+            gateway_v4: None,
+            gateway_v6: None,
+            dns: Vec::new(),
+            routes: Vec::new(),
+            vlan: None,
+            bridge: None,
+        };
+        let unsorted = super::Model {
+            interfaces: vec![iface("XXXXXXXXX"), iface("Pl")],
+        };
+        assert!(has(&unsorted, super::INTERFACE_ORDER, Severity::Error));
+        let sorted = super::Model {
+            interfaces: vec![iface("Pl"), iface("XXXXXXXXX")],
+        };
+        assert!(!has(&sorted, super::INTERFACE_ORDER, Severity::Error));
     }
 
     #[test]

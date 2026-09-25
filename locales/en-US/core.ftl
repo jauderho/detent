@@ -123,6 +123,7 @@ network-invalid-ip = `{$value}` is not a valid IP address.
 network-gateway-outside-subnet = gateway `{$gateway}` is outside this interface's subnets.
 network-vlan-range = VLAN id `{$id}` is outside 1–4094.
 network-duplicate-interface = interface `{$name}` appears more than once.
+network-interface-order = interface `{$name}` must come before the interfaces above it: list interfaces in name order.
 network-injection = `{$value}` contains a line break or null byte.
 network-static-no-gateway = this statically addressed interface has no gateway.
 network-static-no-dns = this statically addressed interface has no DNS servers.
