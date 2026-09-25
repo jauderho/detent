@@ -335,10 +335,6 @@ impl UserStore {
         let mut guard = self.inner.lock().map_err(|_| AuthError::Hash)?;
         Self::refresh_locked_with_sessions(&mut guard, &self.path, sessions)
     }
-    #[allow(dead_code)]
-    fn refresh_locked(inner: &mut UserInner, path: &std::path::Path) -> Result<(), AuthError> {
-        Self::refresh_locked_with_sessions(inner, path, None)
-    }
     fn refresh_locked_with_sessions(
         inner: &mut UserInner,
         path: &std::path::Path,
