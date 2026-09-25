@@ -33,7 +33,7 @@ multiple_crate_versions = "allow"
 arbitrary = { workspace = true, optional = true }
 detent-core = { path = "../detent-core" }
 detent-modules = { path = "../detent-modules" }
-detent-update = { path = "../detent-update", default-features = false }
+detent-update = { path = "../detent-update", default-features = false, optional = true }
 postcard = { workspace = true }
 semver = { workspace = true }
 # Adds the `thread` feature on top of the workspace default (`fs`, `process`,
@@ -67,6 +67,10 @@ fuzzing = ["dep:arbitrary"]
 ## `detent-web` can describe them in `docs/openapi.json`. Off by default, for
 ## the same reason as `detent-core`'s feature of the same name.
 openapi = ["dep:utoipa", "detent-core/openapi"]
+## Links the Sigstore verifier so the monitor can authenticate a staged
+## release for `ReplaceBinary`. Without it every staged release is refused
+## (fail closed), and builds with no self-update carry no verifier crypto.
+update = ["dep:detent-update"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 caps = { workspace = true }

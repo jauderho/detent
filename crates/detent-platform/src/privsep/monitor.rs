@@ -302,6 +302,7 @@ pub struct Monitor<'a> {
     /// global — so parallel tests cannot steer each other.
     binary_override: Option<PathBuf>,
     /// Test-only trust material; production uses [`detent_update::trust::embedded`].
+    #[cfg(feature = "update")]
     update_trust: Option<detent_update::trust::TrustRoot>,
     /// Host facts used by the module validators.
     host_profile: HostProfile,
@@ -331,6 +332,7 @@ impl<'a> Monitor<'a> {
             pending: None,
             staging_dir: PathBuf::from(DEFAULT_STAGING_DIR),
             binary_override: None,
+            #[cfg(feature = "update")]
             update_trust: None,
             host_profile: HostProfile::default(),
             module_registry: None,
@@ -344,6 +346,7 @@ impl<'a> Monitor<'a> {
 
     /// Use explicit Sigstore trust material instead of the embedded roots.
     /// This keeps synthetic verifier fixtures out of production trust files.
+    #[cfg(feature = "update")]
     pub fn set_update_trust(&mut self, trust: detent_update::trust::TrustRoot) {
         self.update_trust = Some(trust);
     }
@@ -581,23 +584,8 @@ impl<'a> Monitor<'a> {
             Err(err) => return Response::Error(err),
         };
         let bundle_path = tag_path.with_file_name(format!("{tag}.sigstore.json"));
-        let Ok(bundle) = read_bounded_file(&bundle_path, detent_update::bundle::MAX_BUNDLE_BYTES)
-        else {
-            return Response::Error(ProtoError::VerificationFailed);
-        };
-        let Ok(decoded) = detent_update::bundle::parse(&bundle) else {
-            return Response::Error(ProtoError::VerificationFailed);
-        };
-        let verified = if let Some(trust) = &self.update_trust {
-            detent_update::verify::verify(&decoded, sha256.as_bytes(), tag, trust)
-        } else {
-            detent_update::trust::embedded().and_then(|trust| {
-                detent_update::verify::verify(&decoded, sha256.as_bytes(), tag, &trust)
-            })
-        };
-        if let Err(err) = verified {
-            tracing::warn!(error = %err, "staged release verification failed");
-            return Response::Error(ProtoError::VerificationFailed);
+        if let Err(err) = self.verify_release(&bundle_path, tag, sha256) {
+            return Response::Error(err);
         }
         let target = self
             .binary_override
@@ -609,6 +597,52 @@ impl<'a> Monitor<'a> {
             },
             Err(err) => Response::Error(err),
         }
+    }
+
+    /// Authenticate a staged release against its Sigstore bundle.
+    #[cfg(feature = "update")]
+    fn verify_release(
+        &self,
+        bundle_path: &Path,
+        tag: &str,
+        sha256: crate::fs::atomic::Sha256Digest,
+    ) -> Result<(), ProtoError> {
+        let Ok(bundle) = read_bounded_file(bundle_path, detent_update::bundle::MAX_BUNDLE_BYTES)
+        else {
+            return Err(ProtoError::VerificationFailed);
+        };
+        let Ok(decoded) = detent_update::bundle::parse(&bundle) else {
+            return Err(ProtoError::VerificationFailed);
+        };
+        let verified = if let Some(trust) = &self.update_trust {
+            detent_update::verify::verify(&decoded, sha256.as_bytes(), tag, trust)
+        } else {
+            detent_update::trust::embedded().and_then(|trust| {
+                detent_update::verify::verify(&decoded, sha256.as_bytes(), tag, &trust)
+            })
+        };
+        verified.map_err(|err| {
+            tracing::warn!(error = %err, "staged release verification failed");
+            ProtoError::VerificationFailed
+        })
+    }
+
+    /// A build without the `update` feature links no verifier, so it can
+    /// authenticate nothing: every staged release is refused (fail closed).
+    #[cfg(not(feature = "update"))]
+    fn verify_release(
+        &self,
+        bundle_path: &Path,
+        tag: &str,
+        _sha256: crate::fs::atomic::Sha256Digest,
+    ) -> Result<(), ProtoError> {
+        tracing::warn!(
+            tag,
+            bundle = %bundle_path.display(),
+            staging = %self.staging_dir.display(),
+            "staged release refused: built without the update feature"
+        );
+        Err(ProtoError::VerificationFailed)
     }
 
     // -- request handlers ---------------------------------------------------
@@ -1470,6 +1504,7 @@ fn materialize_staged(
     Ok(())
 }
 
+#[cfg(feature = "update")]
 fn read_bounded_file(path: &Path, max: usize) -> Result<Vec<u8>, std::io::Error> {
     let mut bytes = Vec::new();
     std::fs::File::open(path)?
@@ -3250,6 +3285,7 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../detent-update/tests/fixtures")
     }
 
+    #[cfg(feature = "update")]
     fn fixture_trust() -> Result<detent_update::trust::TrustRoot, Box<dyn std::error::Error>> {
         let root = std::fs::read_to_string(fixture_dir().join("fulcio-root.pem"))?;
         let rekor = std::fs::read_to_string(fixture_dir().join("rekor-pub.pem"))?;
@@ -3289,6 +3325,7 @@ mod tests {
         let mut monitor = Monitor::new(Allowlist::from_modules(&[], &config)?, Hooks::default());
         monitor.set_staging_dir(staging_dir.to_path_buf());
         monitor.set_binary_override(target);
+        #[cfg(feature = "update")]
         monitor.set_update_trust(fixture_trust()?);
         let _ = monitor.dispatch(Request::Hello {
             proto: PROTO_VERSION,
@@ -3296,6 +3333,7 @@ mod tests {
         Ok(monitor)
     }
 
+    #[cfg(feature = "update")]
     #[test]
     fn monitor_materializes_and_verifies_a_valid_release() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -3374,6 +3412,32 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(not(feature = "update"))]
+    #[test]
+    fn a_build_without_the_update_feature_refuses_a_valid_release()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let state_root = work.path().join("state");
+        std::fs::create_dir_all(&state_root)?;
+        let target = swap_target(work.path(), "detent-old", b"old-binary")?;
+        let (digest, bytes) = plant_release(&state_root, "valid.json")?;
+        let staging_dir = work.path().join("monitor-staging");
+        let mut monitor = update_monitor(&state_root, &staging_dir, target.clone())?;
+
+        let response = monitor.dispatch(Request::ReplaceBinary {
+            tag: FIXTURE_TAG.to_owned(),
+            len: bytes.len() as u64,
+            sha256: digest,
+        })?;
+        assert!(matches!(
+            response,
+            Response::Error(ProtoError::VerificationFailed)
+        ));
+        assert_eq!(std::fs::read(&target)?, b"old-binary");
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
     #[test]
     fn monitor_rejects_wrong_identity_without_swapping() -> Result<(), Box<dyn std::error::Error>> {
         let work = TempDir::new()?;
