@@ -33,7 +33,7 @@ oh-my-pi. Read this file, then `docs/STAGE3.md` §00 (still binding), §11.8 and
 
 ## 4. Work queue, in order
 
-### 4.1 STAGE3 §11.3 step 4 — verification pass (IN PROGRESS, results not yet recorded)
+### 4.1 STAGE3 §11.3 step 4 — verification pass (DONE: results in STAGE3 §11.9)
 
 Five reviewers were started at `733d6e0`'s parent. **All five groups are recorded in STAGE3 §11.9**, with a summary at its end. Also fix the vacuous tests it lists (M5, M18, L-SUP12, H16's named test, C1-d). After the list below, fix the other REOPEN items: M8, M23, M25, L-OPS17, L-OPS18. Fix the REOPEN items first, in this order:
   1. **H6**: every validator and `systemctl` call under a confined `serve` is killed by the inherited seccomp filter.
@@ -60,6 +60,20 @@ For each item: read its Fix/Test/Acceptance lines in STAGE3 §3–§6, then:
 | E CLI/MCP/FFI | H11, M12, M13, L-BIN11–L-BIN15, L-BIN17–L-BIN19, L-ORC1 |
 
 Already verified with failing-first evidence this session (skip): C1-e, H3, H10-MCP, H19, L-SUP13, M16, M20, L-MODB7, L-MODA12, and the H20 pieces.
+
+### 4.1a Update 2026-09-25, end of session (read before 4.1 and 4.2)
+
+**Landed after the verification pass:**
+- `819d253`: dead `UserStore::refresh_locked` removed (allow count 113).
+- `c1c3e03`: **L-OPS18 done** (the empty-registry test is gated on all eight module features).
+- `733d6e0`: ADR-014 body-agreement wording.
+
+**Stopped by the usage limit (partial, unverified work saved as patches):** four implementors stopped mid-task. Their partial diffs are in `docs/stage4-wip/`. Both apply cleanly to `c1c3e03` (`git apply --check`), but they are **not reviewed, not complete and not gated**. Treat them as a starting point only; take them over, finish them, test first, and commit one item per commit. Then delete the patch file in the same commit.
+- `h17-set-partial.patch` (§4.2 item 1). `bundle.rs` parses the SET, `verify.rs` has partial leaf/SET code, and new tests are in `verify_fixtures.rs`. The implementor had confirmed that its two new unit tests fail on the old code. **Not done:** `gen-fixtures` SET minting, fixture re-mint, `bad-set.json` rename, the ADR-014 update, and the cross-crate tests.
+- `aligned-edits-chrony-dhcp-partial.patch` (§4.2 item 2). chrony moved to `edit_entries`, dnsmasq in progress. **Not done:** network, the tests (`deleting_the_first_entry_rewrites_no_other_line`, `apply_is_linear_in_file_size`), fuzz runs, and coverage.
+- H6, H23, H9 and L-WEB16 left **no** changes; start them from zero (fix order in §4.1).
+
+**Still open from the REOPEN list:** H6, H23, H9, L-WEB16, M8, M23, M25, L-OPS17. Do M25 after the aligned-edits work, because both change chrony and dhcp.
 
 ### 4.2 STAGE3 §12 follow-ups
 
