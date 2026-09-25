@@ -31,8 +31,10 @@ Positive:
    allow-list. It CAN still gain root through content: allow-listed targets
    include root-execution vectors (smb.conf `root preexec`, dnsmasq
    `dhcp-script`, `/etc/fstab`, `/etc/exports` `no_root_squash`, ifupdown `up`
-   lines), and the monitor writes worker-supplied bytes without content
-   validation (STAGE3 H23 step 2, not yet built).
+   lines). The monitor re-validates candidate content with the module's
+   parser and refuses a new or changed execution directive from a
+   per-daemon deny-list (STAGE3 H23, `privsep/exec_deny.rs`). That list is
+   best effort: a directive it does not name still reaches root.
 
 Negative:
 - Two-process architecture adds IPC overhead and a protocol to version and

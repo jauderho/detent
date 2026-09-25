@@ -8,6 +8,7 @@
 //! name ever crosses the socket from worker to monitor.
 
 pub mod allowlist;
+pub(crate) mod exec_deny;
 pub mod monitor;
 pub mod proto;
 pub mod spawn;
