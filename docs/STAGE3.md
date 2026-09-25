@@ -1233,3 +1233,41 @@ Method: reviewer per group; each item is checked against its Fix/Test/Acceptance
 | L-PLAT7 | VERIFIED-NO-NEG | `monitor.rs:901` staging dir; `run_check_places_the_candidate_in_monitor_staging`. Plain `create_dir_all` with no trust check (unsafe in capability-user mode, C1-f) |
 | L-PLAT8 | VERIFIED | Doc-only; `proto.rs:296-302` |
 | L-BIN16 | VERIFIED-NO-NEG | `spawn.rs` child arm aborts; two tests |
+
+**Group D (update, ACME).** Tests at HEAD pass: detent-update 64 + 3 + 1 + 18; detent-acme 66.
+
+| Item | Verdict | Evidence / what is missing |
+|---|---|---|
+| H17 | PARTIAL | Steps: 1 **missing** (`release.yml:140` still ships a cosign messageSignature bundle; `dsse_envelope` is required, so the shipped file fails `bundle::parse`); 2 present, **untested** (disabling the `verificationMaterial.certificate` fallback keeps tests green); 3 present; 4 **missing** (the leaf hashes the whole entry, not `0x00‖body`; no SET); 5 **missing** (checkpoint size `>=` not `==`, compares base64(sha256(root)), no 4-byte keyhint); 6 partial (unknown kinds fall into hashedrekord; the real `publicKey` is an object); 7 **missing** (trust files are placeholders, no Fulcio intermediate); 8 **missing** (no captured real bundle) |
+| H18 | VERIFIED | `fetch.rs:291-336`; `follows_302`, `refuses_redirect_to_http`, `caps_redirect_loop` fail without the 3xx branch |
+| M14 | VERIFIED | `policy.rs:136-141`; `marker_embedded_in_sentence_does_not_bypass` fails with `.contains`. Residual: `update.rs:204` still sets `CheckReport.security` with `.contains` |
+| M15 | VERIFIED | `schedule.rs:67-70`; three tests fail with the old 66/90 logic |
+| M17 | VERIFIED-NO-NEG | fsync present; no unit test possible. The dir fsync is best-effort (`let _ =`), not the propagating `?` the Fix asked for |
+| M18 | PARTIAL | Code correct (`order.rs:93-160`), but **`present_failure_withdraws_presented` is vacuous** (removing every cleanup call keeps it green; it never calls `present_challenges`). Needs a test that fails on the 2nd record and asserts the 1st was deleted |
+| M19 | VERIFIED | `acme_attest_is_not_advertised_without_an_attestor` fails when the id is put back |
+| L-SUP10 | PARTIAL | Refusal pinned (`serve.rs:309-316`). `SECURITY_HARDENING.md` contradicts itself (l.45 "implemented…exercised by Pebble" vs l.233 "empty crate"); neither says issuance has no production caller |
+| L-SUP11 | VERIFIED | `issued_debug_redacts_private_key` |
+| L-SUP12 | PARTIAL | Sort present (`policy.rs:88-96`) but **the test is vacuous** (input already newest-first). Use `[v0.0.3 (later), v0.1.0]`, expect `v0.1.0` |
+| L-SUP14 | VERIFIED-NO-NEG | `install.rs:48,78` `sync_directory` propagates; no unit test possible |
+| L-SUP15 | VERIFIED-NO-NEG | https-only everywhere; `acme_dns_rejects_plain_http`. The negative run was blocked by the reviewer's permission classifier |
+| L-SUP16 | VERIFIED | `desec_derives_subnames_and_replaces_wholesale` fails with unquoted rdata / ttl 60. Fixtures still hand-written |
+| L-SUP17 | VERIFIED | `http_request_debug_redacts_header_values` |
+| L-SUP18 | VERIFIED-NO-NEG | Pebble and challtestsrv pinned `@sha256:` (both manifests return 200); the live test returns `Err` without `PEBBLE_URL` |
+| L-ORC2 | VERIFIED-NO-NEG | Explicit aws_lc_rs provider in `health.rs:67-96`; no global install left |
+
+**Group E (CLI, MCP, FFI).** All 17 FFI tests pass.
+
+| Item | Verdict | Evidence / what is missing |
+|---|---|---|
+| H11 | VERIFIED | `main.rs:93-95`; `mcp_stdio_answers_initialize` deadlocks with `.lock()` restored |
+| M12 | VERIFIED | `run.rs:169` `init_tracing`; `mcp_refused_startup_writes_nothing_to_stdout` fails without it |
+| M13 | VERIFIED-NO-NEG | Doc path: `FFI.md:112-116` + deny lints; `hostile_inputs_never_panic_and_report_errors` |
+| L-BIN11 | VERIFIED | `check_utf8` `isize::MAX` guard; `oversized_length_is_refused` aborts (UB) without it |
+| L-BIN12 | VERIFIED-NO-NEG | error code on every NULL path; 4 tests |
+| L-BIN13 | VERIFIED-NO-NEG | `align_of::<AllocHeader>()` + const asserts (no 32-bit run) |
+| L-BIN14 | VERIFIED | `doctor.rs:172-211`; `doctor_refuses_symlink_targets` fails with plain `metadata` |
+| L-BIN15 | VERIFIED | `webadmin.rs:322-333`; `token_create_rejects_expiry_overflow_without_writing` fails with `wrapping_add` |
+| L-BIN17 | PARTIAL | Still open: `main.rs:155` English scanner stops at the first `#[cfg(test)]`; `run.rs` `commit_rollback_surfaces_whatever_the_operations_layer_says` keeps its weak assertion |
+| L-BIN18 | VERIFIED-NO-NEG | Zeroizing chunk read; one un-zeroized `String` copy remains (`webadmin.rs:667-671`) |
+| L-BIN19 | PARTIAL | `ConstantTimeTokenVerifier::from_digests` (`detent-mcp/src/mcp.rs:100`) is public dead code; gate with `#[cfg(test)]` or delete |
+| L-ORC1 | VERIFIED | Comment removed |
