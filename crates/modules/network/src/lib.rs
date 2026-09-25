@@ -868,17 +868,16 @@ fn build_model_from_lines(lines: &[String]) -> Model {
                 vlan: None,
                 bridge: None,
             });
-            if method.as_str() == "dhcp" {
-                entry.dhcp_v4 = true;
-            }
-            // `dhcp6`/`static`/`loopback` methods contribute nothing here;
-            // the `inet6` variant is handled below.
-            // `inet6 dhcp` enables IPv6 DHCP; it does not clear an earlier
-            // `inet dhcp` stanza for the same interface.
-            if raw.contains("inet6") && method == "dhcp" {
-                entry.dhcp_v6 = true;
-            } else if method == "dhcp" && raw.contains("inet ") {
-                entry.dhcp_v4 = true;
+            // `dhcp6`/`static`/`loopback` methods contribute nothing here.
+            // `inet6 dhcp` enables IPv6 DHCP only; it does not clear an
+            // earlier `inet dhcp` stanza for the same interface. The family
+            // is the third word (the name may itself read `inet6`).
+            if method == "dhcp" {
+                if raw.split_whitespace().nth(2) == Some("inet6") {
+                    entry.dhcp_v6 = true;
+                } else {
+                    entry.dhcp_v4 = true;
+                }
             }
             i += 1;
             continue;
@@ -1087,6 +1086,17 @@ fn check_interface(iface: &Interface) -> Result<(), EditError> {
 /// Render one interface as networkd INI lines.
 #[allow(clippy::assigning_clones)]
 fn render_networkd(iface: &Interface) -> Result<Vec<String>, EditError> {
+    // A `.network` file has no bridge-member primitive (`Bridge=` lives on
+    // the member and names one bridge); refuse the bridge instead of
+    // dropping it from the file.
+    if iface.bridge.is_some() {
+        return Err(EditError::Unsupported {
+            message: format!(
+                "systemd-networkd cannot hold the bridge of {:?}",
+                iface.name
+            ),
+        });
+    }
     let mut out = Vec::new();
     out.push("[Match]".to_owned());
     out.push(format!("Name={}", iface.name));
@@ -1137,10 +1147,10 @@ fn render_nm(iface: &Interface) -> Result<Vec<String>, EditError> {
     // Routes have no keyfile representation in the modeled subset (NM stores
     // them as `ipv4.routes` with a different syntax); refuse them instead of
     // dropping them from the file.
-    if !iface.routes.is_empty() {
+    if !iface.routes.is_empty() || iface.bridge.is_some() {
         return Err(EditError::Unsupported {
             message: format!(
-                "NetworkManager keyfiles cannot hold the routes of {:?}",
+                "NetworkManager keyfiles cannot hold the routes or bridge of {:?}",
                 iface.name
             ),
         });
@@ -1269,6 +1279,15 @@ fn render_ifupdown(iface: &Interface) -> Result<Vec<String>, EditError> {
         out.push(format!("\tvlan_id {}", vlan.id));
     }
     if let Some(bridge) = iface.bridge.as_ref() {
+        // `bridge_ports` with no value reads back as no bridge.
+        if bridge.members.is_empty() {
+            return Err(EditError::Unsupported {
+                message: format!(
+                    "ifupdown cannot hold the memberless bridge {:?}",
+                    iface.name
+                ),
+            });
+        }
         out.push(format!("\tbridge_ports {}", bridge.members.join(" ")));
     }
     for route in &iface.routes {
@@ -1994,16 +2013,6 @@ fn edit_networkd_sections(
         .collect();
     let planned_scopes = networkd_scopes(&planned_raw);
     let (partner, used) = pair_by_scope(existing_raw, &planned_scopes);
-    // Fast path: identical models keep bytes byte-identical.
-    let directive_lines: Vec<String> = doc
-        .lines()
-        .iter()
-        .filter(|l| l.kind() == LineKind::Directive)
-        .map(|l| l.raw().to_owned())
-        .collect();
-    if build_model_from_lines(&directive_lines) == *model {
-        return Ok(EditReport::default());
-    }
     // Replacement text per paired existing line (`None` = unchanged).
     let replacement: Vec<Option<String>> = partner
         .iter()
@@ -2062,7 +2071,7 @@ fn edit_networkd_sections(
     report.removed = report.removed.saturating_add(removed);
     // Refuse an edit that parses back to a different model instead of
     // silently dropping modeled state.
-    if !networkd_round_trips(doc, model) {
+    if !round_trips(doc, model) {
         return Err(EditError::Unsupported {
             message: "edit would not round-trip; refusing".to_owned(),
         });
@@ -2161,12 +2170,8 @@ fn splice_surplus(
     added
 }
 
-/// Whether `doc` parses back to `model`. systemd-networkd has no
-/// bridge-member primitive (`Bridge=` lives on the member's `.network` file
-/// and enslaves to one bridge), so bridge membership is lossy here by design:
-/// compare against the model with membership stripped; interface shape must
-/// still survive.
-fn networkd_round_trips(doc: &Document, model: &Model) -> bool {
+/// Whether `doc` parses back to `model`, ignoring interface order.
+fn round_trips(doc: &Document, model: &Model) -> bool {
     let reparsed = Document::parse(&doc.render(), classify);
     let mut back = build_model_from_lines(
         &reparsed
@@ -2176,9 +2181,6 @@ fn networkd_round_trips(doc: &Document, model: &Model) -> bool {
             .collect::<Vec<_>>(),
     );
     let mut want = model.clone();
-    for iface in &mut want.interfaces {
-        iface.bridge = None;
-    }
     want.interfaces.sort_by(|a, b| a.name.cmp(&b.name));
     back.interfaces.sort_by(|a, b| a.name.cmp(&b.name));
     back == want
@@ -2252,16 +2254,15 @@ impl ConfigModule for NetworkModule {
                 });
             }
         }
+        // The document already holds this model, so nothing is written
+        // (invariant 2) even when it holds a value the renderer refuses.
+        // Compare against every line: unknown lines (an unknown section
+        // header, say) change what the directives around them mean.
+        if Self::to_model(doc).is_ok_and(|current| &current == model) {
+            return Ok(EditReport::default());
+        }
         let flavor = detect_flavor(doc);
-        let new_lines = match render_model_lines(flavor, model) {
-            Ok(lines) => lines,
-            // The document already holds this model, so nothing is written
-            // (invariant 2) even when it holds a value the renderer refuses.
-            Err(_) if Self::to_model(doc).is_ok_and(|current| &current == model) => {
-                return Ok(EditReport::default());
-            }
-            Err(e) => return Err(e),
-        };
+        let new_lines = render_model_lines(flavor, model)?;
         for line in &new_lines {
             if !line.is_empty() && !is_directive_like(line) && !line.trim().is_empty() {
                 // Rendered a directive that the classifier would mark Unknown — refuse.
@@ -2278,6 +2279,7 @@ impl ConfigModule for NetworkModule {
             return result;
         }
         // Other flavors have no INI sections: legacy positional pairing.
+        let before = doc.clone();
         let planned_directives: Vec<String> = new_lines
             .iter()
             .filter(|l| is_directive_like(l))
@@ -2303,12 +2305,6 @@ impl ConfigModule for NetworkModule {
         }
         for wanted in planned_directives.iter().skip(planned.len()) {
             planned.push(Some(wanted.clone()));
-        }
-
-        // If the model round-trips to the same directive lines, keep them byte-identical.
-        let existing_model = build_model_from_lines(&directive_lines);
-        if &existing_model == model {
-            return Ok(EditReport::default());
         }
 
         let mut report = EditReport::default();
@@ -2339,6 +2335,15 @@ impl ConfigModule for NetworkModule {
             doc.insert_line(at, raw)?;
             at = at.saturating_add(1);
             report.added = report.added.saturating_add(1);
+        }
+        // An unknown line between rewritten directives (an unknown section
+        // header, say) can change what they mean; refuse, leaving the
+        // document as it was, instead of silently dropping modeled state.
+        if !round_trips(doc, model) {
+            *doc = before;
+            return Err(EditError::Unsupported {
+                message: "edit would not round-trip; refusing".to_owned(),
+            });
         }
         Ok(report)
     }
@@ -3607,46 +3612,65 @@ mod tests {
                 },
             ],
         };
-        // networkd seed.
-        let mut doc = NetworkModule::parse("[Match]\nName=eth0\n\n[Network]\nDHCP=no\n")
-            .map_err(|e| e.to_string())?;
-        let report = NetworkModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        // networkd seed: a `.network` file cannot hold a bridge, so the
+        // model is refused and the file is left as it was.
+        let seed = "[Match]\nName=eth0\n\n[Network]\nDHCP=no\n";
+        let mut doc = NetworkModule::parse(seed).map_err(|e| e.to_string())?;
+        assert!(matches!(
+            NetworkModule::apply(&mut doc, &model),
+            Err(super::EditError::Unsupported { .. })
+        ));
+        assert_eq!(NetworkModule::render(&doc), seed);
+        let mut bridgeless = model.clone();
+        for iface in &mut bridgeless.interfaces {
+            iface.bridge = None;
+        }
+        let report = NetworkModule::apply(&mut doc, &bridgeless).map_err(|e| e.to_string())?;
         assert!(report.added > 0);
         let rendered = NetworkModule::render(&doc);
         assert!(rendered.contains("[VLAN]"));
         assert!(rendered.contains("[Route]"));
         let back = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
         assert_eq!(back.interfaces.len(), 4);
-        // Routes have no keyfile form, so NM refuses them rather than drop
-        // them. Bridge membership is NM-unrepresentable by design — vlan,
-        // addresses, and interface shape survive the NM round trip.
+        // Routes and bridges have no keyfile form, so NM refuses them rather
+        // than drop them. Addresses and interface shape survive the NM round
+        // trip.
         let mut nm = NetworkModule::parse("[connection]\nid=eth0\n").map_err(|e| e.to_string())?;
         assert!(matches!(
             NetworkModule::apply(&mut nm, &model),
             Err(super::EditError::Unsupported { .. })
         ));
         assert_eq!(NetworkModule::render(&nm), "[connection]\nid=eth0\n");
-        let mut routeless = model.clone();
+        let mut routeless = bridgeless.clone();
         for iface in &mut routeless.interfaces {
             iface.routes.clear();
         }
+        // A keyfile does not read back `[vlan]`, and `method=auto` on an
+        // address-less interface reads back as DHCP: refused, file untouched.
+        assert!(matches!(
+            NetworkModule::apply(&mut nm, &routeless),
+            Err(super::EditError::Unsupported { .. })
+        ));
+        assert_eq!(NetworkModule::render(&nm), "[connection]\nid=eth0\n");
+        routeless.interfaces.truncate(1);
         NetworkModule::apply(&mut nm, &routeless).map_err(|e| e.to_string())?;
         let nm_rendered = NetworkModule::render(&nm);
-        assert!(nm_rendered.contains("[vlan]"));
         assert!(!nm_rendered.contains("[bridge]"));
         assert!(nm_rendered.contains("method=manual"));
         let nm_back = NetworkModule::to_model(&nm).map_err(|e| e.to_string())?;
-        let nm_eth0 = nm_back
-            .interfaces
-            .iter()
-            .find(|i| i.name == "eth0")
-            .unwrap_or_else(|| panic!("eth0 missing after NM round trip"));
-        assert!(nm_eth0.routes.is_empty());
-        assert_eq!(nm_eth0.addresses.len(), 2);
-        assert_eq!(nm_back.interfaces.len(), 4);
+        assert_eq!(nm_back, routeless);
         // ifupdown seed: vlan/bridge stanzas + v6 block + route up-lines.
+        // An IPv6 gateway with no IPv6 address has no stanza to live in, so
+        // vlan10's is refused; without it the model applies.
         let mut ifup = NetworkModule::parse("auto eth0\n").map_err(|e| e.to_string())?;
-        NetworkModule::apply(&mut ifup, &model).map_err(|e| e.to_string())?;
+        assert!(matches!(
+            NetworkModule::apply(&mut ifup, &model),
+            Err(super::EditError::Unsupported { .. })
+        ));
+        assert_eq!(NetworkModule::render(&ifup), "auto eth0\n");
+        let mut ifup_model = model.clone();
+        ifup_model.interfaces[1].gateway_v6 = None;
+        NetworkModule::apply(&mut ifup, &ifup_model).map_err(|e| e.to_string())?;
         let ifup_rendered = NetworkModule::render(&ifup);
         assert!(ifup_rendered.contains("vlan-raw-device eth0"));
         assert!(ifup_rendered.contains("bridge_ports eth0"));
@@ -3695,6 +3719,9 @@ mod tests {
         let lines = super::render_ifupdown(&v4only.interfaces[0]).map_err(|e| e.to_string())?;
         assert!(lines.iter().any(|l| l == "iface eth0 inet dhcp"));
         assert!(lines.iter().any(|l| l == "iface eth0 inet6 dhcp"));
+        // NetworkManager writes DHCPv6 as `[ipv6]` `method=auto`.
+        let nm = "[connection]\nid=eth0\n";
+        assert!(assert_apply_keeps_model(nm, &v4only)?);
         Ok(())
     }
 
@@ -4108,5 +4135,135 @@ mod tests {
             id: 10,
         });
         assert!(has(&model, INJECTION, Severity::Error));
+    }
+
+    /// Applies `model` to `src`; when the edit succeeds, the written text
+    /// must read back as exactly `model` (invariant 3).
+    fn assert_apply_keeps_model(src: &str, model: &super::Model) -> Result<bool, String> {
+        let mut doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
+        if NetworkModule::apply(&mut doc, model).is_err() {
+            return Ok(false);
+        }
+        let rendered = NetworkModule::render(&doc);
+        let reparsed = NetworkModule::parse(&rendered).map_err(|e| e.to_string())?;
+        let back = NetworkModule::to_model(&reparsed).map_err(|e| e.to_string())?;
+        assert_eq!(
+            &back, model,
+            "apply succeeded but lost state in {rendered:?}"
+        );
+        Ok(true)
+    }
+
+    /// Fuzz regression (`fuzz_network_edit`): a bridge applied to a document
+    /// with no directives (networkd by default) was dropped by the renderer
+    /// and the edit still succeeded. A backend that cannot hold a bridge must
+    /// refuse it; netplan holds even an empty one.
+    #[test]
+    fn a_bridge_is_refused_where_the_backend_cannot_hold_it() -> Result<(), String> {
+        let bridge = |members: &[&str]| super::Model {
+            interfaces: vec![super::Interface {
+                name: "br0".to_owned(),
+                dhcp_v4: true,
+                dhcp_v6: false,
+                addresses: Vec::new(),
+                gateway_v4: None,
+                gateway_v6: None,
+                dns: Vec::new(),
+                routes: Vec::new(),
+                vlan: None,
+                bridge: Some(super::Bridge {
+                    members: members.iter().map(|m| (*m).to_owned()).collect(),
+                }),
+            }],
+        };
+        let empty = bridge(&[]);
+        let one = bridge(&["eth0"]);
+        // networkd (the default for a document with no directives, and a
+        // sectioned one), NetworkManager and ifupdown-without-members refuse.
+        for (src, model) in [
+            ("# /etc\n", &empty),
+            ("# /etc\n", &one),
+            ("[Match]\nName=eth0\n", &one),
+            ("[connection]\nid=eth0\n", &one),
+            ("auto eth0\n", &empty),
+        ] {
+            assert!(!assert_apply_keeps_model(src, model)?, "{src:?} accepted");
+        }
+        // ifupdown with members and netplan (even empty) hold the bridge.
+        assert!(assert_apply_keeps_model("auto eth0\n", &one)?);
+        let netplan = "network:\n  version: 2\n";
+        assert!(assert_apply_keeps_model(netplan, &empty)?);
+        Ok(())
+    }
+
+    /// Fuzz regression (`fuzz_network_roundtrip`): the no-op check read only
+    /// the directive lines, so an unknown section header dropped out and
+    /// `Name=eth5` under it counted as an interface. The check missed, the
+    /// positional edit moved `Foo=bar:` into the YAML block, and the result
+    /// read back with no interfaces. A document's own model is a no-op.
+    #[test]
+    fn a_mixed_document_applies_its_own_model_as_a_noop() -> Result<(), String> {
+        let src = "[Match]\nName=eth1\n[Unknown]\nName=eth5\nFoo=bar:\nnetwork:\n  ethernets:\n    eth0:\n      dhcp4: true\n";
+        let mut doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
+        let model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        assert_eq!(model.interfaces.len(), 2);
+        let report = NetworkModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        assert_eq!(report, EditReport::default());
+        assert_eq!(NetworkModule::render(&doc), src);
+        assert!(assert_apply_keeps_model(src, &model)?);
+        Ok(())
+    }
+
+    /// Fuzz regression (`fuzz_network_edit`): `iface <name> inet6 dhcp` also
+    /// set IPv4 DHCP, so a DHCPv6-only interface applied to an ifupdown file
+    /// read back with IPv4 DHCP on. The address family decides which flag a
+    /// `dhcp` stanza sets, even for an interface named `inet6`.
+    #[test]
+    fn an_inet6_dhcp_stanza_enables_only_dhcpv6() -> Result<(), String> {
+        let model = super::Model {
+            interfaces: vec![super::Interface {
+                name: "eth0".to_owned(),
+                dhcp_v4: false,
+                dhcp_v6: true,
+                addresses: Vec::new(),
+                gateway_v4: None,
+                gateway_v6: None,
+                dns: Vec::new(),
+                routes: Vec::new(),
+                vlan: None,
+                bridge: None,
+            }],
+        };
+        assert!(assert_apply_keeps_model("auto eth0\n", &model)?);
+        let doc = NetworkModule::parse("iface inet6 inet dhcp\n").map_err(|e| e.to_string())?;
+        let back = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        assert!(back.interfaces[0].dhcp_v4);
+        assert!(!back.interfaces[0].dhcp_v6);
+        Ok(())
+    }
+
+    /// Fuzz regression (`fuzz_network_edit`): the positional edit rewrote
+    /// directives in place, so `Name=` landed under the unknown `[MatCP]`
+    /// header and the interface read back as gone while the edit succeeded.
+    /// An edit that does not read back as the model is refused.
+    #[test]
+    fn a_positional_edit_that_would_not_round_trip_is_refused() -> Result<(), String> {
+        let model = super::Model {
+            interfaces: vec![super::Interface {
+                name: "eth1".to_owned(),
+                dhcp_v4: false,
+                dhcp_v6: false,
+                addresses: Vec::new(),
+                gateway_v4: None,
+                gateway_v6: None,
+                dns: Vec::new(),
+                routes: Vec::new(),
+                vlan: None,
+                bridge: None,
+            }],
+        };
+        let src = "[Detwork]\nDHCP=yes\n[MatCP]\nName=eth0\n";
+        assert!(!assert_apply_keeps_model(src, &model)?);
+        Ok(())
     }
 }

@@ -4,6 +4,18 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-25 - H20 fuzz: network round-trip losses fixed
+
+A local run of all 29 fuzz targets for 60 s each at `675aca2` (as CI does) failed only `fuzz_network_edit` and `fuzz_network_roundtrip`. The CI artifact and full log were out of reach from the cloud container. Fixed in `crates/modules/network/src/lib.rs`:
+1. **Bridge lost silently.** networkd and NM renderers dropped `bridge`, and `networkd_round_trips` stripped bridges before comparing. Now networkd and NM refuse a bridge, ifupdown refuses a memberless one, and the round-trip check (`round_trips`) keeps bridges. User-visible: a bridge edit on networkd/NM returns `Unsupported` instead of vanishing.
+2. **Own model lost on a mixed document.** The no-op shortcuts built the model from directive lines only, but `to_model` reads all lines. `apply` now returns an empty report when `to_model(doc) == model`.
+3. **(fuzz round 1)** ifupdown `iface X inet6 dhcp` also set `dhcp_v4`. The family now comes from the third word.
+4. **(fuzz round 2)** The positional path had no round-trip check. It now restores the document and refuses with `Unsupported` when the result would not read back as the model.
+
+Open, owner decision (§12): `to_model` returns interfaces sorted by name, so a valid model not in name order fails invariant 3 (fuzz crash `2c880b5d…`, source `"— nnnw"`, interfaces `[XXXXXXXXX, Pl]`). This predates this session.
+
+Verify: regression tests `a_bridge_is_refused_where_the_backend_cannot_hold_it`, `a_mixed_document_applies_its_own_model_as_a_noop`, `an_inet6_dhcp_stanza_enables_only_dhcpv6`, `a_positional_edit_that_would_not_round_trip_is_refused` each failed before its fix. `renderers_round_trip_vlan_bridge_routes_per_backend` now expects `Unsupported` for the lossy cases and exact model equality for NM. `cargo test -p detent-module-network --all-features` 53 + 22 passed; clippy and fmt 0; lib.rs 3005/3005 lines covered. All four crash inputs exit 0; 120 s runs clean for roundtrip (722,508 runs) and parse (1,873,515 runs). Implementor: Opus subagent; orchestrator reviewed the diff.
+
 ## 2026-09-25 - H20 crates/modules back to 100%; last new suppression removed
 
 - `bb2f054`: removed the nfs trailing-`\` checks in `render_line` and `validate_client`. Earlier checks there already refuse any `\`, so they could never fire. `validate_export`'s reachable check stays.
