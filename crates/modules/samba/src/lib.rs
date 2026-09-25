@@ -518,27 +518,45 @@ fn validate_entry(entry: &Entry, index: usize, out: &mut Diagnostics) {
     }
 }
 
-/// The last matching directive in `section`, with the global value as fallback.
+/// A parameter name as smb.conf(5) matches it: case-insensitive, with all
+/// whitespace ignored (`Guest OK`, `guestok` and `guest  ok` are one name).
+fn normalise(name: &str) -> String {
+    name.chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// The last matching directive in `section`, with the global value as
+/// fallback. A directive belongs to the nearest section header above it;
+/// `keys` (synonyms included) are compared as [`normalise`]d names.
 fn value_of_in_section<'a>(
     entries: &'a [Entry],
     section: Option<&str>,
     keys: &[&str],
 ) -> Option<&'a str> {
     let find = |wanted: Option<&str>| {
-        let mut current = None;
-        entries.iter().rev().find_map(|entry| {
+        let mut current: Option<&str> = None;
+        let mut found = None;
+        for entry in entries {
             if let Some(name) = &entry.section {
                 current = Some(name.as_str());
-                return None;
+                continue;
             }
             let in_section = match (current, wanted) {
                 (None, None) => true,
                 (Some(current), Some(wanted)) => current.eq_ignore_ascii_case(wanted),
                 _ => false,
             };
-            (in_section && keys.iter().any(|key| entry.key.eq_ignore_ascii_case(key)))
-                .then_some(entry.value.as_str())
-        })
+            if in_section
+                && keys
+                    .iter()
+                    .any(|key| normalise(key) == normalise(&entry.key))
+            {
+                found = Some(entry.value.as_str());
+            }
+        }
+        found
     };
     let is_global = section.is_none_or(|name| name.eq_ignore_ascii_case("global"));
     if is_global {
@@ -588,15 +606,16 @@ fn validate_scope(
     recommendations: bool,
     out: &mut Diagnostics,
 ) {
-    if let Some(value) = offending(entries, section, &["guest ok", "public"], "no") {
+    if let Some(value) = offending(entries, section, &["guestok", "public"], "no") {
         out.push(Diagnostic::new(Severity::Warning, GUEST_OK).with_arg("value", value.to_owned()));
     }
-    if let Some(value) = offending(entries, section, &["map to guest"], "Never") {
+    if let Some(value) = offending(entries, section, &["maptoguest"], "Never") {
         out.push(
             Diagnostic::new(Severity::Warning, MAP_TO_GUEST).with_arg("value", value.to_owned()),
         );
     }
-    if let Some(value) = value_of_in_section(entries, section, &["server min protocol"])
+    if let Some(value) =
+        value_of_in_section(entries, section, &["serverminprotocol", "minprotocol"])
         && let Some(rank) = protocol_rank(value)
         && rank < SMB3_BASE_RANK
     {
@@ -607,14 +626,14 @@ fn validate_scope(
     if let Some(value) = offending(
         entries,
         section,
-        &["smb encrypt", "server smb encrypt"],
+        &["smbencrypt", "serversmbencrypt"],
         "required",
     ) {
         out.push(
             Diagnostic::new(Severity::Warning, SMB_ENCRYPT).with_arg("value", value.to_owned()),
         );
     }
-    if let Some(value) = value_of_in_section(entries, section, &["restrict anonymous"])
+    if let Some(value) = value_of_in_section(entries, section, &["restrictanonymous"])
         && let Ok(count) = value.trim().parse::<u32>()
         && count < 2
     {
@@ -623,9 +642,9 @@ fn validate_scope(
                 .with_arg("value", value.to_owned()),
         );
     }
-    let writable = value_of_in_section(entries, section, &["writeable", "writable"]);
-    let read_only = value_of_in_section(entries, section, &["read only"]);
-    let write_list = value_of_in_section(entries, section, &["write list"]);
+    let writable = value_of_in_section(entries, section, &["writeable", "writable", "writeok"]);
+    let read_only = value_of_in_section(entries, section, &["readonly"]);
+    let write_list = value_of_in_section(entries, section, &["writelist"]);
     if writable.is_some_and(|value| value.eq_ignore_ascii_case("yes") || value.is_empty())
         || read_only.is_some_and(|value| value.eq_ignore_ascii_case("no") || value.is_empty())
         || write_list.is_some_and(|value| !value.is_empty())
@@ -633,7 +652,7 @@ fn validate_scope(
         out.push(Diagnostic::new(Severity::Warning, WRITABLE_EXPOSURE));
     }
     if recommendations {
-        match value_of_in_section(entries, section, &["server signing"]) {
+        match value_of_in_section(entries, section, &["serversigning"]) {
             Some(value) if !value.eq_ignore_ascii_case("mandatory") => out.push(
                 Diagnostic::new(Severity::Recommendation, REC_SERVER_SIGNING)
                     .with_arg("value", value.to_owned()),
@@ -644,7 +663,7 @@ fn validate_scope(
             ),
             _ => {}
         }
-        match value_of_in_section(entries, section, &["load printers"]) {
+        match value_of_in_section(entries, section, &["loadprinters"]) {
             Some(value) if !value.eq_ignore_ascii_case("no") => out.push(
                 Diagnostic::new(Severity::Recommendation, REC_LOAD_PRINTERS)
                     .with_arg("value", value.to_owned()),
@@ -674,9 +693,7 @@ fn validate_values(entries: &[Entry], out: &mut Diagnostics) {
         }
         if entry.section.is_none()
             && !entry.value.is_empty()
-            && ["root preexec", "root postexec"]
-                .iter()
-                .any(|key| entry.key.eq_ignore_ascii_case(key))
+            && ["rootpreexec", "rootpostexec"].contains(&normalise(&entry.key).as_str())
         {
             out.push(
                 Diagnostic::new(Severity::Warning, ROOT_COMMAND).with_arg("key", entry.key.clone()),
@@ -1319,6 +1336,56 @@ mod tests {
         assert!(has(&m, GUEST_OK, Severity::Warning));
         let m = model(vec![entry(None, "guest ok", "no")]);
         assert!(!has(&m, GUEST_OK, Severity::Warning));
+    }
+
+    fn count(model: &Model, id: MessageId) -> usize {
+        let host = profile(Os::Linux);
+        let ctx = ValidationCtx::new(&host);
+        SambaModule::validate(model, &ctx)
+            .iter()
+            .filter(|d| d.id.as_str() == id.as_str())
+            .count()
+    }
+
+    /// A directive belongs to the section header above it, and a share
+    /// inherits `[global]` where it does not set the parameter itself.
+    #[test]
+    fn validate_is_section_aware() {
+        // `[global]` allows guests; `[data]` does not set it, so it inherits.
+        let m = model(vec![
+            entry(Some("global"), "", ""),
+            entry(None, "guest ok", "yes"),
+            entry(Some("data"), "", ""),
+            entry(None, "read only", "yes"),
+        ]);
+        assert_eq!(count(&m, GUEST_OK), 2);
+        // A share's own value wins over `[global]`'s.
+        let m = model(vec![
+            entry(Some("global"), "", ""),
+            entry(None, "guest ok", "yes"),
+            entry(Some("data"), "", ""),
+            entry(None, "guest ok", "no"),
+        ]);
+        assert_eq!(count(&m, GUEST_OK), 1);
+    }
+
+    /// smb.conf matches parameter names without case and without whitespace,
+    /// and accepts synonyms.
+    #[test]
+    fn validate_normalises_parameter_names_and_synonyms() {
+        for (key, id) in [
+            ("GuestOK", GUEST_OK),
+            ("guestok", GUEST_OK),
+            ("Public", GUEST_OK),
+            ("map to  guest", MAP_TO_GUEST),
+        ] {
+            let m = model(vec![entry(None, key, "yes")]);
+            assert!(has(&m, id, Severity::Warning), "{key}");
+        }
+        for key in ["server minprotocol", "min protocol", "minprotocol"] {
+            let m = model(vec![entry(None, key, "NT1")]);
+            assert!(has(&m, MIN_PROTOCOL, Severity::Warning), "{key}");
+        }
     }
 
     #[test]
