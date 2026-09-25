@@ -16,11 +16,14 @@
 //!   bindings, external checks) plus the `x-detent` JSON Schema UI hints.
 //! * [`module`] — the [`ConfigModule`](module::ConfigModule) trait, its error types,
 //!   and the object-safe [`DynModule`](module::DynModule) JSON adapter.
+//! * [`align`] — the bounded Myers alignment shared by the plan diff and by
+//!   [`Document::edit_entries`](doc::Document::edit_entries).
 //! * [`conformance`] — the six invariant checks and the
 //!   [`module_conformance!`](crate::module_conformance) macro that wires them into
 //!   a module crate's test suite.
 #![forbid(unsafe_code)]
 
+pub mod align;
 pub mod conformance;
 pub mod descriptor;
 pub mod diag;

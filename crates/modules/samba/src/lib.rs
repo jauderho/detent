@@ -45,7 +45,7 @@ use detent_core::descriptor::{
     UnitNames, Upstream, ValidationCtx, apply_hints,
 };
 use detent_core::diag::{Diagnostic, Diagnostics, FieldPath, MessageId, Severity};
-use detent_core::doc::{Document, Line, LineKind};
+use detent_core::doc::{Document, LineKind};
 use detent_core::module::{ConfigModule, EditError, EditReport, ModelError, ParseError};
 
 // ------------------------------------------------------------------------- model
@@ -235,6 +235,13 @@ fn classify(raw: &str) -> LineKind {
     } else {
         LineKind::Unknown
     }
+}
+
+/// Whether a line opens a `[section]`. `apply` puts a new section header at the
+/// end of the previous section, not directly after its last directive, so the
+/// lines that close that section stay in it.
+fn opens_section(raw: &str) -> bool {
+    raw.trim_start().starts_with('[')
 }
 
 /// Renders an entry as a line, refusing anything that would not survive a
@@ -754,62 +761,12 @@ impl ConfigModule for SambaModule {
     /// 5) leaves the file exactly as it was. A line whose parsed entry already
     /// equals the model's is not rendered at all, so hand-tuned indentation
     /// survives. Pass 2 only ever touches `Directive` lines; comments, blanks
-    /// and unknown directives keep their position, and new lines go after the
-    /// last existing directive, not at the end of the file.
+    /// and unknown directives keep their position. Entries are aligned with the
+    /// model ([`Document::edit_entries`]), so dropping or adding one never
+    /// rewrites or moves another; a new directive goes after the one before it
+    /// in its `[section]`, and a new section after the end of the previous one.
     fn apply(doc: &mut Self::Doc, model: &Self::Model) -> Result<EditReport, EditError> {
-        // Pass 1, read-only: pair model entries with the existing directive
-        // lines in order and render the ones that differ.
-        let mut planned: Vec<Option<String>> = Vec::with_capacity(model.entries.len());
-        for line in doc
-            .lines()
-            .iter()
-            .filter(|line| line.kind() == LineKind::Directive)
-        {
-            let Some(wanted) = model.entries.get(planned.len()) else {
-                break;
-            };
-            let unchanged = parse_entry(line.raw()).as_ref() == Some(wanted);
-            planned.push(if unchanged {
-                None
-            } else {
-                Some(render_line(wanted)?)
-            });
-        }
-        for wanted in model.entries.iter().skip(planned.len()) {
-            planned.push(Some(render_line(wanted)?));
-        }
-
-        // Pass 2: rewrite, drop the directive lines the model no longer has,
-        // and append the rest after the last directive line.
-        let mut report = EditReport::default();
-        let mut index = 0usize;
-        let mut matched = 0usize;
-        let mut after_last_directive: Option<usize> = None;
-        while index < doc.len() {
-            if doc.lines().get(index).map(Line::kind) != Some(LineKind::Directive) {
-                index = index.saturating_add(1);
-                continue;
-            }
-            let Some(slot) = planned.get(matched) else {
-                doc.remove_line(index)?;
-                report.removed = report.removed.saturating_add(1);
-                continue;
-            };
-            if let Some(raw) = slot.as_deref() {
-                doc.replace_raw(index, raw)?;
-                report.changed_lines = report.changed_lines.saturating_add(1);
-            }
-            matched = matched.saturating_add(1);
-            index = index.saturating_add(1);
-            after_last_directive = Some(index);
-        }
-        let mut at = after_last_directive.unwrap_or_else(|| doc.len());
-        for raw in planned.iter().skip(matched).flatten() {
-            doc.insert_line(at, raw)?;
-            at = at.saturating_add(1);
-            report.added = report.added.saturating_add(1);
-        }
-        Ok(report)
+        doc.edit_entries(&model.entries, parse_entry, render_line, opens_section)
     }
 
     /// Every finding carries a Fluent id — never a rendered sentence, this crate
@@ -1226,6 +1183,74 @@ mod tests {
         assert_eq!(
             SambaModule::render(&doc),
             "# only a comment\n[global]\nworkgroup = MYGROUP\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn deleting_a_directive_does_not_move_later_directives() -> Result<(), String> {
+        let src = concat!(
+            "[global]\n",
+            "workgroup = MYGROUP\n",
+            "   log level   = 1\n",
+            "; the shared home directories\n",
+            "[homes]\n",
+            "   browseable = no\n",
+        );
+        let mut doc = SambaModule::parse(src).map_err(|e| e.to_string())?;
+        let mut m = SambaModule::to_model(&doc).map_err(|e| e.to_string())?;
+        m.entries.remove(1);
+        let report = SambaModule::apply(&mut doc, &m).map_err(|e| e.to_string())?;
+        assert_eq!(
+            report,
+            EditReport {
+                changed_lines: 0,
+                added: 0,
+                removed: 1,
+            }
+        );
+        assert_eq!(
+            SambaModule::render(&doc),
+            concat!(
+                "[global]\n",
+                "   log level   = 1\n",
+                "; the shared home directories\n",
+                "[homes]\n",
+                "   browseable = no\n",
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_new_section_goes_after_the_end_of_the_previous_one() -> Result<(), String> {
+        let src = concat!(
+            "[global]\n",
+            "workgroup = MYGROUP\n",
+            "   192.168.1.0/24\n",
+            "\n",
+            "; printers\n",
+            "[printers]\n",
+        );
+        let mut doc = SambaModule::parse(src).map_err(|e| e.to_string())?;
+        let mut m = SambaModule::to_model(&doc).map_err(|e| e.to_string())?;
+        m.entries.insert(2, entry(Some("homes"), "", ""));
+        m.entries.insert(3, entry(None, "browseable", "no"));
+        let report = SambaModule::apply(&mut doc, &m).map_err(|e| e.to_string())?;
+        assert_eq!(report.added, 2);
+        assert_eq!(report.changed_lines, 0);
+        assert_eq!(
+            SambaModule::render(&doc),
+            concat!(
+                "[global]\n",
+                "workgroup = MYGROUP\n",
+                "   192.168.1.0/24\n",
+                "[homes]\n",
+                "browseable = no\n",
+                "\n",
+                "; printers\n",
+                "[printers]\n",
+            )
         );
         Ok(())
     }

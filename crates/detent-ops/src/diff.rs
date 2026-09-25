@@ -1,9 +1,10 @@
 //! A small in-tree line diff producing unified-diff hunks.
 //!
 //! PLAN §4.1's size budget rules out pulling in a diff crate for what a plan
-//! preview needs, so this is a greedy [Myers] diff over *lines that keep their
-//! own terminator*. Keeping the `\n` (and therefore any preceding `\r`) inside
-//! the line has two consequences that matter:
+//! preview needs, so this is the greedy [Myers] diff of
+//! [`detent_core::align`] run over *lines that keep their own terminator*.
+//! Keeping the `\n` (and therefore any preceding `\r`) inside the line has two
+//! consequences that matter:
 //!
 //! * CRLF files diff and render byte-for-byte, with no normalisation step that
 //!   could silently rewrite a file's line endings; and
@@ -21,6 +22,7 @@
 //!
 //! [Myers]: http://www.xmailserver.org/diff2.pdf
 
+use detent_core::align::{Step, align, replace_all};
 use serde::Serialize;
 
 /// Unchanged lines kept on each side of a change by default (PLAN §2.6: the
@@ -28,12 +30,9 @@ use serde::Serialize;
 pub const DEFAULT_CONTEXT: usize = 3;
 
 /// Largest edit distance the Myers search explores before giving up and
-/// reporting a whole-file replacement instead.
-///
-/// The search allocates `O(MAX_EDIT_DISTANCE²)` machine words in the worst
-/// case, so this is what bounds the diff's memory. Real configuration edits
-/// have an edit distance of a handful of lines.
-pub const MAX_EDIT_DISTANCE: usize = 512;
+/// reporting a whole-file replacement instead; see
+/// [`detent_core::align::MAX_EDIT_DISTANCE`].
+pub use detent_core::align::MAX_EDIT_DISTANCE;
 
 /// One line of a [`Hunk`], including its own line terminator when the source
 /// line had one.
@@ -107,133 +106,6 @@ fn split_lines(text: &str) -> Vec<&str> {
     text.split_inclusive('\n').collect()
 }
 
-/// One step of the edit script, as indices into the two line vectors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Step {
-    /// Line `old` equals line `new`.
-    Equal(usize, usize),
-    /// Original line `old` is gone.
-    Delete(usize),
-    /// Candidate line `new` is added.
-    Insert(usize),
-}
-
-/// Read one cell of the Myers frontier. Out-of-range never happens for the
-/// indices this module generates; `0` is the same value an unvisited diagonal
-/// carries, so a hypothetical out-of-range read stays consistent rather than
-/// panicking.
-fn cell(front: &[usize], index: usize) -> usize {
-    front.get(index).copied().unwrap_or(0)
-}
-
-/// Write one cell of the Myers frontier, ignoring an out-of-range index for
-/// the same reason as [`cell`].
-fn set_cell(front: &mut [usize], index: usize, value: usize) {
-    if let Some(slot) = front.get_mut(index) {
-        *slot = value;
-    }
-}
-
-/// Whether the Myers step at diagonal `kidx` came from a downward (insert)
-/// move rather than a rightward (delete) one.
-fn came_from_down(front: &[usize], kidx: usize, lo: usize, hi: usize) -> bool {
-    kidx == lo
-        || (kidx != hi && cell(front, kidx.saturating_sub(1)) < cell(front, kidx.saturating_add(1)))
-}
-
-/// The greedy Myers search. `None` when the edit distance exceeds
-/// [`MAX_EDIT_DISTANCE`].
-///
-/// `front[kidx]` is the furthest original-line index reached on diagonal
-/// `kidx - offset`; `trace` keeps one snapshot of `front` per edit distance so
-/// [`backtrack`] can reconstruct the script without a second search.
-fn myers(old: &[&str], new: &[&str]) -> Option<Vec<Step>> {
-    let old_len = old.len();
-    let new_len = new.len();
-    let max_dist = old_len.saturating_add(new_len).min(MAX_EDIT_DISTANCE);
-    let offset = max_dist;
-    let width = max_dist.saturating_mul(2).saturating_add(1);
-    let mut front = vec![0_usize; width];
-    let mut trace: Vec<Vec<usize>> = Vec::new();
-
-    for dist in 0..=max_dist {
-        trace.push(front.clone());
-        let lo = offset.saturating_sub(dist);
-        let hi = offset.saturating_add(dist);
-        let mut kidx = lo;
-        while kidx <= hi {
-            let mut oldi = if came_from_down(&front, kidx, lo, hi) {
-                cell(&front, kidx.saturating_add(1))
-            } else {
-                cell(&front, kidx.saturating_sub(1)).saturating_add(1)
-            };
-            let mut newi = oldi.saturating_add(offset).saturating_sub(kidx);
-            while oldi < old_len && newi < new_len && old.get(oldi) == new.get(newi) {
-                oldi = oldi.saturating_add(1);
-                newi = newi.saturating_add(1);
-            }
-            set_cell(&mut front, kidx, oldi);
-            if oldi >= old_len && newi >= new_len {
-                return Some(backtrack(&trace, offset, dist, old_len, new_len));
-            }
-            kidx = kidx.saturating_add(2);
-        }
-    }
-    None
-}
-
-/// Walk the recorded snapshots back from the end of both texts to the start,
-/// emitting the edit script in forward order.
-fn backtrack(
-    trace: &[Vec<usize>],
-    offset: usize,
-    last_dist: usize,
-    old_len: usize,
-    new_len: usize,
-) -> Vec<Step> {
-    let mut steps = Vec::new();
-    let mut oldi = old_len;
-    let mut newi = new_len;
-    for dist in (0..=last_dist).rev() {
-        let Some(front) = trace.get(dist) else { break };
-        let kidx = offset.saturating_add(oldi).saturating_sub(newi);
-        let lo = offset.saturating_sub(dist);
-        let hi = offset.saturating_add(dist);
-        let down = came_from_down(front, kidx, lo, hi);
-        let prev_kidx = if down {
-            kidx.saturating_add(1)
-        } else {
-            kidx.saturating_sub(1)
-        };
-        let prev_old = cell(front, prev_kidx);
-        let prev_new = prev_old.saturating_add(offset).saturating_sub(prev_kidx);
-        while oldi > prev_old && newi > prev_new {
-            oldi = oldi.saturating_sub(1);
-            newi = newi.saturating_sub(1);
-            steps.push(Step::Equal(oldi, newi));
-        }
-        if dist > 0 {
-            if down {
-                newi = newi.saturating_sub(1);
-                steps.push(Step::Insert(newi));
-            } else {
-                oldi = oldi.saturating_sub(1);
-                steps.push(Step::Delete(oldi));
-            }
-        }
-    }
-    steps.reverse();
-    steps
-}
-
-/// The fallback script: delete everything, then insert everything.
-fn replace_all(n: usize, m: usize) -> Vec<Step> {
-    let mut steps = Vec::with_capacity(n.saturating_add(m));
-    steps.extend((0..n).map(Step::Delete));
-    steps.extend((0..m).map(Step::Insert));
-    steps
-}
-
 /// Running counts of original and candidate lines consumed before each step,
 /// with one extra entry for "after the last step".
 fn positions(steps: &[Step]) -> Vec<(usize, usize)> {
@@ -303,7 +175,7 @@ pub fn diff(old: &str, new: &str, context: usize) -> Vec<Hunk> {
     if old_lines == new_lines {
         return Vec::new();
     }
-    let steps = myers(&old_lines, &new_lines)
+    let steps = align(&old_lines, &new_lines)
         .unwrap_or_else(|| replace_all(old_lines.len(), new_lines.len()));
     let at = positions(&steps);
     let mut hunks = Vec::new();

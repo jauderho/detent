@@ -626,6 +626,40 @@ fn classify(raw: &str) -> LineKind {
     }
 }
 
+/// The resolv.conf directive on a line, or `None` for any other line.
+fn resolv_of(raw: &str) -> Option<ResolvEntry> {
+    match parse_entry(raw) {
+        Some(Entry::Resolv(entry)) => Some(entry),
+        _ => None,
+    }
+}
+
+/// The resolved.conf setting on a line, or `None` for any other line.
+fn resolved_of(raw: &str) -> Option<ResolvedEntry> {
+    match parse_entry(raw) {
+        Some(Entry::Resolved(entry)) => Some(entry),
+        _ => None,
+    }
+}
+
+/// The unbound.conf item on a line, or `None` for any other line.
+fn unbound_of(raw: &str) -> Option<UnboundEntry> {
+    match parse_entry(raw) {
+        Some(Entry::Unbound(entry)) => Some(entry),
+        _ => None,
+    }
+}
+
+/// Whether a line opens an unbound.conf section: a bare `name:` clause such as
+/// `server:`, `forward-zone:` or an unmodeled `remote-control:`. `apply` puts a
+/// new section header at the end of the previous section, so the lines that
+/// close that section stay in it.
+fn opens_unbound_section(raw: &str) -> bool {
+    raw.trim()
+        .strip_suffix(':')
+        .is_some_and(|name| !name.is_empty() && !name.contains([':', ' ', '\t', '"', '#']))
+}
+
 /// Renders a resolv.conf entry, refusing anything that would not round-trip.
 ///
 /// # Errors
@@ -1201,7 +1235,7 @@ fn unnamed(diagnostics: &mut Diagnostics) {
 /// Pushes one `resolver-unbound-misplaced` finding: `key` belongs in `section`.
 fn misplaced(diagnostics: &mut Diagnostics, index: usize, field: &str, key: &str, section: &str) {
     diagnostics.push(
-        Diagnostic::new(Severity::Warning, UNBOUND_MISPLACED)
+        Diagnostic::new(Severity::Error, UNBOUND_MISPLACED)
             .with_field(FieldPath::new(format!("unbound/{index}/{field}")))
             .with_arg("key", key.to_owned())
             .with_arg("section", section.to_owned()),
@@ -1443,82 +1477,29 @@ impl ConfigModule for ResolverModule {
         Ok(model)
     }
 
-    /// The minimal-edit two-pass shape shared with `hosts`, extended to pair
-    /// each flavor's model entries with the directive lines parsed as that
-    /// flavor. Pass 1 is read-only, so a refused value leaves the file exactly
-    /// as it was; a line whose parsed entry already equals the model's is never
-    /// rendered, so hand indentation and spacing survive.
+    /// The minimal-edit two-pass shape shared with `hosts`, run once per
+    /// flavor: each flavor's model entries are aligned with the directive lines
+    /// parsed as that flavor ([`Document::plan_entries`]). All three plans are
+    /// built, read-only, before one pass applies them, so a refused value leaves
+    /// the file exactly as it was; a line whose parsed entry already equals the
+    /// model's is never rendered, so hand indentation and spacing survive, and
+    /// dropping or adding an entry never rewrites or moves another.
     fn apply(doc: &mut Self::Doc, model: &Self::Model) -> Result<EditReport, EditError> {
-        // Pass 1, read-only: pair each flavor's model entries with the directive
-        // lines parsed as that flavor, in order, and render the ones that differ.
-        let mut planned: Vec<(usize, Planned)> = Vec::new();
-        let mut resolv_cursor = 0usize;
-        let mut resolved_cursor = 0usize;
-        let mut unbound_cursor = 0usize;
-        let mut leftover: Vec<String> = Vec::new();
-        for (line_index, entry) in doc
-            .lines()
-            .iter()
-            .enumerate()
-            .filter(|(_, line)| line.kind() == LineKind::Directive)
-            .filter_map(|(index, line)| parse_entry(line.raw()).map(|entry| (index, entry)))
-        {
-            let action = match &entry {
-                Entry::Resolv(entry) => {
-                    plan_slot(&model.resolv, &mut resolv_cursor, entry, render_resolv)?
-                }
-                Entry::Resolved(entry) => plan_slot(
-                    &model.resolved,
-                    &mut resolved_cursor,
-                    entry,
-                    render_resolved,
-                )?,
-                Entry::Unbound(entry) => {
-                    plan_slot(&model.unbound, &mut unbound_cursor, entry, render_unbound)?
-                }
-            };
-            planned.push((line_index, action));
-        }
-        for wanted in model.resolv.iter().skip(resolv_cursor) {
-            leftover.push(render_resolv(wanted)?);
-        }
-        for wanted in model.resolved.iter().skip(resolved_cursor) {
-            leftover.push(render_resolved(wanted)?);
-        }
-        for wanted in model.unbound.iter().skip(unbound_cursor) {
-            leftover.push(render_unbound(wanted)?);
-        }
-
-        // Pass 2: rewrite and drop, highest line index first so removals do not
-        // shift the indices still to be edited.
-        let mut report = EditReport::default();
-        for (line_index, action) in planned.into_iter().rev() {
-            match action {
-                Planned::Keep => {}
-                Planned::Replace(raw) => {
-                    doc.replace_raw(line_index, raw.as_str())?;
-                    report.changed_lines = report.changed_lines.saturating_add(1);
-                }
-                Planned::Drop => {
-                    doc.remove_line(line_index)?;
-                    report.removed = report.removed.saturating_add(1);
-                }
-            }
-        }
-
-        // New lines go after the last remaining directive line, not at the end
-        // of the file, so a trailing comment block stays trailing.
-        let mut at = doc
-            .lines()
-            .iter()
-            .rposition(|line| line.kind() == LineKind::Directive)
-            .map_or_else(|| doc.len(), |index| index.saturating_add(1));
-        for raw in leftover {
-            doc.insert_line(at, raw.as_str())?;
-            at = at.saturating_add(1);
-            report.added = report.added.saturating_add(1);
-        }
-        Ok(report)
+        let no_sections = |_: &str| false;
+        let mut plan = doc.plan_entries(&model.resolv, resolv_of, render_resolv, no_sections)?;
+        plan.extend(doc.plan_entries(
+            &model.resolved,
+            resolved_of,
+            render_resolved,
+            no_sections,
+        )?);
+        plan.extend(doc.plan_entries(
+            &model.unbound,
+            unbound_of,
+            render_unbound,
+            opens_unbound_section,
+        )?);
+        Ok(doc.apply_plan(plan))
     }
 
     /// Findings carry Fluent ids, never rendered sentences (ADR-003), a field
@@ -1580,39 +1561,6 @@ impl ConfigModule for ResolverModule {
     }
 }
 
-/// One planned edit to a directive line.
-#[derive(Debug, PartialEq, Eq)]
-enum Planned {
-    /// The line already parses to the model's entry: leave it byte-identical.
-    Keep,
-    /// Re-render the line canonically.
-    Replace(String),
-    /// The model has no entry for this line: remove it.
-    Drop,
-}
-
-/// Decides the edit for one directive line against its flavor's next model
-/// entry, advancing `cursor` past whichever entry was consumed.
-///
-/// # Errors
-///
-/// [`EditError`] from the flavor's renderer, before any document edit happens.
-fn plan_slot<T: PartialEq>(
-    slots: &[T],
-    cursor: &mut usize,
-    parsed: &T,
-    render: fn(&T) -> Result<String, EditError>,
-) -> Result<Planned, EditError> {
-    let Some(wanted) = slots.get(*cursor) else {
-        return Ok(Planned::Drop);
-    };
-    *cursor = cursor.saturating_add(1);
-    if wanted == parsed {
-        return Ok(Planned::Keep);
-    }
-    Ok(Planned::Replace(render(wanted)?))
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1627,9 +1575,9 @@ mod tests {
         parse_unbound, render_resolv, render_resolved, render_unbound, resolv_backend_detect,
         strip_quotes,
     };
-    use super::{Entry, Model, Planned, ResolvedEntry, plan_slot};
+    use super::{Entry, Model, ResolvedEntry};
     use detent_core::descriptor::{HostProfile, InitSystem, Os, ValidationCtx};
-    use detent_core::diag::{Diagnostics, MessageId};
+    use detent_core::diag::{Diagnostics, MessageId, Severity};
     use detent_core::doc::LineKind;
     use detent_core::module::{ConfigModule, EditError, EditReport};
     use std::collections::BTreeMap;
@@ -2174,57 +2122,116 @@ mod tests {
     // ------------------------------------------------------------ plan / apply
 
     #[test]
-    fn plan_slot_walks_slots_in_order() -> Result<(), String> {
-        let slots = vec![
-            ResolvEntry::Nameserver {
-                ip: ip("192.0.2.1"),
-            },
-            ResolvEntry::Domain {
-                domain: "example.com".to_owned(),
-            },
-        ];
-        let mut cursor = 0usize;
-        let parsed = ResolvEntry::Nameserver {
-            ip: ip("192.0.2.1"),
-        };
-        assert_eq!(
-            plan_slot(&slots, &mut cursor, &parsed, render_resolv).map_err(|e| e.to_string())?,
-            Planned::Keep,
-            "equal entries are never re-rendered"
+    fn apply_aligns_each_flavor_with_its_own_lines() -> Result<(), String> {
+        // Dropping the first resolv.conf line rewrites neither the second one
+        // nor the unbound lines between them.
+        let src = concat!(
+            "nameserver 192.0.2.1\n",
+            "server:\n",
+            "  hide-version: yes\n",
+            "domain   example.com\n",
         );
-        assert_eq!(cursor, 1);
+        let mut doc = ResolverModule::parse(src).map_err(|e| e.to_string())?;
+        let mut wanted = ResolverModule::to_model(&doc).map_err(|e| e.to_string())?;
+        wanted.resolv.remove(0);
+        let report = ResolverModule::apply(&mut doc, &wanted).map_err(|e| e.to_string())?;
         assert_eq!(
-            plan_slot(&slots, &mut cursor, &parsed, render_resolv).map_err(|e| e.to_string())?,
-            Planned::Replace("domain example.com".to_owned()),
-            "the next slot in order pairs with the next directive line"
+            report,
+            EditReport {
+                changed_lines: 0,
+                added: 0,
+                removed: 1,
+            }
         );
-        assert_eq!(cursor, 2);
         assert_eq!(
-            plan_slot(&slots, &mut cursor, &parsed, render_resolv).map_err(|e| e.to_string())?,
-            Planned::Drop,
-            "exhausted model drops surplus lines"
+            ResolverModule::render(&doc),
+            "server:\n  hide-version: yes\ndomain   example.com\n"
         );
 
         Ok(())
     }
 
     #[test]
-    fn plan_slot_refuses_before_touching_the_document() {
-        let slots = vec![ResolvEntry::Search {
-            domains: vec!["a\nb".to_owned()],
-        }];
-        let mut cursor = 0usize;
-        let parsed = ResolvEntry::Domain {
-            domain: "example.com".to_owned(),
-        };
-        assert_eq!(
-            plan_slot(&slots, &mut cursor, &parsed, render_resolv),
-            Err(EditError::LineBreakInValue {
-                value: "search a\nb".to_owned()
-            }),
-            "pass 1 is read-only: a refused value leaves the file untouched"
+    fn a_refused_flavor_leaves_every_flavor_untouched() -> Result<(), String> {
+        let src = "nameserver 192.0.2.1\nserver:\n";
+        let mut doc = ResolverModule::parse(src).map_err(|e| e.to_string())?;
+        let wanted = m(
+            vec![ResolvEntry::Nameserver {
+                ip: ip("192.0.2.53"),
+            }],
+            Vec::new(),
+            vec![
+                UnboundEntry::Server,
+                UnboundEntry::ForwardAddr {
+                    addr: "192.0.2.1\nserver:".to_owned(),
+                },
+            ],
         );
-        assert_eq!(cursor, 1, "the slot is consumed by the refusal");
+        assert!(ResolverModule::apply(&mut doc, &wanted).is_err());
+        assert_eq!(
+            ResolverModule::render(&doc),
+            src,
+            "the resolv.conf rewrite planned first is not applied either"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn a_new_forward_zone_goes_after_the_server_section() -> Result<(), String> {
+        let src = concat!(
+            "server:\n",
+            "  hide-version: yes\n",
+            "remote-control:\n",
+            "  control-enable: yes\n",
+        );
+        let mut doc = ResolverModule::parse(src).map_err(|e| e.to_string())?;
+        let mut wanted = ResolverModule::to_model(&doc).map_err(|e| e.to_string())?;
+        wanted.unbound.push(UnboundEntry::ForwardZone);
+        wanted.unbound.push(UnboundEntry::ForwardName {
+            name: ".".to_owned(),
+        });
+        let report = ResolverModule::apply(&mut doc, &wanted).map_err(|e| e.to_string())?;
+        assert_eq!(report.added, 2);
+        assert_eq!(
+            ResolverModule::render(&doc),
+            concat!(
+                "server:\n",
+                "  hide-version: yes\n",
+                "forward-zone:\n",
+                "    name: .\n",
+                "remote-control:\n",
+                "  control-enable: yes\n",
+            )
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn misplaced_unbound_items_are_errors() {
+        let model = m(
+            Vec::new(),
+            Vec::new(),
+            vec![
+                UnboundEntry::Server,
+                UnboundEntry::ForwardZone,
+                UnboundEntry::ForwardName {
+                    name: ".".to_owned(),
+                },
+                UnboundEntry::Hardening {
+                    key: "hide-version".to_owned(),
+                    enabled: true,
+                },
+            ],
+        );
+        let diagnostics = ResolverModule::validate(&model, &ctx(&profile()));
+        let misplaced: Vec<Severity> = diagnostics
+            .iter()
+            .filter(|d| d.id == UNBOUND_MISPLACED)
+            .map(|d| d.severity)
+            .collect();
+        assert_eq!(misplaced, vec![Severity::Error]);
     }
 
     #[test]
@@ -2381,6 +2388,56 @@ mod tests {
             "invariant 3: the model survives the edit"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn an_appended_hardening_entry_lands_in_server() -> Result<(), String> {
+        let src = concat!(
+            "server:\n",
+            "  qname-minimisation: yes\n",
+            "  interface: 0.0.0.0\n",
+            "\n",
+            "forward-zone:\n",
+            "  forward-first: yes\n",
+            "  name: \".\"\n",
+        );
+        let mut doc = ResolverModule::parse(src).map_err(|e| e.to_string())?;
+        let mut wanted = ResolverModule::to_model(&doc).map_err(|e| e.to_string())?;
+        // Appended to the end of the `server:` items, before `forward-zone:`.
+        wanted.unbound.insert(
+            2,
+            UnboundEntry::Hardening {
+                key: "harden-glue".to_owned(),
+                enabled: true,
+            },
+        );
+        let report = ResolverModule::apply(&mut doc, &wanted).map_err(|e| e.to_string())?;
+        assert_eq!(
+            report,
+            EditReport {
+                changed_lines: 0,
+                added: 1,
+                removed: 0,
+            }
+        );
+        assert_eq!(
+            ResolverModule::render(&doc),
+            concat!(
+                "server:\n",
+                "  qname-minimisation: yes\n",
+                "    harden-glue: yes\n",
+                "  interface: 0.0.0.0\n",
+                "\n",
+                "forward-zone:\n",
+                "  forward-first: yes\n",
+                "  name: \".\"\n",
+            )
+        );
+        assert_eq!(
+            ResolverModule::to_model(&doc).map_err(|e| e.to_string())?,
+            wanted
+        );
         Ok(())
     }
 
@@ -2791,7 +2848,7 @@ mod tests {
 
     #[test]
     fn misplaced_forward_name_is_still_validated() {
-        // invalid name outside any forward-zone must be Error + Warning
+        // invalid name outside any forward-zone must be flagged twice
         let model = m(
             Vec::new(),
             Vec::new(),
@@ -2806,7 +2863,7 @@ mod tests {
         );
         assert!(
             diagnostics.iter().any(|d| d.id == UNBOUND_MISPLACED),
-            "misplaced name is a warning"
+            "misplaced name is an error"
         );
         assert!(diagnostics.has_errors());
         // invalid addr outside zone likewise
@@ -2824,7 +2881,7 @@ mod tests {
         );
         assert!(
             diag2.iter().any(|d| d.id == UNBOUND_MISPLACED),
-            "misplaced addr is a warning"
+            "misplaced addr is an error"
         );
         // render must reject injection chars
         assert!(matches!(

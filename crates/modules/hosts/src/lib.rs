@@ -24,7 +24,7 @@ use detent_core::descriptor::{
     TargetKind, UiGroup, Upstream, ValidationCtx, apply_hints,
 };
 use detent_core::diag::{Diagnostic, Diagnostics, FieldPath, MessageId, Severity};
-use detent_core::doc::{Document, Line, LineKind};
+use detent_core::doc::{Document, LineKind};
 use detent_core::module::{ConfigModule, EditError, EditReport, ModelError, ParseError};
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -520,62 +520,13 @@ impl ConfigModule for HostsModule {
     }
 
     fn apply(doc: &mut Self::Doc, model: &Self::Model) -> Result<EditReport, EditError> {
-        // Pass 1, read-only: pair model entries with the existing entry lines in
-        // order and render the ones that differ. Rendering everything up front means
-        // a rejected value (invariant 5) leaves the document untouched, and an entry
-        // that matches its line is never rendered at all, so hand-aligned columns
-        // survive.
-        let mut planned: Vec<Option<String>> = Vec::with_capacity(model.entries.len());
-        for line in doc
-            .lines()
-            .iter()
-            .filter(|line| line.kind() == LineKind::Directive)
-        {
-            let Some(wanted) = model.entries.get(planned.len()) else {
-                break;
-            };
-            let unchanged = parse_entry(line.raw()).as_ref() == Some(wanted);
-            planned.push(if unchanged {
-                None
-            } else {
-                Some(render_line(wanted)?)
-            });
-        }
-        for wanted in model.entries.iter().skip(planned.len()) {
-            planned.push(Some(render_line(wanted)?));
-        }
-
-        // Pass 2: rewrite, drop the entry lines the model no longer has, and append
-        // the rest after the last entry line.
-        let mut report = EditReport::default();
-        let mut index = 0usize;
-        let mut matched = 0usize;
-        let mut after_last_entry: Option<usize> = None;
-        while index < doc.len() {
-            if doc.lines().get(index).map(Line::kind) != Some(LineKind::Directive) {
-                index = index.saturating_add(1);
-                continue;
-            }
-            let Some(slot) = planned.get(matched) else {
-                doc.remove_line(index)?;
-                report.removed = report.removed.saturating_add(1);
-                continue;
-            };
-            if let Some(raw) = slot.as_deref() {
-                doc.replace_raw(index, raw)?;
-                report.changed_lines = report.changed_lines.saturating_add(1);
-            }
-            matched = matched.saturating_add(1);
-            index = index.saturating_add(1);
-            after_last_entry = Some(index);
-        }
-        let mut at = after_last_entry.unwrap_or_else(|| doc.len());
-        for raw in planned.iter().skip(matched).flatten() {
-            doc.insert_line(at, raw)?;
-            at = at.saturating_add(1);
-            report.added = report.added.saturating_add(1);
-        }
-        Ok(report)
+        // Pass 1 (`plan_entries`) is read-only: it aligns the model with the
+        // existing entry lines and renders only the ones that differ, so a
+        // rejected value (invariant 5) leaves the document untouched and an
+        // unchanged line keeps its hand-aligned columns. Pass 2 keeps unchanged
+        // lines in place, rewrites changed ones in place, drops deleted ones
+        // and puts new ones after the previous kept entry line.
+        doc.edit_entries(&model.entries, parse_entry, render_line, |_| false)
     }
 
     fn validate(model: &Self::Model, _ctx: &ValidationCtx<'_>) -> Diagnostics {
@@ -1194,6 +1145,23 @@ mod tests {
         assert_eq!(
             HostsModule::render(&doc),
             "# only a comment\n10.0.0.1\thost\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dropping_the_first_entry_rewrites_no_other_line() -> Result<(), String> {
+        let src = "10.0.0.1\tfirst\n10.0.0.2    second   # aligned\n10.0.0.3    third\n";
+        let mut doc = HostsModule::parse(src).map_err(|e| e.to_string())?;
+        let mut model = HostsModule::to_model(&doc).map_err(|e| e.to_string())?;
+        model.entries.remove(0);
+        let report = HostsModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        assert_eq!(report.changed_lines, 0);
+        assert_eq!(report.added, 0);
+        assert_eq!(report.removed, 1);
+        assert_eq!(
+            HostsModule::render(&doc),
+            "10.0.0.2    second   # aligned\n10.0.0.3    third\n"
         );
         Ok(())
     }
