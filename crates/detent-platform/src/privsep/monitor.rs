@@ -1807,15 +1807,16 @@ fn finish_send_error(err: ChannelError) -> Result<ExitReason, MonitorError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CheckRunner, ExitReason, HookError, Hooks, MAX_CONFIRM_TIMEOUT_S, Monitor,
-        PENDING_COMMIT_MARKER, STAGED_DIR, ServiceControl, finish_send_error, materialize_staged,
-        staged_path,
+        CheckRunner, ExitReason, HookError, Hooks, MAX_CONFIRM_TIMEOUT_S, MONITOR_LOCK, Monitor,
+        PENDING_COMMIT_MARKER, PREVIOUS_SUFFIX, PendingCommitMarker, STAGED_DIR, ServiceControl,
+        finish_send_error, materialize_staged, read_staged_verified, staged_path,
+        swap_running_binary,
     };
     use crate::fs::atomic::{AtomicError, Sha256Digest};
     use crate::privsep::allowlist::{Allowlist, AllowlistError, Config};
     use crate::privsep::proto::{
         BackupId, BindingId, CheckId, CheckOutcome, CommitId, IdKind, ModuleId, PROTO_VERSION,
-        ProtoError, Request, Response, ServiceAction, ServiceOutcome, TargetId,
+        PendingService, ProtoError, Request, Response, ServiceAction, ServiceOutcome, TargetId,
     };
     use crate::privsep::transport::{Channel, ChannelError};
     use crate::privsep::worker::Client;
@@ -1824,8 +1825,8 @@ mod tests {
         PathSpec, ServiceAction as CoreServiceAction, ServiceBinding, Target, TargetKind,
         UnitNames, Upstream,
     };
-    use detent_core::diag::{Diagnostics, MessageId};
-    use detent_core::module::{DynError, DynModule};
+    use detent_core::diag::{Diagnostic, Diagnostics, MessageId, Severity};
+    use detent_core::module::{DynError, DynModule, ModelError, ParseError};
     use serde_json::{Value, json};
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
@@ -3509,6 +3510,1044 @@ mod tests {
             b"old-binary",
             "target must be unchanged on downgrade refusal"
         );
+        Ok(())
+    }
+
+    // -- revalidate: module parsers and external checks -----------------------
+
+    /// A check runner that runs the validator and reports a rejection.
+    struct RejectingChecks;
+    impl CheckRunner for RejectingChecks {
+        fn run_check(
+            &self,
+            _check: &ExternalCheck,
+            _candidate: &Path,
+        ) -> Result<CheckOutcome, HookError> {
+            Ok(CheckOutcome {
+                check: CheckId(0),
+                passed: false,
+                exit_code: Some(1),
+                detail: "rejected".to_owned(),
+            })
+        }
+    }
+
+    /// Which step of module validation a [`RejectingModule`] fails.
+    #[derive(Clone, Copy)]
+    enum RejectAt {
+        Parse,
+        Validate,
+        Diagnose,
+    }
+
+    /// A module whose parser or validator refuses every candidate.
+    struct RejectingModule {
+        descriptor: &'static ModuleDescriptor,
+        at: RejectAt,
+    }
+
+    impl DynModule for RejectingModule {
+        fn id(&self) -> &'static str {
+            self.descriptor.id
+        }
+
+        fn descriptor(&self) -> &'static ModuleDescriptor {
+            self.descriptor
+        }
+
+        fn clone_box(&self) -> Box<dyn DynModule> {
+            Box::new(Self {
+                descriptor: self.descriptor,
+                at: self.at,
+            })
+        }
+
+        fn schema_json(&self) -> Value {
+            Value::Null
+        }
+
+        fn parse_to_model_json(&self, src: &str) -> Result<Value, DynError> {
+            match self.at {
+                RejectAt::Parse => Err(DynError::Parse(ParseError::Malformed {
+                    message: "bad grammar".to_owned(),
+                    span: None,
+                })),
+                RejectAt::Validate | RejectAt::Diagnose => Ok(json!({ "text": src })),
+            }
+        }
+
+        fn apply_json(&self, src: &str, _model_json: &Value) -> Result<String, DynError> {
+            Ok(src.to_owned())
+        }
+
+        fn validate_json(
+            &self,
+            _model_json: &Value,
+            _ctx: &detent_core::descriptor::ValidationCtx<'_>,
+        ) -> Result<Diagnostics, DynError> {
+            match self.at {
+                RejectAt::Validate => Err(DynError::Model(ModelError::Shape {
+                    message: "bad shape".to_owned(),
+                })),
+                RejectAt::Parse | RejectAt::Diagnose => {
+                    let mut diagnostics = Diagnostics::new();
+                    diagnostics.push(Diagnostic::new(
+                        Severity::Error,
+                        MessageId::new("fake-invalid"),
+                    ));
+                    Ok(diagnostics)
+                }
+            }
+        }
+
+        fn defaults_json(&self, _profile: &HostProfile) -> Result<Value, DynError> {
+            Ok(Value::Null)
+        }
+    }
+
+    /// Write `v2` over the fixture's `v1` target without journaling.
+    fn write_v2(monitor: &mut Monitor<'_>) -> Result<Response, super::MonitorError> {
+        monitor.dispatch(Request::WriteTarget {
+            target: TargetId(0),
+            expected_prev: None,
+            bytes: b"v2".to_vec(),
+            journal: false,
+        })
+    }
+
+    /// The message of a `Response::Error(ProtoError::Io(_))`, if it is one.
+    fn io_message(response: &Response) -> Option<&str> {
+        match response {
+            Response::Error(ProtoError::Io(message)) => Some(message),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn write_target_installs_content_the_external_check_accepts_from_monitor_staging()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let staging_dir = fx.root.join("monitor-staging");
+        let checks = CandidateChecks(staging_dir.clone());
+        let hooks = Hooks {
+            checks: &checks,
+            services: &super::NoServices,
+        };
+        let mut monitor = greeted(fx.allow()?, hooks);
+        monitor.set_staging_dir(staging_dir.clone());
+        assert!(matches!(write_v2(&mut monitor)?, Response::Written(_)));
+        assert_eq!(std::fs::read(&fx.target)?, b"v2");
+        // The candidate file is temporary: nothing is left in staging.
+        assert_eq!(std::fs::read_dir(&staging_dir)?.count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn write_target_refuses_content_the_external_check_rejects()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let hooks = Hooks {
+            checks: &RejectingChecks,
+            services: &super::NoServices,
+        };
+        let mut monitor = greeted(fx.allow()?, hooks);
+        let response = write_v2(&mut monitor)?;
+        assert_eq!(
+            io_message(&response),
+            Some("external validator rejected candidate content")
+        );
+        assert_eq!(std::fs::read(&fx.target)?, b"v1");
+        Ok(())
+    }
+
+    #[test]
+    fn write_target_maps_a_failed_external_check_to_an_io_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let hooks = Hooks {
+            checks: &FailingChecks,
+            services: &super::NoServices,
+        };
+        let mut monitor = greeted(fx.allow()?, hooks);
+        let response = write_v2(&mut monitor)?;
+        assert_eq!(io_message(&response), Some("boom"));
+        assert_eq!(std::fs::read(&fx.target)?, b"v1");
+        Ok(())
+    }
+
+    #[test]
+    fn write_target_reports_io_error_when_the_check_candidate_directory_cannot_be_created()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let hooks = Hooks {
+            checks: &OkChecks,
+            services: &super::NoServices,
+        };
+        let mut monitor = greeted(fx.allow()?, hooks);
+        // A directory below a regular file cannot exist (ENOTDIR), root or not.
+        monitor.set_staging_dir(fx.target.join("staging"));
+        let response = write_v2(&mut monitor)?;
+        assert!(
+            io_message(&response)
+                .is_some_and(|message| message.starts_with("cannot create the candidate directory")),
+            "unexpected response {response:?}"
+        );
+        assert_eq!(std::fs::read(&fx.target)?, b"v1");
+        Ok(())
+    }
+
+    #[test]
+    fn write_target_refuses_when_the_registry_has_no_parser_for_the_module()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = greeted_with_registry(fx.allow()?, Hooks::default(), Some(Vec::new()));
+        let response = write_v2(&mut monitor)?;
+        assert_eq!(io_message(&response), Some("module parser is unavailable"));
+        assert_eq!(std::fs::read(&fx.target)?, b"v1");
+        Ok(())
+    }
+
+    #[test]
+    fn write_target_refuses_a_module_with_no_compiled_parser()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        // No registry: the monitor looks the id "fake" up among the compiled
+        // modules, which do not have it.
+        let mut monitor = greeted_real(fx.allow()?, Hooks::default());
+        let response = write_v2(&mut monitor)?;
+        assert_eq!(io_message(&response), Some("module parser is unavailable"));
+        assert_eq!(std::fs::read(&fx.target)?, b"v1");
+        Ok(())
+    }
+
+    #[test]
+    fn write_target_refuses_content_that_is_not_utf8() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        let response = monitor.dispatch(Request::WriteTarget {
+            target: TargetId(0),
+            expected_prev: None,
+            bytes: vec![0xff, 0xfe, 0xfd],
+            journal: false,
+        })?;
+        assert_eq!(
+            io_message(&response),
+            Some("module content is not valid UTF-8")
+        );
+        assert_eq!(std::fs::read(&fx.target)?, b"v1");
+        Ok(())
+    }
+
+    #[test]
+    fn write_target_refuses_content_the_module_parser_or_validator_rejects()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (at, expected) in [
+            (
+                RejectAt::Parse,
+                "module parser rejected candidate content: malformed input: bad grammar",
+            ),
+            (
+                RejectAt::Validate,
+                "module validation rejected candidate content: model does not match its schema: bad shape",
+            ),
+            (
+                RejectAt::Diagnose,
+                "module validation rejected candidate content",
+            ),
+        ] {
+            let fx = fixture()?;
+            let allow = fx.allow()?;
+            let descriptor = allow
+                .module(ModuleId(0))
+                .ok_or("the fixture declares module 0")?;
+            let registry: Vec<Box<dyn DynModule>> =
+                vec![Box::new(RejectingModule { descriptor, at })];
+            let mut monitor = greeted_with_registry(allow, Hooks::default(), Some(registry));
+            let response = write_v2(&mut monitor)?;
+            assert_eq!(io_message(&response), Some(expected));
+            assert_eq!(std::fs::read(&fx.target)?, b"v1");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn new_execution_directives_are_detected_per_module() {
+        let cases: [(&str, &[u8], &[u8], bool); 16] = [
+            // Comments, blank lines and `;` remarks never count.
+            ("samba", b"", b"\n# preexec = /x\n; include = /y\n", false),
+            ("dhcp", b"", b"dhcp-script=/bin/sh\n", true),
+            ("chrony", b"", b"confdir /etc/chrony.d\n", true),
+            ("resolver", b"", b"include: /etc/extra.conf\n", true),
+            ("resolver", b"", b"server:\n", false),
+            // A bare `up` with a short command, and `down`-family hooks.
+            ("network", b"", b"up /bin/sh -c x\n", true),
+            ("network", b"", b"down=/bin/true\n", true),
+            ("network", b"", b"pre-up /bin/true\n", true),
+            // A static route in the `ip route add ... via <gw>` shape is allowed.
+            (
+                "network",
+                b"",
+                b"up ip route add 10.0.0.0/8 via 192.0.2.1\n",
+                false,
+            ),
+            // Five or more words in any other shape is still a command.
+            ("network", b"", b"up /bin/sh -c 'a b c'\n", true),
+            ("network", b"up /bin/true\n", b"up /bin/true\n", false),
+            ("network", b"", b"address 192.0.2.2\n", false),
+            (
+                "mounts",
+                b"",
+                b"/dev/sda1 /mnt ext4 x-systemd.automount 0 0\n",
+                true,
+            ),
+            ("mounts", b"", b"/dev/sda1 /mnt ext4 defaults 0 0\n", false),
+            // NFS options split on commas as well as whitespace.
+            ("nfs", b"", b"/srv 192.0.2.0/24(rw,no_root_squash)\n", true),
+            ("unknown", b"", b"preexec = /bin/true\n", false),
+        ];
+        for (module, previous, candidate, expected) in cases {
+            assert_eq!(
+                Monitor::has_new_forbidden_exec_directive(module, previous, candidate),
+                expected,
+                "module {module}, candidate {:?}",
+                String::from_utf8_lossy(candidate)
+            );
+        }
+    }
+
+    // -- marker, lock and service-replay failures -------------------------------
+
+    /// Write `v2` with journaling and arm commit 1 with `service`.
+    fn arm_commit(
+        monitor: &mut Monitor<'_>,
+        service: Option<PendingService>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert!(matches!(
+            monitor.dispatch(Request::WriteTarget {
+                target: TargetId(0),
+                expected_prev: None,
+                bytes: b"v2".to_vec(),
+                journal: true,
+            })?,
+            Response::Written(_)
+        ));
+        assert!(matches!(
+            monitor.dispatch(Request::StartConfirmTimer {
+                commit: CommitId(1),
+                timeout_s: 60,
+                service,
+            })?,
+            Response::ConfirmTimerStarted { .. }
+        ));
+        Ok(())
+    }
+
+    const RESTART_BINDING_0: PendingService = PendingService {
+        binding: BindingId(0),
+        action: ServiceAction::Restart,
+    };
+
+    #[test]
+    fn start_confirm_timer_reports_a_state_error_when_the_marker_cannot_be_written()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        // A directory where the marker file goes: opening it for writing
+        // fails with EISDIR, root or not.
+        std::fs::create_dir_all(fx.state_root.join(PENDING_COMMIT_MARKER))?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        let response = monitor.dispatch(Request::StartConfirmTimer {
+            commit: CommitId(1),
+            timeout_s: 60,
+            service: None,
+        });
+        assert!(matches!(
+            response,
+            Err(super::MonitorError::State { op: "write", .. })
+        ));
+        assert!(!monitor.has_pending_commit());
+        Ok(())
+    }
+
+    #[test]
+    fn confirm_commit_reports_a_state_error_when_the_marker_is_a_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        arm_commit(&mut monitor, None)?;
+        let marker = fx.state_root.join(PENDING_COMMIT_MARKER);
+        std::fs::remove_file(&marker)?;
+        std::fs::create_dir(&marker)?;
+        std::fs::write(marker.join("keep"), b"x")?;
+        let response = monitor.dispatch(Request::ConfirmCommit {
+            commit: CommitId(1),
+        });
+        assert!(matches!(
+            response,
+            Err(super::MonitorError::State {
+                op: "remove_file",
+                ..
+            })
+        ));
+        // The confirmed write stays; only the marker cleanup failed.
+        assert_eq!(std::fs::read(&fx.target)?, b"v2");
+        Ok(())
+    }
+
+    #[test]
+    fn recover_pending_reports_a_state_error_when_the_marker_is_a_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        std::fs::create_dir_all(fx.state_root.join(PENDING_COMMIT_MARKER))?;
+        let monitor = Monitor::new(fx.allow()?, Hooks::default());
+        assert!(matches!(
+            monitor.recover_pending(),
+            Err(super::MonitorError::State { op: "read", .. })
+        ));
+        Ok(())
+    }
+
+    /// Plant a marker with no rollback entries and `service` to replay.
+    fn plant_marker(
+        fx: &Fixture,
+        service: PendingService,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        std::fs::create_dir_all(&fx.state_root)?;
+        let marker = PendingCommitMarker {
+            commit: 7,
+            deadline_unix_ms: 0,
+            entries: Vec::new(),
+            service: Some(service),
+        };
+        std::fs::write(
+            fx.state_root.join(PENDING_COMMIT_MARKER),
+            serde_json::to_vec(&marker)?,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn recover_pending_reports_a_service_binding_that_disappeared()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        plant_marker(
+            &fx,
+            PendingService {
+                binding: BindingId(99),
+                action: ServiceAction::Restart,
+            },
+        )?;
+        let monitor = Monitor::new(fx.allow()?, Hooks::default());
+        let recovered = monitor
+            .recover_pending()?
+            .ok_or("expected a recovered commit")?;
+        assert_eq!(recovered.commit, CommitId(7));
+        assert_eq!(recovered.failures.len(), 1);
+        assert!(
+            recovered
+                .failures
+                .iter()
+                .all(|failure| failure.contains("service binding 99 disappeared")),
+            "unexpected failures {:?}",
+            recovered.failures
+        );
+        assert!(!fx.state_root.join(PENDING_COMMIT_MARKER).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn recover_pending_refuses_to_replay_a_non_mutating_action()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        plant_marker(
+            &fx,
+            PendingService {
+                binding: BindingId(0),
+                action: ServiceAction::Status,
+            },
+        )?;
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &OkServices,
+        };
+        let monitor = Monitor::new(fx.allow()?, hooks);
+        let recovered = monitor
+            .recover_pending()?
+            .ok_or("expected a recovered commit")?;
+        assert_eq!(
+            recovered.failures,
+            vec!["pending service action is not mutating".to_owned()]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_commit_replays_the_service_action_after_restoring()
+    -> Result<(), Box<dyn std::error::Error>> {
+        install_tracing();
+        let fx = fixture()?;
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &OkServices,
+        };
+        let mut monitor = greeted(fx.allow()?, hooks);
+        arm_commit(&mut monitor, Some(RESTART_BINDING_0))?;
+        let response = monitor.dispatch(Request::RollbackCommit {
+            commit: CommitId(1),
+        })?;
+        assert!(matches!(
+            response,
+            Response::RolledBack {
+                commit: CommitId(1),
+                restored: 1
+            }
+        ));
+        assert_eq!(std::fs::read(&fx.target)?, b"v1");
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_service_replay_does_not_stop_an_expired_rollback()
+    -> Result<(), Box<dyn std::error::Error>> {
+        install_tracing();
+        let fx = fixture()?;
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &FailingServices,
+        };
+        let mut monitor = greeted(fx.allow()?, hooks);
+        arm_commit(&mut monitor, Some(RESTART_BINDING_0))?;
+        if let Some(pending) = monitor.pending.as_mut() {
+            pending.deadline = std::time::Instant::now();
+        }
+        monitor.enforce_deadline()?;
+        assert!(!monitor.has_pending_commit());
+        assert_eq!(std::fs::read(&fx.target)?, b"v1");
+        assert!(!fx.state_root.join(PENDING_COMMIT_MARKER).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_service_replay_does_not_stop_the_rollback_on_exit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        install_tracing();
+        let fx = fixture()?;
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &FailingServices,
+        };
+        let mut monitor = greeted(fx.allow()?, hooks);
+        arm_commit(&mut monitor, Some(RESTART_BINDING_0))?;
+        monitor.rollback_pending_on_exit()?;
+        assert!(!monitor.has_pending_commit());
+        assert_eq!(std::fs::read(&fx.target)?, b"v1");
+        assert!(!fx.state_root.join(PENDING_COMMIT_MARKER).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn recover_pending_refuses_an_action_the_binding_no_longer_allows()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        // The fixture binding declares only `Restart`.
+        plant_marker(
+            &fx,
+            PendingService {
+                binding: BindingId(0),
+                action: ServiceAction::Stop,
+            },
+        )?;
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &OkServices,
+        };
+        let monitor = Monitor::new(fx.allow()?, hooks);
+        let recovered = monitor
+            .recover_pending()?
+            .ok_or("expected a recovered commit")?;
+        assert_eq!(
+            recovered.failures,
+            vec!["pending service action is no longer allowed".to_owned()]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recover_pending_restores_the_writes_a_dead_monitor_left_armed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        {
+            let mut monitor = greeted(fx.allow()?, Hooks::default());
+            arm_commit(&mut monitor, None)?;
+            // Dropped without confirming, as if the process died.
+        }
+        assert_eq!(std::fs::read(&fx.target)?, b"v2");
+        let monitor = Monitor::new(fx.allow()?, Hooks::default());
+        let recovered = monitor
+            .recover_pending()?
+            .ok_or("expected a recovered commit")?;
+        assert_eq!(recovered.commit, CommitId(1));
+        assert_eq!(recovered.restored, 1);
+        assert!(recovered.failures.is_empty());
+        assert_eq!(std::fs::read(&fx.target)?, b"v1");
+        assert!(!fx.state_root.join(PENDING_COMMIT_MARKER).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn write_target_reports_io_error_when_the_target_is_a_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        std::fs::remove_file(&fx.target)?;
+        std::fs::create_dir(&fx.target)?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        let response = write_v2(&mut monitor)?;
+        assert!(matches!(response, Response::Error(ProtoError::Io(_))));
+        assert!(fx.target.is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn restore_reports_io_error_when_the_target_became_a_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        assert!(matches!(write_v2(&mut monitor)?, Response::Written(_)));
+        std::fs::remove_file(&fx.target)?;
+        std::fs::create_dir(&fx.target)?;
+        let response = monitor.dispatch(Request::Restore {
+            module: ModuleId(0),
+            backup: BackupId(0),
+        })?;
+        assert!(matches!(response, Response::Error(ProtoError::Io(_))));
+        assert!(fx.target.is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn list_backups_reports_io_error_when_the_backup_directory_is_a_file()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        let backup_dir = monitor
+            .allowlist()
+            .target(TargetId(0))
+            .ok_or("the fixture declares target 0")?
+            .backup_dir
+            .clone();
+        if let Some(parent) = backup_dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&backup_dir, b"not a directory")?;
+        let response = monitor.dispatch(Request::ListBackups {
+            module: ModuleId(0),
+        })?;
+        assert!(matches!(response, Response::Error(ProtoError::Io(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn lock_reports_a_state_error_when_the_state_root_cannot_be_created()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        assert!(matches!(
+            Monitor::lock(&fx.target.join("state")),
+            Err(super::MonitorError::State {
+                op: "create_dir_all",
+                ..
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn lock_reports_a_state_error_when_the_lock_path_is_a_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        std::fs::create_dir_all(fx.state_root.join(MONITOR_LOCK))?;
+        assert!(matches!(
+            Monitor::lock(&fx.state_root),
+            Err(super::MonitorError::State {
+                op: "open lock",
+                ..
+            })
+        ));
+        Ok(())
+    }
+
+    // -- staged images: verification, materialization and the swap ------------
+
+    /// A monitor-private staging directory holding one image, `image`.
+    fn private_staging(work: &TempDir) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
+        let dir = work.path().join("staging");
+        std::fs::create_dir(&dir)?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        let image = dir.join("image");
+        std::fs::write(&image, b"image")?;
+        Ok((dir, image))
+    }
+
+    fn io_error_text(result: Result<Vec<u8>, ProtoError>) -> Option<String> {
+        match result {
+            Err(ProtoError::Io(message)) => Some(message),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn read_staged_verified_returns_the_bytes_of_a_trusted_image()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let (_, image) = private_staging(&work)?;
+        let bytes = read_staged_verified(&image, 5, Sha256Digest::of(b"image"))?;
+        assert_eq!(bytes, b"image");
+        Ok(())
+    }
+
+    #[test]
+    fn read_staged_verified_refuses_missing_symlinked_and_non_regular_images()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let (dir, image) = private_staging(&work)?;
+        let digest = Sha256Digest::of(b"image");
+        assert_eq!(
+            io_error_text(read_staged_verified(&dir.join("absent"), 5, digest)).as_deref(),
+            Some("staged binary is missing")
+        );
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&image, &link)?;
+        assert!(
+            io_error_text(read_staged_verified(&link, 5, digest))
+                .is_some_and(|message| message.starts_with("open staged binary:"))
+        );
+        let subdir = dir.join("subdir");
+        std::fs::create_dir(&subdir)?;
+        assert_eq!(
+            io_error_text(read_staged_verified(&subdir, 5, digest)).as_deref(),
+            Some("staged binary is not a regular file")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn read_staged_verified_refuses_a_hard_linked_image() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let work = TempDir::new()?;
+        let (dir, image) = private_staging(&work)?;
+        std::fs::hard_link(&image, dir.join("second-name"))?;
+        assert_eq!(
+            io_error_text(read_staged_verified(&image, 5, Sha256Digest::of(b"image"))).as_deref(),
+            Some("staged binary is not trusted")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn read_staged_verified_refuses_a_group_writable_staging_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let (dir, image) = private_staging(&work)?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o770))?;
+        assert_eq!(
+            io_error_text(read_staged_verified(&image, 5, Sha256Digest::of(b"image"))).as_deref(),
+            Some("staged binary is not trusted")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn read_staged_verified_refuses_a_wrong_length_or_digest()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let (_, image) = private_staging(&work)?;
+        assert_eq!(
+            io_error_text(read_staged_verified(&image, 4, Sha256Digest::of(b"image"))).as_deref(),
+            Some("staged binary size does not match the request")
+        );
+        let claimed = Sha256Digest::of(b"other");
+        assert!(matches!(
+            read_staged_verified(&image, 5, claimed),
+            Err(ProtoError::Conflict { expected, actual: Some(actual) })
+                if expected == claimed && actual == Sha256Digest::of(b"image")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn materialize_staged_refuses_a_tag_that_is_not_a_plain_file_name()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let digest = Sha256Digest::of(b"image");
+        for tag in ["", ".", "..", "a/b", "nul\0byte"] {
+            assert!(matches!(
+                materialize_staged(work.path(), &work.path().join("staging"), tag, 5, digest),
+                Err(ProtoError::VerificationFailed)
+            ));
+        }
+        assert!(!work.path().join("staging").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn materialize_staged_reports_io_error_when_staging_cannot_be_created()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let file = work.path().join("file");
+        std::fs::write(&file, b"x")?;
+        let result = materialize_staged(
+            work.path(),
+            &file.join("staging"),
+            FIXTURE_TAG,
+            5,
+            Sha256Digest::of(b"image"),
+        );
+        assert!(matches!(
+            result,
+            Err(ProtoError::Io(message)) if message.starts_with("create monitor staging directory")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn materialize_staged_refuses_a_source_that_is_its_own_destination()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let digest = Sha256Digest::of(b"image");
+        let tag = digest.to_string();
+        let inputs = work.path().join(STAGED_DIR);
+        std::fs::create_dir_all(&inputs)?;
+        // Private, so the staging trust check passes whatever the umask.
+        std::fs::set_permissions(&inputs, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::write(inputs.join(&tag), b"image")?;
+        assert!(matches!(
+            materialize_staged(work.path(), &inputs, &tag, 5, digest),
+            Err(ProtoError::VerificationFailed)
+        ));
+        assert_eq!(std::fs::read(inputs.join(&tag))?, b"image");
+        Ok(())
+    }
+
+    #[test]
+    fn materialize_staged_refuses_an_unreadable_or_wrong_sized_input()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let digest = Sha256Digest::of(b"image");
+        let inputs = work.path().join(STAGED_DIR);
+        let staging = work.path().join("monitor-staging");
+        std::fs::create_dir_all(inputs.join("v1.0.0"))?;
+        assert!(matches!(
+            materialize_staged(work.path(), &staging, "v1.0.0", 5, digest),
+            Err(ProtoError::Io(message)) if message.starts_with("read staged binary")
+        ));
+        std::fs::write(inputs.join("v2.0.0"), b"image")?;
+        assert!(matches!(
+            materialize_staged(work.path(), &staging, "v2.0.0", 6, digest),
+            Err(ProtoError::Io(message)) if message == "staged binary size does not match the request"
+        ));
+        assert!(!staged_path(&staging, digest).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn replace_binary_refuses_a_tag_that_is_not_semver() -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let state_root = work.path().join("state");
+        let target = swap_target(work.path(), "detent-semver", b"old-binary")?;
+        let mut monitor = update_monitor(
+            &state_root,
+            &work.path().join("monitor-staging"),
+            target.clone(),
+        )?;
+        let response = monitor.dispatch(Request::ReplaceBinary {
+            tag: "latest".to_owned(),
+            len: 5,
+            sha256: Sha256Digest::of(b"image"),
+        })?;
+        assert_eq!(
+            io_message(&response),
+            Some("release tag is not a semver version")
+        );
+        assert_eq!(std::fs::read(&target)?, b"old-binary");
+        Ok(())
+    }
+
+    #[test]
+    fn replace_binary_surfaces_a_missing_staged_input() -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let state_root = work.path().join("state");
+        std::fs::create_dir_all(&state_root)?;
+        let target = swap_target(work.path(), "detent-missing", b"old-binary")?;
+        let mut monitor = update_monitor(
+            &state_root,
+            &work.path().join("monitor-staging"),
+            target.clone(),
+        )?;
+        let response = monitor.dispatch(Request::ReplaceBinary {
+            tag: "v999.0.0".to_owned(),
+            len: 5,
+            sha256: Sha256Digest::of(b"image"),
+        })?;
+        assert!(
+            io_message(&response).is_some_and(|message| message.starts_with("open staged binary")),
+            "unexpected response {response:?}"
+        );
+        assert_eq!(std::fs::read(&target)?, b"old-binary");
+        Ok(())
+    }
+
+    #[test]
+    fn replace_binary_refuses_a_missing_or_unparseable_bundle()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for bundle in [None, Some(b"not a sigstore bundle".as_slice())] {
+            let work = TempDir::new()?;
+            let state_root = work.path().join("state");
+            std::fs::create_dir_all(&state_root)?;
+            let target = swap_target(work.path(), "detent-bundle", b"old-binary")?;
+            let (digest, bytes) = plant_release(&state_root, "valid.json")?;
+            let bundle_path = state_root
+                .join(STAGED_DIR)
+                .join(format!("{FIXTURE_TAG}.sigstore.json"));
+            match bundle {
+                None => std::fs::remove_file(&bundle_path)?,
+                Some(contents) => std::fs::write(&bundle_path, contents)?,
+            }
+            let mut monitor = update_monitor(
+                &state_root,
+                &work.path().join("monitor-staging"),
+                target.clone(),
+            )?;
+            let response = monitor.dispatch(Request::ReplaceBinary {
+                tag: FIXTURE_TAG.to_owned(),
+                len: bytes.len() as u64,
+                sha256: digest,
+            })?;
+            assert!(matches!(
+                response,
+                Response::Error(ProtoError::VerificationFailed)
+            ));
+            assert_eq!(std::fs::read(&target)?, b"old-binary");
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn replace_binary_verifies_against_the_embedded_roots_by_default()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // The fixture bundle is signed by test roots, so without injected
+        // trust the embedded production roots must refuse it.
+        let work = TempDir::new()?;
+        let state_root = work.path().join("state");
+        std::fs::create_dir_all(&state_root)?;
+        let target = swap_target(work.path(), "detent-embedded", b"old-binary")?;
+        let (digest, bytes) = plant_release(&state_root, "valid.json")?;
+        let config = Config::with_state_root(&state_root);
+        let mut monitor = Monitor::new(Allowlist::from_modules(&[], &config)?, Hooks::default());
+        monitor.set_staging_dir(work.path().join("monitor-staging"));
+        monitor.set_binary_override(target.clone());
+        let _ = monitor.dispatch(Request::Hello {
+            proto: PROTO_VERSION,
+        });
+        let response = monitor.dispatch(Request::ReplaceBinary {
+            tag: FIXTURE_TAG.to_owned(),
+            len: bytes.len() as u64,
+            sha256: digest,
+        })?;
+        assert!(matches!(
+            response,
+            Response::Error(ProtoError::VerificationFailed)
+        ));
+        assert_eq!(std::fs::read(&target)?, b"old-binary");
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn replace_binary_reports_a_missing_running_binary_after_verification()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let state_root = work.path().join("state");
+        std::fs::create_dir_all(&state_root)?;
+        let (digest, bytes) = plant_release(&state_root, "valid.json")?;
+        let target = work.path().join("detent-gone");
+        let mut monitor = update_monitor(
+            &state_root,
+            &work.path().join("monitor-staging"),
+            target.clone(),
+        )?;
+        let response = monitor.dispatch(Request::ReplaceBinary {
+            tag: FIXTURE_TAG.to_owned(),
+            len: bytes.len() as u64,
+            sha256: digest,
+        })?;
+        assert_eq!(io_message(&response), Some("running binary is missing"));
+        assert!(!target.exists());
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn read_bounded_file_refuses_a_file_over_its_cap() -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let path = work.path().join("bundle");
+        std::fs::write(&path, b"1234")?;
+        assert_eq!(super::read_bounded_file(&path, 4)?, b"1234");
+        assert!(super::read_bounded_file(&path, 3).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn swap_running_binary_refuses_a_target_that_is_not_a_regular_file()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let staged = work.path().join("staged");
+        let directory = work.path().join("detent-dir");
+        std::fs::create_dir(&directory)?;
+        assert!(matches!(
+            swap_running_binary(b"new", &staged, &directory),
+            Err(ProtoError::Io(message)) if message == "running binary is not a regular file"
+        ));
+        let file = swap_target(work.path(), "detent-file", b"old-binary")?;
+        assert!(matches!(
+            swap_running_binary(b"new", &staged, &file.join("below-a-file")),
+            Err(ProtoError::Io(message)) if message.starts_with("stat running binary")
+        ));
+        assert_eq!(std::fs::read(&file)?, b"old-binary");
+        Ok(())
+    }
+
+    #[test]
+    fn swap_running_binary_refuses_when_the_previous_name_is_taken_by_a_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let target = swap_target(work.path(), "detent-prev", b"old-binary")?;
+        let previous = work.path().join(format!("detent-prev{PREVIOUS_SUFFIX}"));
+        std::fs::create_dir(&previous)?;
+        std::fs::write(previous.join("keep"), b"x")?;
+        assert!(matches!(
+            swap_running_binary(b"new", &work.path().join("staged"), &target),
+            Err(ProtoError::Io(message)) if message.starts_with("unlink previous binary")
+        ));
+        assert_eq!(std::fs::read(&target)?, b"old-binary");
+        Ok(())
+    }
+
+    #[test]
+    fn swap_running_binary_refuses_to_reuse_a_leftover_temp_name()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let target = swap_target(work.path(), "detent-tmp", b"old-binary")?;
+        // A non-empty directory under the temp name survives the pre-clean
+        // `remove_file`, so the `O_EXCL` create must fail.
+        let tmp = work
+            .path()
+            .join(format!("staged.tmp.{}", std::process::id()));
+        std::fs::create_dir(&tmp)?;
+        std::fs::write(tmp.join("keep"), b"x")?;
+        assert!(matches!(
+            swap_running_binary(b"new", &work.path().join("staged"), &target),
+            Err(ProtoError::Io(message)) if message.starts_with("stage binary in target dir")
+        ));
+        assert_eq!(std::fs::read(&target)?, b"old-binary");
         Ok(())
     }
 
