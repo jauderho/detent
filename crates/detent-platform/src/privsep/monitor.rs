@@ -519,7 +519,8 @@ impl<'a> Monitor<'a> {
                 target,
                 expected_prev,
                 bytes,
-            } => self.write_target(target, expected_prev, &bytes),
+                journal,
+            } => self.write_target(target, expected_prev, &bytes, journal),
             Request::RunCheck { check, bytes } => self.run_check(check, &bytes),
             Request::Service { binding, action } => self.service(binding, action),
             Request::ListBackups { module } => self.list_backups(module),
@@ -541,7 +542,6 @@ impl<'a> Monitor<'a> {
             Request::Shutdown => Response::ShuttingDown,
         })
     }
-
     /// Materialize and authenticate a staged release, then atomically swap it.
     fn replace_binary(
         &self,
@@ -632,6 +632,7 @@ impl<'a> Monitor<'a> {
         id: TargetId,
         expected_prev: Option<crate::fs::atomic::Sha256Digest>,
         bytes: &[u8],
+        journal: bool,
     ) -> Response {
         let Some(entry) = self.allow.target(id).cloned() else {
             return unknown(IdKind::Target, u32::from(id.get()));
@@ -661,12 +662,17 @@ impl<'a> Monitor<'a> {
             Ok(outcome) => outcome,
             Err(err) => return Response::Error(atomic_to_proto(&err)),
         };
-        if let Some(backup) = outcome.backup.clone() {
-            self.journal.push(RollbackEntry {
-                target: id.get(),
-                path: entry.path.clone(),
-                backup,
-            });
+        if journal && outcome.backup.is_some() {
+            if self.pending.is_none() {
+                self.journal.clear();
+            }
+            if let Some(backup) = outcome.backup.clone() {
+                self.journal.push(RollbackEntry {
+                    target: id.get(),
+                    path: entry.path.clone(),
+                    backup,
+                });
+            }
         }
         Response::Written(WriteReceipt {
             target: id,
@@ -2315,6 +2321,7 @@ mod tests {
             target: TargetId(99),
             expected_prev: None,
             bytes: b"x".to_vec(),
+            journal: false,
         })?;
         assert!(matches!(
             response,
@@ -2332,6 +2339,7 @@ mod tests {
             target: TargetId(0),
             expected_prev: None,
             bytes: b"created\n".to_vec(),
+            journal: false,
         })?;
         assert!(matches!(response, Response::Written(receipt) if receipt.created));
         assert_eq!(std::fs::read(&fx.target)?, b"created\n");
@@ -2355,6 +2363,7 @@ mod tests {
             target: TargetId(0),
             expected_prev: None,
             bytes: candidate.to_vec(),
+            journal: false,
         })?;
 
         assert!(matches!(response, Response::Error(_)));
@@ -2405,6 +2414,7 @@ mod tests {
                 target: TargetId(0),
                 expected_prev: None,
                 bytes: b"v2".to_vec(),
+                journal: false,
             })?,
             Response::Written(_)
         ));
@@ -2446,6 +2456,7 @@ mod tests {
                 target: TargetId(0),
                 expected_prev: None,
                 bytes: b"v2".to_vec(),
+                journal: false,
             })?,
             Response::Written(_)
         ));
@@ -2473,6 +2484,7 @@ mod tests {
                 target: TargetId(0),
                 expected_prev: None,
                 bytes: b"v2".to_vec(),
+                journal: true,
             })?,
             Response::Written(_)
         ));
@@ -2510,6 +2522,7 @@ mod tests {
                 target: TargetId(0),
                 expected_prev: None,
                 bytes: b"v2".to_vec(),
+                journal: true,
             })?,
             Response::Written(_)
         ));
@@ -2537,6 +2550,7 @@ mod tests {
                 target: TargetId(0),
                 expected_prev: None,
                 bytes: b"v2".to_vec(),
+                journal: true,
             })?,
             Response::Written(_)
         ));
@@ -2572,6 +2586,7 @@ mod tests {
                 target: TargetId(0),
                 expected_prev: None,
                 bytes: b"v2".to_vec(),
+                journal: true,
             })?,
             Response::Written(_)
         ));
@@ -2607,6 +2622,7 @@ mod tests {
                 target: TargetId(0),
                 expected_prev: None,
                 bytes: b"v2".to_vec(),
+                journal: true,
             })?,
             Response::Written(_)
         ));
@@ -2667,6 +2683,7 @@ mod tests {
                 target: TargetId(0),
                 expected_prev: None,
                 bytes: b"v2".to_vec(),
+                journal: true,
             })?,
             Response::Written(_)
         ));
@@ -2706,6 +2723,7 @@ mod tests {
                 target: TargetId(0),
                 expected_prev: None,
                 bytes: b"v2".to_vec(),
+                journal: true,
             })?,
             Response::Written(_)
         ));
@@ -2736,6 +2754,7 @@ mod tests {
                 target: TargetId(0),
                 expected_prev: None,
                 bytes: b"v2".to_vec(),
+                journal: true,
             })?,
             Response::Written(_)
         ));
@@ -2894,7 +2913,7 @@ mod tests {
         });
         let mut client = Client::new(worker_end);
         client.hello()?;
-        client.write_target(TargetId(0), None, b"v2".to_vec())?;
+        client.write_target(TargetId(0), None, b"v2".to_vec(), true)?;
         client.start_confirm_timer(CommitId(1), 60, None)?;
         client.shutdown()?;
         assert_eq!(
@@ -2934,6 +2953,7 @@ mod tests {
                 target: TargetId(0),
                 expected_prev: None,
                 bytes: b"v2".to_vec(),
+                journal: false,
             })?,
             Response::Written(_)
         ));
@@ -2942,6 +2962,7 @@ mod tests {
                 target: TargetId(0),
                 expected_prev: None,
                 bytes: b"v3".to_vec(),
+                journal: false,
             })?,
             Response::Written(_)
         ));
@@ -2966,6 +2987,7 @@ mod tests {
                 target: TargetId(0),
                 expected_prev: None,
                 bytes: b"v2".to_vec(),
+                journal: false,
             })?,
             Response::Written(_)
         ));
@@ -2992,6 +3014,7 @@ mod tests {
                 target: TargetId(0),
                 expected_prev: None,
                 bytes: b"v2".to_vec(),
+                journal: false,
             })?,
             Response::Written(_)
         ));
@@ -3025,6 +3048,7 @@ mod tests {
                 target: TargetId(0),
                 expected_prev: None,
                 bytes: b"v2".to_vec(),
+                journal: false,
             })?,
             Response::Written(_)
         ));

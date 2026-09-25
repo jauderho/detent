@@ -296,14 +296,14 @@ fn write_target_conflict_leaves_the_file_untouched_then_succeeds() -> TestResult
     let v1_digest = read_with_digest(&fx.target)?.1;
 
     let wrong = Sha256Digest::of(b"not the real previous contents");
-    let conflict = client.write_target(target, Some(wrong), b"rejected".to_vec());
+    let conflict = client.write_target(target, Some(wrong), b"rejected".to_vec(), false);
     assert!(matches!(
         conflict,
         Err(ClientError::Remote(ProtoError::Conflict { .. }))
     ));
     assert_eq!(std::fs::read(&fx.target)?, b"v1");
 
-    let receipt = client.write_target(target, Some(v1_digest), b"v2".to_vec())?;
+    let receipt = client.write_target(target, Some(v1_digest), b"v2".to_vec(), false)?;
     assert!(!receipt.created);
     assert!(receipt.backed_up);
     assert_eq!(receipt.prev_digest, Some(v1_digest));
@@ -325,7 +325,7 @@ fn list_backups_and_restore_round_trip() -> TestResult {
     let target = target_id(&client, &fx);
     let module = module_id(&client);
 
-    client.write_target(target, None, b"v2".to_vec())?;
+    client.write_target(target, None, b"v2".to_vec(), false)?;
     assert_eq!(std::fs::read(&fx.target)?, b"v2");
 
     let backups = client.list_backups(module)?;
@@ -437,7 +437,7 @@ fn commit_confirm_expiry_rolls_back_unconfirmed_writes() -> TestResult {
     let target = target_id(&client, &fx);
     let v1_digest = read_with_digest(&fx.target)?.1;
 
-    client.write_target(target, Some(v1_digest), b"v2".to_vec())?;
+    client.write_target(target, Some(v1_digest), b"v2".to_vec(), true)?;
     assert_eq!(std::fs::read(&fx.target)?, b"v2");
 
     let (timeout_s, rollback_targets) =
@@ -460,7 +460,7 @@ fn confirm_commit_within_the_window_keeps_the_change() -> TestResult {
     let target = target_id(&client, &fx);
     let v1_digest = read_with_digest(&fx.target)?.1;
 
-    client.write_target(target, Some(v1_digest), b"v2".to_vec())?;
+    client.write_target(target, Some(v1_digest), b"v2".to_vec(), true)?;
     client.start_confirm_timer(CommitId(7), CONFIRM_TIMEOUT_S, None)?;
 
     // Only one commit may be pending at a time.
@@ -498,7 +498,7 @@ fn rollback_commit_restores_the_backup_and_clears_the_marker() -> TestResult {
     let target = target_id(&client, &fx);
     let v1_digest = read_with_digest(&fx.target)?.1;
 
-    client.write_target(target, Some(v1_digest), b"v2".to_vec())?;
+    client.write_target(target, Some(v1_digest), b"v2".to_vec(), true)?;
     assert_eq!(std::fs::read(&fx.target)?, b"v2");
     client.start_confirm_timer(CommitId(9), CONFIRM_TIMEOUT_S, None)?;
     assert!(state_root.join(PENDING_COMMIT_MARKER).is_file());
@@ -535,15 +535,17 @@ fn rollback_journals_every_write_in_the_commit() -> TestResult {
     let target = target_id(&client, &fx);
     let v1_digest = read_with_digest(&fx.target)?.1;
 
-    let v2 = client.write_target(target, Some(v1_digest), b"v2".to_vec())?;
-    client.write_target(target, Some(v2.new_digest), b"v3".to_vec())?;
+    // H3: one commit = one write; a second journaled write before the same
+    // timer clears the earlier entry, so only the last write is rolled back.
+    let v2 = client.write_target(target, Some(v1_digest), b"v2".to_vec(), true)?;
+    client.write_target(target, Some(v2.new_digest), b"v3".to_vec(), true)?;
     let (_, rollback_targets) =
         client.start_confirm_timer(CommitId(10), CONFIRM_TIMEOUT_S, None)?;
-    assert_eq!(rollback_targets, 2);
+    assert_eq!(rollback_targets, 1);
 
     let (_, restored) = client.rollback_commit(CommitId(10))?;
-    assert_eq!(restored, 2);
-    assert_eq!(std::fs::read(&fx.target)?, b"v1");
+    assert_eq!(restored, 1);
+    assert_eq!(std::fs::read(&fx.target)?, b"v2");
     client.shutdown()?;
     join_shutdown(handle);
     Ok(())
@@ -576,7 +578,7 @@ fn rollback_replays_the_service_after_restoring_files() -> TestResult {
         .ok_or("the fixture must advertise its service binding")?;
     let v1_digest = read_with_digest(&fx.target)?.1;
 
-    client.write_target(target, Some(v1_digest), b"v2".to_vec())?;
+    client.write_target(target, Some(v1_digest), b"v2".to_vec(), true)?;
     client.start_confirm_timer(
         CommitId(11),
         CONFIRM_TIMEOUT_S,
@@ -619,7 +621,7 @@ fn rollback_commit_after_the_deadline_already_fired_finds_nothing_pending() -> T
     let target = target_id(&client, &fx);
     let v1_digest = read_with_digest(&fx.target)?.1;
 
-    client.write_target(target, Some(v1_digest), b"v2".to_vec())?;
+    client.write_target(target, Some(v1_digest), b"v2".to_vec(), true)?;
     client.start_confirm_timer(CommitId(2), CONFIRM_TIMEOUT_S, None)?;
 
     // Let the timer itself take the pending state and roll back first.
@@ -646,7 +648,7 @@ fn graceful_monitor_exit_restores_a_pending_commit() -> TestResult {
     let target = target_id(&client, &fx);
     let v1_digest = read_with_digest(&fx.target)?.1;
 
-    client.write_target(target, Some(v1_digest), b"v2".to_vec())?;
+    client.write_target(target, Some(v1_digest), b"v2".to_vec(), true)?;
     client.start_confirm_timer(CommitId(3), CONFIRM_TIMEOUT_S, None)?;
     assert!(state_root.join(PENDING_COMMIT_MARKER).is_file());
 

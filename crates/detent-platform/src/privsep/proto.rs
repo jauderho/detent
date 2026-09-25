@@ -47,19 +47,11 @@ use detent_core::descriptor::{ServiceAction as CoreServiceAction, TargetKind};
 /// unaffected, because an old peer never emits a discriminant a new peer does
 /// not know.
 ///
-/// This build does **not** bump `PROTO_VERSION` for the addition, because
-/// that failure mode cannot occur in practice yet: `spawn_pair` forks the
-/// worker from the monitor's own already-running image, so the two ends of
-/// one connection are always the same binary, and the one feature that could
-/// introduce a mismatched pair — replacing the running binary underneath a
-/// live monitor — is `Request::ReplaceBinary`, which dispatches to the
-/// monitor's `replace_binary` path (staged-file verification and atomic swap).
-/// Whether an in-flight connection needs draining before the swap and whether
-/// a version bump is warranted is decided at that swap point; bumping it now
-/// would not protect anything, because there is no path to pairing two
-/// different binaries yet.
-pub const PROTO_VERSION: u16 = 1;
-
+/// `Request::WriteTarget::journal` (H3) appends a field inside an existing
+/// variant, which changes the wire shape. `PROTO_VERSION` was bumped to `2`
+/// for it, so a mismatched pair fails at the `Hello` handshake rather than
+/// mis-decoding the frame.
+pub const PROTO_VERSION: u16 = 2;
 /// Largest encoded message accepted in either direction, in bytes.
 ///
 /// The largest legitimate payload is a configuration file, and 1 MiB is far
@@ -244,6 +236,10 @@ pub enum Request {
         expected_prev: Option<Sha256Digest>,
         /// New contents, at most [`MAX_FRAME`] minus framing overhead.
         bytes: Vec<u8>,
+        /// Whether this write should be recorded for commit-confirm rollback.
+        /// Plain writes leave `false`; the journal stays empty and an
+        /// unrelated earlier write is never rolled back by a later commit (H3).
+        journal: bool,
     },
     /// Run an allow-listed upstream validator against candidate bytes.
     RunCheck {
@@ -766,11 +762,13 @@ mod tests {
                 target: TargetId(7),
                 expected_prev: Some(digest()),
                 bytes: b"new contents".to_vec(),
+                journal: false,
             },
             Request::WriteTarget {
                 target: TargetId(7),
                 expected_prev: None,
                 bytes: Vec::new(),
+                journal: false,
             },
             Request::RunCheck {
                 check: CheckId(1),
@@ -992,6 +990,7 @@ mod tests {
             target: TargetId(0),
             expected_prev: None,
             bytes: vec![0_u8; MAX_FRAME + 1],
+            journal: false,
         };
         assert!(matches!(
             encode(&oversize),
@@ -1010,6 +1009,7 @@ mod tests {
             target: TargetId(1),
             expected_prev: None,
             bytes: b"abc".to_vec(),
+            journal: false,
         })
         .unwrap_or_default();
         for cut in 0..bytes.len() {
@@ -1023,6 +1023,7 @@ mod tests {
                         target: TargetId(1),
                         expected_prev: None,
                         bytes: b"abc".to_vec(),
+                        journal: false,
                     }
                 );
             }
@@ -1106,6 +1107,7 @@ mod tests {
             target: TargetId(0),
             expected_prev: Some(digest()),
             bytes: Vec::new(),
+            journal: false,
         };
         let bytes = encode(&request).unwrap_or_default();
         let back = match decode::<Request>(&bytes) {

@@ -196,11 +196,13 @@ impl Client {
         target: TargetId,
         expected_prev: Option<Sha256Digest>,
         bytes: Vec<u8>,
+        journal: bool,
     ) -> Result<WriteReceipt, ClientError> {
         match self.checked_call(&Request::WriteTarget {
             target,
             expected_prev,
             bytes,
+            journal,
         })? {
             Response::Written(receipt) => Ok(receipt),
             other => Err(unexpected("Written", &other)),
@@ -615,7 +617,7 @@ mod tests {
             digest: Sha256Digest::of(b"x"),
         }))?;
         assert!(matches!(
-            client.write_target(TargetId(0), None, Vec::new()),
+            client.write_target(TargetId(0), None, Vec::new(), false),
             Err(ClientError::Unexpected {
                 want: "Written",
                 got: "Target"

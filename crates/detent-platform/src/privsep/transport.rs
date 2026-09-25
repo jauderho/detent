@@ -337,6 +337,7 @@ mod tests {
             target: TargetId(0),
             expected_prev: None,
             bytes: bytes.clone(),
+            journal: false,
         };
         // A 512 KiB frame exceeds the socket buffer, so the write must be
         // drained concurrently or `write_all` blocks forever.
@@ -452,6 +453,7 @@ mod tests {
             target: TargetId(0),
             expected_prev: None,
             bytes: vec![0_u8; MAX_FRAME + 1],
+            journal: false,
         });
         assert!(matches!(err, Err(ChannelError::Oversize { .. })));
         // Nothing was written, so the peer is still idle rather than

@@ -4,6 +4,12 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-24 - H3 journal flag on WriteTarget (STAGE3)
+
+`Request::WriteTarget` now carries `journal: bool`. The engine sets it only for commit-confirm applies (`descriptor.commit_confirm || confirm.is_some()`); the monitor pushes to the rollback journal only when `journal` is true, and when `pending` is `None` clears the journal before pushing so one commit equals one write. `PROTO_VERSION` bumped 1→2. Test `an_unrelated_earlier_write_is_not_rolled_back_by_a_later_commit` applies plain A v1→v2 then commit-confirm B with 1 s window, lets it expire, asserts A still v2 and `rollback_targets==1`.
+
+Verify: test failed before fix (left 2 vs right 1 on `rollback_targets`) and passes after; `cargo test -p detent-platform --all-features` 340 passed 1 ignored; `cargo test -p detent-ops --test engine an_unrelated_earlier_write_is_not_rolled_back_by_a_later_commit` 1 passed; `cargo fmt --all --check` 0; `cargo clippy -p detent-platform -p detent-ops --all-targets -- -D warnings` 0 on touched crates (pre-existing monitor allow-list warnings unchanged).
+
 ## 2026-09-24 - C1-e monitor downgrade refusal (STAGE3)
 
 `replace_binary` now parses the staged `tag` as semver (stripping leading `v`, same as `detent-update::policy::version_of`) and refuses unless the version is strictly greater than `env!("CARGO_PKG_VERSION")`. Downgrade stays CLI-only, never over the privsep channel. Test `replace_binary_refuses_an_older_signed_release` plants `older-tag.json` (a valid Sigstore bundle for `v0.0.0`, minted by `gen-fixtures`, older than `0.0.1`) and dispatches tag `v0.0.0`, so only the downgrade check can refuse it.

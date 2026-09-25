@@ -586,7 +586,12 @@ impl OpsEngine {
         }
         let receipt = self
             .client
-            .write_target(wiring.target, Some(contents.digest), rendered.into_bytes())
+            .write_target(
+                wiring.target,
+                Some(contents.digest),
+                rendered.into_bytes(),
+                commit_required,
+            )
             .map_err(map_client)?;
         hashes.prev = receipt.prev_digest;
         hashes.new = Some(receipt.new_digest);
