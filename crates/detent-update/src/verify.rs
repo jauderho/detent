@@ -561,6 +561,14 @@ mod tests {
     }
 
     #[test]
+    fn root_from_path_refuses_an_index_outside_the_tree() {
+        assert_eq!(
+            root_from_path(4, 4, [0_u8; 32], &[[1_u8; 32], [2_u8; 32]]),
+            Err(VerificationError::SetInvalid)
+        );
+    }
+
+    #[test]
     fn root_from_path_refuses_short_path() {
         assert_eq!(
             root_from_path(0, 4, [0_u8; 32], &[]),

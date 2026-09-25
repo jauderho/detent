@@ -13,6 +13,11 @@ use serde::Deserialize;
 /// Largest accepted bundle, in bytes (ADR-014 step 1).
 pub const MAX_BUNDLE_BYTES: usize = 1 << 20;
 
+/// Longest inclusion path accepted. RFC 9162 trees of at most 2^64 leaves
+/// never need more than 64 sibling hashes; a longer path is refused before
+/// any of it is decoded.
+pub const MAX_INCLUSION_PATH: usize = 64;
+
 /// The only bundle media type this verifier consumes (ADR-014: pinned to
 /// v0.3; unknown major bumps are refused).
 pub const MEDIA_TYPE: &str = "application/vnd.dev.sigstore.bundle.v0.3+json";
@@ -351,14 +356,23 @@ pub fn parse(bytes: &[u8]) -> Result<Decoded, BundleError> {
         body: decode(tlog.canonicalized_body.as_bytes(), "canonicalized body")?,
         tree_size: tlog.inclusion_proof.tree_size,
         proof_log_index: tlog.inclusion_proof.log_index,
-        path_hashes: tlog
-            .inclusion_proof
-            .hashes
-            .iter()
-            .map(|hash| decode(hash.as_bytes(), "inclusion path hash"))
-            .collect::<Result<_, _>>()?,
+        path_hashes: decode_path(&tlog.inclusion_proof.hashes)?,
         checkpoint: tlog.inclusion_proof.checkpoint.envelope.clone(),
     })
+}
+
+/// Decode an inclusion path, refusing one longer than [`MAX_INCLUSION_PATH`]
+/// before any hash is decoded.
+fn decode_path(hashes: &[String]) -> Result<Vec<Vec<u8>>, BundleError> {
+    if hashes.len() > MAX_INCLUSION_PATH {
+        return Err(BundleError::Malformed(format!(
+            "inclusion path is longer than {MAX_INCLUSION_PATH} hashes"
+        )));
+    }
+    hashes
+        .iter()
+        .map(|hash| decode(hash.as_bytes(), "inclusion path hash"))
+        .collect()
 }
 
 fn decode(raw: &[u8], field: &'static str) -> Result<Vec<u8>, BundleError> {
@@ -428,6 +442,18 @@ mod tests {
         let decoded = parse_json(&value).expect("real Sigstore envelope shape parses");
         assert_eq!(decoded.certs, vec![vec![0, 0, 0]]);
         assert_eq!(decoded.dsse_payload_type, DSSE_PAYLOAD_TYPE);
+    }
+
+    #[test]
+    fn refuses_an_inclusion_path_longer_than_the_cap() {
+        let mut value = minimal();
+        let path = |len: usize| serde_json::json!(vec!["AAAA"; len]);
+        value["verificationMaterial"]["tlogEntries"][0]["inclusionProof"]["hashes"] =
+            path(MAX_INCLUSION_PATH);
+        assert!(parse_json(&value).is_ok(), "a path at the cap parses");
+        value["verificationMaterial"]["tlogEntries"][0]["inclusionProof"]["hashes"] =
+            path(MAX_INCLUSION_PATH.saturating_add(1));
+        assert!(matches!(parse_json(&value), Err(BundleError::Malformed(_))));
     }
 
     #[test]
