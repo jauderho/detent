@@ -1271,3 +1271,39 @@ Method: reviewer per group; each item is checked against its Fix/Test/Acceptance
 | L-BIN18 | VERIFIED-NO-NEG | Zeroizing chunk read; one un-zeroized `String` copy remains (`webadmin.rs:667-671`) |
 | L-BIN19 | PARTIAL | `ConstantTimeTokenVerifier::from_digests` (`detent-mcp/src/mcp.rs:100`) is public dead code; gate with `#[cfg(test)]` or delete |
 | L-ORC1 | VERIFIED | Comment removed |
+
+**Group B (ops, audit, modules).** Rebuilt from clean source: 739 tests pass (ops, i18n, core, modules, all module crates); `privsep::monitor` 101 pass.
+
+| Item | Verdict | Evidence / what is missing |
+|---|---|---|
+| H5 | PARTIAL | `engine.rs:574-588`; only the `!ran` path is tested (`apply_refuses_a_candidate_a_declared_check_rejects`). Missing: a check that ran and failed (`FailChecks`), a "no backup created" assertion, and `ApplyReport.checks`. The DECISION was resolved **fail-closed on `!ran`** (not the proposed "allow") without a §12 record: every apply on a host without the validator binary now fails. H6 dependency open |
+| H7 | VERIFIED | `engine.rs:205-210`; `an_unwritable_audit_sink_refuses_the_mutation` |
+| H13 | VERIFIED | samba render/parse guards; unit + conformance inv. 5 fail without the fix |
+| H14 | VERIFIED | nfs guards; 4 unit tests + conformance fail without the fix |
+| H15 | VERIFIED | resolver `misplaced_forward_name_is_still_validated`, `forward_items_outside_a_zone_are_misplaced`. A test comment still says "warnings" |
+| H16 | VERIFIED | `networkd_sections_*` tests fail without the fix. The named `edit_keeps_unknown_keys_under_their_section` is **vacuous** |
+| M3 | PARTIAL | `verify()` exists but runtime `query` does not verify; directory not 0700, parent not fsynced; no deleted-middle-record test. **New bug:** `record()` re-verifies the whole log before each append, so a torn final line (crash mid-append) makes every later mutation fail with `AuditUnavailable` (via H7) until the log is repaired by hand; also O(n) per write |
+| M4 | PARTIAL | Engine still `AllowAll` in `serve.rs:427` and `run.rs:1218`; the engine's Denied path never fires; MCP denials not audited; web denials go to the auth log with `AuditResult::Error` |
+| M5 | PARTIAL | Skip-on-error present, but `plan_rejects_invalid_model_before_reporting_checks` is **vacuous**; plans that ran checks are not audited; `run_checks` error detail is not truncated |
+| M7 | PARTIAL | Restore half pinned (`restore_rejects_a_stale_target_hash`). Rollback half absent: `RollbackEntry` has no `new_digest`; `roll_back` overwrites without `expected_prev`; test `rollback_does_not_overwrite_an_edit_made_during_the_window` absent |
+| M8 | **REOPEN** | Property inputs still `".*"` (never `\n`); no `conformance_src_strategy`, no `Exercised` counter, no `property_inputs_include_newlines`. `5800807` only touched `check_injection_rejected` |
+| M21 | PARTIAL | `rebuild`/`apply_plan` exist; chrony, dhcp, network apply are still per-line. Probe (debug, empty model): chrony 11.9 s at 25k lines and 47.9 s at 50k (quadratic); hosts 0.58 s at 200k. No timing test |
+| M22 | PARTIAL | Critical `noauto` refused. Missing: Error for a relative mountpoint, Warning when there is no `/` entry, doc that commit-confirm cannot protect fstab. The mounts SERVICES comment says the monitor mounts, but `Mount` is Unsupported |
+| M23 | **REOPEN** | `value_of_in_section` walks backwards and gives each directive to the next section (probe: `[global] guest ok=no / [data] guest ok=yes` → data "no", global "yes"). No name normalisation or synonyms: `GuestOK`, `guestok`, `server minprotocol` do not warn (the acceptance line fails) |
+| M24 | VERIFIED | `netplan_block_nameservers_are_dns_not_interface_addresses` |
+| M25 | **REOPEN** | dnsmasq `dhcp-script`, `dhcp-luascript`, `dhcp-scriptuser` not flagged (`INCLUDE_KEYS` has `script`, which is not a dnsmasq key); chrony `pidfile`, `user` not flagged; named tests absent |
+| L-OPS11 | PARTIAL | Apply/rollback/restore carry hashes. `UpdateApply` does not set `hashes.new`, and its test does not assert hashes |
+| L-OPS12 | VERIFIED | `no_op_apply_skips_write_commit_and_audit` |
+| L-OPS14 | VERIFIED | `confirm_after_deadline_is_rejected_and_rolls_back` (answers `CommitExpired`) |
+| L-OPS15 | PARTIAL | Default and cap pinned; the reader still scans forward through the whole file; no backwards read, no size rotation |
+| L-OPS16 | VERIFIED | `an_unknown_module_is_sanitized_in_audit_records` |
+| L-OPS17 | **REOPEN** | Not done: no `ProtoError::NotFound`; `create_missing: false`; `created` still misleading. Implement or record a decision |
+| L-OPS18 | **REOPEN** | `the_registry_is_empty_without_any_module_feature` fails with `--features module-resolver`. Gate it on `not(any(<all eight module features>))` |
+| L-OPS19 | PARTIAL | `render` sanitises; `Localizer::get_args` (used for every CLI message with args, `detent/src/i18n.rs:107`) does not |
+| L-MODA8 | VERIFIED | nfs `sec=sys` and world-export warnings (world only with `rw`) |
+| L-MODA9 | VERIFIED | hosts localhost tests |
+| L-MODA10 | PARTIAL | Only `root preexec`/`root postexec` warn; missing e.g. `add user script`, `username map script`, `panic action`, `message command`, `magic script`, `usershare allow guests`, `wide links` |
+| L-MODA11 | PARTIAL | Probes added (inv. 5 fails without H13/H14); model and fuzz alphabets not widened |
+| L-MODB8 | VERIFIED | Placeholders gone; bridge refusals. A no-op `let _ = profile;` remains (`network lib.rs:2575`); `a_bridge_is_refused…` also passes without the refusal (the round-trip guard catches it) |
+
+**Pass summary (groups A–E):** REOPEN — H6, H9, H23, L-WEB16, M8, M23, M25, L-OPS17, L-OPS18. Vacuous tests to replace — M5, M18, L-SUP12, H16's named test, C1-d (likely). All PARTIAL items are listed above with the missing piece.
