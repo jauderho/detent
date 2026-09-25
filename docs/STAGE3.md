@@ -1123,3 +1123,64 @@ Open decisions carried from the review (owner answers pending):
 - Latest CI: run 36074875296 (push of H19-health `8bd105b`): Rust/Web/macOS/FFI/ACME green; Coverage and Size check fail. Fuzz run 36074883068: cargo-fuzz failure. D6 commits unpushed, CI not yet watched.
 - Allow count: 117 (`git grep -c -E '#!?\[(allow|expect)\(' HEAD -- crates`).
 - Still owed per §11.5/§11.6: D3 (push + all-green CI incl. fuzz), H6 real-validator strace on a010, D4 a010 cleanup, D5 attribution table. Stopping for orchestrator review; STAGE3 not finished.
+
+### 11.8 Session report 2026-09-25 at `c94a860` — D3 CI green, D5 table, D6 tail landed
+
+Worked by the orchestrator in a cloud container (Linux x86_64, root), with Opus/Sonnet implementors whose diffs were reviewed before each commit. The branch is `claude/determined-noether-wo0uh8`; CI was run by `workflow_dispatch` there.
+
+**Items done (id + hash):**
+- H20 (CI red): `2ff9f87` macOS rollback-deadline race (poll, not one sleep); `281b91a` size baselines re-cut (owner-approved); `1248f1e` platform, `7e781d8` web, `a149e56` detent, `430935a` core/i18n/ops coverage tests; `bb2f054` dead nfs checks; `675aca2` last module line; `de0b8bd` codespell word; `4ae64c8` + `4ee303f` network fuzz findings (lossy bridge, own-model loss, inet6 dhcp, positional loss, interface order).
+- C1-c follow-up: `a6f9447` verifier behind `detent-platform/update` (owner-approved; CLI binary 3.06 → 2.10 MB); `4fd56b4` fuzz lock.
+- D6 tail: L-SUP13 `9923f36`; M20 `5b184f9`; M16 `947cfa8`; L-MODB7 `65e9e41`; L-MODA12 `272076d`.
+- §11.3 step 2 (new suppressions): `098a213`, `216d326`, `1a5eb24` removed the three added since the root commit. **Allow count 114** (was 117).
+- Tooling: `39d7951` `make clean` / `make realclean` (`scripts/clean.sh`).
+- Process error, fixed forward: `216d326` also committed another implementor's staged fixture rename, so the detent-update fixture test was red for `216d326..1248f1e`; `947cfa8` fixed it. Since then the index is checked before every commit, and implementors do not stage.
+
+**Items opened in §12:** CLI-SIZE, SIZE-BASELINE, NET-ORDER (all answered by the owner), L-MODA12 note, L-MODB8 re-check, H17/M16 SET gap, M20 scope (chrony/dhcp/network still positional), network follow-ups, dead `refresh_locked`, H6/D4 not done.
+
+**Gates at HEAD (local, root container):** `cargo fmt --all --check` 0; `cargo clippy --workspace --all-targets --all-features -D warnings` 0; `cargo test --workspace --all-features --no-fail-fast` 1911 passed, 1 failed. The failure, `webadmin::tests::setup_with_force_reports_a_write_failure_as_a_credential_failure`, fails only as uid 0 and passes as uid 65534. Full coverage run: all per-path floors PASS (core/i18n/ops/modules 100, platform 92.56, web 97.75, detent 95.23 as root). All 29 fuzz targets 60 s clean except the two network targets, since fixed; network edit/roundtrip/parse 120 s clean after the fixes.
+
+**Latest CI:** CI run 36124975918 on `4ee303f`: **success, all 11 jobs** (Rust, macOS, Coverage, Size check, Web, FFI Miri/semver, ACME, supply chain, shell, pins). Fuzz run 36124973393 on `4ee303f`: **success** (all 29 targets). Codespell run 36124977836 on `4ee303f`: success. Lint Code Base run 36120650130 on `675aca2`: success.
+
+**Jev (`jev-1.13.0`, live POST) used only for classification and routing:** item order (L-SUP13 first, conf 0.59); implementor tier for M20 (strong, 0.96), L-MODB7 (strong, 0.76), M16 (strong, 0.86); D5 commit-to-item classification (26 Choices, 77,685 input tokens; 8 overridden, marked in the table). Everything else, including every readiness judgement, came from deterministic gates and the default model.
+
+**D5 — retroactive attribution** (commits after the review with no `Item:` line). Jev (`jev-1.13.0`, one Choice per commit over the 98 STAGE3 ids plus `none`, 77,685 input tokens) proposed the item; the orchestrator checked each diff and overrode where marked. No commit body records a failing test, so every "Failed first" is **not recorded**, and all 26 commits go on the verification list (§11.3 step 4).
+
+| Commit | Subject | Item(s) | Jev (conf) | Test(s) added | Failed first |
+|---|---|---|---|---|---|
+| `462e9bf` | Recover pending commits on monitor startup | H1 | H1 (0.97) | `shutdown_with_a_pending_commit_rolls_back`, `a_cli_apply_on_a_commit_confirm_module_never_leaves_an_unenforced_commit` | not recorded |
+| `13e4f10` | Add pending commit rehydration and safe arming | H1, H2, H21 | H1 (0.45; H2 0.38) | `commit_confirm_does_not_arm_without_a_backup`, `a_commit_confirm_apply_without_a_backup_is_refused`; web "reads the monitor pending commit without a mutation body" | not recorded |
+| `d0cffe1` | Fix CLI clippy warnings | H20-a | none (0.98) — **override**: §12 STEP0-GATES answer | none (lint fix) | n/a |
+| `c80ab63` | Pin ACME test images by digest | L-SUP18 | none (0.76) — **override** | none (CI pin) | n/a |
+| `776f717` | Fix codespell findings | H20 | none (0.99) — **override**: Codespell gate | none | n/a |
+| `711ac58` | Harden upstream watch dispatch | H20 | none (0.85) — **override**: Checkov gate | none | n/a |
+| `6e50880` | Fix fuzz harness edit targets | H20 | none (0.87) — **override**: fuzz gate | none (fuzz targets) | n/a |
+| `9063b90` | Stabilize redirect transport tests | H18 | H18 (0.65) | changes `caps_redirect_loop` | not recorded |
+| `a8bffcf` | Handle worker capability drop after setuid | M1 | M1 (0.94) | none new | not recorded |
+| `4b098d0` | Move update staging to monitor runtime | C1-b | L-PLAT7 (0.90) — **override**: §11.4 names it C1-b | `monitor_rejects_group_writable_staging_permissions`, `only_the_monitor_policy_grants_the_runtime_staging_base` | not recorded |
+| `de63e2e` | Reap workers on monitor startup failure | L-BIN16 | L-BIN16 (0.57) | `a_failed_monitor_setup_returns_an_error_and_reaps_its_worker` | not recorded |
+| `fb82560` | Reject disabled critical mounts | M22 | M22 (0.71) | `validate_flags_boot_blockers_and_rejects_critical_noauto` | not recorded |
+| `7613890` | Fix network backend round trips | L-MODB7 (partial: routes round-trip; filter and probe still open) | L-MODB7 (0.61) | `route_models_validate_and_round_trip_through_real_backends` | not recorded |
+| `61e3f88` | Harden Samba security validation | M23, L-MODA10 | M23 (0.54; L-MODA10 0.45) | `root_command_warning_only_matches_root_hooks` | not recorded |
+| `5800807` | Validate conformance renders | M8 | M8 (0.68) | none new | not recorded |
+| `bdd33e0` | Harden Sigstore bundle verification | H17, M16 (partial: SCT parse only) | M16 (0.78; H17 0.18) | `accepts_sigstore_certificate_objects_and_in_toto_payload_type`, `an_sct_octet_string_must_parse_as_a_nonempty_list` | not recorded |
+| `4de4b09` | Use explicit TLS provider for health checks | L-ORC2 | L-ORC2 (0.72) | none new | not recorded |
+| `de97cad` | Harden TLS pair lifecycle | L-WEB9, L-WEB10 | L-WEB10 (0.58; L-WEB9 0.27) | `self_signed_rotation_obeys_the_acme_configuration_and_expiry`, `an_expiring_bootstrap_pair_is_regenerated` | not recorded |
+| `7aa07dd` | Update operations staging fixtures | C1-b (follow-up) | none (0.84) — **override** | fixture update | n/a |
+| `87cdbf3` | Sanitize unknown module audit records | L-OPS16 | L-OPS16 (0.99) | `an_unknown_module_is_sanitized_in_audit_records` | not recorded |
+| `74d19c7` | Test no-op apply preserves backups | L-OPS12 | L-OPS12 (0.96) | test-only commit | not recorded |
+| `a19e637` | Audit commit id on apply | L-OPS11 | L-OPS11 (0.52) | none new | not recorded |
+| `e3ceee0` | Record STAGE3 hardening progress | none (docs) | none (0.99) | — | n/a |
+| `75c680e` | Align missing staging error test | C1-b (follow-up) | none (0.69) — **override** | test assertion change | n/a |
+| `93f3eb2` | Make staging error assertion portable | C1-b (follow-up) | none (0.76) — **override** | test assertion change | n/a |
+| `a5d06a1` | Fix concurrent web test request stubs | H20 (Web CI) | none (0.85) — **override** | test stub change | n/a |
+
+`35fdd42` (C1-e), `5d651be` (H3), `0f69392` (H10-MCP), `1cadb77` (H6), `f2e0106` (H21), `3a9d1cc` (H20) and `7f1df06` (H18) carry an `Item:` line in the body but not as a git trailer; they need no row.
+
+**Still owed:**
+- D4 (a010 cleanup): the owner said "do not remove packages on a010 for now".
+- H6 real-validator strace on a010: no a010 access from the cloud container.
+- §11.3 step 4 verification pass over the "done" and batch-only items, including the 26 D5 commits.
+- The §12 follow-ups.
+
+STAGE3 is not marked complete; that is for the orchestrator audit.
