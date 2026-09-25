@@ -1306,4 +1306,4 @@ Method: reviewer per group; each item is checked against its Fix/Test/Acceptance
 | L-MODA11 | PARTIAL | Probes added (inv. 5 fails without H13/H14); model and fuzz alphabets not widened |
 | L-MODB8 | VERIFIED | Placeholders gone; bridge refusals. A no-op `let _ = profile;` remains (`network lib.rs:2575`); `a_bridge_is_refused…` also passes without the refusal (the round-trip guard catches it) |
 
-**Pass summary (groups A–E):** REOPEN — H6, H9, H23, L-WEB16, M8, M23, M25, L-OPS17, L-OPS18. Vacuous tests to replace — M5, M18, L-SUP12, H16's named test, C1-d (likely). All PARTIAL items are listed above with the missing piece.
+**Pass summary (groups A–E):** REOPEN — H6, H9, H23, L-WEB16, M8, M23, M25, L-OPS17, L-OPS18 (all fixed 2026-09-25: L-OPS18 `c1c3e03`, M23 `977f942`, M8 `0a11fb6`, M25 `f044538`, L-OPS17 `7587e2e`, L-WEB16 `6c59a65`, H9 `dcfdb0d`, H23 `9737985`, H6 `73e7c88`; L-OPS17 by decision "refuse clearly", H6 by decision "runner process"). Vacuous tests to replace — M5, M18, L-SUP12, H16's named test, C1-d (likely). All PARTIAL items are listed above with the missing piece.

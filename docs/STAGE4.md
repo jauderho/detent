@@ -71,9 +71,9 @@ Already verified with failing-first evidence this session (skip): C1-e, H3, H10-
 **Stopped by the usage limit (partial, unverified work saved as patches):** four implementors stopped mid-task. Their partial diffs are in `docs/stage4-wip/`. Both apply cleanly to `c1c3e03` (`git apply --check`), but they are **not reviewed, not complete and not gated**. Treat them as a starting point only; take them over, finish them, test first, and commit one item per commit. Then delete the patch file in the same commit.
 - `h17-set-partial.patch` (§4.2 item 1). `bundle.rs` parses the SET, `verify.rs` has partial leaf/SET code, and new tests are in `verify_fixtures.rs`. The implementor had confirmed that its two new unit tests fail on the old code. **Not done:** `gen-fixtures` SET minting, fixture re-mint, `bad-set.json` rename, the ADR-014 update, and the cross-crate tests.
 - `aligned-edits-chrony-dhcp-partial.patch` (§4.2 item 2). chrony moved to `edit_entries`, dnsmasq in progress. **Not done:** network, the tests (`deleting_the_first_entry_rewrites_no_other_line`, `apply_is_linear_in_file_size`), fuzz runs, and coverage.
-- H6, H23, H9 and L-WEB16 left **no** changes; start them from zero (fix order in §4.1).
+- The aligned-edits patch still applies after M25 (`f044538`).
 
-**Still open from the REOPEN list:** H6, H23, H9, L-WEB16, M8, M23, M25, L-OPS17. Do M25 after the aligned-edits work, because both change chrony and dhcp.
+**REOPEN list: all closed** (later the same day): M23 `977f942`, M8 `0a11fb6`, M25 `f044538`, L-OPS17 `7587e2e`, L-WEB16 `6c59a65`, H9 `dcfdb0d`, H23 `9737985`, H6 `73e7c88`. H6 adds a third process, the runner (see `docs/ARCHITECTURE.md` §3, §5.3). Follow-ups from them: remove `clone`/`execve` from the monitor seccomp table after a traced confined `serve` run on a010; run a full confined `detent serve` end to end (not done in the container).
 
 ### 4.2 STAGE3 §12 follow-ups
 

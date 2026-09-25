@@ -4,6 +4,8 @@ Threat-model checklist pass for PLAN §3 (PLAN Phase 4, task 5). This is not a
 replacement for `docs/THREAT_MODEL.md` (full text, Phase 12) — it is a working
 checklist that turns PLAN §3's controls map into one row per control, each
 pointing at the code that implements it and the test that proves it.
+[`ARCHITECTURE.md`](ARCHITECTURE.md) shows how the processes, trust
+boundaries and data paths these controls protect fit together.
 
 **Rule for this document:** the last column has to be true. "Covered" only
 appears where a real test function was found and named below. Where no test
@@ -84,7 +86,7 @@ release (compromised token).
 | ≤ 1 MiB message cap, postcard-encoded, `deny_unknown_fields`-equivalent (unknown discriminant closes the connection) | a compromised worker flooding/crashing the monitor with oversized or malformed frames | `crates/detent-platform/src/privsep/proto.rs` | `oversize_frames_are_rejected_before_allocating`, `truncated_and_unknown_frames_are_rejected` (`proto.rs`) |
 | `PR_SET_NO_NEW_PRIVS` at startup | privilege escalation via setuid binaries after confinement | `crates/detent-platform/src/sandbox/linux.rs` | `no_new_privs_is_set_afterwards` (kernel-observable: reads `/proc/self/status`, `linux.rs`) |
 | `PR_SET_DUMPABLE=0` | a local user attaching a debugger / reading `/proc/<pid>/mem` to extract key material | `crates/detent-platform/src/sandbox/linux.rs` (`harden_dumpable`) | **not directly tested.** The outcome is folded into `confine()`'s returned struct (asserted only indirectly, e.g. by `debug_format_of_the_monitor_does_not_panic`-style tests elsewhere), but no test reads `/proc/self/status`'s `Dumpable:` field the way `no_new_privs_is_set_afterwards` does for `NoNewPrivs:`. See [Gaps](#gaps). |
-| Capability bounding set shrunk to the computed minimum | a compromised process using an unneeded capability (e.g. `CAP_SYS_ADMIN`) | `crates/detent-platform/src/sandbox/linux.rs` | `capability_bounding_set_shrinks_to_the_policy_set` (`linux.rs`), which asserts the shrunk mask where `CAP_SETPCAP` is held and, where it is not, asserts only that the refusal is reported rather than mistaken for success. **Fails open, unlike seccomp:** shrinking the bounding set needs `CAP_SETPCAP`, and when the drop is refused `confine` records `Outcome::Unavailable` and start-up continues with the full bounding set. `require_seccomp` defaults on and `require_landlock` exists; there is no `require_caps`. The monitor starts as root and so normally has `CAP_SETPCAP`, but a deployment that does not (a restrictive container, a `CapBnd`-trimmed unit) loses this control silently. See [Gaps](#gaps). |
+| Capability bounding set shrunk to the computed minimum | a compromised process using an unneeded capability (e.g. `CAP_SYS_ADMIN`) | `crates/detent-platform/src/sandbox/linux.rs` | `capability_bounding_set_shrinks_to_the_policy_set` (`linux.rs`), which asserts the shrunk mask where `CAP_SETPCAP` is held and, where it is not, asserts only that the refusal is reported rather than mistaken for success. The monitor's policy sets `require_caps: true`: when the drop is refused (no `CAP_SETPCAP`), `confine` returns `CapsRequired` and start-up stops; `caps_that_do_not_drop_are_fatal_only_when_required` (`sandbox/mod.rs`). The worker (`require_caps: false`) has no capabilities after its uid drop, which `drop_capabilities` treats as the required outcome. |
 | Landlock ruleset restricting writes to target dirs + backup dir (+ binary dir for `update`), with the monitor-only `/run/detent/staging` base for materialized update bytes | a compromised worker/monitor writing outside its declared file set | `crates/detent-platform/src/sandbox/linux.rs`, `crates/detent-platform/src/privsep/monitor.rs` | `only_the_monitor_policy_grants_the_runtime_staging_base` (`sandbox/mod.rs`); `materialized_digest_is_monitor_owned_private_and_durable` and `monitor_rejects_group_writable_staging_permissions` (`monitor.rs`) |
 | Landlock absence degrades loudly (warn, `doctor`/UI-visible, hard-fail only if `require_landlock=true`) rather than silently | silent loss of confinement on old kernels | `crates/detent-platform/src/sandbox/mod.rs` | `confine_is_all_unavailable_and_never_errs_off_linux`, `landlock_status_serializes_to_snake_case` (`mod.rs`) — the "warn once / mark degraded in doctor" UI-visible half of this is not yet exercised by a test (doctor output tested elsewhere, not cross-checked against sandbox degradation here); noted in [Gaps](#gaps). |
 | seccomp allow-list, per-architecture tables, `SCMP_ACT_LOG` before enforcing | a compromised process making an unexpected syscall (container/sandbox escape primitives) | `crates/detent-platform/src/sandbox/seccomp.rs`, `linux.rs` | `every_table_entry_resolves_on_both_tier_one_architectures`, `the_two_tables_share_every_ipc_and_runtime_housekeeping_syscall` (`seccomp.rs`); `log_mode_seccomp_lets_a_forbidden_syscall_through`, `enforce_mode_seccomp_refuses_ptrace`, `enforce_mode_seccomp_kills_the_monitor_on_a_forbidden_syscall` (`linux.rs`) |
@@ -151,18 +153,10 @@ Controls named in PLAN §3 with **no** test and no other evidence found during
 this pass, or found only partially covered. Listed here rather than folded
 quietly into the tables above.
 
-1. **The capability bounding-set drop fails open.** Seccomp refuses to start
-   when its filter does not install (`require_seccomp`, default on) and
-   Landlock has `require_landlock`; the capability drop has no equivalent. If
-   `CAP_SETPCAP` is absent, `caps::drop` answers `EPERM`, `confine` records
-   `Outcome::Unavailable`, and the process continues with the **full** bounding
-   set. The monitor starts as root and normally holds `CAP_SETPCAP`, so this is
-   latent rather than active — but it is the same shape as the seccomp
-   fail-open fixed in Phase 4, and it is invisible at run time because
-   everything else works. Found when CI first ran the Linux-only test as an
-   unprivileged user. A `require_caps` knob, defaulted on for the monitor,
-   would close it; deferred because the worker's confinement order relative to
-   its uid drop needs checking first.
+1. **Closed: the capability bounding-set drop no longer fails open for the
+   monitor.** `Policy::monitor` sets `require_caps: true`, so a refused drop
+   stops start-up (`caps_verdict`, `sandbox/mod.rs`). Still unproven on a host
+   without `CAP_SETPCAP` outside the unit test.
 2. **Landlock is unavailable on Raspberry Pi OS, detent's flagship target.**
    Measured on a Pi running Debian 13, kernel `6.18.39+rpt-rpi-v8`:
    `/sys/kernel/security/lsm` reports `capability` alone, and the kernel config
