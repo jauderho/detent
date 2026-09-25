@@ -154,17 +154,7 @@ fn bundle_for(material: &Material, digest_hex: &str, mutate: &str) -> Value {
         dsse_sig[10] ^= 0x01;
     }
 
-    let body = json!({
-        "apiVersion": "0.0.1",
-        "kind": "hashedrekord",
-        "spec": {
-            "data": { "hash": { "algorithm": "sha256", "value": digest_hex } },
-            "signature": {
-                "content": BASE64.encode(encode_sig(&sig)),
-                "publicKey": BASE64.encode(spki_pem(&material.leaf_key).as_bytes()),
-            }
-        }
-    });
+    let body = tlog_body(material, &sig, digest_hex, mutate);
 
     // Inclusion proof over a two-leaf tree: this entry and a fixed neighbor.
     let log_key_digest = Sha256::digest(spki_pem(&material.rekor_key).as_bytes());
@@ -206,7 +196,7 @@ fn bundle_for(material: &Material, digest_hex: &str, mutate: &str) -> Value {
             // checkpoint, which itself still verifies - inclusion fails.
             path_hashes[0][0] ^= 0xff;
         }
-        "bad-sct" => {
+        "bad-checkpoint-sig" => {
             // Corrupt the checkpoint signature.
             checkpoint_sig_text = format!(
                 "u{}",
@@ -216,7 +206,8 @@ fn bundle_for(material: &Material, digest_hex: &str, mutate: &str) -> Value {
                     .unwrap_or_default()
             );
         }
-        "wrong-identity" | "expired-leaf" | "valid" | "bad-signature" => {}
+        "wrong-identity" | "expired-leaf" | "valid" | "bad-signature" | "bad-body-sig"
+        | "bad-body-key" => {}
         other => panic!("unknown fixture {other}"),
     }
 
@@ -244,6 +235,43 @@ fn bundle_for(material: &Material, digest_hex: &str, mutate: &str) -> Value {
             "payloadType": payload_type,
             "payload": BASE64.encode(payload_json.as_bytes()),
             "signatures": [{ "keyid": "", "sig": BASE64.encode(&dsse_sig) }]
+        }
+    })
+}
+
+/// The hashedrekord tlog body for `sig`, as `mutate` shapes it.
+fn tlog_body(
+    material: &Material,
+    sig: &p256::ecdsa::Signature,
+    digest_hex: &str,
+    mutate: &str,
+) -> Value {
+    // The tlog body normally repeats the envelope's signature and the leaf
+    // key. The bad-body-* fixtures swap one of them before the inclusion
+    // proof and checkpoint are computed, so both stay valid over the altered
+    // body and only step 6's body-agreement check can refuse it.
+    let body_sig = if mutate == "bad-body-sig" {
+        let other: p256::ecdsa::Signature = material.leaf_key.sign(b"another statement");
+        encode_sig(&other)
+    } else {
+        encode_sig(sig)
+    };
+    let body_key = if mutate == "bad-body-key" {
+        spki_pem(&key(
+            "6162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80",
+        ))
+    } else {
+        spki_pem(&material.leaf_key)
+    };
+    json!({
+        "apiVersion": "0.0.1",
+        "kind": "hashedrekord",
+        "spec": {
+            "data": { "hash": { "algorithm": "sha256", "value": digest_hex } },
+            "signature": {
+                "content": BASE64.encode(body_sig),
+                "publicKey": BASE64.encode(body_key.as_bytes()),
+            }
         }
     })
 }
@@ -310,8 +338,25 @@ fn main() {
     );
     write(
         dir,
-        "bad-sct.json",
-        bundle_for(&valid, &digest_hex, "bad-sct"),
+        "bad-checkpoint-sig.json",
+        bundle_for(&valid, &digest_hex, "bad-checkpoint-sig"),
+    );
+    write(
+        dir,
+        "bad-body-sig.json",
+        bundle_for(&valid, &digest_hex, "bad-body-sig"),
+    );
+    write(
+        dir,
+        "bad-body-key.json",
+        bundle_for(&valid, &digest_hex, "bad-body-key"),
+    );
+    // A consistent bundle whose statement attests some other file: every
+    // step before 5 passes, and the subject misses binary.bin's digest.
+    write(
+        dir,
+        "wrong-digest.json",
+        bundle_for(&valid, &hex(&Sha256::digest(b"another binary")), "valid"),
     );
     let older = mint(
         &detent_update::verify::pinned_identity("v0.0.0"),
