@@ -641,6 +641,9 @@ fn conformance_checks_catch_violations() {
         check_injection_rejected::<BadModule>("!applyerr", &probe("a\nb")),
         Ok(())
     );
+    // Rejecting the probe is not enough on its own: the untouched doc must
+    // still render back to parsable text.
+    assert!(check_injection_rejected::<BadModule>("!applyerr!rfail", &probe("a\nb")).is_err());
 
     // Invariant 6 on a module that satisfies it.
     assert_eq!(check_bounded_parse::<KvModule>(7), Ok(()));

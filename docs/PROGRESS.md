@@ -4,6 +4,19 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-25 - H20 core, i18n and ops coverage back to 100%
+
+Tests only. detent-core, detent-i18n and detent-ops reach 100% line coverage. What the tests cover:
+- Conformance: the invariant-5 branch where a refused probe leaves text that does not re-parse.
+- Audit chain verify errors: invalid JSON, missing chain metadata, a broken link, a non-NotFound IO error.
+- Audit record and query edge cases: an empty existing log, a path with no parent, `limit: Some(0)`.
+- The engine's `CheckFailed` refusal.
+- Network apply arms: the positional editor, headerless networkd directives, unpaired removal, the lossy-reorder refusal, netplan with and without extras.
+
+Two assertions in tests were re-wrapped so their message arguments are not on separate never-run lines; each is the same assertion as before. crates/modules is at 99.89% (11356/11368). The remaining 12 lines: nfs dead continuation checks (§12 follow-up), three unreachable `Err` arms in `apply_networkd_sections`, and one closing brace that llvm-cov attributes oddly.
+
+Verify: tests of the four touched packages 287 passed; fmt 0; clippy (four packages) `-D warnings` 0. Implementor: Sonnet subagent; orchestrator reviewed the diff (all hunks in test modules).
+
 ## 2026-09-25 - H20 detent crate coverage back over the floor
 
 `crates/detent/` read 91.09% against its 95% floor. New tests, and no production change, bring it to 95.42% (7440/7797) in the full CI measurement, measured as root. CI measures unprivileged, which trades a few root-only lines for the MCP HTTP serve path; all new tests pass as uid 65534. What the tests cover:

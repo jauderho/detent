@@ -843,8 +843,7 @@ mod tests {
         ] {
             assert!(
                 !text.contains(ch),
-                "render output still contains control/bidi char U+{:04X}",
-                ch as u32
+                "render output still contains control/bidi char {ch:?}"
             );
         }
         assert!(

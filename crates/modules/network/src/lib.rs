@@ -3005,6 +3005,127 @@ mod tests {
         Ok(())
     }
 
+    /// The legacy positional two-pass edit (used for every flavor except
+    /// networkd) must: skip a non-directive line without touching it, remove
+    /// a surplus existing directive that has no planned counterpart, and
+    /// replace a directive whose text changed — all in one pass.
+    #[test]
+    fn positional_apply_skips_removes_and_replaces() -> Result<(), String> {
+        let mut doc = NetworkModule::parse(
+            "auto eth0\niface eth0 inet static\n\taddress 10.0.0.5/24\n\taddress 10.0.0.6/24\n# keep me\n\tgateway 10.0.0.9\n",
+        )
+        .map_err(|e| e.to_string())?;
+        assert_eq!(detect_flavor(&doc), super::BackendFlavor::Ifupdown);
+        let model = super::Model {
+            interfaces: vec![super::Interface {
+                name: "eth0".to_owned(),
+                dhcp_v4: false,
+                dhcp_v6: false,
+                addresses: vec!["10.0.0.7/24".to_owned()],
+                gateway_v4: Some("10.0.0.9".to_owned()),
+                gateway_v6: None,
+                dns: Vec::new(),
+                routes: Vec::new(),
+                vlan: None,
+                bridge: None,
+            }],
+        };
+        let report = NetworkModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        assert_eq!(report.removed, 1, "the surplus address line is removed");
+        assert_eq!(
+            report.changed_lines, 2,
+            "the kept address and gateway lines are both rewritten"
+        );
+        assert_eq!(report.added, 0);
+        let rendered = NetworkModule::render(&doc);
+        assert!(
+            rendered.contains("# keep me"),
+            "the comment line is not a directive and must survive verbatim: {rendered:?}"
+        );
+        assert!(rendered.contains("10.0.0.7/24"));
+        assert!(!rendered.contains("10.0.0.5/24"));
+        assert!(!rendered.contains("10.0.0.6/24"));
+        Ok(())
+    }
+
+    /// A directive-shaped line that appears before any recognised networkd
+    /// section header is not "in" any section, so the section-aware editor
+    /// must leave it exactly as it found it instead of pairing or removing
+    /// it.
+    #[test]
+    fn networkd_sections_leave_a_headerless_directive_verbatim() -> Result<(), String> {
+        let mut doc = NetworkModule::parse("DHCP=yes\n[Match]\nName=eth0\n\n[Network]\nDHCP=yes\n")
+            .map_err(|e| e.to_string())?;
+        let mut model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        model.interfaces[0].dhcp_v4 = false;
+        model.interfaces[0].dhcp_v6 = false;
+        NetworkModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let rendered = NetworkModule::render(&doc);
+        assert!(
+            rendered.starts_with("DHCP=yes\n"),
+            "the headerless line must survive untouched: {rendered:?}"
+        );
+        assert!(rendered.contains("DHCP=no"));
+        Ok(())
+    }
+
+    /// An existing directive inside a managed section that the new model no
+    /// longer wants (no planned counterpart in its scope group) is removed,
+    /// not left behind or overwritten.
+    #[test]
+    fn networkd_sections_remove_an_existing_directive_with_no_planned_partner() -> Result<(), String>
+    {
+        let mut doc =
+            NetworkModule::parse("[Match]\nName=eth0\n\n[Network]\nDHCP=yes\nAddress=1.2.3.4/24\n")
+                .map_err(|e| e.to_string())?;
+        let mut model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        assert_eq!(model.interfaces[0].addresses, vec!["1.2.3.4/24".to_owned()]);
+        model.interfaces[0].addresses.clear();
+        let report = NetworkModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        assert!(report.removed > 0);
+        let rendered = NetworkModule::render(&doc);
+        assert!(!rendered.contains("1.2.3.4/24"));
+        let back = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        assert!(back.interfaces[0].addresses.is_empty());
+        Ok(())
+    }
+
+    /// A surplus planned directive whose group has no existing line at all
+    /// (so its search for a placed predecessor exhausts every earlier
+    /// planned index without a match) goes to the end-of-file buffer; one
+    /// whose search finds an already-placed predecessor is spliced in right
+    /// after it, shifting every later placement along. Both paths run in the
+    /// same edit here, and the resulting reorder does not read back to the
+    /// same model, which the section-aware editor must refuse rather than
+    /// silently accept.
+    #[test]
+    fn networkd_sections_surplus_without_a_predecessor_refuses_a_lossy_reorder()
+    -> Result<(), String> {
+        let mut doc =
+            NetworkModule::parse("[Network]\nDHCP=no\nDNS=1.1.1.1\n").map_err(|e| e.to_string())?;
+        let model = super::Model {
+            interfaces: vec![super::Interface {
+                name: "eth0".to_owned(),
+                dhcp_v4: false,
+                dhcp_v6: false,
+                addresses: vec!["10.0.0.9/24".to_owned()],
+                gateway_v4: None,
+                gateway_v6: None,
+                dns: vec!["1.1.1.1".to_owned()],
+                routes: Vec::new(),
+                vlan: None,
+                bridge: None,
+            }],
+        };
+        assert_eq!(detect_flavor(&doc), super::BackendFlavor::Networkd);
+        let err = NetworkModule::apply(&mut doc, &model);
+        assert!(
+            matches!(&err, Err(super::EditError::Unsupported { message }) if message.contains("round-trip")),
+            "expected a round-trip refusal, got {err:?}"
+        );
+        Ok(())
+    }
+
     #[test]
     fn apply_edits_all_four_flavors() -> Result<(), String> {
         // networkd edit
@@ -3316,6 +3437,16 @@ mod tests {
             })
         );
         assert_eq!(vlan9.dns, vec!["9.9.9.9".to_owned()]);
+
+        // A bare `-` list item under a block `addresses:` is blank and must
+        // be skipped, not pushed as an empty address.
+        let src5 = "network:\n  version: 2\n  ethernets:\n    eth2:\n      addresses:\n        -\n        - 10.0.0.5/24\n";
+        let doc5 = NetworkModule::parse(src5).map_err(|e| e.to_string())?;
+        let model5 = NetworkModule::to_model(&doc5).map_err(|e| e.to_string())?;
+        assert_eq!(
+            model5.interfaces[0].addresses,
+            vec!["10.0.0.5/24".to_owned()]
+        );
         Ok(())
     }
 
@@ -3583,6 +3714,114 @@ mod tests {
         Ok(())
     }
 
+    /// `render_netplan` iterates every ethernet and every VLAN interface in
+    /// turn; each one independently decides whether it has routes/addresses
+    /// to render. A model mixing an interface that has them with one that
+    /// does not, in both sections, exercises the "nothing to render for this
+    /// one" fall-through for the second interface in each loop.
+    #[test]
+    fn render_netplan_handles_interfaces_with_and_without_extras() -> Result<(), String> {
+        let model = super::Model {
+            interfaces: vec![
+                super::Interface {
+                    name: "eth0".to_owned(),
+                    dhcp_v4: false,
+                    dhcp_v6: false,
+                    addresses: vec!["10.0.0.2/24".to_owned()],
+                    gateway_v4: None,
+                    gateway_v6: None,
+                    dns: Vec::new(),
+                    routes: vec![super::Route {
+                        to: "10.0.0.0/24".to_owned(),
+                        via: "10.0.0.1".to_owned(),
+                    }],
+                    vlan: None,
+                    bridge: None,
+                },
+                super::Interface {
+                    name: "eth1".to_owned(),
+                    dhcp_v4: true,
+                    dhcp_v6: false,
+                    addresses: Vec::new(),
+                    gateway_v4: None,
+                    gateway_v6: None,
+                    dns: Vec::new(),
+                    routes: Vec::new(),
+                    vlan: None,
+                    bridge: None,
+                },
+                super::Interface {
+                    name: "vlan10".to_owned(),
+                    dhcp_v4: false,
+                    dhcp_v6: false,
+                    addresses: vec!["10.10.10.2/24".to_owned()],
+                    gateway_v4: None,
+                    gateway_v6: None,
+                    dns: Vec::new(),
+                    routes: Vec::new(),
+                    vlan: Some(super::Vlan {
+                        link: "eth0".to_owned(),
+                        id: 10,
+                    }),
+                    bridge: None,
+                },
+                super::Interface {
+                    name: "vlan20".to_owned(),
+                    dhcp_v4: true,
+                    dhcp_v6: false,
+                    addresses: Vec::new(),
+                    gateway_v4: None,
+                    gateway_v6: None,
+                    dns: Vec::new(),
+                    routes: Vec::new(),
+                    vlan: Some(super::Vlan {
+                        link: "eth0".to_owned(),
+                        id: 20,
+                    }),
+                    bridge: None,
+                },
+            ],
+        };
+        let lines = super::render_netplan(&model).map_err(|e| e.to_string())?;
+        // eth0 (has routes) and vlan10 (has addresses) still render them.
+        assert!(lines.iter().any(|l| l == "      routes:"));
+        assert!(lines.iter().any(|l| l == "        - 10.10.10.2/24"));
+        // eth1 has no routes and vlan20 has no addresses: each interface's
+        // stanza ends right at the next interface's, with nothing in between.
+        let eth1_pos = lines
+            .iter()
+            .position(|l| l == "    eth1:")
+            .ok_or("eth1 missing")?;
+        let vlan10_pos = lines
+            .iter()
+            .position(|l| l == "    vlan10:")
+            .ok_or("vlan10 missing")?;
+        assert_eq!(
+            &lines[eth1_pos..vlan10_pos],
+            &[
+                "    eth1:".to_owned(),
+                "      dhcp4: true".to_owned(),
+                "      dhcp6: false".to_owned(),
+                "  vlans:".to_owned(),
+            ]
+        );
+        let vlan20_pos = lines
+            .iter()
+            .position(|l| l == "    vlan20:")
+            .ok_or("vlan20 missing")?;
+        assert_eq!(
+            &lines[vlan20_pos..],
+            &[
+                "    vlan20:".to_owned(),
+                "      id: 20".to_owned(),
+                "      link: eth0".to_owned(),
+                "      dhcp4: true".to_owned(),
+                "      dhcp6: false".to_owned(),
+            ]
+        );
+        Ok(())
+    }
+
     #[test]
     fn netplan_via_list_items_and_pending_routes() -> Result<(), String> {
         // `- via:` list items complete a pending `- to:`; when no route exists
@@ -3759,11 +3998,9 @@ mod tests {
         iface.dns = vec!["8.8.8.8 1.1.1.1".to_owned()];
         cases.push(iface);
         for iface in cases {
+            let result = super::check_interface(&iface);
             assert!(
-                matches!(
-                    super::check_interface(&iface),
-                    Err(super::EditError::Unsupported { .. })
-                ),
+                matches!(result, Err(super::EditError::Unsupported { .. })),
                 "{iface:?}"
             );
         }

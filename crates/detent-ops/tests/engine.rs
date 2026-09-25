@@ -1063,6 +1063,38 @@ fn apply_refuses_a_stale_expected_hash() -> TestResult {
 }
 
 #[test]
+fn apply_refuses_a_candidate_a_declared_check_rejects() -> TestResult {
+    // No hooks are wired up, so the declared check cannot run at all: `apply`
+    // must fail closed on that, exactly as it does on an outright failure.
+    let mut fx = harness(
+        b"v1\n",
+        Setup {
+            shape: Shape {
+                check: true,
+                ..Shape::default()
+            },
+            ..Setup::default()
+        },
+    )?;
+    let err = fx.run(apply("v2\n", None));
+    assert!(matches!(
+        err,
+        Err(OpsError::CheckFailed { ref program, .. }) if program == "/nonexistent/detent-ops-check"
+    ));
+    // Nothing was written: the target and its content are untouched.
+    assert_eq!(fx.contents()?, "v1\n");
+
+    let records = fx.records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records.get(1).map(|r| r.result), Some(AuditResult::Error));
+    assert_eq!(
+        records.get(1).and_then(|r| r.error_id.clone()),
+        Some("ops-check-failed".to_owned())
+    );
+    fx.finish()
+}
+
+#[test]
 fn apply_fails_when_the_target_cannot_be_read() -> TestResult {
     let mut fx = harness(b"v1\n", Setup::default())?;
     std::fs::remove_file(&fx.target)?;
