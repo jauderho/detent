@@ -903,6 +903,23 @@ pub fn load_acme(cert_dir: &Path) -> Result<Option<CertifiedKeyPair>, TlsError> 
     Ok(pair.to_certified_key().ok().map(|_| pair))
 }
 
+/// The certificate the listener actually serves: a stored ACME chain when
+/// present, otherwise the bootstrap pair.
+///
+/// Shared by `serve` (to build the listener) and `restart_and_check` (to pin
+/// the health probe). Preferring ACME here avoids H19 where the probe pinned
+/// the bootstrap cert while `serve` presented the ACME chain.
+///
+/// # Errors
+///
+/// [`TlsError::Read`] when an existing file cannot be read.
+pub fn serving_pair(cert_dir: &Path) -> Result<Option<CertifiedKeyPair>, TlsError> {
+    if let Some(pair) = load_acme(cert_dir)? {
+        return Ok(Some(pair));
+    }
+    load_bootstrap(cert_dir)
+}
+
 /// Make sure `cert_dir` grants nothing to group or other, whether this call
 /// created it or found it.
 ///

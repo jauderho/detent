@@ -690,7 +690,7 @@ fn restart_and_check(config_path: &std::path::Path) -> RestartOutcome {
     // Capture the expected serving certificate before the restart. Loading it
     // afterwards would let a replacement certificate become the pin.
     let cert_dir = &config.tls.cert_dir;
-    let cert = match detent_web::tls::load_bootstrap(cert_dir) {
+    let cert = match detent_web::tls::serving_pair(cert_dir) {
         Ok(Some(pair)) => pair.cert_der().to_vec(),
         Ok(None) => {
             return RestartOutcome::Unhealthy(format!(
