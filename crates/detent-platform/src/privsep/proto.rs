@@ -816,34 +816,65 @@ mod tests {
         ]
     }
 
-    #[allow(clippy::too_many_lines)]
-    fn every_response() -> Vec<Response> {
+    fn hello_ack() -> Response {
+        Response::HelloAck(HelloAck {
+            proto: PROTO_VERSION,
+            modules: vec![ModuleInfo {
+                id: ModuleId(0),
+                name: "hosts".to_owned(),
+                commit_confirm: false,
+            }],
+            targets: vec![TargetInfo {
+                id: TargetId(0),
+                module: ModuleId(0),
+                path: "/etc/hosts".to_owned(),
+                kind: PathKind::File,
+            }],
+            checks: vec![CheckInfo {
+                id: CheckId(0),
+                module: ModuleId(0),
+                program: "/usr/sbin/chronyd".to_owned(),
+            }],
+            bindings: vec![BindingInfo {
+                id: BindingId(0),
+                module: ModuleId(0),
+                unit: "chronyd.service".to_owned(),
+                actions: vec![ServiceAction::Restart, ServiceAction::Reload],
+            }],
+        })
+    }
+
+    fn every_error_response() -> Vec<Response> {
         vec![
-            Response::HelloAck(HelloAck {
-                proto: PROTO_VERSION,
-                modules: vec![ModuleInfo {
-                    id: ModuleId(0),
-                    name: "hosts".to_owned(),
-                    commit_confirm: false,
-                }],
-                targets: vec![TargetInfo {
-                    id: TargetId(0),
-                    module: ModuleId(0),
-                    path: "/etc/hosts".to_owned(),
-                    kind: PathKind::File,
-                }],
-                checks: vec![CheckInfo {
-                    id: CheckId(0),
-                    module: ModuleId(0),
-                    program: "/usr/sbin/chronyd".to_owned(),
-                }],
-                bindings: vec![BindingInfo {
-                    id: BindingId(0),
-                    module: ModuleId(0),
-                    unit: "chronyd.service".to_owned(),
-                    actions: vec![ServiceAction::Restart, ServiceAction::Reload],
-                }],
+            Response::Error(ProtoError::VersionMismatch {
+                expected: 1,
+                got: 9,
             }),
+            Response::Error(ProtoError::HandshakeRequired),
+            Response::Error(ProtoError::UnknownId {
+                kind: IdKind::Target,
+                id: 42,
+            }),
+            Response::Error(ProtoError::ActionNotAllowed),
+            Response::Error(ProtoError::Conflict {
+                expected: digest(),
+                actual: None,
+            }),
+            Response::Error(ProtoError::Conflict {
+                expected: digest(),
+                actual: Some(digest()),
+            }),
+            Response::Error(ProtoError::CommitPending(CommitId(3))),
+            Response::Error(ProtoError::CommitExpired(CommitId(4))),
+            Response::Error(ProtoError::Unsupported("mount".to_owned())),
+            Response::Error(ProtoError::Unavailable("no service manager".to_owned())),
+            Response::Error(ProtoError::Io("openat failed".to_owned())),
+        ]
+    }
+
+    fn every_response() -> Vec<Response> {
+        let mut responses = vec![
+            hello_ack(),
             Response::Target(TargetContents {
                 target: TargetId(0),
                 bytes: b"127.0.0.1 localhost\n".to_vec(),
@@ -890,36 +921,15 @@ mod tests {
                 commit: CommitId(1),
             },
             Response::ShuttingDown,
-            Response::Error(ProtoError::VersionMismatch {
-                expected: 1,
-                got: 9,
-            }),
-            Response::Error(ProtoError::HandshakeRequired),
-            Response::Error(ProtoError::UnknownId {
-                kind: IdKind::Target,
-                id: 42,
-            }),
-            Response::Error(ProtoError::ActionNotAllowed),
-            Response::Error(ProtoError::Conflict {
-                expected: digest(),
-                actual: None,
-            }),
-            Response::Error(ProtoError::Conflict {
-                expected: digest(),
-                actual: Some(digest()),
-            }),
-            Response::Error(ProtoError::CommitPending(CommitId(3))),
-            Response::Error(ProtoError::CommitExpired(CommitId(4))),
-            Response::Error(ProtoError::Unsupported("mount".to_owned())),
-            Response::Error(ProtoError::Unavailable("no service manager".to_owned())),
-            Response::Error(ProtoError::Io("openat failed".to_owned())),
             Response::RolledBack {
                 commit: CommitId(1),
                 restored: 2,
             },
             Response::Pending(Some(CommitId(3))),
             Response::Pending(None),
-        ]
+        ];
+        responses.extend(every_error_response());
+        responses
     }
 
     #[test]
