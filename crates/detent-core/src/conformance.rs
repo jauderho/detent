@@ -393,27 +393,88 @@ macro_rules! module_conformance {
 
 
 
+            /// Source text for the property tests: up to twenty lines, each
+            /// ended by `\n`, `\r\n` or nothing, so line structure and mixed
+            /// terminators are exercised.
+            fn conformance_src_strategy()
+            -> impl ::proptest::strategy::Strategy<Value = ::std::string::String> {
+                ::proptest::strategy::Strategy::prop_map(
+                    ::proptest::collection::vec("[^\n]*(\n|\r\n)?", 0..20),
+                    |lines| lines.concat(),
+                )
+            }
+
+            #[test]
+            fn property_inputs_include_newlines() {
+                use ::proptest::strategy::{Strategy as _, ValueTree as _};
+                let mut runner = ::proptest::test_runner::TestRunner::deterministic();
+                let (mut lf, mut crlf) = (false, false);
+                for _ in 0..256 {
+                    let Ok(tree) = conformance_src_strategy().new_tree(&mut runner) else {
+                        continue;
+                    };
+                    let src = tree.current();
+                    lf |= src.contains('\n');
+                    crlf |= src.contains("\r\n");
+                }
+                assert!(lf && crlf, "generated sources lack line breaks: lf={lf} crlf={crlf}");
+            }
+
+            /// Invariants 3 and 4 skip inputs they cannot use; this counts the
+            /// generated cases that really ran, so a strategy that never
+            /// produces a usable input fails instead of passing vacuously.
+            #[test]
+            fn invariants_3_and_4_run_on_generated_inputs() {
+                use ::proptest::strategy::{Strategy as _, ValueTree as _};
+                let mut runner = ::proptest::test_runner::TestRunner::deterministic();
+                let (mut edits, mut rerenders) = (0_usize, 0_usize);
+                for _ in 0..256 {
+                    let (Ok(src), Ok(model)) = (
+                        conformance_src_strategy().new_tree(&mut runner),
+                        ($strategy).new_tree(&mut runner),
+                    ) else {
+                        continue;
+                    };
+                    let (src, model) = (src.current(), model.current());
+                    let exercised = $crate::conformance::Exercised::Yes;
+                    if $crate::conformance::check_edit_fidelity::<$module>(&src, &model)
+                        == Ok(exercised)
+                    {
+                        edits = edits.saturating_add(1);
+                    }
+                    if $crate::conformance::check_idempotent::<$module>(&src, &model)
+                        == Ok(exercised)
+                    {
+                        rerenders = rerenders.saturating_add(1);
+                    }
+                }
+                assert!(
+                    edits > 0 && rerenders > 0,
+                    "no generated case was exercised: edits={edits} rerenders={rerenders}"
+                );
+            }
+
             ::proptest::proptest! {
                 #[test]
-                fn invariant_1_render_parse_roundtrip_prop(src in ".*") {
+                fn invariant_1_render_parse_roundtrip_prop(src in conformance_src_strategy()) {
                     let r = $crate::conformance::check_render_parse_roundtrip::<$module>(&src);
                     ::proptest::prop_assert_eq!(r, Ok(()));
                 }
 
                 #[test]
-                fn invariant_2_apply_of_own_model_is_a_noop_prop(src in ".*") {
+                fn invariant_2_apply_of_own_model_is_a_noop_prop(src in conformance_src_strategy()) {
                     let r = $crate::conformance::check_apply_is_noop::<$module>(&src);
                     ::proptest::prop_assert!(r.is_ok());
                 }
 
                 #[test]
-                fn invariant_3_edit_fidelity_prop(src in ".*", model in $strategy) {
+                fn invariant_3_edit_fidelity_prop(src in conformance_src_strategy(), model in $strategy) {
                     let r = $crate::conformance::check_edit_fidelity::<$module>(&src, &model);
                     ::proptest::prop_assert!(r.is_ok());
                 }
 
                 #[test]
-                fn invariant_4_render_reparse_idempotence_prop(src in ".*", model in $strategy) {
+                fn invariant_4_render_reparse_idempotence_prop(src in conformance_src_strategy(), model in $strategy) {
                     let r = $crate::conformance::check_idempotent::<$module>(&src, &model);
                     ::proptest::prop_assert!(r.is_ok());
                 }
