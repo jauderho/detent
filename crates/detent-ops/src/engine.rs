@@ -512,7 +512,6 @@ impl OpsEngine {
 
     // -- mutating operations -------------------------------------------------
 
-    #[allow(clippy::too_many_lines)]
     fn apply(
         &mut self,
         id: &str,
@@ -615,11 +614,7 @@ impl OpsEngine {
             None
         };
         if commit_required && !receipt.backed_up {
-            if let Some(commit) = commit.as_ref()
-                && self.client.rollback_commit(commit.commit_id).is_ok()
-            {
-                self.pending_commit = None;
-            }
+            self.discard_commit(commit.as_ref());
             return Err(OpsError::NoBackup);
         }
 
@@ -627,17 +622,11 @@ impl OpsEngine {
         //    whenever an action was asked for.
         let service = match (service_action, wiring.binding.as_ref()) {
             (Some(action), Some(&(binding, ref affected))) => {
-                match self.act(binding, &affected.unit, action) {
-                    Ok(service) => Some(service),
-                    Err(err) => {
-                        if let Some(commit) = commit.as_ref()
-                            && self.client.rollback_commit(commit.commit_id).is_ok()
-                        {
-                            self.pending_commit = None;
-                        }
-                        return Err(err);
-                    }
+                let acted = self.act(binding, &affected.unit, action);
+                if acted.is_err() {
+                    self.discard_commit(commit.as_ref());
                 }
+                Some(acted?)
             }
             _ => None,
         };
@@ -652,6 +641,16 @@ impl OpsEngine {
             service,
             commit,
         })
+    }
+
+    /// Roll back `commit`, if one was armed, and forget it once the monitor
+    /// confirms. A failed rollback leaves it pending for the monitor's timer.
+    fn discard_commit(&mut self, commit: Option<&PendingCommit>) {
+        if let Some(commit) = commit
+            && self.client.rollback_commit(commit.commit_id).is_ok()
+        {
+            self.pending_commit = None;
+        }
     }
 
     /// Start the monitor's commit-confirm timer and describe the window.
