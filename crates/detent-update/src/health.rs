@@ -66,26 +66,88 @@ pub fn wait_healthy(
 
 /// A TLS configuration trusting exactly one certificate.
 fn client_config(pinned_cert_der: &[u8]) -> Result<Arc<rustls::ClientConfig>, UpdateError> {
-    let mut roots = rustls::RootCertStore::empty();
-    roots
-        .add(rustls_pki_types::CertificateDer::from(
-            pinned_cert_der.to_vec(),
-        ))
+    use rustls::pki_types::CertificateDer;
+
+    // The pinned cert must be a parseable certificate; otherwise there is no
+    // way to check health and that must fail closed with the same wording the
+    // previous `RootCertStore::add` path used.
+    let cert = CertificateDer::from(pinned_cert_der.to_vec());
+    if webpki::EndEntityCert::try_from(&cert).is_err() {
+        return Err(UpdateError::Unhealthy {
+            waited_secs: 0,
+            reason: "the serving certificate is not usable as a trust anchor: BadEncoding"
+                .to_owned(),
+        });
+    }
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> = Arc::new(PinnedVerifier {
+        pinned: pinned_cert_der.to_vec(),
+        provider: Arc::clone(&provider),
+    });
+    let config = rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
+        .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|err| UpdateError::Unhealthy {
             waited_secs: 0,
-            reason: format!("the serving certificate is not usable as a trust anchor: {err}"),
-        })?;
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_protocol_versions(&[&rustls::version::TLS13])
-    .map_err(|err| UpdateError::Unhealthy {
-        waited_secs: 0,
-        reason: format!("TLS 1.3 client config: {err}"),
-    })?
-    .with_root_certificates(roots)
-    .with_no_client_auth();
+            reason: format!("TLS 1.3 client config: {err}"),
+        })?
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
     Ok(Arc::new(config))
+}
+
+#[derive(Debug)]
+struct PinnedVerifier {
+    pinned: Vec<u8>,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+}
+
+impl rustls::client::danger::ServerCertVerifier for PinnedVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        if end_entity.as_ref() == self.pinned.as_slice() {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::UnknownIssuer,
+            ))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::General("TLS 1.2 not offered".into()))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
 }
 
 /// One `GET /healthz`. `Ok(())` only on a 2xx.
@@ -231,6 +293,78 @@ mod tests {
         )
         .expect_err("garbage is not a trust anchor");
         assert!(err.to_string().contains("trust anchor"), "{err}");
+    }
+
+    #[test]
+    fn a_ca_issued_leaf_without_localhost_is_healthy_when_pinned() {
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
+        // CA that signs the leaf.
+        let mut ca_params = CertificateParams::new(Vec::default()).expect("ca params");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params
+            .key_usages
+            .push(rcgen::KeyUsagePurpose::KeyCertSign);
+        ca_params.key_usages.push(rcgen::KeyUsagePurpose::CrlSign);
+        let ca_key = KeyPair::generate().expect("ca key");
+        let ca_cert = ca_params.self_signed(&ca_key).expect("ca cert");
+        let _ = ca_cert.der().to_vec();
+        let issuer = Issuer::new(ca_params, ca_key);
+        // Leaf for a public name, deliberately without localhost.
+        let mut leaf_params =
+            CertificateParams::new(vec!["example.com".to_owned()]).expect("leaf params");
+        leaf_params.is_ca = IsCa::ExplicitNoCa;
+        leaf_params
+            .extended_key_usages
+            .push(rcgen::ExtendedKeyUsagePurpose::ServerAuth);
+        let leaf_key = KeyPair::generate().expect("leaf key");
+        let leaf_cert = leaf_params
+            .signed_by(&leaf_key, &issuer)
+            .expect("leaf cert");
+        let leaf_der = leaf_cert.der().to_vec();
+        let key = rustls_pki_types::PrivateKeyDer::Pkcs8(leaf_key.serialize_der().into());
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("TLS 1.3 server config")
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![rustls_pki_types::CertificateDer::from(leaf_der.clone())],
+            key,
+        )
+        .expect("server config");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let handle = std::thread::spawn(move || {
+            let Ok((mut socket, _)) = listener.accept() else {
+                return;
+            };
+            let Ok(mut session) = rustls::ServerConnection::new(Arc::new(config)) else {
+                return;
+            };
+            let mut stream = rustls::Stream::new(&mut session, &mut socket);
+            let mut seen = Vec::new();
+            let mut buf = [0_u8; 256];
+            loop {
+                let Ok(n) = stream.read(&mut buf) else {
+                    return;
+                };
+                if n == 0 {
+                    return;
+                }
+                seen.extend_from_slice(buf.get(..n).unwrap_or_default());
+                if seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            let _ = stream.flush();
+        });
+        // Pinned to the CA-issued leaf's DER: the probe must accept it even
+        // though the name is not localhost and the issuer is not a trust
+        // anchor in the webpki sense. Pin equality is the only check.
+        assert!(wait_healthy(addr, &leaf_der, Duration::ZERO).is_ok());
+        let _ = handle.join();
     }
 
     #[test]

@@ -505,16 +505,9 @@ async fn bind_web_server(
     // A renewed pair survives a restart: prefer the stored ACME chain over
     // the bootstrap pair, whose fingerprint stays the TOFU anchor until the
     // first renewal lands.
-    let stored_acme = match detent_web::load_acme(&config.tls.cert_dir) {
-        Ok(pair) => pair,
-        Err(err) => {
-            tls_failed(&err, renderer, streams);
-            return None;
-        }
-    };
-    let cert = match stored_acme {
-        Some(pair) => pair,
-        None => match detent_web::load_or_bootstrap(
+    let cert = match detent_web::serving_pair(&config.tls.cert_dir) {
+        Ok(Some(pair)) => pair,
+        Ok(None) => match detent_web::load_or_bootstrap(
             &config.tls.cert_dir,
             hostnames,
             config.tls.bootstrap == detent_web::Bootstrap::Acme,
@@ -525,6 +518,10 @@ async fn bind_web_server(
                 return None;
             }
         },
+        Err(err) => {
+            tls_failed(&err, renderer, streams);
+            return None;
+        }
     };
     // Trust-on-first-use: this is the operator's only way to verify the
     // bootstrap certificate, so it must reach the journal every start, not
