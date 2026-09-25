@@ -78,14 +78,6 @@ impl AuthState {
         users.attach_sessions(std::sync::Arc::clone(&sessions));
         let tokens = std::sync::Arc::new(TokenStore::load(state_root)?);
         let limiter = std::sync::Arc::new(RateLimiter::new(auth.max_failures));
-        if tokio::runtime::Handle::try_current().is_ok() {
-            drop(crate::auth::session::spawn_sweeper(
-                &sessions,
-                &tokens,
-                &limiter,
-                crate::auth::session::SWEEP_INTERVAL,
-            ));
-        }
         Ok(Self {
             users,
             sessions,
@@ -96,6 +88,26 @@ impl AuthState {
             audit: Box::new(FileAuthAudit::under_state_root(state_root)),
             totp_required: auth.totp_required,
         })
+    }
+
+    /// Start the background sweep of expired sessions, expired tokens and
+    /// idle limiter buckets. It stops on its own once every store is dropped.
+    ///
+    /// Call it once the runtime that will serve requests exists: `open` runs
+    /// before `serve` builds that runtime, so it cannot start the sweep
+    /// itself (STAGE3 L-WEB16).
+    ///
+    /// # Panics
+    ///
+    /// When called outside a Tokio runtime.
+    #[must_use = "dropping the handle detaches the sweep; keep it to observe or abort it"]
+    pub fn start_sweeper(&self) -> tokio::task::JoinHandle<()> {
+        crate::auth::session::spawn_sweeper(
+            &self.sessions,
+            &self.tokens,
+            &self.limiter,
+            crate::auth::session::SWEEP_INTERVAL,
+        )
     }
 
     /// The same, with a caller-supplied audit sink.
@@ -386,6 +398,16 @@ mod tests {
         assert!(AuthState::open(&file, &AuthConfig::default(), 4096).is_err());
         // And the shorthand still works on a good root.
         assert!(test_state().is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_sweeper_keeps_running_once_started() -> R {
+        let fixture = test_state()?;
+        let sweeper = fixture.state.auth.start_sweeper();
+        tokio::task::yield_now().await;
+        assert!(!sweeper.is_finished(), "the sweep ended at once");
+        sweeper.abort();
         Ok(())
     }
 }
