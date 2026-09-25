@@ -4,6 +4,12 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-25 - H20 fuzz: network interface order is a validation error
+
+Owner decision (2026-09-25): `validate` flags interfaces that are not in name order (`network-interface-order`, Error). `to_model` reads interfaces back sorted by name, so only a sorted model survives apply unchanged (invariant 3). The fuzz edit target skips models with validation errors, so this closes crash `2c880b5d…` (interfaces `[XXXXXXXXX, Pl]`). UI/API consequence: a client must send interfaces in name order, or it gets this error.
+
+Verify: `interfaces_out_of_name_order_are_an_error` failed before the fix (no diagnostic) and passes after. `cargo test -p detent-module-network --all-features` 54 + 22 passed; the crash input exits 0; `fuzz_network_edit`, `fuzz_network_roundtrip` and `fuzz_network_parse` each ran 120 s clean. `bun run i18n:check` OK (272 ids). Workspace `cargo test --all-features --no-fail-fast`: 1911 passed, 1 failed (the known uid-0-only webadmin test).
+
 ## 2026-09-25 - H20 fuzz: network round-trip losses fixed
 
 A local run of all 29 fuzz targets for 60 s each at `675aca2` (as CI does) failed only `fuzz_network_edit` and `fuzz_network_roundtrip`. The CI artifact and full log were out of reach from the cloud container. Fixed in `crates/modules/network/src/lib.rs`:
