@@ -137,6 +137,11 @@ fn classify(raw: &str) -> LineKind {
 /// the rendered line does not parse back to the setting it came from, the edit
 /// would silently mean something else, so refuse it. Formats with quoting rules
 /// quote here instead of refusing, but must still re-parse-check the result.
+/// Beyond line breaks, reject every character the upstream parser treats as
+/// syntax in that position — comment markers, separators, section brackets,
+/// quotes, escapes and continuation characters — unless the format can quote
+/// it. A re-parse through *this* module's parser is not enough on its own: the
+/// upstream daemon's parser is the one that must not be confused.
 ///
 /// # Errors
 ///

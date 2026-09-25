@@ -80,6 +80,10 @@ jobs:
       # path of a build without `update` runs only here.
       - name: cargo test (detent-platform without update; ReplaceBinary fails closed)
         run: cargo test -p detent-platform --lib a_build_without_the_update_feature_refuses_a_valid_release
+      # STAGE3 L-MODA12: the copy-me recipe must still produce a module that
+      # formats, lints and tests clean. Runs on a throwaway copy of the tree.
+      - name: Instantiate the module template and test the copy
+        run: scripts/template-check.sh --verbose
       # D2': cargo itself never runs as root (root-owned target/ files broke
       # later unprivileged builds with EACCES). The test binary builds
       # unprivileged; only the binary runs under sudo.

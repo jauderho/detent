@@ -4,6 +4,12 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-25 - L-MODA12 module template is instantiated and tested in CI (STAGE3)
+
+The finding's premise is out of date: `_template` has been a workspace member (`detent-module-template`) since the exclude was dropped, so it compiles and tests with the workspace. The README still said it was excluded. What was really broken: the copy recipe kept the package name `detent-module-template`, so every copy failed with "two packages named `detent-module-template`". The recipe now also renames the package and crate names. `scripts/template-check.sh` (`--id`, `--keep`, `--dryrun`, `--verbose`) runs the recipe on a `git archive` copy of HEAD and checks the copy with fmt, clippy `-D warnings` and tests. CI runs it in the Rust job. The template's `render_line` TODO now says to reject every character the upstream parser treats as syntax, not only line breaks.
+
+Verify: the old recipe failed with the duplicate-package error. `scripts/template-check.sh -v` now passes (copy: 28 unit + 16 conformance). shellcheck 0; `shfmt -d -i 2 -ci` 0; `cargo test -p detent-module-template --all-features` passes.
+
 ## 2026-09-25 - L-MODB7 network conformance: routes, probes, renderer refusals (STAGE3)
 
 The two no-op `prop_filter`s are gone. The model strategy now generates 0–2 routes with a family-matched `via`. There are 21 new injection probes: route `to`/`via` with `;`, `$( )`, whitespace, `#`, `"`, `[ ]` and `=`, plus address, DNS, gateway, name and VLAN-link probes. Before the fix, `route_to_probe("0.0.0.0/0; reboot")` was accepted by networkd, netplan and ifupdown (`invariant_5_injection_probes_are_rejected` failed). Every other field probe was accepted too. The renderers now refuse bad values themselves: `check_route` checks that `to` is `default`, a CIDR or an IP, and that `via` is an IP (required on ifupdown's shell `up ip route add` line). `check_interface` enforces name, VLAN-link and bridge-member charset, CIDR addresses, per-family gateways and IP DNS servers. The line-break check runs first, so `\n\r\0` still map to `LineBreakInValue`. Render-before-mutate still holds. A file that already holds a refused value and equals the model is a no-op (invariant 2).
