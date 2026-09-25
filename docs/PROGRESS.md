@@ -4,6 +4,14 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-25 - L-MODB7 network conformance: routes, probes, renderer refusals (STAGE3)
+
+The two no-op `prop_filter`s are gone. The model strategy now generates 0–2 routes with a family-matched `via`. There are 21 new injection probes: route `to`/`via` with `;`, `$( )`, whitespace, `#`, `"`, `[ ]` and `=`, plus address, DNS, gateway, name and VLAN-link probes. Before the fix, `route_to_probe("0.0.0.0/0; reboot")` was accepted by networkd, netplan and ifupdown (`invariant_5_injection_probes_are_rejected` failed). Every other field probe was accepted too. The renderers now refuse bad values themselves: `check_route` checks that `to` is `default`, a CIDR or an IP, and that `via` is an IP (required on ifupdown's shell `up ip route add` line). `check_interface` enforces name, VLAN-link and bridge-member charset, CIDR addresses, per-family gateways and IP DNS servers. The line-break check runs first, so `\n\r\0` still map to `LineBreakInValue`. Render-before-mutate still holds. A file that already holds a refused value and equals the model is a no-op (invariant 2).
+
+Finding: L-MODB8 was marked done, but `render_nm` silently dropped routes. It now returns `Unsupported`, and the NM case of `renderers_round_trip_vlan_bridge_routes_per_backend` asserts that. Follow-ups (§12): `validate` does not flag the new name rule; a leading `-` in a name is allowed; `is_valid_cidr` accepts `+24`; a `vlan_id 0` document may break invariant 2 (unverified).
+
+Verify: `cargo test -p detent-module-network --all-features` 43 unit + 22 conformance passed; clippy `-p detent-module-network --all-targets --all-features -D warnings` 0; fmt 0. Implementor: Opus subagent; orchestrator reviewed the diff.
+
 ## 2026-09-25 - M16 verifier negative fixtures and honest SCT/SET claims (STAGE3)
 
 `gen-fixtures` mints `bad-body-sig` and `bad-body-key`. Each is a tlog body that disagrees with the envelope, with the inclusion proof and checkpoint valid over that body, so only body agreement can refuse it. It also mints `wrong-digest` (a validly signed bundle for another file). `bad-sct` is renamed `bad-checkpoint-sig`, which is what it corrupts. The rename landed by mistake in `216d326`; this commit updates its references. Existing fixture bytes are unchanged; the three new fixtures chain to the committed root. PLAN §2.9 and ADR-014 no longer claim SCT signature verification or Rekor SET verification. They now state what is checked: SCT list presence, inclusion proof plus signed checkpoint, body agreement, and statement digest.

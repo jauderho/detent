@@ -94,6 +94,21 @@ fn iface_name_strategy() -> impl Strategy<Value = String> {
     ]
 }
 
+/// A static route whose `via` is in the same family as its `to`.
+fn route_strategy() -> impl Strategy<Value = Route> {
+    cidr_strategy().prop_flat_map(|to| {
+        let via = if to.contains(':') {
+            ip_v6_strategy().boxed()
+        } else {
+            ip_v4_strategy().boxed()
+        };
+        via.prop_map(move |via| Route {
+            to: to.clone(),
+            via,
+        })
+    })
+}
+
 fn interface_strategy() -> impl Strategy<Value = Interface> {
     (
         iface_name_strategy(),
@@ -103,7 +118,7 @@ fn interface_strategy() -> impl Strategy<Value = Interface> {
         proptest::option::of(ip_v4_strategy()),
         proptest::option::of(ip_v6_strategy()),
         proptest::collection::vec(ip_strategy(), 0..=2),
-        Just(Vec::new()),
+        proptest::collection::vec(route_strategy(), 0..=2),
         proptest::strategy::Just(None),
         proptest::strategy::Just(None),
     )
@@ -132,33 +147,20 @@ fn interface_strategy() -> impl Strategy<Value = Interface> {
                 bridge,
             },
         )
-        .prop_filter("gateway inside subnet or no gateway", |iface| {
-            // Keep strategy valid-only: if gateway present but no addresses, warn not error, so allow.
-            // VLAN range already constrained. Duplicate names filtered at model level.
-            // Just ensure no injection.
-            !iface.name.contains(['\n', '\r', '\0'])
-        })
 }
 
 fn model_strategy() -> impl Strategy<Value = Model> {
     // 0–3 interfaces with unique names; filter duplicates to keep valid.
-    proptest::collection::vec(interface_strategy(), 0..=3)
-        .prop_map(|mut ifaces| {
-            // Deduplicate by name, keep first occurrence.
-            let mut seen = std::collections::BTreeSet::new();
-            ifaces.retain(|i| seen.insert(i.name.clone()));
-            // `to_model` collects interfaces through a `BTreeMap`, so the read
-            // back order is by name; a valid model must match that order for
-            // invariant 3 to hold on any backend.
-            ifaces.sort_by(|a, b| a.name.cmp(&b.name));
-            Model { interfaces: ifaces }
-        })
-        .prop_filter("valid model", |m| {
-            // Must be valid: no duplicate names (ensured), no injection, CIDR/IP already valid, vlan range valid.
-            // So accept all.
-            let _ = m;
-            true
-        })
+    proptest::collection::vec(interface_strategy(), 0..=3).prop_map(|mut ifaces| {
+        // Deduplicate by name, keep first occurrence.
+        let mut seen = std::collections::BTreeSet::new();
+        ifaces.retain(|i| seen.insert(i.name.clone()));
+        // `to_model` collects interfaces through a `BTreeMap`, so the read
+        // back order is by name; a valid model must match that order for
+        // invariant 3 to hold on any backend.
+        ifaces.sort_by(|a, b| a.name.cmp(&b.name));
+        Model { interfaces: ifaces }
+    })
 }
 
 fn name_probe(value: &str) -> Model {
@@ -249,6 +251,26 @@ fn route_to_probe(value: &str) -> Model {
     }
 }
 
+fn route_via_probe(value: &str) -> Model {
+    Model {
+        interfaces: vec![Interface {
+            name: "eth0".to_owned(),
+            dhcp_v4: false,
+            dhcp_v6: false,
+            addresses: vec![],
+            gateway_v4: None,
+            gateway_v6: None,
+            dns: vec![],
+            routes: vec![Route {
+                to: "10.0.0.0/24".to_owned(),
+                via: value.to_owned(),
+            }],
+            vlan: None,
+            bridge: None,
+        }],
+    }
+}
+
 fn vlan_link_probe(value: &str) -> Model {
     Model {
         interfaces: vec![Interface {
@@ -285,6 +307,30 @@ detent_core::module_conformance!(
         gateway_probe("a\nb"),
         route_to_probe("a\nb"),
         vlan_link_probe("a\nb"),
+        // Characters the upstream syntaxes treat as syntax: `;` and `$()`
+        // (shell, via ifupdown's `up` lines), whitespace (argv splitting),
+        // `#` (comments), `"` and `[`/`]` (YAML flow and INI headers), `=`.
+        route_to_probe("0.0.0.0/0; reboot"),
+        route_to_probe("$(reboot)"),
+        route_to_probe("10.0.0.0/24 dev eth1"),
+        route_to_probe("10.0.0.0/24#x"),
+        route_to_probe("\"10.0.0.0/24\""),
+        route_to_probe("[10.0.0.0/24]"),
+        route_to_probe("to=10.0.0.0/24"),
+        route_via_probe("192.168.1.1; reboot"),
+        route_via_probe("192.168.1.1 dev eth1"),
+        route_via_probe("192.168.1.1#x"),
+        route_via_probe("\"192.168.1.1\""),
+        route_via_probe("[192.168.1.1]"),
+        route_via_probe("via=192.168.1.1"),
+        address_probe("192.168.1.10/24 # x"),
+        address_probe("[192.168.1.10/24]"),
+        dns_probe("8.8.8.8, 1.1.1.1"),
+        dns_probe("8.8.8.8 1.1.1.1"),
+        gateway_probe("192.168.1.1; reboot"),
+        name_probe("eth0:"),
+        name_probe("#eth0"),
+        vlan_link_probe("eth0 eth1"),
     ],
 );
 
