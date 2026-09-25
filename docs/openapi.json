@@ -998,7 +998,7 @@
           },
           "created": {
             "type": "boolean",
-            "description": "Whether the target did not exist before."
+            "description": "Whether the target did not exist before. Always `false`: apply never\ncreates a target and refuses a missing one."
           },
           "module": {
             "type": "string",

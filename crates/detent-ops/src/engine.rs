@@ -870,13 +870,15 @@ fn decode(bytes: &[u8], path: &str) -> Result<String, OpsError> {
     }
 }
 
-/// Turn a `ProtoError::Conflict` into the typed conflict error and everything
+/// Turn a `ProtoError::Conflict` into the typed conflict error, a
+/// `ProtoError::NotFound` into [`OpsError::TargetMissing`], and everything
 /// else into [`OpsError::Privsep`].
 fn map_client(err: ClientError) -> OpsError {
     match err {
         ClientError::Remote(ProtoError::Conflict { expected, actual }) => {
             OpsError::HashConflict { expected, actual }
         }
+        ClientError::Remote(ProtoError::NotFound) => OpsError::TargetMissing,
         other => OpsError::Privsep(other),
     }
 }
@@ -951,6 +953,10 @@ mod tests {
             id: 9,
         }));
         assert!(matches!(other, OpsError::Privsep(_)));
+        assert!(matches!(
+            map_client(ClientError::Remote(ProtoError::NotFound)),
+            OpsError::TargetMissing
+        ));
         assert!(matches!(
             map_client(ClientError::NotGreeted),
             OpsError::Privsep(_)

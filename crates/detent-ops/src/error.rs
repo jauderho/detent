@@ -83,6 +83,10 @@ pub enum OpsError {
     /// A commit-confirm apply was refused because its write had no backup.
     #[error("commit-confirm requires a retained backup")]
     NoBackup,
+    /// The managed file does not exist. Apply never creates a target; the
+    /// operator creates it (with its package or by hand) first.
+    #[error("the target file does not exist")]
+    TargetMissing,
     /// The audit log could not be read.
     #[error(transparent)]
     Audit(#[from] AuditError),
@@ -116,6 +120,7 @@ impl OpsError {
             Self::AuditUnavailable(_) => MessageId::new("ops-audit-unavailable"),
             Self::CommitPending(_) => MessageId::new("ops-commit-pending"),
             Self::NoBackup => MessageId::new("ops-no-backup"),
+            Self::TargetMissing => MessageId::new("ops-target-missing"),
             Self::Unsupported { .. } => MessageId::new("ops-unsupported"),
         }
     }
@@ -203,6 +208,7 @@ mod tests {
             ),
             (OpsError::CommitPending(CommitId(7)), "ops-commit-pending"),
             (OpsError::NoBackup, "ops-no-backup"),
+            (OpsError::TargetMissing, "ops-target-missing"),
             (
                 OpsError::from(AuditError::Encode("bad".to_owned())),
                 "ops-audit-failed",

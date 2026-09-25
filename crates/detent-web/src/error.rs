@@ -180,10 +180,10 @@ impl From<OpsError> for ApiError {
             // optimistic-concurrency conflict, not a client mistake.
             OpsError::HashConflict { .. } => Self::new(StatusCode::CONFLICT, message_id),
             // The module exists but declares no writable target or no service
-            // binding on this host — a module/allow-list mismatch, so the
-            // requested action conflicts with what the module can do here
-            // rather than naming something absent.
-            OpsError::NoTarget { .. } | OpsError::NoService { .. } => {
+            // binding on this host — a module/allow-list mismatch — or its
+            // file is missing: the requested action conflicts with the host's
+            // state rather than naming an absent API resource.
+            OpsError::NoTarget { .. } | OpsError::NoService { .. } | OpsError::TargetMissing => {
                 Self::new(StatusCode::CONFLICT, message_id)
             }
             // A stale or already-settled commit id: see `is_unknown_wire_id`.
@@ -388,6 +388,7 @@ mod tests {
                 },
                 StatusCode::CONFLICT,
             ),
+            (OpsError::TargetMissing, StatusCode::CONFLICT),
             (
                 // A stale or already-settled commit/backup id.
                 OpsError::from(ClientError::Remote(ProtoError::UnknownId {

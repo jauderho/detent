@@ -42,6 +42,7 @@ export const API_MESSAGE_IDS = [
   'ops-no-target',
   'ops-commit-pending',
   'ops-no-backup',
+  'ops-target-missing',
   'ops-privsep-failed',
   'ops-service-failed',
   'ops-unknown-module',
