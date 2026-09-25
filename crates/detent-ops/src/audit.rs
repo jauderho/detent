@@ -649,10 +649,8 @@ mod tests {
         std::fs::write(sink.path(), lines.join("\n") + "\n")?;
         assert!(matches!(sink.verify(), Err(AuditError::Chain(_))));
 
-        std::fs::write(
-            sink.path(),
-            format!("{}\n", lines.first().ok_or("three audit records")?),
-        )?;
+        let truncated = format!("{}\n", lines.first().ok_or("three audit records")?);
+        std::fs::write(sink.path(), truncated)?;
         assert!(matches!(sink.verify(), Ok(terminal) if terminal != anchor));
         Ok(())
     }
@@ -665,6 +663,90 @@ mod tests {
         raw.push_str("\n\n{ truncated\n");
         std::fs::write(sink.path(), raw)?;
         assert_eq!(sink.query(&AuditQuery::default())?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn verify_reports_invalid_json_missing_chain_and_a_broken_link() -> R {
+        let dir = tempfile::TempDir::new()?;
+
+        // Invariant 1: a line that is not valid JSON at all.
+        let not_json = FileAudit::new(dir.path().join("not-json.jsonl"));
+        std::fs::write(not_json.path(), "{ this is not json\n")?;
+        assert!(
+            matches!(not_json.verify(), Err(AuditError::Chain(msg)) if msg.contains("not valid JSON"))
+        );
+
+        // Invariant 2: valid JSON, but the record was never chained.
+        let no_chain = FileAudit::new(dir.path().join("no-chain.jsonl"));
+        let unchained = serde_json::to_string(&record("root", Some("hosts"), AuditResult::Ok))?;
+        std::fs::write(no_chain.path(), format!("{unchained}\n"))?;
+        assert!(
+            matches!(no_chain.verify(), Err(AuditError::Chain(msg)) if msg.contains("no chain metadata"))
+        );
+
+        // Invariant 3: two records, each independently the "first" of its own
+        // chain, so the second is never linked to the one before it.
+        let broken_link = FileAudit::new(dir.path().join("broken-link.jsonl"));
+        broken_link.record(&record("root", Some("hosts"), AuditResult::Ok))?;
+        let mut second = record("alice", Some("chrony"), AuditResult::Ok);
+        second.chain = Some(super::make_chain(&second, None)?);
+        let mut raw = std::fs::read_to_string(broken_link.path())?;
+        raw.push_str(&serde_json::to_string(&second)?);
+        raw.push('\n');
+        std::fs::write(broken_link.path(), raw)?;
+        assert!(matches!(
+            broken_link.verify(),
+            Err(AuditError::Chain(msg)) if msg.contains("not linked to its predecessor")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn verify_reports_a_non_notfound_io_error() -> R {
+        let dir = tempfile::TempDir::new()?;
+        // The path is a directory, not a file: reading it fails with an error
+        // other than `NotFound`.
+        let sink = FileAudit::new(dir.path());
+        assert!(matches!(sink.verify(), Err(AuditError::Io(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn record_treats_an_existing_empty_log_as_having_no_predecessor() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let sink = FileAudit::new(dir.path().join("audit.jsonl"));
+        std::fs::write(sink.path(), "   \n")?;
+        sink.record(&record("root", Some("hosts"), AuditResult::Ok))?;
+        let anchor = sink.verify()?;
+        assert_eq!(anchor.sequence, 1);
+        assert_eq!(anchor.prev, None);
+        Ok(())
+    }
+
+    #[test]
+    fn record_skips_creating_a_parent_when_the_path_has_none() {
+        // An empty path has no parent (unlike `/`, which fails to read as a
+        // file): `record` must skip `create_dir_all` and go straight on to
+        // fail at the open, not at the missing-parent check.
+        let sink = FileAudit::new("");
+        assert_eq!(sink.path().parent(), None);
+        assert!(matches!(
+            sink.record(&record("root", None, AuditResult::Ok)),
+            Err(AuditError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn query_with_a_zero_limit_returns_nothing() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let sink = FileAudit::new(dir.path().join("audit.jsonl"));
+        sink.record(&record("root", Some("hosts"), AuditResult::Ok))?;
+        let out = sink.query(&AuditQuery {
+            limit: Some(0),
+            ..AuditQuery::default()
+        })?;
+        assert!(out.is_empty());
         Ok(())
     }
 
