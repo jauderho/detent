@@ -343,7 +343,16 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "module-hosts"))]
+    #[cfg(not(any(
+        feature = "module-hosts",
+        feature = "module-resolver",
+        feature = "module-chrony",
+        feature = "module-mounts",
+        feature = "module-nfs",
+        feature = "module-samba",
+        feature = "module-dhcp",
+        feature = "module-network"
+    )))]
     #[test]
     fn the_registry_is_empty_without_any_module_feature() {
         assert!(modules().is_empty());
