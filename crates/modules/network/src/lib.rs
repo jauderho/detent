@@ -3704,6 +3704,31 @@ mod tests {
     /// does not, in both sections, exercises the "nothing to render for this
     /// one" fall-through for the second interface in each loop.
     #[test]
+    fn render_netplan_without_a_plain_ethernet_writes_no_ethernets_key() -> Result<(), String> {
+        let model = super::Model {
+            interfaces: vec![super::Interface {
+                name: "vlan10".to_owned(),
+                dhcp_v4: true,
+                dhcp_v6: false,
+                addresses: Vec::new(),
+                gateway_v4: None,
+                gateway_v6: None,
+                dns: Vec::new(),
+                routes: Vec::new(),
+                vlan: Some(super::Vlan {
+                    link: "eth0".to_owned(),
+                    id: 10,
+                }),
+                bridge: None,
+            }],
+        };
+        let lines = super::render_netplan(&model).map_err(|e| e.to_string())?;
+        assert!(!lines.iter().any(|l| l == "  ethernets:"), "{lines:?}");
+        assert!(lines.iter().any(|l| l == "  vlans:"), "{lines:?}");
+        Ok(())
+    }
+
+    #[test]
     fn render_netplan_handles_interfaces_with_and_without_extras() -> Result<(), String> {
         let model = super::Model {
             interfaces: vec![

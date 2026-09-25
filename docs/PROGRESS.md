@@ -4,6 +4,14 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-25 - H20 crates/modules back to 100%; last new suppression removed
+
+- `bb2f054`: removed the nfs trailing-`\` checks in `render_line` and `validate_client`. Earlier checks there already refuse any `\`, so they could never fire. `validate_export`'s reachable check stays.
+- `1a5eb24`: split `apply_networkd_sections` into helpers and removed its four-lint `#[allow]` (added by `2febdc8`, H16). The helpers are `edit_networkd_sections` (returns `Result`, so the three unreachable `Err` arms became `?`), `networkd_scopes`, `pair_by_scope`, `splice_surplus`, `networkd_round_trips` and `commit_lines`. Behaviour is unchanged. Allow count 115 → 114.
+- This commit: `render_netplan_without_a_plain_ethernet_writes_no_ethernets_key`. The last uncovered module line was the implicit "no ethernets" path of `render_netplan`. It was a real untested case, not a tool artifact.
+
+Verify: full CI-shaped coverage run (clean, workspace `--skip sandbox::linux::tests`, root sandbox run, merge): core, i18n, ops, modules 100.00%; platform 92.56; web 97.75; detent 95.23 (measured as root); acme 87.10. `PASS: all coverage thresholds met`. `cargo test -p detent-module-network --all-features` 49 + 22 passed.
+
 ## 2026-09-25 - H20 core, i18n and ops coverage back to 100%
 
 Tests only. detent-core, detent-i18n and detent-ops reach 100% line coverage. What the tests cover:
