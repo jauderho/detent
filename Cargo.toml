@@ -169,6 +169,13 @@ semver = "1.0.28"
 # Bundle/base64 decoding. Already in the lock transitively.
 base64 = "0.22.1"
 
+# Dependencies build without debug info. This workspace's own crates keep
+# full debug info, so backtraces and stepping through detent code are
+# unchanged, while target/debug shrinks by most of its size (third-party
+# debug info dominates it) and debug builds link faster.
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 opt-level = "z"
 lto = "fat"
