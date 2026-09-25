@@ -1022,9 +1022,71 @@ fn detect_flavor(doc: &Document) -> BackendFlavor {
     BackendFlavor::Networkd
 }
 
+/// Refuse a route that is not one destination and one next hop.
+///
+/// `to` must be `default`, a CIDR or an IP; `via` must be an IP, or empty
+/// (a direct route) where `via_required` is false. Every renderer that writes a
+/// route calls this first, so a value cannot carry backend syntax (`;`, `$()`,
+/// `#`, whitespace, `"`, `[`, `=`) into the file even when the model was never
+/// validated.
+fn check_route(route: &Route, via_required: bool) -> Result<(), EditError> {
+    let to_ok = route.to == "default" || is_valid_cidr(&route.to) || is_valid_ip(&route.to);
+    let via_ok = is_valid_ip(&route.via) || (!via_required && route.via.is_empty());
+    if to_ok && via_ok {
+        return Ok(());
+    }
+    Err(EditError::Unsupported {
+        message: format!(
+            "route {:?} via {:?} is not a destination and a next-hop address",
+            route.to, route.via
+        ),
+    })
+}
+
+/// Whether `s` is an interface name every backend reads back as one token:
+/// ASCII letters, digits, `-`, `_` and `.` only.
+fn is_valid_ifname(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Refuse an interface value that is not its field's syntax, so no backend
+/// file receives a name, address, gateway or DNS server carrying `#`, `;`,
+/// `:`, whitespace, `"`, `[`, `]`, `=` or `,`.
+fn check_interface(iface: &Interface) -> Result<(), EditError> {
+    let bad = std::iter::once(&iface.name)
+        .chain(iface.vlan.iter().map(|v| &v.link))
+        .chain(iface.bridge.iter().flat_map(|b| b.members.iter()))
+        .find(|name| !is_valid_ifname(name))
+        .or_else(|| iface.addresses.iter().find(|a| !is_valid_cidr(a)))
+        .or_else(|| {
+            iface
+                .gateway_v4
+                .as_ref()
+                .filter(|gw| gw.parse::<std::net::Ipv4Addr>().is_err())
+        })
+        .or_else(|| {
+            iface
+                .gateway_v6
+                .as_ref()
+                .filter(|gw| gw.parse::<std::net::Ipv6Addr>().is_err())
+        })
+        .or_else(|| iface.dns.iter().find(|d| !is_valid_ip(d)));
+    match bad {
+        None => Ok(()),
+        Some(value) => Err(EditError::Unsupported {
+            message: format!(
+                "{value:?} is not valid for its field of interface {:?}",
+                iface.name
+            ),
+        }),
+    }
+}
+
 /// Render one interface as networkd INI lines.
 #[allow(clippy::assigning_clones)]
-fn render_networkd(iface: &Interface) -> Vec<String> {
+fn render_networkd(iface: &Interface) -> Result<Vec<String>, EditError> {
     let mut out = Vec::new();
     out.push("[Match]".to_owned());
     out.push(format!("Name={}", iface.name));
@@ -1053,6 +1115,7 @@ fn render_networkd(iface: &Interface) -> Vec<String> {
         out.push(format!("VLAN={}:{}", vlan.link, vlan.id));
     }
     for route in &iface.routes {
+        check_route(route, false)?;
         out.push(String::new());
         out.push("[Route]".to_owned());
         out.push(format!("Destination={}", route.to));
@@ -1065,12 +1128,23 @@ fn render_networkd(iface: &Interface) -> Vec<String> {
         out.push("[VLAN]".to_owned());
         out.push(format!("Id={}", vlan.id));
     }
-    out
+    Ok(out)
 }
 
 /// Render one interface as `NetworkManager` keyfile lines.
 #[allow(clippy::assigning_clones)]
-fn render_nm(iface: &Interface) -> Vec<String> {
+fn render_nm(iface: &Interface) -> Result<Vec<String>, EditError> {
+    // Routes have no keyfile representation in the modeled subset (NM stores
+    // them as `ipv4.routes` with a different syntax); refuse them instead of
+    // dropping them from the file.
+    if !iface.routes.is_empty() {
+        return Err(EditError::Unsupported {
+            message: format!(
+                "NetworkManager keyfiles cannot hold the routes of {:?}",
+                iface.name
+            ),
+        });
+    }
     let mut out = Vec::new();
     out.push("[connection]".to_owned());
     out.push(format!("id={}", iface.name));
@@ -1113,9 +1187,6 @@ fn render_nm(iface: &Interface) -> Vec<String> {
             ));
         }
     }
-    // Routes have no keyfile representation in the modeled subset (NM stores
-    // them as `ipv4.routes` with a different syntax); they are
-    // networkd/ifupdown/netplan-only and dropped from keyfiles.
     out.push(String::new());
     out.push("[ipv6]".to_owned());
     if iface.dhcp_v6 {
@@ -1154,11 +1225,14 @@ fn render_nm(iface: &Interface) -> Vec<String> {
         out.push(format!("id={}", vlan.id));
         out.push(format!("parent={}", vlan.link));
     }
-    out
+    Ok(out)
 }
 
 /// Render one interface as ifupdown stanza lines.
-fn render_ifupdown(iface: &Interface) -> Vec<String> {
+///
+/// A route becomes a shell command (`up ip route add <to> via <via>`), so its
+/// fields are checked here, not left to validation.
+fn render_ifupdown(iface: &Interface) -> Result<Vec<String>, EditError> {
     let mut out = Vec::new();
     out.push(format!("auto {}", iface.name));
     let method = if iface.dhcp_v4 && iface.addresses.is_empty() {
@@ -1198,19 +1272,20 @@ fn render_ifupdown(iface: &Interface) -> Vec<String> {
         out.push(format!("\tbridge_ports {}", bridge.members.join(" ")));
     }
     for route in &iface.routes {
+        check_route(route, true)?;
         out.push(format!("\tup ip route add {} via {}", route.to, route.via));
     }
-    out
+    Ok(out)
 }
 
 /// Render the whole model as netplan YAML lines.
 #[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
-fn render_netplan(model: &Model) -> Vec<String> {
+fn render_netplan(model: &Model) -> Result<Vec<String>, EditError> {
     let mut out = Vec::new();
     out.push("network:".to_owned());
     out.push("  version: 2".to_owned());
     if model.interfaces.is_empty() {
-        return out;
+        return Ok(out);
     }
     let has_ethernets = model
         .interfaces
@@ -1252,6 +1327,7 @@ fn render_netplan(model: &Model) -> Vec<String> {
             if !iface.routes.is_empty() {
                 out.push("      routes:".to_owned());
                 for route in &iface.routes {
+                    check_route(route, false)?;
                     out.push(format!("        - to: {}", route.to));
                     out.push(format!("          via: {}", route.via));
                 }
@@ -1319,12 +1395,15 @@ fn render_netplan(model: &Model) -> Vec<String> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Render the model in the flavor's syntax, returning lines.
 #[allow(clippy::too_many_lines)]
-fn render_model_lines(flavor: BackendFlavor, model: &Model) -> Vec<String> {
+fn render_model_lines(flavor: BackendFlavor, model: &Model) -> Result<Vec<String>, EditError> {
+    for iface in &model.interfaces {
+        check_interface(iface)?;
+    }
     let mut lines: Vec<String> = Vec::new();
     match flavor {
         BackendFlavor::Networkd => {
@@ -1332,7 +1411,7 @@ fn render_model_lines(flavor: BackendFlavor, model: &Model) -> Vec<String> {
                 if idx > 0 {
                     lines.push(String::new());
                 }
-                lines.extend(render_networkd(iface));
+                lines.extend(render_networkd(iface)?);
             }
         }
         BackendFlavor::NetworkManager => {
@@ -1340,12 +1419,12 @@ fn render_model_lines(flavor: BackendFlavor, model: &Model) -> Vec<String> {
                 if idx > 0 {
                     lines.push(String::new());
                 }
-                lines.extend(render_nm(iface));
+                lines.extend(render_nm(iface)?);
             }
         }
         BackendFlavor::Ifupdown => {
             for iface in &model.interfaces {
-                lines.extend(render_ifupdown(iface));
+                lines.extend(render_ifupdown(iface)?);
                 lines.push(String::new());
             }
             // Drop trailing blank
@@ -1354,10 +1433,10 @@ fn render_model_lines(flavor: BackendFlavor, model: &Model) -> Vec<String> {
             }
         }
         BackendFlavor::Netplan => {
-            lines.extend(render_netplan(model));
+            lines.extend(render_netplan(model)?);
         }
     }
-    lines
+    Ok(lines)
 }
 
 // -------------------------------------------------------------------- descriptor
@@ -2104,7 +2183,7 @@ fn apply_networkd_sections(
     );
     // systemd-networkd has no bridge-member primitive (`Bridge=` lives on the
     // member's `.network` file and enslaves to one bridge), so bridge
-    // membership is lossy here by design — like routes on NM. Compare against
+    // membership is lossy here by design. Compare against
     // the model with membership stripped; interface shape must still survive.
     let mut want = model.clone();
     for iface in &mut want.interfaces {
@@ -2154,23 +2233,9 @@ impl ConfigModule for NetworkModule {
         clippy::explicit_counter_loop
     )]
     fn apply(doc: &mut Self::Doc, model: &Self::Model) -> Result<EditReport, EditError> {
-        // Pass 1: validate all rendered lines before touching the document.
-        let flavor = detect_flavor(doc);
-        let new_lines = render_model_lines(flavor, model);
-        for line in &new_lines {
-            if line.contains(['\n', '\r', '\0']) {
-                return Err(EditError::LineBreakInValue {
-                    value: line.clone(),
-                });
-            }
-            if !line.is_empty() && !is_directive_like(line) && !line.trim().is_empty() {
-                // Rendered a directive that the classifier would mark Unknown — refuse.
-                return Err(EditError::Unsupported {
-                    message: format!("rendered line does not round-trip: {line:?}"),
-                });
-            }
-        }
-        // Also validate injection via model fields (defense in depth).
+        // Pass 1: validate the model and every rendered line before touching
+        // the document. A line break or NUL in any field is directive
+        // injection.
         for iface in &model.interfaces {
             for s in std::iter::once(&iface.name)
                 .chain(iface.addresses.iter())
@@ -2200,6 +2265,24 @@ impl ConfigModule for NetworkModule {
             if iface.name.is_empty() || iface.name.contains(char::is_whitespace) {
                 return Err(EditError::Unsupported {
                     message: "interface name cannot round-trip".to_owned(),
+                });
+            }
+        }
+        let flavor = detect_flavor(doc);
+        let new_lines = match render_model_lines(flavor, model) {
+            Ok(lines) => lines,
+            // The document already holds this model, so nothing is written
+            // (invariant 2) even when it holds a value the renderer refuses.
+            Err(_) if Self::to_model(doc).is_ok_and(|current| &current == model) => {
+                return Ok(EditReport::default());
+            }
+            Err(e) => return Err(e),
+        };
+        for line in &new_lines {
+            if !line.is_empty() && !is_directive_like(line) && !line.trim().is_empty() {
+                // Rendered a directive that the classifier would mark Unknown — refuse.
+                return Err(EditError::Unsupported {
+                    message: format!("rendered line does not round-trip: {line:?}"),
                 });
             }
         }
@@ -3419,10 +3502,20 @@ mod tests {
         assert!(rendered.contains("[Route]"));
         let back = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
         assert_eq!(back.interfaces.len(), 4);
-        // Routes and bridge membership are NM-unrepresentable by design —
-        // vlan, addresses, and interface shape survive the NM round trip.
+        // Routes have no keyfile form, so NM refuses them rather than drop
+        // them. Bridge membership is NM-unrepresentable by design — vlan,
+        // addresses, and interface shape survive the NM round trip.
         let mut nm = NetworkModule::parse("[connection]\nid=eth0\n").map_err(|e| e.to_string())?;
-        NetworkModule::apply(&mut nm, &model).map_err(|e| e.to_string())?;
+        assert!(matches!(
+            NetworkModule::apply(&mut nm, &model),
+            Err(super::EditError::Unsupported { .. })
+        ));
+        assert_eq!(NetworkModule::render(&nm), "[connection]\nid=eth0\n");
+        let mut routeless = model.clone();
+        for iface in &mut routeless.interfaces {
+            iface.routes.clear();
+        }
+        NetworkModule::apply(&mut nm, &routeless).map_err(|e| e.to_string())?;
         let nm_rendered = NetworkModule::render(&nm);
         assert!(nm_rendered.contains("[vlan]"));
         assert!(!nm_rendered.contains("[bridge]"));
@@ -3471,7 +3564,7 @@ mod tests {
         let unknown = NetworkModule::parse("garbage line\n").map_err(|e| e.to_string())?;
         assert_eq!(detect_flavor(&unknown), BackendFlavor::Networkd);
         // Empty model renders the netplan header only.
-        let lines = super::render_netplan(&super::Model::default());
+        let lines = super::render_netplan(&super::Model::default()).map_err(|e| e.to_string())?;
         assert_eq!(
             lines,
             vec!["network:".to_owned(), "  version: 2".to_owned()]
@@ -3479,11 +3572,12 @@ mod tests {
         // `DHCP=ipv4` arm: v4-only DHCP renders distinctly.
         let mut v4only = NetworkModule::defaults(&profile(Os::Linux));
         v4only.interfaces[0].dhcp_v6 = false;
-        let lines = super::render_model_lines(super::BackendFlavor::Networkd, &v4only);
+        let lines = super::render_model_lines(super::BackendFlavor::Networkd, &v4only)
+            .map_err(|e| e.to_string())?;
         assert!(lines.iter().any(|l| l == "DHCP=ipv4"));
         v4only.interfaces[0].dhcp_v6 = true;
         // ifupdown needs a separate inet6 stanza for DHCPv6.
-        let lines = super::render_ifupdown(&v4only.interfaces[0]);
+        let lines = super::render_ifupdown(&v4only.interfaces[0]).map_err(|e| e.to_string())?;
         assert!(lines.iter().any(|l| l == "iface eth0 inet dhcp"));
         assert!(lines.iter().any(|l| l == "iface eth0 inet6 dhcp"));
         Ok(())
@@ -3587,6 +3681,125 @@ mod tests {
         // Non-Linux hosts get nothing but netplan (service presence only).
         assert!(!networkd_backend_detect(&profile(Os::MacOs)));
         assert!(!ifupdown_backend_detect(&profile(Os::MacOs)));
+    }
+
+    #[test]
+    fn route_renderers_refuse_what_is_not_a_destination_and_next_hop() -> Result<(), String> {
+        let mut iface = NetworkModule::defaults(&profile(Os::Linux)).interfaces[0].clone();
+        let route = |to: &str, via: &str| super::Route {
+            to: to.to_owned(),
+            via: via.to_owned(),
+        };
+        // ifupdown writes a shell command, so the renderer itself refuses a
+        // `to` that is not a CIDR/IP/`default` and a `via` that is not an IP.
+        for bad in [
+            route("0.0.0.0/0; reboot", "192.168.1.1"),
+            route("10.0.0.0/24", "192.168.1.1 dev eth1"),
+            route("10.0.0.0/24", ""),
+        ] {
+            iface.routes = vec![bad];
+            assert!(matches!(
+                super::render_ifupdown(&iface),
+                Err(super::EditError::Unsupported { .. })
+            ));
+        }
+        iface.routes = vec![
+            route("default", "192.168.1.1"),
+            route("10.0.0.1", "10.0.0.2"),
+        ];
+        let lines = super::render_ifupdown(&iface).map_err(|e| e.to_string())?;
+        assert!(lines.contains(&"\tup ip route add default via 192.168.1.1".to_owned()));
+        // networkd and netplan write a direct route (empty `via`) but refuse
+        // a malformed one; NM has no route form at all.
+        iface.routes = vec![route("10.0.0.0/24", "")];
+        assert!(super::render_networkd(&iface).is_ok());
+        let direct = super::Model {
+            interfaces: vec![iface.clone()],
+        };
+        assert!(super::render_netplan(&direct).is_ok());
+        assert!(super::render_nm(&iface).is_err());
+        iface.routes = vec![route("10.0.0.0/24#x", "")];
+        assert!(super::render_networkd(&iface).is_err());
+        let bad = super::Model {
+            interfaces: vec![iface],
+        };
+        assert!(super::render_netplan(&bad).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn check_interface_refuses_each_malformed_field() {
+        let good = NetworkModule::defaults(&profile(Os::Linux)).interfaces[0].clone();
+        assert!(super::check_interface(&good).is_ok());
+        let mut cases: Vec<super::Interface> = Vec::new();
+        let mut iface = good.clone();
+        iface.name = "eth0:1".to_owned();
+        cases.push(iface);
+        let mut iface = good.clone();
+        iface.vlan = Some(super::Vlan {
+            link: "#eth0".to_owned(),
+            id: 10,
+        });
+        cases.push(iface);
+        let mut iface = good.clone();
+        iface.bridge = Some(super::Bridge {
+            members: vec!["eth0".to_owned(), "eth1,eth2".to_owned()],
+        });
+        cases.push(iface);
+        let mut iface = good.clone();
+        iface.addresses = vec!["[192.168.1.10/24]".to_owned()];
+        cases.push(iface);
+        let mut iface = good.clone();
+        iface.gateway_v4 = Some("2001:db8::1".to_owned());
+        cases.push(iface);
+        let mut iface = good.clone();
+        iface.gateway_v6 = Some("192.168.1.1".to_owned());
+        cases.push(iface);
+        let mut iface = good;
+        iface.dns = vec!["8.8.8.8 1.1.1.1".to_owned()];
+        cases.push(iface);
+        for iface in cases {
+            assert!(
+                matches!(
+                    super::check_interface(&iface),
+                    Err(super::EditError::Unsupported { .. })
+                ),
+                "{iface:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_document_with_a_refused_route_applies_only_its_own_model() -> Result<(), String> {
+        // The file already holds a route the renderer would refuse: applying
+        // its own model writes nothing (invariant 2), any other edit is
+        // refused and leaves the text alone.
+        let src = "auto eth0\niface eth0 inet static\n\tup ip route add 0.0.0.0/0; reboot via 192.168.1.1\n";
+        let mut doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
+        let mut model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        assert_eq!(model.interfaces[0].routes[0].to, "0.0.0.0/0; reboot");
+        let report = NetworkModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        assert_eq!(report, super::EditReport::default());
+        model.interfaces[0].dhcp_v6 = true;
+        assert!(NetworkModule::apply(&mut doc, &model).is_err());
+        assert_eq!(NetworkModule::render(&doc), src);
+        Ok(())
+    }
+
+    #[test]
+    fn apply_rejects_a_valid_name_that_renders_an_unknown_line() -> Result<(), String> {
+        // `-eth0` passes the name checks but renders `    -eth0:`, which
+        // netplan's classifier leaves Unknown; the rendered-line check refuses it.
+        let src = "network:\n  version: 2\n";
+        let mut doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
+        let mut model = NetworkModule::defaults(&profile(Os::Linux));
+        model.interfaces[0].name = "-eth0".to_owned();
+        assert!(matches!(
+            NetworkModule::apply(&mut doc, &model),
+            Err(super::EditError::Unsupported { message }) if message.starts_with("rendered line")
+        ));
+        assert_eq!(NetworkModule::render(&doc), src);
+        Ok(())
     }
 
     #[test]
