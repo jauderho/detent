@@ -313,6 +313,16 @@ fn main() {
         "bad-sct.json",
         bundle_for(&valid, &digest_hex, "bad-sct"),
     );
+    let older = mint(
+        &detent_update::verify::pinned_identity("v0.0.0"),
+        1_700_000_000,
+        1_900_000_000,
+    );
+    write(
+        dir,
+        "older-tag.json",
+        bundle_for(&older, &digest_hex, "valid"),
+    );
     std::fs::write(dir.join("binary.bin"), BINARY).expect("write binary");
 
     write(
