@@ -409,6 +409,50 @@ mod tests {
         );
     }
 
+    /// `authorize` is the second gate behind `WriteCaller`: a read-only
+    /// caller that reaches it with a write operation is refused 403 and the
+    /// refusal is audited, rather than passed through to the engine.
+    #[test]
+    fn authorize_refuses_and_audits_a_write_operation_for_a_read_caller()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::auth::audit::AuthEvent;
+        use crate::auth::extract::{Caller, unix_now};
+        use crate::authz::Scope;
+        use axum::http::{HeaderMap, HeaderValue, header};
+        use detent_ops::Operation;
+        use detent_ops::audit::AuditResult;
+
+        let fixture = crate::state::test_state()?;
+        let state = &fixture.state;
+        let (token, view) = state.auth.tokens.issue("reader", Scope::Read, None)?;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", token.expose()))?,
+        );
+        let caller = Caller::resolve(state, &headers, std::time::Instant::now(), unix_now())?;
+
+        assert!(super::authorize(state, &caller, &Operation::CertStatus).is_ok());
+        assert!(fixture.audit.records().is_empty());
+
+        let error = super::authorize(state, &caller, &Operation::CertRenew)
+            .err()
+            .ok_or("a read caller was allowed to renew the certificate")?;
+        assert_eq!(error.status(), StatusCode::FORBIDDEN);
+        assert_eq!(error.message_id().as_str(), "web-denied-scope");
+
+        let records = fixture.audit.records();
+        let [record] = records.as_slice() else {
+            return Err(format!("expected one audit record, got {records:?}").into());
+        };
+        assert_eq!(record.event, AuthEvent::ScopeDenied);
+        assert_eq!(record.subject, caller.identity().subject);
+        assert!(record.subject.contains(&view.id), "{record:?}");
+        assert_eq!(record.result, AuditResult::Error);
+        assert_eq!(record.detail.as_deref(), Some("web-denied-scope"));
+        Ok(())
+    }
+
     #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn the_router_answers_exactly_the_table() -> Result<(), Box<dyn std::error::Error>> {

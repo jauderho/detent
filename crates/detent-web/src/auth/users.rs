@@ -998,6 +998,124 @@ mod tests {
     }
 
     #[test]
+    fn a_record_debug_names_the_user_but_never_the_hash_or_the_secret() -> R {
+        let root = tempfile::tempdir()?;
+        let hasher = hasher()?;
+        let store = open(root.path())?;
+        store.create(&hasher, "alice", "hunter2", true)?;
+        let secret = TotpSecret::generate()?;
+        store.set_totp("alice", Some(&secret))?;
+        let records = store.records();
+        let record = records.first().ok_or("no record")?;
+        let rendered = format!("{record:?}");
+        assert!(rendered.starts_with("UserRecord"), "{rendered}");
+        assert!(rendered.contains("\"alice\""), "{rendered}");
+        assert!(rendered.contains("totp_enrolled: true"), "{rendered}");
+        assert!(
+            rendered.contains("must_change_password: true"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains(&record.phc), "{rendered}");
+        assert!(!rendered.contains("argon2"), "{rendered}");
+        assert!(
+            !rendered.contains(secret.to_base32().expose()),
+            "{rendered}"
+        );
+        Ok(())
+    }
+
+    /// A change another process makes to the file (the CLI resetting a
+    /// password, removing a user) ends that user's live sessions here on the
+    /// next refresh; users it did not touch keep theirs.
+    #[test]
+    fn an_external_change_revokes_only_the_affected_sessions() -> R {
+        use crate::auth::session::SessionStore;
+        use crate::authz::Scopes;
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let root = tempfile::tempdir()?;
+        let hasher = hasher()?;
+        let server = open(root.path())?;
+        for name in ["alice", "bob", "carol"] {
+            server.create(&hasher, name, "hunter2", false)?;
+        }
+        let sessions = Arc::new(SessionStore::new(
+            Duration::from_secs(600),
+            Duration::from_secs(3600),
+        ));
+        server.attach_sessions(Arc::clone(&sessions));
+        let now = Instant::now();
+        let (alice, _) = sessions.create("alice", Scopes::read_write(), false, now)?;
+        let (bob, _) = sessions.create("bob", Scopes::read_write(), false, now)?;
+        let (carol, _) = sessions.create("carol", Scopes::read_write(), false, now)?;
+
+        let cli = open(root.path())?;
+        cli.set_password(&hasher, "alice", "a new password")?;
+        cli.remove("bob")?;
+
+        server.refresh()?;
+        assert!(sessions.lookup(alice.expose(), now).is_none());
+        assert!(sessions.lookup(bob.expose(), now).is_none());
+        assert!(sessions.lookup(carol.expose(), now).is_some());
+        assert_eq!(sessions.len(), 1);
+        assert!(
+            server
+                .verify_password(&hasher, "alice", "a new password")
+                .is_ok()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_file_deleted_underneath_the_store_empties_it_and_ends_every_session() -> R {
+        use crate::auth::session::SessionStore;
+        use crate::authz::Scopes;
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let root = tempfile::tempdir()?;
+        let hasher = hasher()?;
+        let store = open(root.path())?;
+        store.create(&hasher, "alice", "hunter2", false)?;
+        let sessions = Arc::new(SessionStore::new(
+            Duration::from_secs(600),
+            Duration::from_secs(3600),
+        ));
+        store.attach_sessions(Arc::clone(&sessions));
+        let (alice, _) = sessions.create("alice", Scopes::read_write(), false, Instant::now())?;
+
+        std::fs::remove_file(store.path())?;
+        store.refresh()?;
+        assert!(store.is_empty());
+        assert!(sessions.lookup(alice.expose(), Instant::now()).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn a_file_replaced_by_a_directory_is_a_read_failure_on_refresh() -> R {
+        let root = tempfile::tempdir()?;
+        let hasher = hasher()?;
+        let store = open(root.path())?;
+        store.create(&hasher, "alice", "hunter2", false)?;
+
+        std::fs::remove_file(store.path())?;
+        std::fs::create_dir(store.path())?;
+        match store.refresh() {
+            Err(err @ AuthError::StoreRead { .. }) => {
+                assert_eq!(err.message_id().as_str(), "web-auth-store-unreadable");
+            }
+            other => return Err(format!("expected a read failure, got {other:?}").into()),
+        }
+        // The last good set is kept rather than replaced by nothing.
+        assert_eq!(
+            store.list().into_iter().map(|u| u.name).collect::<Vec<_>>(),
+            vec!["alice".to_owned()]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn a_failed_write_leaves_the_store_as_it_was() -> R {
         let root = tempfile::tempdir()?;
         let hasher = hasher()?;

@@ -710,6 +710,62 @@ mod tests {
     }
 
     #[test]
+    fn a_record_debug_shows_its_metadata_but_never_its_digest() -> R {
+        let root = tempfile::tempdir()?;
+        let store = TokenStore::load(root.path())?;
+        let (token, view) = store.issue("laptop", Scope::Write, Some(4_000_000_000))?;
+        let records = store
+            .inner
+            .lock()
+            .map_err(|_| "token store lock poisoned")?
+            .tokens
+            .clone();
+        let record = records.first().ok_or("no record")?;
+        let rendered = format!("{record:?}");
+        assert!(rendered.starts_with("TokenRecord"), "{rendered}");
+        assert!(rendered.contains(&view.id), "{rendered}");
+        assert!(rendered.contains("\"laptop\""), "{rendered}");
+        assert!(rendered.contains("Some(4000000000)"), "{rendered}");
+        assert!(!rendered.contains(&record.digest), "{rendered}");
+        assert!(!rendered.contains(token.expose()), "{rendered}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_file_deleted_underneath_the_store_revokes_every_token() -> R {
+        let root = tempfile::tempdir()?;
+        let store = TokenStore::load(root.path())?;
+        let (token, _view) = store.issue("laptop", Scope::Read, None)?;
+        std::fs::remove_file(store.path())?;
+        store.refresh()?;
+        assert!(store.list().is_empty());
+        match store.authenticate(token.expose(), 0) {
+            Err(AuthError::UnknownToken) => {}
+            other => return Err(format!("a deleted token still worked: {other:?}").into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_file_replaced_by_a_directory_is_a_read_failure_on_refresh() -> R {
+        let root = tempfile::tempdir()?;
+        let store = TokenStore::load(root.path())?;
+        let (token, _view) = store.issue("laptop", Scope::Read, None)?;
+        std::fs::remove_file(store.path())?;
+        std::fs::create_dir(store.path())?;
+        match store.refresh() {
+            Err(AuthError::StoreRead { .. }) => {}
+            other => return Err(format!("expected a read failure, got {other:?}").into()),
+        }
+        // Refuse closed: a store it cannot read authenticates nobody.
+        match store.authenticate(token.expose(), 0) {
+            Err(AuthError::StoreRead { .. }) => {}
+            other => return Err(format!("expected a read failure, got {other:?}").into()),
+        }
+        Ok(())
+    }
+
+    #[test]
     fn nothing_here_prints_a_token_or_a_digest() -> R {
         let root = tempfile::tempdir()?;
         let store = TokenStore::load(root.path())?;

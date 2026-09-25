@@ -996,9 +996,11 @@ pub fn load_or_bootstrap(
 #[cfg(test)]
 mod tests {
     use super::{
-        ACME_PAIR_FILE, ALPN_H2_HTTP11, BOOTSTRAP_PAIR_FILE, CertStore, CertifiedKeyPair, TlsError,
-        bootstrap_self_signed, confine_cert_dir, fingerprint, install_acme, load_acme,
-        load_bootstrap, load_or_bootstrap, renewal_due_at, server_config, store_acme,
+        ACME_PAIR_FILE, ALPN_H2_HTTP11, BOOTSTRAP_PAIR_FILE, CertStore, CertifiedKeyPair,
+        LEGACY_ACME_CERT_FILE, LEGACY_ACME_KEY_FILE, LEGACY_BOOTSTRAP_CERT_FILE,
+        LEGACY_BOOTSTRAP_KEY_FILE, MAX_PAIR_CERTS, PAIR_MAGIC, TlsError, bootstrap_self_signed,
+        confine_cert_dir, decode_pair, encode_pair, fingerprint, install_acme, load_acme,
+        load_bootstrap, load_or_bootstrap, renewal_due_at, server_config, serving_pair, store_acme,
         store_bootstrap, validity_unix,
     };
     use std::os::unix::fs::PermissionsExt as _;
@@ -1549,6 +1551,229 @@ mod tests {
             other => return Err(format!("expected a prepare error, got {other:?}").into()),
         }
         Ok(())
+    }
+
+    /// Every framing check in the atomic pair file refuses rather than
+    /// guesses: a torn or tampered file never becomes a half-read pair.
+    #[test]
+    fn a_malformed_pair_file_is_refused_at_every_framing_step() -> R {
+        let pair = pair()?;
+        let good = encode_pair(&pair)?;
+        assert_eq!(decode_pair(&good)?, pair);
+
+        let header = PAIR_MAGIC.len();
+        let count_end = header.checked_add(4).ok_or("offset overflow")?;
+        let frame = |count: u32, entries: &[&[u8]]| -> Vec<u8> {
+            let mut out = PAIR_MAGIC.to_vec();
+            out.extend_from_slice(&count.to_be_bytes());
+            for entry in entries {
+                let len = u32::try_from(entry.len()).unwrap_or(u32::MAX);
+                out.extend_from_slice(&len.to_be_bytes());
+                out.extend_from_slice(entry);
+            }
+            out
+        };
+
+        let mut wrong_magic = good.clone();
+        if let Some(first) = wrong_magic.first_mut() {
+            *first ^= 0xff;
+        }
+        let mut trailing = good.clone();
+        trailing.push(0);
+        let too_many = u32::try_from(MAX_PAIR_CERTS.saturating_add(1))?;
+        let cases: [(&str, Vec<u8>); 7] = [
+            ("wrong magic", wrong_magic),
+            ("no count", good.get(..header).unwrap_or_default().to_vec()),
+            ("zero certificates", frame(0, &[b"key"])),
+            ("too many certificates", frame(too_many, &[b"cert", b"key"])),
+            ("an empty entry", frame(1, &[b"", b"key"])),
+            (
+                "a truncated entry",
+                good.get(..count_end.saturating_add(6))
+                    .unwrap_or_default()
+                    .to_vec(),
+            ),
+            ("trailing bytes", trailing),
+        ];
+        for (what, encoded) in cases {
+            assert!(
+                matches!(decode_pair(&encoded), Err(TlsError::Pem)),
+                "{what} was not refused"
+            );
+        }
+
+        // Nor is an empty key ever written.
+        let keyless = CertifiedKeyPair::new(pair.cert_der().to_vec(), Vec::new());
+        assert!(matches!(encode_pair(&keyless), Err(TlsError::Pem)));
+        Ok(())
+    }
+
+    #[test]
+    fn a_legacy_two_file_bootstrap_pair_is_still_read() -> R {
+        let dir = tempfile::tempdir()?;
+        let cert_dir = dir.path();
+        let pair = pair()?;
+        std::fs::write(cert_dir.join(LEGACY_BOOTSTRAP_CERT_FILE), pair.cert_der())?;
+        // Half a legacy pair is no pair at all.
+        assert!(load_bootstrap(cert_dir)?.is_none());
+
+        std::fs::write(
+            cert_dir.join(LEGACY_BOOTSTRAP_KEY_FILE),
+            &pair.key_pkcs8_der,
+        )?;
+        assert_eq!(load_bootstrap(cert_dir)?, Some(pair.clone()));
+
+        // Storing migrates: the atomic file appears and the legacy files go.
+        store_bootstrap(cert_dir, &pair)?;
+        assert!(cert_dir.join(BOOTSTRAP_PAIR_FILE).exists());
+        assert!(!cert_dir.join(LEGACY_BOOTSTRAP_CERT_FILE).exists());
+        assert!(!cert_dir.join(LEGACY_BOOTSTRAP_KEY_FILE).exists());
+        assert_eq!(load_bootstrap(cert_dir)?, Some(pair));
+        Ok(())
+    }
+
+    #[test]
+    fn a_legacy_acme_chain_is_served_and_a_malformed_one_falls_back() -> R {
+        use rcgen::generate_simple_self_signed;
+        let leaf = generate_simple_self_signed(["leaf.example".to_owned()])?;
+        let issuer = generate_simple_self_signed(["issuer.example".to_owned()])?;
+        let mut chain = Vec::new();
+        for der in [leaf.cert.der().to_vec(), issuer.cert.der().to_vec()] {
+            chain.extend_from_slice(&u32::try_from(der.len())?.to_be_bytes());
+            chain.extend_from_slice(&der);
+        }
+        let key = leaf.signing_key.serialize_der();
+
+        let dir = tempfile::tempdir()?;
+        let cert_dir = dir.path();
+        let bootstrap = pair()?;
+        store_bootstrap(cert_dir, &bootstrap)?;
+        std::fs::write(cert_dir.join(LEGACY_ACME_CERT_FILE), &chain)?;
+        // A chain without its key is ignored in favour of the bootstrap pair.
+        assert!(load_acme(cert_dir)?.is_none());
+        assert_eq!(serving_pair(cert_dir)?, Some(bootstrap.clone()));
+
+        std::fs::write(cert_dir.join(LEGACY_ACME_KEY_FILE), &key)?;
+        let loaded = load_acme(cert_dir)?.ok_or("the legacy chain was not read")?;
+        assert_eq!(loaded.cert_der(), leaf.cert.der().as_ref());
+        assert_eq!(
+            loaded.intermediates_der(),
+            &[issuer.cert.der().to_vec()][..]
+        );
+        // The listener prefers it over the bootstrap pair.
+        assert_eq!(serving_pair(cert_dir)?, Some(loaded));
+
+        // An empty chain and a torn frame are both "no ACME pair".
+        std::fs::write(cert_dir.join(LEGACY_ACME_CERT_FILE), b"")?;
+        assert!(load_acme(cert_dir)?.is_none());
+        std::fs::write(cert_dir.join(LEGACY_ACME_CERT_FILE), [0, 0, 0, 9, 1])?;
+        assert!(load_acme(cert_dir)?.is_none());
+        assert_eq!(serving_pair(cert_dir)?, Some(bootstrap.clone()));
+
+        // So is a torn atomic file, which takes precedence over the legacy
+        // files once it exists.
+        std::fs::write(cert_dir.join(ACME_PAIR_FILE), b"torn")?;
+        assert!(load_acme(cert_dir)?.is_none());
+        assert_eq!(serving_pair(cert_dir)?, Some(bootstrap));
+        Ok(())
+    }
+
+    /// A legacy name that cannot be removed (here: a directory in its place)
+    /// fails the store loudly rather than leaving two layouts to disagree.
+    #[test]
+    fn a_legacy_file_that_cannot_be_removed_is_reported() -> R {
+        let dir = tempfile::tempdir()?;
+        let cert_dir = dir.path();
+        let blocker = cert_dir.join(LEGACY_BOOTSTRAP_KEY_FILE);
+        std::fs::create_dir(&blocker)?;
+        std::fs::write(blocker.join("inside"), b"x")?;
+        match store_bootstrap(cert_dir, &pair()?) {
+            Err(err @ TlsError::Prepare { .. }) => {
+                assert_eq!(err.message_id().as_str(), "web-tls-store-unwritable");
+                assert!(err.to_string().contains(LEGACY_BOOTSTRAP_KEY_FILE), "{err}");
+            }
+            other => return Err(format!("expected a prepare error, got {other:?}").into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_stored_bootstrap_certificate_that_cannot_be_parsed_is_rotated() -> R {
+        let dir = tempfile::tempdir()?;
+        let cert_dir = dir.path().join("certs");
+        let garbage = CertifiedKeyPair::new(b"not a certificate".to_vec(), pair()?.key_pkcs8_der);
+        store_bootstrap(&cert_dir, &garbage)?;
+        let rotated = load_or_bootstrap(&cert_dir, &["box.example".to_owned()], false)?;
+        assert_ne!(rotated, garbage);
+        assert!(rotated.not_after_unix().is_some());
+        assert_eq!(load_bootstrap(&cert_dir)?, Some(rotated));
+        Ok(())
+    }
+
+    /// Dates from 2050 on are `GeneralizedTime` (four-digit year) in X.509,
+    /// not `UTCTime`; both must read back to the same instant.
+    #[test]
+    fn a_generalized_time_validity_is_read() -> R {
+        use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
+        use time::OffsetDateTime;
+
+        let not_before = 1_577_836_800; // 2020-01-01T00:00:00Z, UTCTime
+        let not_after = 2_556_144_000; // 2051-01-01T00:00:00Z, GeneralizedTime
+        let mut params = CertificateParams::new(vec!["box.example".to_owned()])?;
+        params.not_before = OffsetDateTime::from_unix_timestamp(not_before)?;
+        params.not_after = OffsetDateTime::from_unix_timestamp(not_after)?;
+        let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
+        let cert = params.self_signed(&key)?;
+        assert_eq!(validity_unix(cert.der()), Some((not_before, not_after)));
+        Ok(())
+    }
+
+    /// Hand-built DER that bends the certificate shape reads as "unknown".
+    #[test]
+    fn a_misshapen_validity_is_unknown_rather_than_guessed() {
+        /// One DER TLV with a short-form length.
+        fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
+            let mut out = vec![tag, u8::try_from(content.len()).unwrap_or(u8::MAX)];
+            out.extend_from_slice(content);
+            out
+        }
+        fn certificate(tbs_children: &[Vec<u8>]) -> Vec<u8> {
+            tlv(0x30, &tlv(0x30, &tbs_children.concat()))
+        }
+        let utc = |text: &str| tlv(0x17, text.as_bytes());
+        let serial = tlv(0x02, &[1]);
+
+        // The shape it accepts, so the refusals below are about one change.
+        let valid = tlv(0x30, &[utc("200101000000Z"), utc("300101000000Z")].concat());
+        assert_eq!(
+            validity_unix(&certificate(&[serial.clone(), valid])),
+            Some((1_577_836_800, 1_893_456_000))
+        );
+
+        // A long-form length of zero bytes is not DER.
+        assert_eq!(validity_unix(&[0x30, 0x80]), None);
+        // More leading children than a TBSCertificate has before validity.
+        assert_eq!(validity_unix(&certificate(&vec![serial.clone(); 7])), None);
+        // Three times where the validity holds exactly two.
+        let three = tlv(
+            0x30,
+            &[
+                utc("200101000000Z"),
+                utc("300101000000Z"),
+                utc("300101000000Z"),
+            ]
+            .concat(),
+        );
+        assert_eq!(validity_unix(&certificate(&[serial.clone(), three])), None);
+        // A time without its `Z`, and one with too few digits.
+        for bad in ["200101000000", "2001010000Z"] {
+            let odd = tlv(0x30, &[utc(bad), utc("300101000000Z")].concat());
+            assert_eq!(
+                validity_unix(&certificate(&[serial.clone(), odd])),
+                None,
+                "{bad}"
+            );
+        }
     }
 
     #[test]
