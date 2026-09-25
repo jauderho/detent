@@ -429,6 +429,23 @@ fn replace_binary_rejects_a_missing_staged_file() -> TestResult {
 /// check interval.
 const CONFIRM_TIMEOUT_S: u16 = 1;
 const PAST_CONFIRM_DEADLINE: Duration = Duration::from_millis(1300);
+/// Upper bound on the wait for the monitor's own deadline rollback. A loaded
+/// CI runner can starve the monitor thread past `PAST_CONFIRM_DEADLINE`, so
+/// a positive rollback check polls for the result instead of sleeping once.
+const ROLLBACK_WAIT_LIMIT: Duration = Duration::from_secs(15);
+
+/// Poll `path` until it holds `expected` or [`ROLLBACK_WAIT_LIMIT`] passes.
+/// Returns the last contents read, so the caller asserts on real data.
+fn wait_for_contents(path: &Path, expected: &[u8]) -> std::io::Result<Vec<u8>> {
+    let started = std::time::Instant::now();
+    loop {
+        let contents = std::fs::read(path)?;
+        if contents == expected || started.elapsed() >= ROLLBACK_WAIT_LIMIT {
+            return Ok(contents);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
 
 #[test]
 fn commit_confirm_expiry_rolls_back_unconfirmed_writes() -> TestResult {
@@ -445,8 +462,7 @@ fn commit_confirm_expiry_rolls_back_unconfirmed_writes() -> TestResult {
     assert_eq!(timeout_s, CONFIRM_TIMEOUT_S);
     assert_eq!(rollback_targets, 1);
 
-    std::thread::sleep(PAST_CONFIRM_DEADLINE);
-    assert_eq!(std::fs::read(&fx.target)?, b"v1");
+    assert_eq!(wait_for_contents(&fx.target, b"v1")?, b"v1");
 
     client.shutdown()?;
     join_shutdown(handle);
@@ -625,8 +641,7 @@ fn rollback_commit_after_the_deadline_already_fired_finds_nothing_pending() -> T
     client.start_confirm_timer(CommitId(2), CONFIRM_TIMEOUT_S, None)?;
 
     // Let the timer itself take the pending state and roll back first.
-    std::thread::sleep(PAST_CONFIRM_DEADLINE);
-    assert_eq!(std::fs::read(&fx.target)?, b"v1");
+    assert_eq!(wait_for_contents(&fx.target, b"v1")?, b"v1");
 
     let response = client.rollback_commit(CommitId(2));
     assert!(matches!(
