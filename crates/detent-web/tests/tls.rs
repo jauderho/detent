@@ -353,6 +353,18 @@ async fn the_peer_address_reaches_the_handlers() -> TestResult {
 }
 #[tokio::test]
 async fn an_idle_connection_does_not_hold_a_permit() -> TestResult {
+    idle_connection_frees_its_permit(b"http/1.1").await
+}
+
+#[tokio::test]
+async fn an_idle_h2_connection_does_not_hold_a_permit() -> TestResult {
+    idle_connection_frees_its_permit(b"h2").await
+}
+
+/// H9: a peer that completes the handshake (negotiating `alpn`) and then
+/// sends nothing loses its connection, and its permit, at the header timeout
+/// even under the default connection lifetime.
+async fn idle_connection_frees_its_permit(alpn: &'static [u8]) -> TestResult {
     let cert = bootstrap_self_signed(&[HOST.to_owned()])?;
     let store = Arc::new(CertStore::new(&cert)?);
     let tls = server_config_from_store(Arc::clone(&store), ALPN_H2_HTTP11)?;
@@ -362,7 +374,6 @@ async fn an_idle_connection_does_not_hold_a_permit() -> TestResult {
     config.validate()?;
     let mut server = Server::bind(&config, tls, healthz()).await?;
     server.header_read_timeout = Duration::from_millis(200);
-    server.max_connection_lifetime = Duration::from_millis(450);
     let addr = server.local_addr();
     let (stop, stopped) = oneshot::channel::<()>();
     let task = tokio::spawn(async move {
@@ -373,11 +384,13 @@ async fn an_idle_connection_does_not_hold_a_permit() -> TestResult {
             .await;
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
+    let idle_cfg = client_config(&cert, &[&rustls::version::TLS13], &[alpn])?;
     let client_cfg = client_config(&cert, &[&rustls::version::TLS13], &[b"http/1.1"])?;
-    let connector = TlsConnector::from(Arc::new(client_cfg.clone()));
+    let connector = TlsConnector::from(Arc::new(idle_cfg));
     let tcp = TcpStream::connect(addr).await?;
     let server_name = ServerName::try_from(HOST.to_owned())?;
     let idle = connector.connect(server_name.clone(), tcp).await?;
+    assert_eq!(idle.get_ref().1.alpn_protocol(), Some(alpn));
     // Longer than header timeout, so the idle connection is closed and its permit freed.
     tokio::time::sleep(Duration::from_millis(800)).await;
     let mut last_err: Option<String> = None;
@@ -405,7 +418,7 @@ async fn an_idle_connection_does_not_hold_a_permit() -> TestResult {
                         )
                         .await;
                         let response = String::from_utf8_lossy(&raw).into_owned();
-                        last_response = response.clone();
+                        last_response.clone_from(&response);
                         if response.contains("200 OK") {
                             got_ok = true;
                             break;
@@ -429,6 +442,56 @@ async fn an_idle_connection_does_not_hold_a_permit() -> TestResult {
         .into());
     }
     drop(idle);
+    drop(stop);
+    let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+    Ok(())
+}
+
+/// The H9 deadline covers only the first request: a keep-alive connection
+/// that keeps being served is not cut when the header timeout passes. Each
+/// gap stays under the timeout, which hyper applies to an idle keep-alive.
+#[tokio::test]
+async fn a_served_connection_outlives_the_first_request_deadline() -> TestResult {
+    let cert = bootstrap_self_signed(&[HOST.to_owned()])?;
+    let store = Arc::new(CertStore::new(&cert)?);
+    let tls = server_config_from_store(Arc::clone(&store), ALPN_H2_HTTP11)?;
+    let mut config = Config::default();
+    config.listen.addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+    config.validate()?;
+    let mut server = Server::bind(&config, tls, healthz()).await?;
+    server.header_read_timeout = Duration::from_millis(400);
+    let addr = server.local_addr();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        server
+            .serve(async move {
+                let _ = stopped.await;
+            })
+            .await;
+    });
+    let client_cfg = client_config(&cert, &[&rustls::version::TLS13], &[b"http/1.1"])?;
+    let tcp = TcpStream::connect(addr).await?;
+    let mut stream = TlsConnector::from(Arc::new(client_cfg))
+        .connect(ServerName::try_from(HOST.to_owned())?, tcp)
+        .await?;
+    // Three requests 250 ms apart: the third is sent past the 400 ms deadline.
+    for _ in 0..3 {
+        stream
+            .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await?;
+        let mut response = Vec::new();
+        while !String::from_utf8_lossy(&response).ends_with("\r\n\r\nok") {
+            let mut chunk = [0_u8; 1024];
+            let read =
+                tokio::time::timeout(Duration::from_secs(2), stream.read(&mut chunk)).await??;
+            if read == 0 {
+                return Err("the connection closed before the response".into());
+            }
+            response.extend_from_slice(chunk.get(..read).unwrap_or_default());
+        }
+        assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200 OK"));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
     drop(stop);
     let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
     Ok(())
