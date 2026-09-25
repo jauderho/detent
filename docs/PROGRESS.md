@@ -4,6 +4,10 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-25 - H20 size baseline re-cut
+
+CI Size check failed on `full-default-aarch64-musl`. Measured locally with the CI pins (`cargo-zigbuild` 0.23.2, zig 0.16.0, Rust 1.98.1): full 5,272,560; full+ui 6,092,784; resolver+web 4,757,616; CLI-only 2,104,824 (after the C1-c `update` gate). The oldest commit in this repository, e4713de, already builds to 5,225,520 (full) and 3,015,088 (CLI), so the growth over the 2026-09-10 baselines predates STAGE3 and the squashed history cannot attribute it. Owner approved the re-cut (2026-09-25). Full, ui and CLI rows re-cut; tolerance stays 3%; the PLAN §4.1 budgets are unchanged, and every row is under its budget. resolver+web is within tolerance and was not changed.
+
 ## 2026-09-25 - C1-c verifier behind a detent-platform `update` feature (STAGE3)
 
 C1-c made the monitor verify the Sigstore bundle, so `detent-platform` linked `detent-update` → `rustls-webpki` → aws-lc-rs in every build, including the CLI-only build with no self-update. The CLI-only aarch64-musl binary grew to 3,064,368 bytes (baseline 1,712,952; budget 3 MiB). Owner decision (2026-09-25): gate the verifier. `detent-platform` now has an `update` feature (`dep:detent-update`); `detent`'s `update` feature enables it. The monitor's bundle check moved into `verify_release`: with `update` it runs the same check as before; without it, every staged release is refused (`VerificationFailed`, fail closed). The downgrade check and staging code are unchanged. CLI-only binary: 2,104,824 bytes, and aws-lc-rs is no longer in its tree.
