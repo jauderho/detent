@@ -782,4 +782,53 @@ mod tests {
         let _ = handle.join();
         Ok(())
     }
+
+    #[test]
+    fn pending_commit_reports_unexpected_for_a_wrong_response()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut client, handle) = client_with_scripted_reply(Response::Replaced {
+            version: "abc".to_owned(),
+        })?;
+        assert!(matches!(
+            client.pending_commit(),
+            Err(ClientError::Unexpected {
+                want: "Pending",
+                got: "Replaced"
+            })
+        ));
+        drop(client);
+        let _ = handle.join();
+        Ok(())
+    }
+
+    #[test]
+    fn replace_binary_reports_unexpected_for_a_wrong_response()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut client, handle) = client_with_scripted_reply(Response::Pending(None))?;
+        assert!(matches!(
+            client.replace_binary("v1.0.0", 5, Sha256Digest::of(b"image")),
+            Err(ClientError::Unexpected {
+                want: "Replaced",
+                got: "Pending"
+            })
+        ));
+        drop(client);
+        let _ = handle.join();
+        Ok(())
+    }
+
+    #[test]
+    fn replace_binary_returns_the_version_the_monitor_installed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut client, handle) = client_with_scripted_reply(Response::Replaced {
+            version: "abc".to_owned(),
+        })?;
+        assert_eq!(
+            client.replace_binary("v1.0.0", 5, Sha256Digest::of(b"image"))?,
+            "abc"
+        );
+        drop(client);
+        let _ = handle.join();
+        Ok(())
+    }
 }
