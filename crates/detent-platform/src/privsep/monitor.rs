@@ -824,79 +824,10 @@ impl<'a> Monitor<'a> {
     }
 
     /// Reject only newly introduced directives that ask a privileged daemon to
-    /// execute content. Existing directives remain editable in place.
+    /// execute content, or changed values of existing ones. Existing
+    /// directives remain in place unchanged. See [`super::exec_deny`].
     fn has_new_forbidden_exec_directive(module: &str, previous: &[u8], candidate: &[u8]) -> bool {
-        fn directives(text: &[u8], names: &[&str]) -> usize {
-            String::from_utf8_lossy(text)
-                .lines()
-                .filter_map(|line| {
-                    let line = line.trim();
-                    if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-                        return None;
-                    }
-                    line.split_once('=')
-                        .map_or_else(
-                            || line.split_whitespace().next(),
-                            |(key, _)| Some(key.trim()),
-                        )
-                        .map(str::to_ascii_lowercase)
-                })
-                .filter(|key| names.iter().any(|name| key == *name))
-                .count()
-        }
-
-        fn words(text: &[u8], prefix: &str) -> usize {
-            String::from_utf8_lossy(text)
-                .split(|c: char| c == ',' || c.is_whitespace())
-                .filter(|word| word.starts_with(prefix))
-                .count()
-        }
-
-        let added = |names: &[&str]| directives(candidate, names) > directives(previous, names);
-        match module {
-            "samba" => added(&[
-                "root preexec",
-                "root postexec",
-                "preexec",
-                "postexec",
-                "add user script",
-                "include",
-            ]),
-            "dhcp" => added(&["dhcp-script", "dhcp-luascript", "conf-file", "conf-dir"]),
-            "chrony" => added(&["include", "confdir", "sourcedir", "pidfile"]),
-            "resolver" => added(&["include:", "python-script:"]),
-            "network" => {
-                let forbidden = |text: &[u8]| {
-                    String::from_utf8_lossy(text)
-                        .lines()
-                        .filter(|line| {
-                            let (key, value) = line
-                                .split_once('=')
-                                .or_else(|| line.split_once(char::is_whitespace))
-                                .unwrap_or((line, ""));
-                            match key.trim().to_ascii_lowercase().as_str() {
-                                "up" => {
-                                    let words: Vec<&str> = value.split_whitespace().collect();
-                                    if words.len() < 5 {
-                                        return true;
-                                    }
-                                    !matches!(
-                                        words.as_slice(),
-                                        ["ip", "route", "add", .., "via", _]
-                                    )
-                                }
-                                "down" | "pre-up" | "post-down" => true,
-                                _ => false,
-                            }
-                        })
-                        .count()
-                };
-                forbidden(candidate) > forbidden(previous)
-            }
-            "mounts" => words(candidate, "x-systemd.") > words(previous, "x-systemd."),
-            "nfs" => words(candidate, "no_root_squash") > words(previous, "no_root_squash"),
-            _ => false,
-        }
+        super::exec_deny::adds_exec_directive(module, previous, candidate)
     }
 
     fn run_check(&self, id: CheckId, bytes: &[u8]) -> Response {
@@ -2398,17 +2329,20 @@ mod tests {
             &Config::with_state_root(dir.path().join("state")),
         )?;
         let mut monitor = greeted_real(allow, Hooks::default());
-        let candidate = b"[global]\nworkgroup = EXAMPLE\nroot preexec = /bin/sh\n";
-
-        let response = monitor.dispatch(Request::WriteTarget {
-            target: TargetId(0),
-            expected_prev: None,
-            bytes: candidate.to_vec(),
-            journal: false,
-        })?;
-
-        assert!(matches!(response, Response::Error(_)));
-        assert_eq!(std::fs::read(&target)?, original);
+        // The second spelling is the one the H23 probe wrote to disk.
+        for candidate in [
+            &b"[global]\nworkgroup = EXAMPLE\nroot preexec = /bin/sh\n"[..],
+            b"[global]\nworkgroup = EXAMPLE\nrootpreexec = /bin/sh\n",
+        ] {
+            let response = monitor.dispatch(Request::WriteTarget {
+                target: TargetId(0),
+                expected_prev: None,
+                bytes: candidate.to_vec(),
+                journal: false,
+            })?;
+            assert!(matches!(response, Response::Error(_)));
+            assert_eq!(std::fs::read(&target)?, original);
+        }
         Ok(())
     }
     // -- backups and restore ------------------------------------------------
