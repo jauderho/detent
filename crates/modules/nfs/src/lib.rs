@@ -42,7 +42,7 @@ use detent_core::descriptor::{
     apply_hints,
 };
 use detent_core::diag::{Diagnostic, Diagnostics, FieldPath, MessageId, Severity};
-use detent_core::doc::{Document, Line, LineKind};
+use detent_core::doc::{Document, LineKind};
 use detent_core::module::{ConfigModule, EditError, EditReport, ModelError, ParseError};
 
 // ------------------------------------------------------------------------- model
@@ -724,62 +724,11 @@ impl ConfigModule for NfsModule {
     /// 5) leaves the file exactly as it was. A line whose parsed export already
     /// equals the model's is not rendered at all, so hand-aligned columns
     /// survive. Pass 2 only ever touches `Directive` lines; comments, blanks and
-    /// unknown directives keep their position, and new lines go after the last
-    /// existing export, not at the end of the file.
+    /// unknown directives keep their position. Exports are aligned with the
+    /// model ([`Document::edit_entries`]), so dropping or adding one never
+    /// rewrites another, and a new line goes after the export before it.
     fn apply(doc: &mut Self::Doc, model: &Self::Model) -> Result<EditReport, EditError> {
-        // Pass 1, read-only: pair model exports with the existing export lines
-        // in order and render the ones that differ.
-        let mut planned: Vec<Option<String>> = Vec::with_capacity(model.entries.len());
-        for line in doc
-            .lines()
-            .iter()
-            .filter(|line| line.kind() == LineKind::Directive)
-        {
-            let Some(wanted) = model.entries.get(planned.len()) else {
-                break;
-            };
-            let unchanged = parse_export(line.raw()).as_ref() == Some(wanted);
-            planned.push(if unchanged {
-                None
-            } else {
-                Some(render_line(wanted)?)
-            });
-        }
-        for wanted in model.entries.iter().skip(planned.len()) {
-            planned.push(Some(render_line(wanted)?));
-        }
-
-        // Pass 2: rewrite, drop the export lines the model no longer has, and
-        // append the rest after the last export line.
-        let mut report = EditReport::default();
-        let mut index = 0usize;
-        let mut matched = 0usize;
-        let mut after_last_export: Option<usize> = None;
-        while index < doc.len() {
-            if doc.lines().get(index).map(Line::kind) != Some(LineKind::Directive) {
-                index = index.saturating_add(1);
-                continue;
-            }
-            let Some(slot) = planned.get(matched) else {
-                doc.remove_line(index)?;
-                report.removed = report.removed.saturating_add(1);
-                continue;
-            };
-            if let Some(raw) = slot.as_deref() {
-                doc.replace_raw(index, raw)?;
-                report.changed_lines = report.changed_lines.saturating_add(1);
-            }
-            matched = matched.saturating_add(1);
-            index = index.saturating_add(1);
-            after_last_export = Some(index);
-        }
-        let mut at = after_last_export.unwrap_or_else(|| doc.len());
-        for raw in planned.iter().skip(matched).flatten() {
-            doc.insert_line(at, raw)?;
-            at = at.saturating_add(1);
-            report.added = report.added.saturating_add(1);
-        }
-        Ok(report)
+        doc.edit_entries(&model.entries, parse_export, render_line, |_| false)
     }
 
     /// Every finding carries a Fluent id — never a rendered sentence, this crate

@@ -30,7 +30,7 @@ use detent_core::descriptor::{
     UnitNames, Upstream, ValidationCtx, apply_hints,
 };
 use detent_core::diag::{Diagnostic, Diagnostics, FieldPath, MessageId, Severity};
-use detent_core::doc::{Document, Line, LineKind};
+use detent_core::doc::{Document, LineKind};
 use detent_core::module::{ConfigModule, EditError, EditReport, ModelError, ParseError};
 use std::collections::BTreeSet;
 
@@ -392,62 +392,12 @@ impl ConfigModule for TemplateModule {
     ///   reports `EditReport::default()`) hold.
     /// * Pass 2 only ever touches `Directive` lines: comments, blanks and unknown
     ///   directives keep their position.
-    /// * New lines go after the last existing setting, not at the end of the file,
-    ///   so a trailing comment block stays trailing.
+    /// * Settings are aligned with the model ([`Document::edit_entries`]), so
+    ///   dropping or adding one never rewrites another. A new line goes after the
+    ///   setting before it, so a trailing comment block stays trailing. A format
+    ///   with sections passes its header test instead of `|_| false`.
     fn apply(doc: &mut Self::Doc, model: &Self::Model) -> Result<EditReport, EditError> {
-        // Pass 1, read-only: pair model settings with the existing directive lines
-        // in order and render the ones that differ.
-        let mut planned: Vec<Option<String>> = Vec::with_capacity(model.settings.len());
-        for line in doc
-            .lines()
-            .iter()
-            .filter(|line| line.kind() == LineKind::Directive)
-        {
-            let Some(wanted) = model.settings.get(planned.len()) else {
-                break;
-            };
-            let unchanged = parse_setting(line.raw()).as_ref() == Some(wanted);
-            planned.push(if unchanged {
-                None
-            } else {
-                Some(render_line(wanted)?)
-            });
-        }
-        for wanted in model.settings.iter().skip(planned.len()) {
-            planned.push(Some(render_line(wanted)?));
-        }
-
-        // Pass 2: rewrite, drop the directive lines the model no longer has, and
-        // append the rest after the last directive line.
-        let mut report = EditReport::default();
-        let mut index = 0usize;
-        let mut matched = 0usize;
-        let mut after_last_directive: Option<usize> = None;
-        while index < doc.len() {
-            if doc.lines().get(index).map(Line::kind) != Some(LineKind::Directive) {
-                index = index.saturating_add(1);
-                continue;
-            }
-            let Some(slot) = planned.get(matched) else {
-                doc.remove_line(index)?;
-                report.removed = report.removed.saturating_add(1);
-                continue;
-            };
-            if let Some(raw) = slot.as_deref() {
-                doc.replace_raw(index, raw)?;
-                report.changed_lines = report.changed_lines.saturating_add(1);
-            }
-            matched = matched.saturating_add(1);
-            index = index.saturating_add(1);
-            after_last_directive = Some(index);
-        }
-        let mut at = after_last_directive.unwrap_or_else(|| doc.len());
-        for raw in planned.iter().skip(matched).flatten() {
-            doc.insert_line(at, raw)?;
-            at = at.saturating_add(1);
-            report.added = report.added.saturating_add(1);
-        }
-        Ok(report)
+        doc.edit_entries(&model.settings, parse_setting, render_line, |_| false)
     }
 
     /// TODO(validate): a module needs at least one of each severity, and every
