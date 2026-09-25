@@ -474,8 +474,8 @@ fn render_applied(outcome: OpOutcome) -> Result<Json<Box<ApplyReport>>, ApiError
 #[cfg(test)]
 mod tests {
     use super::{
-        HASH_HEX_LEN, parse_hash, render_applied, render_module, render_modules, render_planned,
-        render_validated,
+        HASH_HEX_LEN, parse_hash, redact_view, render_applied, render_module, render_modules,
+        render_planned, render_validated,
     };
     use detent_core::descriptor::{ModuleDescriptor, Upstream};
     use detent_core::diag::{Diagnostics, MessageId};
@@ -568,6 +568,62 @@ mod tests {
         };
         assert!(render_applied(OpOutcome::Applied(Box::new(report))).is_ok());
         assert!(render_applied(wrong_outcome()).is_err());
+    }
+
+    #[test]
+    fn redaction_reaches_every_string_under_a_secret_pointer_or_secret_key() {
+        let mut view = ModuleView {
+            descriptor: &TEST_DESCRIPTOR,
+            schema: serde_json::json!({}),
+            model: Some(serde_json::json!({
+                "token": "plain-secret",
+                "keys": ["k1", {"inner": "k2", "count": 3}],
+                "nested": {"a": "n1", "flag": true},
+                "entries": [
+                    {"psk": ["p1", {"deep": "p2"}, 7]},
+                    {"secret": {"x": "s1"}},
+                    {"db_password": null},
+                    {"label": "visible"},
+                ],
+                "note": "password=hunter2,guest",
+                "port": 22,
+            })),
+            current_hash: None,
+            diagnostics: Diagnostics::default(),
+            secret_pointers: &["/token", "/keys", "/nested", "/port", "/absent"],
+        };
+        redact_view(&mut view);
+        assert_eq!(
+            view.model,
+            Some(serde_json::json!({
+                "token": "[redacted]",
+                "keys": ["[redacted]", {"inner": "[redacted]", "count": 3}],
+                "nested": {"a": "[redacted]", "flag": true},
+                "entries": [
+                    {"psk": ["[redacted]", {"deep": "[redacted]"}, 7]},
+                    {"secret": {"x": "[redacted]"}},
+                    {"db_password": null},
+                    {"label": "visible"},
+                ],
+                "note": "password=[redacted],guest",
+                "port": 22,
+            }))
+        );
+    }
+
+    #[test]
+    fn redaction_leaves_a_view_without_a_model_alone() {
+        let mut view = ModuleView {
+            descriptor: &TEST_DESCRIPTOR,
+            schema: serde_json::json!({"password": "schema-text"}),
+            model: None,
+            current_hash: None,
+            diagnostics: Diagnostics::default(),
+            secret_pointers: &["/password"],
+        };
+        redact_view(&mut view);
+        assert_eq!(view.model, None);
+        assert_eq!(view.schema, serde_json::json!({"password": "schema-text"}));
     }
 
     #[test]

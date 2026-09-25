@@ -4,6 +4,12 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-25 - H20 detent-web coverage back over the floor
+
+detent-web read about 95.7% on Linux against its 97% floor. 25 new tests, and no production change, bring it to 97.75% (9097/9306) in the full CI measurement. The tests cover: secret redaction in module views, scope refusal plus its audit record, pending-commit, commit, backup and service routes through the full stack, malformed module ids, update-check stamps, user and token store refresh after external edits (deleted file, directory in place of the file), redacted `Debug` for user and token records, TLS pair framing errors, legacy two-file bootstrap and ACME chains, rotation of an unparseable bootstrap cert, and GeneralizedTime / misshapen validity parsing. Still uncovered: failure arms inside tests, the already-ignored timing test in `password.rs`, and the live release-feed check. Noted: `UserStore::refresh_locked` is dead code behind an existing `#[allow(dead_code)]` (§12).
+
+Verify: `cargo test -p detent-web --all-features` 340 lib (2 ignored, both pre-existing) + 9 tls passed; lib as uid 65534: 340 passed. fmt 0; clippy `-p detent-web --all-targets --all-features -D warnings` 0. Implementor: Opus subagent; orchestrator reviewed the diff.
+
 ## 2026-09-25 - L-MODA12 module template is instantiated and tested in CI (STAGE3)
 
 The finding's premise is out of date: `_template` has been a workspace member (`detent-module-template`) since the exclude was dropped, so it compiles and tests with the workspace. The README still said it was excluded. What was really broken: the copy recipe kept the package name `detent-module-template`, so every copy failed with "two packages named `detent-module-template`". The recipe now also renames the package and crate names. `scripts/template-check.sh` (`--id`, `--keep`, `--dryrun`, `--verbose`) runs the recipe on a `git archive` copy of HEAD and checks the copy with fmt, clippy `-D warnings` and tests. CI runs it in the Rust job. The template's `render_line` TODO now says to reject every character the upstream parser treats as syntax, not only line breaks.

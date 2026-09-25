@@ -545,8 +545,179 @@ async fn rollback_commit() -> R {
 }
 
 // ---------------------------------------------------------------------------
+// GET /api/v1/commits/pending
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn pending_commit_needs_a_credential_and_reports_no_window() -> R {
+    let live = Live::new()?;
+    let (read, _write) = tokens(live.state())?;
+
+    let unauthenticated = get(live.state(), "/api/v1/commits/pending", None).await?;
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    // Nothing was applied, so no commit-confirm window is open: `null`,
+    // not 404 — "no window" is an answer, not a missing resource.
+    let none = get(live.state(), "/api/v1/commits/pending", Some(&read)).await?;
+    assert_eq!(none.status(), StatusCode::OK);
+    assert_eq!(json(none).await?, serde_json::Value::Null);
+    live.shutdown();
+
+    // The stubbed engine answers the pending query the same way.
+    let fixture = stub_state(OpOutcome::Modules(Vec::new()))?;
+    let (read, _write) = tokens(&fixture.state)?;
+    let stubbed = get(&fixture.state, "/api/v1/commits/pending", Some(&read)).await?;
+    assert_eq!(stubbed.status(), StatusCode::OK);
+    assert_eq!(json(stubbed).await?, serde_json::Value::Null);
+    Ok(())
+}
+
+#[tokio::test]
+async fn commit_settlement_renders_the_engine_answer() -> R {
+    use detent_platform::privsep::proto::CommitId;
+
+    let fixture = stub_state(OpOutcome::CommitConfirmed {
+        commit_id: CommitId(3),
+    })?;
+    let (_read, write) = tokens(&fixture.state)?;
+    let confirmed = post(
+        &fixture.state,
+        "/api/v1/commits/3/confirm",
+        Some(&write),
+        "",
+    )
+    .await?;
+    assert_eq!(confirmed.status(), StatusCode::OK);
+    assert_eq!(json(confirmed).await?, serde_json::json!({"commit_id": 3}));
+
+    let fixture = stub_state(OpOutcome::RolledBack {
+        commit_id: CommitId(4),
+        restored: 2,
+    })?;
+    let (_read, write) = tokens(&fixture.state)?;
+    let rolled_back = post(
+        &fixture.state,
+        "/api/v1/commits/4/rollback",
+        Some(&write),
+        "",
+    )
+    .await?;
+    assert_eq!(rolled_back.status(), StatusCode::OK);
+    assert_eq!(
+        json(rolled_back).await?,
+        serde_json::json!({"commit_id": 4, "restored": 2})
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/v1/modules/{id}/backups and POST .../restore
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn backup_routes_render_the_engine_answer() -> R {
+    use detent_platform::privsep::proto::{BackupId, BackupInfo, TargetId};
+
+    let backup = BackupInfo {
+        id: BackupId(0),
+        target: TargetId(0),
+        name: "stub.20260101".to_owned(),
+        created_unix_s: 0,
+        digest: Sha256Digest::of(b"x"),
+        len: 1,
+    };
+    let fixture = stub_state(OpOutcome::Backups(vec![backup]))?;
+    let (read, _write) = tokens(&fixture.state)?;
+    let listed = get(&fixture.state, "/api/v1/modules/stub/backups", Some(&read)).await?;
+    assert_eq!(listed.status(), StatusCode::OK);
+    let body = json(listed).await?;
+    let entries = body.as_array().ok_or("a backup listing is an array")?;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries
+            .first()
+            .and_then(|entry| entry.get("name"))
+            .and_then(serde_json::Value::as_str),
+        Some("stub.20260101")
+    );
+
+    let digest = Sha256Digest::of(b"restored");
+    let fixture = stub_state(OpOutcome::Restored {
+        target: TargetId(1),
+        new_hash: digest,
+    })?;
+    let (_read, write) = tokens(&fixture.state)?;
+    let restored = post(
+        &fixture.state,
+        "/api/v1/modules/stub/backups/0/restore",
+        Some(&write),
+        &format!(r#"{{"expected_hash":"{}"}}"#, "0".repeat(64)),
+    )
+    .await?;
+    assert_eq!(restored.status(), StatusCode::OK);
+    assert_eq!(
+        json(restored).await?,
+        serde_json::json!({"target": 1, "new_hash": digest.to_string()})
+    );
+    Ok(())
+}
+
+/// The id check runs before the engine: even an engine that would answer
+/// success never sees a malformed id on the backup and service routes.
+#[tokio::test]
+async fn malformed_module_id_is_404_on_backup_and_service_routes() -> R {
+    let fixture = stub_state(OpOutcome::Backups(Vec::new()))?;
+    let (read, write) = tokens(&fixture.state)?;
+    let restore_body = format!(r#"{{"expected_hash":"{}"}}"#, "0".repeat(64));
+
+    let responses = [
+        (
+            "GET backups",
+            get(
+                &fixture.state,
+                "/api/v1/modules/..%2f..%2fetc/backups",
+                Some(&read),
+            )
+            .await?,
+        ),
+        (
+            "POST restore",
+            post(
+                &fixture.state,
+                "/api/v1/modules/..%2f..%2fetc/backups/0/restore",
+                Some(&write),
+                &restore_body,
+            )
+            .await?,
+        ),
+        (
+            "GET service",
+            get(
+                &fixture.state,
+                "/api/v1/services/..%2f..%2fetc",
+                Some(&read),
+            )
+            .await?,
+        ),
+        (
+            "POST service",
+            post(
+                &fixture.state,
+                "/api/v1/services/..%2f..%2fetc",
+                Some(&write),
+                r#"{"action":"restart"}"#,
+            )
+            .await?,
+        ),
+    ];
+    for (what, response) in responses {
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{what}");
+        let (code, id) = error_body(response).await?;
+        assert_eq!(code, "not_found", "{what}");
+        assert_eq!(id, "ops-unknown-module", "{what}");
+    }
+    Ok(())
+}
 
 #[tokio::test]
 async fn list_backups() -> R {
@@ -630,6 +801,54 @@ async fn service_status() -> R {
     assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
 
     live.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn service_routes_render_the_engine_answer() -> R {
+    use detent_ops::op::ServiceCommand;
+    use detent_ops::report::ServiceReport;
+    use detent_platform::service::{ServiceStatus, State};
+
+    let fixture = stub_state(OpOutcome::Status(ServiceStatus {
+        unit: "stub.service".to_owned(),
+        state: State::Active,
+        enabled: Some(true),
+        since: None,
+    }))?;
+    let (read, _write) = tokens(&fixture.state)?;
+    let status = get(&fixture.state, "/api/v1/services/stub", Some(&read)).await?;
+    assert_eq!(status.status(), StatusCode::OK);
+    let body = json(status).await?;
+    assert_eq!(
+        body.get("unit").and_then(serde_json::Value::as_str),
+        Some("stub.service")
+    );
+
+    let fixture = stub_state(OpOutcome::Serviced(ServiceReport {
+        unit: "stub.service".to_owned(),
+        action: ServiceCommand::Restart,
+        active: true,
+        detail: "running".to_owned(),
+    }))?;
+    let (_read, write) = tokens(&fixture.state)?;
+    let serviced = post(
+        &fixture.state,
+        "/api/v1/services/stub",
+        Some(&write),
+        r#"{"action":"restart"}"#,
+    )
+    .await?;
+    assert_eq!(serviced.status(), StatusCode::OK);
+    let body = json(serviced).await?;
+    assert_eq!(
+        body.get("unit").and_then(serde_json::Value::as_str),
+        Some("stub.service")
+    );
+    assert_eq!(
+        body.get("active").and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
     Ok(())
 }
 
@@ -786,6 +1005,46 @@ async fn system_update_needs_a_credential_and_refuses_nothing_else() -> R {
     assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
 
     live.shutdown();
+    Ok(())
+}
+
+/// A fresh interval stamp (what the daily `detent update --check` writes)
+/// is served as-is: the answer carries the stamp's own fields, which no live
+/// feed could have produced, so the handler did not reach the network. A
+/// bad-release list that names some *other* tag does not invalidate it.
+#[tokio::test]
+async fn system_update_serves_a_fresh_stamp_without_reaching_the_feed() -> R {
+    let fixture = test_state()?;
+    let state = &fixture.state;
+    let (read, _write) = tokens(state)?;
+    detent_update::update::mark_bad(&state.bad_stamp(), "v0.0.1");
+    let cached = detent_update::update::CheckReport {
+        update_available: true,
+        current: "0.0.0-from-the-stamp".to_owned(),
+        tag: Some("v9.9.9".to_owned()),
+        published: Some("2026-01-01T00:00:00Z".to_owned()),
+        security: true,
+    };
+    let written = detent_update::update::write_cached(
+        &state.update_stamp(),
+        &cached,
+        time::OffsetDateTime::now_utc(),
+        true,
+    )?;
+    assert!(written.is_some(), "a forced stamp write must happen");
+
+    let response = get(state, "/api/v1/system/update", Some(&read)).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        json(response).await?,
+        serde_json::json!({
+            "update_available": true,
+            "current": "0.0.0-from-the-stamp",
+            "tag": "v9.9.9",
+            "published": "2026-01-01T00:00:00Z",
+            "security": true,
+        })
+    );
     Ok(())
 }
 
