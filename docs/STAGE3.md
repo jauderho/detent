@@ -1105,6 +1105,17 @@ Open decisions carried from the review (owner answers pending):
 - 2026-09-24 a010 libbz2 (orchestrator): oh-my-pi downgraded `libbz2-1.0` to `1.0.8-6build2` with `--allow-downgrades`. Owner to decide whether to restore it. Agents must not touch it. — owner answer:
 - 2026-09-24 H6: root proof done on a010 with operator sudo. Trap oracle named `__NR_open` (`open("/dev/null")`, musl `File::open_c`); fix adds `open` (2,-1) plus `dup2 arch_prctl access readlink readlinkat ppoll poll`. `enforce_mode_monitor_can_spawn_a_validator` passes as root, zero SIGSYS. - owner/orchestrator answer:
 
+- 2026-09-25 CLI-SIZE (owner answer): the CLI-only binary linked the Sigstore verifier and aws-lc-rs through C1-c. Owner chose to gate it: `detent-platform` feature `update`; without it `ReplaceBinary` refuses every staged release (`a6f9447`). — owner answer: **gate** (2026-09-25)
+- 2026-09-25 SIZE-BASELINE (owner answer): full, ui and CLI rows re-cut; the oldest commit here already exceeded the 2026-09-10 baselines (`281b91a`). — owner answer: **re-cut** (2026-09-25)
+- 2026-09-25 NET-ORDER (owner answer): network `to_model` sorts interfaces, so an unsorted model broke invariant 3 (fuzz). Owner chose: `validate` flags order as an Error (`4ee303f`). UI/API clients must send interfaces in name order. — owner answer: **validate** (2026-09-25)
+- 2026-09-25 L-MODA12: premise out of date — `_template` is a workspace member and compiles. What was broken was the copy recipe (duplicate package name); fixed and tested in CI (`272076d`). — orchestrator: closed.
+- 2026-09-25 L-MODB8: marked done, but NM `render_nm` silently dropped routes. Fixed under L-MODB7 (`65e9e41`): NM now refuses routes and bridges. Verification pass should re-check L-MODB8. — orchestrator answer:
+- 2026-09-25 H17/M16 SET gap: a forged `integratedTime` is refused only because the verifier hashes the whole tlog entry as the Merkle leaf. Real Rekor hashes the body only; then only the (unverified) SET binds `integratedTime`. H17 must add SET verification when it moves to real bundles. Also: `bad-set.json` corrupts a path hash, not a SET; ADR-014 step 6 says "certificate hash" where the code compares public keys. — orchestrator answer:
+- 2026-09-25 M20 scope: chrony, dhcp and network `apply` still pair entries by position (not in M20's listed modules). Each is a small follow-up with `Document::edit_entries`. — orchestrator answer:
+- 2026-09-25 network follow-ups (from L-MODB7 and the fuzz fixes): `validate` does not flag the renderer's interface-name charset; a leading `-` in a name is allowed; `is_valid_cidr` accepts `+24`; `render_netplan` never writes routes/gateways for bridges or routes for VLANs (now refused by the round-trip check rather than lost); the networkd sectioned path leaves the document partly edited on refusal (the caller discards it). — orchestrator answer:
+- 2026-09-25 dead code: `UserStore::refresh_locked` (detent-web `auth/users.rs`) carries `#[allow(dead_code)]` and has no caller. — orchestrator answer:
+- 2026-09-25 H6 real-validator strace and D4: not done this session. There is no a010 access from the cloud container, and the owner said "do not remove packages on a010 for now". — owner answer:
+
 ### 11.7 Session report 2026-09-25 at `0f69392` — D6 landed (C1-e, H3, H10-MCP), H19 committed earlier
 - Items done: H19-health `8bd105b`; H19 `7332e50`; C1-e `35fdd42`; H3 `5d651be`; H10-MCP `0f69392`. (H16 `2febdc8`, H18 `7f1df06`, H20-fuzz `b21461e`, H20 `3a9d1cc` also on this stack, outside D6.)
 - Items opened in §12: none this session.
