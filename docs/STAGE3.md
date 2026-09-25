@@ -1211,3 +1211,25 @@ Method: reviewer per group; each item is checked against its Fix/Test/Acceptance
 | L-WEB16 | **REOPEN** | `spawn_sweeper` starts only if a Tokio runtime exists (`state.rs:81`). `serve` calls `AuthState::open` (`serve.rs:433`) before it builds the runtime (`:447`), so the sweeper never runs in production. Fix: start it after the runtime exists; add a serve-level test |
 | L-WEB17 | VERIFIED | `csrf.rs:236-239`, `extract.rs:100-107`; both tests fail with `.get(COOKIE)` |
 | L-FE3 | VERIFIED | `api:check` exits 1 when `schema.d.ts` JSDoc is edited |
+
+**Group A (platform) — checked at `9bdcc65`. No negative checks ran:** the reviewer's permission classifier refused the worktree mutations, so "VERIFIED" items are VERIFIED-NO-NEG. Tests at HEAD pass: platform lib 131 (filtered), `sandbox::linux::tests` 9 as root, `privsep_e2e` 22.
+
+| Item | Verdict | Evidence / what is missing |
+|---|---|---|
+| C1-a | VERIFIED-NO-NEG | `monitor.rs:1566` nlink, `:1590-1594` parent uid / mode; `read_staged_verified_refuses_a_hard_linked_image` (unit-level; no dispatch-level test) |
+| C1-b | PARTIAL | Copy-from-worker-tree, not chunked `StageUpdate` (owner still to confirm, §12). Read-only findings: the source open has no `O_NONBLOCK` / regular-file check (a planted FIFO blocks the monitor and its deadline enforcement); `O_NOFOLLOW` guards the last component only (`update/staged` → `/etc` symlink lets the worker learn sizes and SHA-256 of root-readable files via the length check and `Conflict`); the bundle is opened with a symlink-following `File::open`; a failed verify leaves the `O_EXCL` file behind, so a retry fails until reboot |
+| C1-c | VERIFIED-NO-NEG | `monitor.rs:593-647`; wrong-identity / missing-bundle / embedded-roots / valid-release tests; no HTTP/TLS stack in `detent-platform` (only as good as H17) |
+| C1-d | VERIFIED-NO-NEG (weak) | `O_EXCL` 0o700, file + dir fsync. The test puts a directory at the temp name, which fails without EXCL too, so it is likely vacuous for EXCL. A failed dir `open` skips fsync silently |
+| H1 | VERIFIED-NO-NEG | `serve_locked`, `rollback_pending_on_exit`, CLI recovery; 3 tests. `lock_state` falls back to a `/dev/null` lock on EACCES (no mutual exclusion then) |
+| H2 | VERIFIED-NO-NEG | `engine.rs:571-630`; 4 tests. If `arm_commit` fails after the write, no rollback |
+| H4 | PARTIAL | Replay on request is pinned (`rollback_replays_the_service_after_restoring_files`). Replay on deadline expiry, on monitor exit and in `recover_pending` has no test that records the call; `an_expired_commit_replays_the_service_action` is absent |
+| H6 | **REOPEN** | The monitor survives a spawn, but **the seccomp filter is inherited across execve**: a probe running `uname`, `id`, `sh -c`, `findmnt --verify`, `systemctl show`/`--version` under the confined monitor saw each killed (SIGSYS; syscalls 63, 107, 102, 157). `MONITOR` also lacks `socket`/`connect`, which systemctl needs. So **every real validator and service action under a confined `serve` fails**, and apply fails closed for every module with checks. Fix: allow-list what the children need, or install a separate child filter before exec; extend the test beyond `/bin/true` to `findmnt` and `systemctl --version`. The a010 strace step stays blocked |
+| H12 | VERIFIED-NO-NEG | `mcp.rs:69-78`; `http_transport_refused_for_root`. Gated on euid only, not on capabilities |
+| H23 | **REOPEN** | The deny-list is bypassed (probe): samba `rootpreexec`, `root  preexec`, `root_preexec` (a full `WriteTarget` wrote `rootpreexec = /bin/sh` to disk); changing an existing directive's value (counts, not values, are compared); ifupdown indented `    up …` (no trim before split), `up … x=1` (`=` in the key), `post-up`/`pre-down` missing, `$(…)` inside `up ip route add`; unbound `include:/x` (no space); Kea `hooks-libraries` and unbound `dynlib-file:` not covered. Fix: normalise names as each daemon does, trim before split, compare values, add the missing hooks, one regression test per bypass |
+| M1 | VERIFIED-NO-NEG | `caps_that_do_not_drop_are_fatal_only_when_required`. The worker's after-`setuid` branch reports `Applied` with its bounding set still full (untested) |
+| M2 | PARTIAL | Startup notes and warning work. `state/confinement.json` is read by nothing; both roles write the same file; the root monitor writes it with a symlink-following `std::fs::write` inside the worker-owned state root. Fix: one file per role, no-follow writes, doctor reads it |
+| M11 | VERIFIED-NO-NEG | `mcp.rs:87-94`; `bind_table_keeps_bearer_on_loopback`, `http_config_enforces_origin_validation` |
+| L-PLAT6 | VERIFIED-NO-NEG | `checks.rs:96-101`; `stdout_pattern_requires_literal_match_and_exit_zero` |
+| L-PLAT7 | VERIFIED-NO-NEG | `monitor.rs:901` staging dir; `run_check_places_the_candidate_in_monitor_staging`. Plain `create_dir_all` with no trust check (unsafe in capability-user mode, C1-f) |
+| L-PLAT8 | VERIFIED | Doc-only; `proto.rs:296-302` |
+| L-BIN16 | VERIFIED-NO-NEG | `spawn.rs` child arm aborts; two tests |

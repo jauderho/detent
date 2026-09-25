@@ -34,7 +34,14 @@ oh-my-pi. Read this file, then `docs/STAGE3.md` §00 (still binding), §11.8 and
 
 ### 4.1 STAGE3 §11.3 step 4 — verification pass (IN PROGRESS, results not yet recorded)
 
-Five reviewers were started at `733d6e0`'s parent. **Group C is recorded in STAGE3 §11.9** (7 VERIFIED, 8 PARTIAL, 3 REOPEN: H9 and L-WEB16 are real defects; fix them first). The other groups may not have been recorded before this session ended. **Redo any group that has no table in STAGE3 §11.9.**
+Five reviewers were started at `733d6e0`'s parent. **Groups A and C are recorded in STAGE3 §11.9.** Fix the REOPEN items first, in this order:
+  1. **H6**: every validator and `systemctl` call under a confined `serve` is killed by the inherited seccomp filter.
+  2. **H23**: the root-exec deny-list is bypassed, e.g. samba `rootpreexec` and indented ifupdown `up`.
+  3. **H9**: an idle connection holds a permit for 600 s.
+  4. **L-WEB16**: the sweeper never starts in `serve`.
+  5. The **C1-b** read-only findings: FIFO block, parent-symlink info leak.
+
+Group A's negative checks did not run: a permission classifier refused the worktree mutations. Redo them. The other groups may not have been recorded before this session ended. **Redo any group that has no table in STAGE3 §11.9.**
 
 For each item: read its Fix/Test/Acceptance lines in STAGE3 §3–§6, then:
 1. Confirm the fix is present at HEAD (file:line).
