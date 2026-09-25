@@ -913,7 +913,7 @@ fn plan_refuses_a_target_that_is_not_utf8() -> TestResult {
 }
 
 #[test]
-fn plan_reports_a_target_that_cannot_be_read() -> TestResult {
+fn plan_reports_a_missing_target_clearly() -> TestResult {
     let mut fx = harness(b"a\n", Setup::default())?;
     std::fs::remove_file(&fx.target)?;
     assert!(matches!(
@@ -921,7 +921,7 @@ fn plan_reports_a_target_that_cannot_be_read() -> TestResult {
             id: MODULE.to_owned(),
             model: json!({"text": "a\n"}),
         }),
-        Err(OpsError::Privsep(_))
+        Err(OpsError::TargetMissing)
     ));
     fx.finish()
 }
@@ -1095,14 +1095,16 @@ fn apply_refuses_a_candidate_a_declared_check_rejects() -> TestResult {
 }
 
 #[test]
-fn apply_fails_when_the_target_cannot_be_read() -> TestResult {
+fn apply_refuses_a_missing_target_clearly() -> TestResult {
     let mut fx = harness(b"v1\n", Setup::default())?;
     std::fs::remove_file(&fx.target)?;
-    // Reading is what fails first when the file is gone.
+    // Apply never creates a target: a missing file is refused with its own
+    // error, not a generic privsep failure. STAGE3 L-OPS17.
     assert!(matches!(
         fx.run(apply("v2\n", None)),
-        Err(OpsError::Privsep(_))
+        Err(OpsError::TargetMissing)
     ));
+    assert!(!fx.target.exists());
     let records = fx.records();
     assert_eq!(records.len(), 2);
     assert_eq!(
@@ -1110,6 +1112,10 @@ fn apply_fails_when_the_target_cannot_be_read() -> TestResult {
         Some(AuditResult::Started)
     );
     assert_eq!(records.get(1).map(|r| r.result), Some(AuditResult::Error));
+    assert_eq!(
+        records.get(1).and_then(|r| r.error_id.clone()),
+        Some("ops-target-missing".to_owned())
+    );
     fx.finish()
 }
 

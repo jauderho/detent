@@ -52,6 +52,7 @@ ops-unknown-module = there is no module by that name in this build.
 ops-unsupported = that is not supported in this build.
 ops-commit-pending = another commit-confirm window is already pending.
 ops-no-backup = commit-confirm requires a retained backup; nothing was changed.
+ops-target-missing = the managed file does not exist; create it (install its package or create it by hand), then try again.
 web-api-unexpected-outcome = the operation completed but its result could not be rendered.
 web-auth-ambiguous-credentials = send either a session cookie or a bearer token, not both.
 web-auth-argon2-params = the configured argon2 parameters are not usable.

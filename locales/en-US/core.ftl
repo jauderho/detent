@@ -245,6 +245,7 @@ ops-audit-unavailable = the audit log could not be written, so the operation was
 ops-unsupported = {$what} is not supported in this build.
 ops-commit-pending = another commit-confirm window is already pending.
 ops-no-backup = commit-confirm requires a retained backup; nothing was changed.
+ops-target-missing = the managed file does not exist; create it (install its package or create it by hand), then try again.
 ops-denied = you are not permitted to do that.
 
 ## detent-web — configuration, TLS, the operations bridge, and the listener

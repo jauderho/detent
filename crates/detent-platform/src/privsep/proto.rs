@@ -617,6 +617,10 @@ pub enum ProtoError {
     /// The staged release failed authenticity verification.
     #[error("staged release verification failed")]
     VerificationFailed,
+    /// The allow-listed target does not exist. The worker already knows the
+    /// target by id, so this reveals no path.
+    #[error("target does not exist")]
+    NotFound,
 }
 
 /// Which allow-list table an [`ProtoError::UnknownId`] refers to.
@@ -869,6 +873,7 @@ mod tests {
             Response::Error(ProtoError::Unsupported("mount".to_owned())),
             Response::Error(ProtoError::Unavailable("no service manager".to_owned())),
             Response::Error(ProtoError::Io("openat failed".to_owned())),
+            Response::Error(ProtoError::NotFound),
         ]
     }
 

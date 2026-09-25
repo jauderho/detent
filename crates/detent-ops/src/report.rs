@@ -142,7 +142,8 @@ pub struct ApplyReport {
     pub prev_hash: Option<Sha256Digest>,
     /// Digest now on disk.
     pub new_hash: Sha256Digest,
-    /// Whether the target did not exist before.
+    /// Whether the target did not exist before. Always `false`: apply never
+    /// creates a target and refuses a missing one.
     pub created: bool,
     /// Whether a backup was retained, and therefore whether commit-confirm
     /// has something to roll back to.

@@ -657,6 +657,11 @@ impl<'a> Monitor<'a> {
                 bytes,
                 digest,
             }),
+            Err(AtomicError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Response::Error(ProtoError::NotFound)
+            }
             Err(err) => Response::Error(atomic_to_proto(&err)),
         }
     }
@@ -2337,15 +2342,15 @@ mod tests {
     // -- read/write targets -----------------------------------------------------
 
     #[test]
-    fn read_target_reports_io_error_when_the_file_is_gone() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn read_target_reports_not_found_when_the_file_is_gone()
+    -> Result<(), Box<dyn std::error::Error>> {
         let fx = fixture()?;
         let mut monitor = greeted(fx.allow()?, Hooks::default());
         assert!(std::fs::remove_file(&fx.target).is_ok());
         let response = monitor.dispatch(Request::ReadTarget {
             target: TargetId(0),
         })?;
-        assert!(matches!(response, Response::Error(ProtoError::Io(_))));
+        assert!(matches!(response, Response::Error(ProtoError::NotFound)));
         Ok(())
     }
 
