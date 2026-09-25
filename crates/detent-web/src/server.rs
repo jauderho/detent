@@ -26,6 +26,7 @@
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::Router;
@@ -381,9 +382,12 @@ impl Server {
                             return;
                         }
                     };
+                let requested = Arc::new(AtomicBool::new(false));
+                let seen = Arc::clone(&requested);
                 let svc = tower::ServiceExt::map_request(
                     router,
                     move |mut req: axum::http::Request<hyper::body::Incoming>| {
+                        seen.store(true, Ordering::Relaxed);
                         req.extensions_mut().insert(ConnectInfo(peer));
                         req
                     },
@@ -392,11 +396,23 @@ impl Server {
                 let connection = builder
                     .serve_connection(TokioIo::new(tls), service)
                     .into_owned();
-                match tokio::time::timeout(max_connection_lifetime, watcher.watch(connection)).await
-                {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => debug!(%peer, ?error, "connection ended"),
-                    Err(_) => debug!(%peer, "connection lifetime exceeded"),
+                // The auto builder reads to sniff the protocol with no
+                // deadline, and hyper's header timeout does not cover that
+                // read, so a peer that completes the handshake and then sends
+                // nothing would hold its permit for the whole lifetime. Its
+                // first request must arrive within the header timeout (H9).
+                tokio::select! {
+                    outcome = tokio::time::timeout(
+                        max_connection_lifetime,
+                        watcher.watch(connection),
+                    ) => match outcome {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => debug!(%peer, ?error, "connection ended"),
+                        Err(_) => debug!(%peer, "connection lifetime exceeded"),
+                    },
+                    () = no_request_by(&requested, header_read_timeout) => {
+                        debug!(%peer, "no request before the header timeout");
+                    }
                 }
             });
         }
@@ -410,6 +426,15 @@ impl Server {
                 debug!("shutdown grace expired with connections still open");
             }
         }
+    }
+}
+
+/// Resolves at `deadline` unless a request has arrived by then; otherwise
+/// never (H9).
+async fn no_request_by(requested: &AtomicBool, deadline: Duration) {
+    tokio::time::sleep(deadline).await;
+    if requested.load(Ordering::Relaxed) {
+        std::future::pending::<()>().await;
     }
 }
 
