@@ -4,6 +4,12 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-25 - L-SUP13 inclusion path cap (STAGE3)
+
+`bundle::parse` refuses an inclusion path longer than `MAX_INCLUSION_PATH` (64) before it decodes any hash (`decode_path`). `root_from_path` already refused `index >= size` and a non-empty path at size 1 (`root_from_path_singleton_rejects_extra_nodes`); `root_from_path_refuses_an_index_outside_the_tree` now pins the index case.
+
+Verify: `bundle::tests::refuses_an_inclusion_path_longer_than_the_cap` failed before the fix (65 hashes parsed) and passes after. `cargo fmt --all --check` 0; workspace clippy `--all-features -D warnings` 0; `cargo test --workspace --all-features --no-fail-fast` 1759 passed, 1 failed (`webadmin` `setup_with_force_reports_a_write_failure_as_a_credential_failure`, which fails only as uid 0 in the cloud container and passes as uid 65534). Jev (`jev-1.13.0`) routed this item first (conf 0.59); complex reasoning by the default model.
+
 ## 2026-09-24 - H10 MCP half: per-request token verification
 
 Closed the MCP side of H10. `detent-mcp`'s `check_auth` no longer reads
