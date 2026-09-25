@@ -20,9 +20,11 @@
 //!    observed syscall names against (1) to separate real monitor/worker
 //!    behaviour from test-harness noise. `execve`/`clone` from the initial
 //!    process launch stay excluded for that reason — but `clone`/`execve`
-//!    *after* confinement are real: the monitor spawns validators and
-//!    service commands via `service::exec` on every `RunCheck`/`Service`
-//!    request (STAGE3 H6), so they are allow-listed in the table below.
+//!    *after* confinement were allow-listed so the monitor could spawn
+//!    validators and service commands (STAGE3 H6). A child inherits this
+//!    filter, so under `serve` those programs now run in the unconfined
+//!    runner (`privsep::runner`); the entries stay until a traced run shows
+//!    the monitor no longer needs them.
 //!
 //! `SYSCALL_NUMBERS` itself is not from memory either: both columns were
 //! read out of `<asm/unistd.h>` (via `gcc -E -dM -xc - < <(echo '#include

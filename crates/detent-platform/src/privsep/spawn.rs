@@ -217,13 +217,7 @@ pub fn spawn_pair(config: &SpawnConfig, sandbox: &dyn SandboxHooks) -> Result<Sp
     let (monitor_end, worker_end) = Channel::pair_with(config.read_timeout, config.write_timeout)
         .map_err(SpawnError::Channel)?;
 
-    // SAFETY of the fork itself is documented on `sys::fork_process`. The
-    // obligation it places on the caller — do nothing in the child that could
-    // deadlock on a lock held by a thread that did not survive the fork — is
-    // met by forking before any runtime or thread pool starts, and by the
-    // child path below doing nothing but syscalls and one small allocation.
-    #[allow(unsafe_code)]
-    let side = unsafe { sys::fork_process() }.map_err(SpawnError::Fork)?;
+    let side = fork()?;
 
     // The worker waits for this byte before it can return as a usable role;
     // dropping the monitor end makes a failed startup exit.
@@ -266,7 +260,72 @@ pub fn spawn_pair(config: &SpawnConfig, sandbox: &dyn SandboxHooks) -> Result<Sp
     }
 }
 
-fn reap_child(child_pid: i32) {
+/// `fork(2)`, for [`spawn_pair`] and [`spawn_runner`].
+///
+/// SAFETY of the fork itself is documented on `sys::fork_process`. The
+/// obligation it places on the caller — do nothing in the child that could
+/// deadlock on a lock held by a thread that did not survive the fork — is met
+/// by both callers forking before any runtime or thread pool starts, and by
+/// their child paths doing nothing but syscalls and small allocations.
+fn fork() -> Result<Side, SpawnError> {
+    #[allow(unsafe_code)]
+    let side = unsafe { sys::fork_process() }.map_err(SpawnError::Fork)?;
+    Ok(side)
+}
+
+/// The monitor's handle on the runner (STAGE3 H6).
+#[derive(Debug)]
+pub struct RunnerHandle {
+    /// Pid of the runner process; reap it with [`reap_child`] once the
+    /// channel is dropped.
+    pub child_pid: i32,
+    /// The monitor's end of the runner channel. Build a
+    /// [`RunnerClient`](super::runner::RunnerClient) on it. A worker forked
+    /// after the runner inherits this descriptor and must drop it first.
+    pub channel: Channel,
+}
+
+/// Fork the runner, which answers [`RunnerRequest`](super::runner::RunnerRequest)s
+/// with the real validator and service hooks, unconfined, until its channel
+/// closes. Call it before [`spawn_pair`], so that the monitor's confinement
+/// does not reach the runner's children.
+///
+/// # Errors
+///
+/// [`SpawnError::Channel`] and [`SpawnError::Fork`].
+pub fn spawn_runner(
+    allow: &super::allowlist::Allowlist,
+    staging_dir: &std::path::Path,
+    init: detent_core::descriptor::InitSystem,
+) -> Result<RunnerHandle, SpawnError> {
+    let (monitor_end, runner_end) =
+        Channel::pair_with(super::runner::RUNNER_TIMEOUT, super::runner::RUNNER_TIMEOUT)
+            .map_err(SpawnError::Channel)?;
+    match fork()? {
+        Side::Parent(child_pid) => {
+            drop(runner_end);
+            Ok(RunnerHandle {
+                child_pid,
+                channel: monitor_end,
+            })
+        }
+        Side::Child => {
+            drop(monitor_end);
+            let mut channel = runner_end;
+            let checks = crate::service::checks::ExternalCheckRunner::new();
+            let services = crate::service::ServiceControlAdapter(crate::service::for_host(init));
+            let hooks = super::monitor::Hooks {
+                checks: &checks,
+                services: &services,
+            };
+            super::runner::serve_runner(allow, staging_dir, &hooks, &mut channel);
+            abort_child(0);
+        }
+    }
+}
+
+/// Reap a forked child, blocking until it exits.
+pub fn reap_child(child_pid: i32) {
     if let Some(pid) = rustix::process::Pid::from_raw(child_pid) {
         let _ = rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::empty());
     }

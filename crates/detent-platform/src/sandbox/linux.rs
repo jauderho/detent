@@ -566,6 +566,83 @@ mod tests {
         })
     }
 
+    /// A validator that needs what real ones need: `uname`, the uid calls,
+    /// `findmnt` and `systemctl` (the H6 probe saw each killed by `SIGSYS`
+    /// under the monitor's filter), then reads its candidate.
+    static PROBE_CHECKS: &[detent_core::descriptor::ExternalCheck] =
+        &[detent_core::descriptor::ExternalCheck {
+            program: PathSpec::new("/bin/sh"),
+            args: &[
+                detent_core::descriptor::ArgTemplate::Literal("-c"),
+                detent_core::descriptor::ArgTemplate::Literal(
+                    "uname >/dev/null && id -u >/dev/null && findmnt --version >/dev/null \
+                     && systemctl --version >/dev/null && test -s \"$0\"",
+                ),
+                detent_core::descriptor::ArgTemplate::TempFile,
+            ],
+            expects: detent_core::descriptor::CheckExpectation::ExitZero,
+        }];
+
+    /// STAGE3 H6: under the real monitor confinement, a validator run
+    /// through the runner (forked before `confine`) is not bound by the
+    /// monitor's seccomp filter, so it runs to completion.
+    #[test]
+    fn enforce_mode_monitor_runs_real_validators_through_the_runner()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::privsep::monitor::CheckRunner as _;
+        use crate::privsep::runner::RunnerClient;
+        use crate::privsep::spawn::{reap_child, spawn_runner};
+        static PROBE: ModuleDescriptor = ModuleDescriptor {
+            id: "probe",
+            display_name_id: MessageId::new("probe-name"),
+            targets: &[Target {
+                path: PathSpec::new("/etc/hosts"),
+                kind: TargetKind::File,
+                mode: 0o644,
+                owner: Owner::Root,
+                backend_detect: always,
+            }],
+            upstream: UPSTREAM,
+            services: &[],
+            checks: PROBE_CHECKS,
+            commit_confirm: false,
+            security_notes: &[],
+        };
+        in_forked_child(|| {
+            let dir =
+                std::env::temp_dir().join(format!("detent-sandbox-runner-{}", std::process::id()));
+            let staging = dir.join("staging");
+            let candidate = staging.join("detent-validate-probe");
+            if std::fs::create_dir_all(&staging).is_err()
+                || std::fs::write(&candidate, b"candidate").is_err()
+            {
+                return false;
+            }
+            let Ok(allow) = Allowlist::from_modules(&[&PROBE], &Config::with_state_root(&dir))
+            else {
+                return false;
+            };
+            let Ok(runner) =
+                spawn_runner(&allow, &staging, detent_core::descriptor::InitSystem::None)
+            else {
+                return false;
+            };
+            if confine(Role::Monitor, &Policy::monitor(&allow)).is_err() {
+                return false;
+            }
+            let pid = runner.child_pid;
+            let client = RunnerClient::new(runner.channel, &allow);
+            let passed = PROBE_CHECKS.first().is_some_and(|check| {
+                client
+                    .run_check(check, &candidate)
+                    .is_ok_and(|outcome| outcome.passed)
+            });
+            drop(client);
+            reap_child(pid);
+            passed
+        })
+    }
+
     #[test]
     fn enforce_mode_seccomp_kills_the_monitor_on_a_forbidden_syscall()
     -> Result<(), Box<dyn std::error::Error>> {
