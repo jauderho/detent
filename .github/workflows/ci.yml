@@ -76,6 +76,10 @@ jobs:
 
       - name: cargo test (unprivileged; privileged sandbox tests run below)
         run: cargo test --workspace --all-features -- --skip sandbox::linux::tests
+      # `--all-features` links the verifier, so the fail-closed ReplaceBinary
+      # path of a build without `update` runs only here.
+      - name: cargo test (detent-platform without update; ReplaceBinary fails closed)
+        run: cargo test -p detent-platform --lib a_build_without_the_update_feature_refuses_a_valid_release
       # D2': cargo itself never runs as root (root-owned target/ files broke
       # later unprivileged builds with EACCES). The test binary builds
       # unprivileged; only the binary runs under sudo.

@@ -4,6 +4,12 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-25 - C1-c verifier behind a detent-platform `update` feature (STAGE3)
+
+C1-c made the monitor verify the Sigstore bundle, so `detent-platform` linked `detent-update` → `rustls-webpki` → aws-lc-rs in every build, including the CLI-only build with no self-update. The CLI-only aarch64-musl binary grew to 3,064,368 bytes (baseline 1,712,952; budget 3 MiB). Owner decision (2026-09-25): gate the verifier. `detent-platform` now has an `update` feature (`dep:detent-update`); `detent`'s `update` feature enables it. The monitor's bundle check moved into `verify_release`: with `update` it runs the same check as before; without it, every staged release is refused (`VerificationFailed`, fail closed). The downgrade check and staging code are unchanged. CLI-only binary: 2,104,824 bytes, and aws-lc-rs is no longer in its tree.
+
+Verify: `privsep::monitor::tests::a_build_without_the_update_feature_refuses_a_valid_release` (default features) passes, and fails when the stub returns `Ok(())`. CI runs it in a new step, because `--all-features` links the verifier. `cargo fmt --all --check` 0; workspace clippy `--all-features` 0; clippy `-p detent-platform` (no features) 0; clippy CLI-only feature set 0; `cargo test -p detent-platform --lib` 252 passed; `cargo test --workspace --all-features --no-fail-fast` 1759 passed, 1 failed (uid 0 only, see L-SUP13 entry).
+
 ## 2026-09-25 - L-SUP13 inclusion path cap (STAGE3)
 
 `bundle::parse` refuses an inclusion path longer than `MAX_INCLUSION_PATH` (64) before it decodes any hash (`decode_path`). `root_from_path` already refused `index >= size` and a non-empty path at size 1 (`root_from_path_singleton_rejects_extra_nodes`); `root_from_path_refuses_an_index_outside_the_tree` now pins the index case.
