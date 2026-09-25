@@ -200,8 +200,56 @@ fn corrupted_inclusion_path_is_refused_at_step_6() {
 
 #[test]
 fn corrupted_checkpoint_signature_is_refused_at_step_6() {
-    let error = run("bad-sct.json").expect_err("corrupt checkpoint sig must be refused");
+    let error = run("bad-checkpoint-sig.json").expect_err("corrupt checkpoint sig must be refused");
     assert!(matches!(error, VerificationError::SetInvalid), "{error:?}");
+}
+
+#[test]
+fn a_body_with_another_signature_is_refused_at_step_6() {
+    // The tlog body carries a signature other than the envelope's; the
+    // inclusion proof and checkpoint are valid over that body, so only the
+    // body-agreement check can refuse it.
+    assert_eq!(run("bad-body-sig.json"), Err(VerificationError::SetInvalid));
+}
+
+#[test]
+fn a_body_naming_another_key_is_refused_at_step_6() {
+    // As above, but the body names a public key other than the leaf's.
+    assert_eq!(run("bad-body-key.json"), Err(VerificationError::SetInvalid));
+}
+
+#[test]
+fn a_wrong_subject_digest_is_refused() {
+    // A consistent, validly signed bundle whose statement attests another
+    // file: step 5 refuses it against binary.bin's digest.
+    assert_eq!(
+        run("wrong-digest.json"),
+        Err(VerificationError::DigestMismatch)
+    );
+}
+
+#[test]
+fn a_forged_integrated_time_is_refused() {
+    // integratedTime moved by one minute, still inside the leaf's validity
+    // window, so step 2 passes. The verifier's leaf hash covers the whole
+    // tlog entry including integratedTime, so the Merkle root no longer
+    // matches the signed checkpoint and step 6 refuses. No Rekor SET
+    // (inclusionPromise) is verified: this binding exists only through the
+    // entry-shaped leaf hash.
+    let raw = std::fs::read(fixtures().join("valid.json")).expect("fixture");
+    let mut bundle: serde_json::Value = serde_json::from_slice(&raw).expect("fixture json");
+    let time = bundle
+        .pointer_mut("/verificationMaterial/tlogEntries/0/integratedTime")
+        .expect("integratedTime");
+    *time = serde_json::json!(time.as_i64().expect("integer") + 60);
+    let decoded = detent_update::bundle::parse(&serde_json::to_vec(&bundle).expect("json"))
+        .expect("forged bundle still parses");
+    let digest: [u8; 32] =
+        Sha256::digest(std::fs::read(fixtures().join("binary.bin")).expect("binary")).into();
+    assert_eq!(
+        verify(&decoded, &digest, FIXTURE_TAG, &trust()),
+        Err(VerificationError::SetInvalid)
+    );
 }
 
 #[test]

@@ -86,12 +86,14 @@ No partial state, no retries with weaker checks.
 5. **Subject digest** — the statement's `subject[]` must contain exactly one
    entry whose `digest.sha256` equals the SHA-256 of the downloaded file.
    Zero or multiple matching subjects = refuse (ambiguous).
-6. **Rekor SET / inclusion** — verify `inclusionProof`: recompute the Merkle
+6. **Rekor inclusion** — verify `inclusionProof`: recompute the Merkle
    root from `hashes` + the leaf hash (RFC 6962), verify the `checkpoint`
    envelope's signature against the **embedded Rekor log public key**, and
    check the checkpoint's tree size ≥ the proof's tree size. The
    `canonicalizedBody` (hashedrekord) must embed the same signature bytes and
-   certificate hash as the envelope.
+   certificate hash as the envelope. The Rekor signed entry timestamp (SET)
+   is not verified, and embedded SCTs are only checked for presence (a
+   non-empty SCT list), not against CT log keys (tracked by STAGE3 H17/M16).
 
 ### Embedded trust root and refresh procedure
 
@@ -124,7 +126,9 @@ pass for the stated reason, asserted by test:
 | `wrong-identity.json` | step 3 fails: SAN ≠ pinned workflow identity (different repo/workflow ref) |
 | `wrong-digest.json` | step 5 fails: subject digest ≠ file SHA-256 |
 | `expired-leaf.json` | step 2 fails: leaf validity window excludes `integratedTime` |
-| `bad-sct.json` | step 2/6 fails: invalid embedded timestamp/certificate proof |
+| `bad-checkpoint-sig.json` | step 6 fails: checkpoint signature does not verify against the embedded Rekor key |
+| `bad-body-sig.json` | step 6 fails: tlog body carries a signature other than the envelope's |
+| `bad-body-key.json` | step 6 fails: tlog body names a key other than the leaf's |
 | `bad-set.json` | step 6 fails: inclusion proof fails to verify against the embedded Rekor key |
 
 ### Error taxonomy
