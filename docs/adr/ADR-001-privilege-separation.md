@@ -21,7 +21,8 @@ tokio, TLS, or HTTP; it only serves a closed request set (`ReadTarget`,
 from enabled modules — no path, unit name, or program name ever crosses the
 socket (§2.4, Appendix B). The worker holds all network-facing code (TLS,
 HTTP, ACME, update, UI) and drops to an unprivileged user, capabilities, and
-sandboxing after fork. No setuid binary is used.
+sandboxing after fork. No setuid binary is used. (ACME moved to its own
+confined process: see ADR-015.)
 
 ## Consequences
 

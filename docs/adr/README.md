@@ -46,3 +46,4 @@ File naming: `ADR-NNN-<kebab-slug>.md`, zero-padded to three digits.
 | ADR-012 | Commit-confirm auto-rollback | Accepted |
 | ADR-013 | Platform and architecture tiers | Accepted |
 | ADR-014 | In-tree Sigstore bundle verifier | Accepted |
+| ADR-015 | The ACME client runs in its own confined process | Accepted |
