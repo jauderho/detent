@@ -223,6 +223,9 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<Re
       return json(route, APPLY_REPORT)
     }
     if (path.endsWith('/confirm')) {
+      // A confirmed window is no longer pending: a later rehydration must not
+      // bring the banner back.
+      pendingCommit = null
       return json(route, { commit_id: 1, targets: 1 })
     }
     if (path.endsWith('/backups')) {
