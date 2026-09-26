@@ -30,7 +30,7 @@ use detent_core::descriptor::{
     UnitNames, Upstream, ValidationCtx, apply_hints,
 };
 use detent_core::diag::{Diagnostic, Diagnostics, FieldPath, MessageId, Severity};
-use detent_core::doc::{Document, Line, LineKind};
+use detent_core::doc::{Document, LineKind};
 use detent_core::module::{ConfigModule, EditError, EditReport, ModelError, ParseError};
 use std::collections::BTreeSet;
 
@@ -459,62 +459,12 @@ impl ConfigModule for ChronyModule {
     ///   and reports `EditReport::default()`) hold.
     /// * Pass 2 only ever touches `Directive` lines: comments, blanks and
     ///   unknown directives keep their position.
-    /// * New lines go after the last existing setting, not at the end of the
-    ///   file, so a trailing comment block stays trailing.
+    /// * Settings are aligned with the model ([`Document::edit_entries`]), so
+    ///   dropping or adding one never rewrites or moves another, and the whole
+    ///   edit is one pass over the file. A new setting goes directly after the
+    ///   one before it, so a trailing comment block stays trailing.
     fn apply(doc: &mut Self::Doc, model: &Self::Model) -> Result<EditReport, EditError> {
-        // Pass 1, read-only: pair model settings with the existing directive lines
-        // in order and render the ones that differ.
-        let mut planned: Vec<Option<String>> = Vec::with_capacity(model.settings.len());
-        for line in doc
-            .lines()
-            .iter()
-            .filter(|line| line.kind() == LineKind::Directive)
-        {
-            let Some(wanted) = model.settings.get(planned.len()) else {
-                break;
-            };
-            let unchanged = parse_setting(line.raw()).as_ref() == Some(wanted);
-            planned.push(if unchanged {
-                None
-            } else {
-                Some(render_line(wanted)?)
-            });
-        }
-        for wanted in model.settings.iter().skip(planned.len()) {
-            planned.push(Some(render_line(wanted)?));
-        }
-
-        // Pass 2: rewrite, drop the directive lines the model no longer has, and
-        // append the rest after the last directive line.
-        let mut report = EditReport::default();
-        let mut index = 0usize;
-        let mut matched = 0usize;
-        let mut after_last_directive: Option<usize> = None;
-        while index < doc.len() {
-            if doc.lines().get(index).map(Line::kind) != Some(LineKind::Directive) {
-                index = index.saturating_add(1);
-                continue;
-            }
-            let Some(slot) = planned.get(matched) else {
-                doc.remove_line(index)?;
-                report.removed = report.removed.saturating_add(1);
-                continue;
-            };
-            if let Some(raw) = slot.as_deref() {
-                doc.replace_raw(index, raw)?;
-                report.changed_lines = report.changed_lines.saturating_add(1);
-            }
-            matched = matched.saturating_add(1);
-            index = index.saturating_add(1);
-            after_last_directive = Some(index);
-        }
-        let mut at = after_last_directive.unwrap_or_else(|| doc.len());
-        for raw in planned.iter().skip(matched).flatten() {
-            doc.insert_line(at, raw)?;
-            at = at.saturating_add(1);
-            report.added = report.added.saturating_add(1);
-        }
-        Ok(report)
+        doc.edit_entries(&model.settings, parse_setting, render_line, |_| false)
     }
 
     /// A module needs at least one of each severity, and every finding carries a
@@ -948,6 +898,59 @@ mod tests {
         };
         assert!(ChronyModule::apply(&mut doc, &model).is_err());
         assert_eq!(ChronyModule::render(&doc), src);
+        Ok(())
+    }
+
+    #[test]
+    fn deleting_the_first_entry_rewrites_no_other_line() -> Result<(), String> {
+        let src = "server a.example iburst\nmakestep     1 3\n# note\nrtcsync\n";
+        let mut doc = ChronyModule::parse(src).map_err(|e| e.to_string())?;
+        let mut model = ChronyModule::to_model(&doc).map_err(|e| e.to_string())?;
+        model.settings.remove(0);
+        let report = ChronyModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        assert_eq!(
+            report,
+            EditReport {
+                changed_lines: 0,
+                added: 0,
+                removed: 1,
+            }
+        );
+        assert_eq!(
+            ChronyModule::render(&doc),
+            "makestep     1 3\n# note\nrtcsync\n"
+        );
+        Ok(())
+    }
+
+    /// The fastest of three runs of `apply` with an empty model on a file of
+    /// `lines` settings. Checks that every line goes.
+    fn time_empty_apply(lines: usize) -> Result<std::time::Duration, String> {
+        let src = "server ntp.example iburst\n".repeat(lines);
+        let mut fastest = std::time::Duration::MAX;
+        for _ in 0..3 {
+            let mut doc = ChronyModule::parse(&src).map_err(|e| e.to_string())?;
+            let started = std::time::Instant::now();
+            let report =
+                ChronyModule::apply(&mut doc, &Model::default()).map_err(|e| e.to_string())?;
+            fastest = fastest.min(started.elapsed());
+            assert_eq!(report.removed, lines);
+            assert_eq!(ChronyModule::render(&doc), "");
+        }
+        Ok(fastest)
+    }
+
+    #[test]
+    fn apply_is_linear_in_file_size() -> Result<(), String> {
+        // M21: ten times the lines must cost far less than a hundred times the
+        // time. Linear work gives a ratio near 10, quadratic work near 100. A
+        // ratio, not an absolute bound, so a slow or loaded runner still passes.
+        let small = time_empty_apply(5_000)?;
+        let large = time_empty_apply(50_000)?;
+        assert!(
+            large < small.saturating_mul(30),
+            "5k lines took {small:?}, 50k lines took {large:?}"
+        );
         Ok(())
     }
 
