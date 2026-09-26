@@ -27,6 +27,8 @@ pub mod order;
 #[cfg(any(feature = "dns-providers", feature = "fuzzing"))]
 pub mod providers;
 pub mod schedule;
+#[cfg(any(feature = "dns-providers", feature = "fuzzing"))]
+mod tsig;
 
 pub use attest::Attestor;
 #[cfg(feature = "fuzzing")]

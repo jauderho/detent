@@ -59,7 +59,7 @@ real test of `present_challenges`, which item 4's seam makes possible).
 
 The gap analysis was done at `c50200e`. In short: the pieces exist, but nothing wires them into `serve`.
 1. **Provider HTTPS transport** for Cloudflare, acme-dns and deSEC. Use the hyper-rustls client that `detent-acme` `order.rs` already builds. **The docs are wrong that a new dependency is needed**; fix `providers.rs:51-60` and `Cargo.toml:12-15`. Add TSIG for RFC 2136 with `hmac`/aws-lc (already in the workspace). Add provider selection in `[acme]`. Tests: recorded fixtures, and a **log-capture** test that no secret is logged.
-   - **Transport: DONE** (`src/https.rs`; the docs and `Cargo.toml` comments are fixed). **Open:** TSIG, provider selection in `[acme]`, the log-capture test (it needs the serve path that logs).
+   - **Transport: DONE** (`src/https.rs`; the docs and `Cargo.toml` comments are fixed). **TSIG: DONE** (`src/tsig.rs`, HMAC-SHA2 only; fixtures checked by dnspython). **Open:** provider selection in `[acme]`, the log-capture test (it needs the serve path that logs).
 2. **Renewal loop in `serve`**:
    - Read `[acme]`, order, `CertStore::install_acme` (hot reload), ARI window (`should_renew_ari`).
    - Remove the `cli-serve-acme-unsupported` refusal (`serve.rs:~309`).
