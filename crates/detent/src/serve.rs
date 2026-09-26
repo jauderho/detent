@@ -41,8 +41,11 @@ use detent_platform::privsep::allowlist::{Allowlist, Config};
 use detent_platform::privsep::monitor::{DEFAULT_STAGING_DIR, ExitReason, Hooks, Monitor};
 use detent_platform::privsep::runner::RunnerClient;
 use detent_platform::privsep::spawn::{
-    Role, RunnerHandle, SpawnConfig, SpawnError, abort_child, reap_child, spawn_pair, spawn_runner,
+    AcmeHandle, Role, RunnerHandle, SpawnConfig, SpawnError, abort_child, reap_child, spawn_pair,
+    spawn_runner,
 };
+#[cfg(feature = "web")]
+use detent_platform::privsep::transport::Channel;
 use detent_platform::sandbox::{
     Confinement, Hooks as SandboxHooks, LandlockOutcome, LandlockStatus, Outcome, Policy,
 };
@@ -88,22 +91,13 @@ pub fn run(
         };
 
     #[cfg(feature = "web")]
-    let config = match preflight_web_config(settings, renderer, streams)? {
-        Ok(config) => config,
+    let (config, provider) = match preflight_web_config(settings, renderer, streams)? {
+        Ok(checked) => checked,
         Err(exit) => return Ok(exit),
     };
 
     if dryrun {
-        renderer.line(
-            streams.out,
-            MessageId::new("cli-dryrun-serve"),
-            &[
-                ("modules", &descriptors.len().to_string()),
-                ("targets", &allow.target_count().to_string()),
-                ("state", &settings.state_root.display().to_string()),
-            ],
-        )?;
-        return Ok(Exit::Ok);
+        return report_dry_run(descriptors.len(), &allow, settings, renderer, streams);
     }
 
     let hooks = SandboxHooks::new(Policy::monitor(&allow), Policy::worker(&allow));
@@ -118,16 +112,25 @@ pub fn run(
         Err(exit) => return Ok(exit),
     };
 
-    let spawned = match spawn_pair(&SpawnConfig::default(), &hooks) {
-        Ok(spawned) => spawned,
-        Err(err) => {
-            renderer.line(
-                streams.notes,
-                MessageId::new("cli-serve-failed"),
-                &[("reason", &err.to_string())],
-            )?;
-            return Ok(exit_for_spawn(&err));
+    // After the runner and before the pair (ADR-015): only when preflight
+    // built a provider, that is with `tls.bootstrap = "acme"`.
+    #[cfg(feature = "web")]
+    let (hooks, acme, runner, config) = match provider {
+        None => (hooks, None::<AcmeHandle>, runner, config),
+        #[cfg(feature = "acme-dns-providers")]
+        Some(provider) => {
+            match start_acme(provider, hooks, runner, config, settings, renderer, streams)? {
+                Ok(started) => started,
+                Err(exit) => return Ok(exit),
+            }
         }
+    };
+    #[cfg(not(feature = "web"))]
+    let acme: Option<AcmeHandle> = None;
+
+    let spawned = match start_pair(&hooks, renderer, streams)? {
+        Ok(spawned) => spawned,
+        Err(exit) => return Ok(exit),
     };
 
     match spawned.role {
@@ -139,6 +142,11 @@ pub fn run(
             #[cfg(feature = "web")]
             {
                 report_confinement(&hooks, &settings.state_root, "worker", renderer, streams);
+                // The worker keeps its end of the acme channel.
+                let config = WorkerConfig {
+                    web: config,
+                    acme: acme.map(|acme| acme.channel),
+                };
                 let status =
                     run_worker(*client, host, registry, config, settings, renderer, streams);
                 let _ = streams.out.flush();
@@ -147,6 +155,7 @@ pub fn run(
             }
             #[cfg(not(feature = "web"))]
             {
+                drop(acme);
                 let mut client = client;
                 let greeted = client.hello().is_ok();
                 let _ = renderer.line(
@@ -161,8 +170,11 @@ pub fn run(
             }
         }
         Role::Monitor(handle) => {
+            // The monitor never talks to the acme process: it drops the
+            // channel here and keeps only the pid, to reap it.
+            let acme_pid = acme.map(|acme| acme.child_pid);
             report_confinement(&hooks, &settings.state_root, "monitor", renderer, streams);
-            run_monitor(
+            let exit = run_monitor(
                 &host,
                 allow,
                 handle,
@@ -170,7 +182,54 @@ pub fn run(
                 spawned.dropped_privileges,
                 renderer,
                 streams,
-            )
+            );
+            // Last, after the worker and the runner: the acme process ends
+            // when the worker's end of its channel closes. The monitor has
+            // no `CAP_KILL`, so it only waits. Not after a monitor failure,
+            // when the worker may still run.
+            if let (Ok(_), Some(acme_pid)) = (&exit, acme_pid) {
+                reap_child(acme_pid);
+            }
+            exit
+        }
+    }
+}
+
+/// Describes what `serve` would start, without forking.
+fn report_dry_run(
+    modules: usize,
+    allow: &Allowlist,
+    settings: &Settings,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Exit> {
+    renderer.line(
+        streams.out,
+        MessageId::new("cli-dryrun-serve"),
+        &[
+            ("modules", &modules.to_string()),
+            ("targets", &allow.target_count().to_string()),
+            ("state", &settings.state_root.display().to_string()),
+        ],
+    )?;
+    Ok(Exit::Ok)
+}
+
+/// Forks the monitor/worker pair, or reports why it could not.
+fn start_pair(
+    hooks: &SandboxHooks,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Result<detent_platform::privsep::spawn::Spawned, Exit>> {
+    match spawn_pair(&SpawnConfig::default(), hooks) {
+        Ok(spawned) => Ok(Ok(spawned)),
+        Err(err) => {
+            renderer.line(
+                streams.notes,
+                MessageId::new("cli-serve-failed"),
+                &[("reason", &err.to_string())],
+            )?;
+            Ok(Err(exit_for_spawn(&err)))
         }
     }
 }
@@ -185,6 +244,81 @@ fn start_runner(
     match spawn_runner(allow, std::path::Path::new(DEFAULT_STAGING_DIR), init) {
         Ok(runner) => Ok(Ok(runner)),
         Err(err) => {
+            renderer.line(
+                streams.notes,
+                MessageId::new("cli-serve-failed"),
+                &[("reason", &err.to_string())],
+            )?;
+            Ok(Err(exit_for_spawn(&err)))
+        }
+    }
+}
+
+/// What [`start_acme`] gives back: the hooks with the acme policy, the acme
+/// handle, and the runner handle and configuration the child dropped.
+#[cfg(all(feature = "web", feature = "acme-dns-providers"))]
+type AcmeStarted = (
+    SandboxHooks,
+    Option<AcmeHandle>,
+    RunnerHandle,
+    detent_web::Config,
+);
+
+/// Forks the acme process (ADR-015) with the provider preflight built, or
+/// reports why it could not.
+///
+/// The process drops `runner` and `config` first (they are its `inherited`
+/// value) and keeps only the issuer (settings, provider and secret) and
+/// `tls.cert_dir`. The caller gets `hooks` back with the acme policy,
+/// the acme handle, and `runner` and `config` unchanged.
+#[cfg(all(feature = "web", feature = "acme-dns-providers"))]
+fn start_acme(
+    provider: Provider,
+    hooks: SandboxHooks,
+    runner: RunnerHandle,
+    config: detent_web::Config,
+    settings: &Settings,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Result<AcmeStarted, Exit>> {
+    let issuer =
+        match crate::acme::AcmeIssuer::new(&config.acme, provider, crate::acme::ORDER_POLICY) {
+            Ok(issuer) => issuer,
+            Err(setting) => {
+                renderer.line(
+                    streams.notes,
+                    MessageId::new("cli-serve-acme-setting-missing"),
+                    &[
+                        ("setting", &format!("acme.{setting}")),
+                        ("path", &settings.config_path.display().to_string()),
+                    ],
+                )?;
+                return Ok(Err(Exit::Failed));
+            }
+        };
+    // Preflight refused a credentials path without a parent. An empty path
+    // here gives the process no writable directory: it fails closed.
+    let credentials_dir = config
+        .acme
+        .credentials_path
+        .as_deref()
+        .and_then(std::path::Path::parent)
+        .unwrap_or(std::path::Path::new(""));
+    let hooks = hooks.with_acme(Policy::acme(credentials_dir));
+    let runner_pid = runner.child_pid;
+    let cert_dir = config.tls.cert_dir.clone();
+    match crate::acme::fork_acme(
+        &SpawnConfig::default(),
+        &hooks,
+        issuer,
+        cert_dir,
+        (runner, config),
+    ) {
+        Ok((acme, (runner, config))) => Ok(Ok((hooks, Some(acme), runner, config))),
+        Err(err) => {
+            // `spawn_acme` dropped the runner channel with the error, so the
+            // runner ends.
+            reap_child(runner_pid);
             renderer.line(
                 streams.notes,
                 MessageId::new("cli-serve-failed"),
@@ -411,19 +545,31 @@ fn report_recovery(
     )
 }
 
+/// A dns-01 provider with its secret, built by [`preflight_dns_provider`].
+#[cfg(all(feature = "web", feature = "acme-dns-providers"))]
+type Provider = Box<dyn detent_acme::DnsProvider>;
+
+/// This build has no dns-01 providers, so preflight never yields one.
+#[cfg(all(feature = "web", not(feature = "acme-dns-providers")))]
+type Provider = std::convert::Infallible;
+
 /// Loads and validates `detent.toml`, and rejects a listen port this build
-/// cannot bind (see [`PRIVILEGED_PORT_CEILING`]) or an ACME bootstrap this
-/// build does not implement. When `[acme.provider]` is set, it also checks
-/// the provider and its secret ([`preflight_dns_provider`]).
+/// cannot bind (see [`PRIVILEGED_PORT_CEILING`]). With `tls.bootstrap =
+/// "acme"` it checks the `[acme]` settings ([`preflight_acme`]). When
+/// `[acme.provider]` is set, it also checks the provider and its secret
+/// ([`preflight_dns_provider`]).
 ///
 /// The outer `Result` is an I/O failure while reporting; the inner one is
 /// either the loaded configuration or the exit code already reported for it.
+/// With the configuration comes the built provider when `tls.bootstrap =
+/// "acme"`: the acme process takes it. A provider set without it is only
+/// checked, and dropped here with its secret.
 #[cfg(feature = "web")]
 fn preflight_web_config(
     settings: &Settings,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
-) -> std::io::Result<Result<detent_web::Config, Exit>> {
+) -> std::io::Result<Result<(detent_web::Config, Option<Provider>), Exit>> {
     let config = match settings.load_web_config() {
         Ok(config) => config,
         Err(err) => {
@@ -439,26 +585,118 @@ fn preflight_web_config(
         )?;
         return Ok(Err(Exit::Failed));
     }
-    if config.tls.bootstrap == detent_web::Bootstrap::Acme {
+    let acme = config.tls.bootstrap == detent_web::Bootstrap::Acme;
+    if acme && let Err(exit) = preflight_acme(&config, settings, renderer, streams)? {
+        return Ok(Err(exit));
+    }
+    let provider = match &config.acme.provider {
+        Some(provider) => match preflight_dns_provider(provider, settings, renderer, streams)? {
+            Ok(provider) => Some(provider),
+            Err(exit) => return Ok(Err(exit)),
+        },
+        None => None,
+    };
+    Ok(Ok((config, provider.filter(|_| acme))))
+}
+
+/// Checks `tls.bootstrap = "acme"`: every `[acme]` setting the acme
+/// process needs is set, and the two directories the confined processes
+/// write are under the state root. The acme process writes only the
+/// directory of `acme.credentials_path` (`Policy::acme`); the worker writes
+/// `tls.cert_dir` and may write only under the state root
+/// (`Policy::worker`).
+///
+/// Same outer/inner `Result` split as [`preflight_web_config`].
+#[cfg(all(feature = "web", feature = "acme-dns-providers"))]
+fn preflight_acme(
+    config: &detent_web::Config,
+    settings: &Settings,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Result<(), Exit>> {
+    let acme = &config.acme;
+    let missing = [
+        ("acme.directory_url", acme.directory_url.is_none()),
+        ("acme.domains", acme.domains.is_empty()),
+        ("acme.credentials_path", acme.credentials_path.is_none()),
+        ("acme.provider", acme.provider.is_none()),
+    ]
+    .into_iter()
+    .find_map(|(setting, missing)| missing.then_some(setting));
+    if let Some(setting) = missing {
         renderer.line(
             streams.notes,
-            MessageId::new("cli-serve-acme-unsupported"),
-            &[("path", &settings.config_path.display().to_string())],
+            MessageId::new("cli-serve-acme-setting-missing"),
+            &[
+                ("setting", setting),
+                ("path", &settings.config_path.display().to_string()),
+            ],
         )?;
         return Ok(Err(Exit::Failed));
     }
-    if let Some(provider) = &config.acme.provider
-        && let Err(exit) = preflight_dns_provider(provider, settings, renderer, streams)?
-    {
-        return Ok(Err(exit));
+    let credentials = acme
+        .credentials_path
+        .as_deref()
+        .unwrap_or(std::path::Path::new(""));
+    let cert_dir = config.tls.cert_dir.as_path();
+    for (setting, value, dir) in [
+        ("acme.credentials_path", credentials, credentials.parent()),
+        ("tls.cert_dir", cert_dir, Some(cert_dir)),
+    ] {
+        if !dir.is_some_and(|dir| lexically_under(dir, &settings.state_root)) {
+            renderer.line(
+                streams.notes,
+                MessageId::new("cli-serve-acme-path-outside"),
+                &[
+                    ("setting", setting),
+                    ("value", &value.display().to_string()),
+                    ("root", &settings.state_root.display().to_string()),
+                ],
+            )?;
+            return Ok(Err(Exit::Failed));
+        }
     }
-    Ok(Ok(config))
+    Ok(Ok(()))
+}
+
+/// This build has no dns-01 providers, so it cannot obtain an ACME
+/// certificate: `tls.bootstrap = "acme"` is refused.
+#[cfg(all(feature = "web", not(feature = "acme-dns-providers")))]
+fn preflight_acme(
+    _config: &detent_web::Config,
+    settings: &Settings,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Result<(), Exit>> {
+    renderer.line(
+        streams.notes,
+        MessageId::new("cli-serve-acme-unsupported"),
+        &[("path", &settings.config_path.display().to_string())],
+    )?;
+    Ok(Err(Exit::Failed))
+}
+
+/// True when `path` is `root` or under it. Both are made absolute and
+/// compared by components; no symlink is followed. A path with a `..`
+/// component is never under `root`.
+#[cfg(all(feature = "web", feature = "acme-dns-providers"))]
+fn lexically_under(path: &std::path::Path, root: &std::path::Path) -> bool {
+    match (std::path::absolute(path), std::path::absolute(root)) {
+        (Ok(path), Ok(root)) => {
+            !path
+                .components()
+                .any(|part| part == std::path::Component::ParentDir)
+                && path.starts_with(root)
+        }
+        _ => false,
+    }
 }
 
 /// Checks `[acme.provider]` before the fork, while this process can still
 /// read the `0600` `secrets.toml`: the file passes
 /// [`detent_web::secrets::load`], it holds `[acme] dns_provider`, and the
-/// provider builds from both. The built provider is dropped at once.
+/// provider builds from both. It returns the built provider: the secret is
+/// read here, as root, before any fork, and only the acme process keeps it.
 ///
 /// Same outer/inner `Result` split as [`preflight_web_config`].
 #[cfg(feature = "web")]
@@ -467,7 +705,7 @@ fn preflight_dns_provider(
     settings: &Settings,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
-) -> std::io::Result<Result<(), Exit>> {
+) -> std::io::Result<Result<Provider, Exit>> {
     let path = settings.secrets_path();
     let secrets = match detent_web::secrets::load(&path) {
         Ok(secrets) => secrets,
@@ -494,7 +732,7 @@ fn preflight_dns_provider(
     check_dns_provider(provider, secret, settings, renderer, streams)
 }
 
-/// Builds the provider to prove it can be built, then drops it.
+/// Builds the provider from its settings and secret.
 #[cfg(all(feature = "web", feature = "acme-dns-providers"))]
 fn check_dns_provider(
     provider: &detent_web::DnsProviderConfig,
@@ -502,9 +740,9 @@ fn check_dns_provider(
     _settings: &Settings,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
-) -> std::io::Result<Result<(), Exit>> {
+) -> std::io::Result<Result<Provider, Exit>> {
     match build_dns_provider(provider, secret) {
-        Ok(_provider) => Ok(Ok(())),
+        Ok(provider) => Ok(Ok(provider)),
         Err(err) => {
             renderer.line(
                 streams.notes,
@@ -524,7 +762,7 @@ fn check_dns_provider(
     settings: &Settings,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
-) -> std::io::Result<Result<(), Exit>> {
+) -> std::io::Result<Result<Provider, Exit>> {
     renderer.line(
         streams.notes,
         MessageId::new("cli-serve-acme-providers-not-built"),
@@ -587,7 +825,7 @@ fn run_worker(
     client: detent_platform::privsep::worker::Client,
     host: detent_platform::host::Detected,
     registry: Vec<Box<dyn detent_core::module::DynModule>>,
-    config: detent_web::Config,
+    config: WorkerConfig,
     settings: &Settings,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
@@ -630,6 +868,16 @@ fn run_worker(
     }
 }
 
+/// What the worker is started with: `detent.toml`, and its end of the acme
+/// channel when the acme process runs.
+#[cfg(feature = "web")]
+struct WorkerConfig {
+    /// The loaded `detent.toml`.
+    web: detent_web::Config,
+    /// The worker's end of the acme channel.
+    acme: Option<Channel>,
+}
+
 /// Everything [`run_worker`] needs before it can block on
 /// [`serve`](detent_web::Server::serve): the runtime it will drive that call
 /// with, the bound listener, and the engine thread to join afterwards.
@@ -658,7 +906,7 @@ fn prepare_worker(
     mut client: detent_platform::privsep::worker::Client,
     host: detent_platform::host::Detected,
     registry: Vec<Box<dyn detent_core::module::DynModule>>,
-    config: detent_web::Config,
+    config: WorkerConfig,
     settings: &Settings,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
@@ -676,7 +924,7 @@ fn prepare_worker(
 
     let ram_mib = host.profile.ram_mib;
     let init = host.profile.init;
-    let mut hostnames = config.tls.hostnames.clone();
+    let mut hostnames = config.web.tls.hostnames.clone();
     hostnames.push(host.profile.hostname.clone());
 
     let audit: Box<dyn AuditSink> = Box::new(FileAudit::under_state_root(&settings.state_root));
@@ -684,18 +932,18 @@ fn prepare_worker(
     engine.set_state_root(settings.state_root.clone());
     let (engine_handle, engine_thread) = detent_web::spawn_engine(engine);
 
-    let auth_state = match detent_web::AuthState::open(&settings.state_root, &config.auth, ram_mib)
-    {
-        Ok(state) => state,
-        Err(err) => {
-            let _ = renderer.line(
-                streams.notes,
-                MessageId::new("cli-serve-auth-failed"),
-                &[("reason", &err.to_string())],
-            );
-            return None;
-        }
-    };
+    let auth_state =
+        match detent_web::AuthState::open(&settings.state_root, &config.web.auth, ram_mib) {
+            Ok(state) => state,
+            Err(err) => {
+                let _ = renderer.line(
+                    streams.notes,
+                    MessageId::new("cli-serve-auth-failed"),
+                    &[("reason", &err.to_string())],
+                );
+                return None;
+            }
+        };
 
     // Built inside this one function, never process-wide: a one-shot command
     // must not pay for a runtime it never starts.
@@ -742,11 +990,15 @@ fn prepare_worker(
 /// listener — everything between the operations engine being ready and the
 /// server being ready to [`serve`](detent_web::Server::serve).
 ///
+/// With `config.acme`, the worker's end of the acme channel, it starts the
+/// thread that installs each certificate the acme process sends into the
+/// store ([`crate::acme::spawn_installs`]) once the store exists.
+///
 /// `None` on any failure; the caller has already been told why through
 /// `renderer`.
 #[cfg(feature = "web")]
 async fn bind_web_server(
-    config: detent_web::Config,
+    config: WorkerConfig,
     hostnames: &[String],
     engine_handle: detent_web::EngineHandle,
     auth_state: detent_web::AuthState,
@@ -762,6 +1014,7 @@ async fn bind_web_server(
                 &[("reason", &err.to_string())],
             );
         };
+    let WorkerConfig { web: config, acme } = config;
 
     // A renewed pair survives a restart: prefer the stored ACME chain over
     // the bootstrap pair, whose fingerprint stays the TOFU anchor until the
@@ -800,6 +1053,19 @@ async fn bind_web_server(
         }
     };
     let store = std::sync::Arc::new(store);
+    #[cfg(feature = "acme-dns-providers")]
+    if let Some(channel) = acme
+        && let Err(err) = crate::acme::spawn_installs(
+            channel,
+            config.acme.domains.clone(),
+            config.tls.cert_dir.clone(),
+            std::sync::Arc::clone(&store),
+        )
+    {
+        tracing::warn!(reason = %err, "the worker cannot start its acme thread");
+    }
+    #[cfg(not(feature = "acme-dns-providers"))]
+    drop(acme);
     let tls_config = match detent_web::server_config_from_store(
         std::sync::Arc::clone(&store),
         detent_web::tls::ALPN_H2_HTTP11,
@@ -1267,6 +1533,14 @@ mod web_tests {
         Ok((handle, thread, monitor))
     }
 
+    /// `config`, with no acme process.
+    fn worker_config(config: detent_web::Config) -> super::WorkerConfig {
+        super::WorkerConfig {
+            web: config,
+            acme: None,
+        }
+    }
+
     fn cheap_web_config(dir: &std::path::Path) -> detent_web::Config {
         detent_web::Config {
             listen: detent_web::ListenConfig {
@@ -1307,7 +1581,7 @@ mod web_tests {
                 notes: &mut notes,
             },
         )?;
-        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(outcome.is_ok(), "{:?}", outcome.as_ref().err());
         Ok(())
     }
 
@@ -1347,7 +1621,7 @@ mod web_tests {
                     notes: &mut notes,
                 },
             )?;
-            assert_eq!(outcome, Err(Exit::Failed), "{path:?}");
+            assert_eq!(outcome.err(), Some(Exit::Failed), "{path:?}");
             assert!(!notes.is_empty(), "{path:?}");
         }
         Ok(())
@@ -1441,7 +1715,7 @@ mod web_tests {
                 notes: &mut notes,
             },
         )?;
-        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(outcome.is_ok(), "{:?}", outcome.as_ref().err());
         assert!(notes.is_empty(), "{}", String::from_utf8_lossy(&notes));
         Ok(())
     }
@@ -1508,6 +1782,231 @@ mod web_tests {
         Ok(())
     }
 
+    /// A stand-in secret: low entropy on purpose (CI runs gitleaks).
+    const SECRET: &str = "not-a-real-token";
+
+    /// A `detent.toml` with `tls.bootstrap = "acme"` and every `[acme]`
+    /// setting the acme process needs, its paths under `root`.
+    fn complete_acme(root: &std::path::Path) -> String {
+        format!(
+            "[tls]\nbootstrap = \"acme\"\ncert_dir = \"{root}/certs\"\n\n\
+             [acme]\ndirectory_url = \"https://127.0.0.1:9/dir\"\n\
+             domains = [\"box.example\"]\n\
+             credentials_path = \"{root}/acme/account.json\"\n\n\
+             [acme.provider]\n{}",
+            cloudflare(),
+            root = root.display(),
+        )
+    }
+
+    /// `text` without the lines that start with one of `keys`.
+    #[cfg(feature = "acme-dns-providers")]
+    fn without(text: &str, keys: &[&str]) -> String {
+        text.lines()
+            .filter(|line| !keys.iter().any(|key| line.starts_with(key)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Runs `preflight_web_config` on `config` with a good `secrets.toml`
+    /// next to it and `state_root` as the state root. Returns whether it
+    /// passed with a provider, and the notes.
+    fn preflight_acme(
+        dir: &std::path::Path,
+        config: &str,
+        state_root: &std::path::Path,
+    ) -> Result<(Result<bool, Exit>, String), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let config_path = dir.join("detent.toml");
+        std::fs::write(&config_path, config)?;
+        let secrets = dir.join("secrets.toml");
+        std::fs::write(&secrets, secret_file(SECRET))?;
+        std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o600))?;
+        let messages = Messages::new(Some("en-US"));
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let mut input = std::io::empty();
+        let outcome = preflight_web_config(
+            &settings(state_root, config_path),
+            &renderer(&messages),
+            &mut crate::run::Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        let notes = String::from_utf8(notes)?;
+        assert!(!notes.contains(SECRET), "{notes}");
+        Ok((outcome.map(|(_, provider)| provider.is_some()), notes))
+    }
+
+    #[cfg(feature = "acme-dns-providers")]
+    #[test]
+    fn preflight_passes_a_complete_acme_config_with_its_provider() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let (outcome, notes) = preflight_acme(dir.path(), &complete_acme(dir.path()), dir.path())?;
+        assert_eq!(outcome, Ok(true), "{notes}");
+        assert!(notes.is_empty(), "{notes}");
+        Ok(())
+    }
+
+    #[cfg(feature = "acme-dns-providers")]
+    #[test]
+    fn preflight_names_each_missing_acme_setting() -> R {
+        for (keys, setting) in [
+            (&["directory_url"][..], "acme.directory_url"),
+            (&["domains"][..], "acme.domains"),
+            (&["credentials_path"][..], "acme.credentials_path"),
+            (&["[acme.provider]", "kind", "zone_id"][..], "acme.provider"),
+        ] {
+            let dir = tempfile::TempDir::new()?;
+            let config = without(&complete_acme(dir.path()), keys);
+            let (outcome, notes) = preflight_acme(dir.path(), &config, dir.path())?;
+            assert_eq!(outcome, Err(Exit::Failed), "{setting}");
+            assert!(notes.contains(setting), "{setting}: {notes}");
+            assert!(notes.contains("is not set"), "{setting}: {notes}");
+        }
+        Ok(())
+    }
+
+    /// The acme process writes only its credentials directory and the
+    /// worker only the state root: both directories must be under it. The
+    /// check is lexical: a `..` component is refused.
+    #[cfg(feature = "acme-dns-providers")]
+    #[test]
+    fn preflight_refuses_acme_paths_outside_the_state_root() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let root = dir.path().join("root");
+        let complete = complete_acme(&root);
+        let outside = dir.path().join("elsewhere").display().to_string();
+        let escape = root.join("../elsewhere").display().to_string();
+        for (keys, line, setting) in [
+            (
+                "credentials_path",
+                format!("credentials_path = \"{outside}/account.json\""),
+                "acme.credentials_path",
+            ),
+            (
+                "credentials_path",
+                format!("credentials_path = \"{escape}/account.json\""),
+                "acme.credentials_path",
+            ),
+            (
+                "cert_dir",
+                format!("cert_dir = \"{outside}\""),
+                "tls.cert_dir",
+            ),
+            (
+                "cert_dir",
+                format!("cert_dir = \"{escape}\""),
+                "tls.cert_dir",
+            ),
+        ] {
+            let config = complete
+                .lines()
+                .map(|old| {
+                    if old.starts_with(keys) {
+                        line.as_str()
+                    } else {
+                        old
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let (outcome, notes) = preflight_acme(dir.path(), &config, &root)?;
+            assert_eq!(outcome, Err(Exit::Failed), "{line}");
+            assert!(notes.contains(setting), "{line}: {notes}");
+            assert!(notes.contains("state root"), "{line}: {notes}");
+        }
+        Ok(())
+    }
+
+    /// A provider without `bootstrap = "acme"` is checked as before, and
+    /// preflight yields none: no acme process starts.
+    #[cfg(feature = "acme-dns-providers")]
+    #[test]
+    fn preflight_checks_a_provider_without_acme_and_yields_none() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let config = format!("[acme.provider]\n{}", cloudflare());
+        let (outcome, notes) = preflight_acme(dir.path(), &config, dir.path())?;
+        assert_eq!(outcome, Ok(false), "{notes}");
+        let self_signed = complete_acme(dir.path()).replace("\"acme\"", "\"self-signed\"");
+        let (outcome, notes) = preflight_acme(dir.path(), &self_signed, dir.path())?;
+        assert_eq!(outcome, Ok(false), "{notes}");
+        Ok(())
+    }
+
+    /// `start_acme` forks the acme process with the production spawn
+    /// configuration and gives back the runner handle and the configuration
+    /// it passed to the child. As root without the `detent` account (a
+    /// developer container), the fork is refused before it happens: the
+    /// runner is reaped and the failure is a privilege problem.
+    #[cfg(feature = "acme-dns-providers")]
+    #[test]
+    fn start_acme_forks_the_acme_process_and_gives_back_the_runner() -> R {
+        use detent_platform::privsep::spawn::is_root;
+        use detent_platform::sandbox::{Hooks as SandboxHooks, Policy};
+        let dir = tempfile::TempDir::new()?;
+        let allow = Allowlist::from_modules(&[], &AllowConfig::with_state_root(dir.path()))?;
+        let hooks = SandboxHooks::new(Policy::monitor(&allow), Policy::worker(&allow));
+        let mut config = cheap_web_config(dir.path());
+        config.acme = detent_web::AcmeConfig {
+            directory_url: Some("https://127.0.0.1:9/dir".to_owned()),
+            domains: vec!["box.example".to_owned()],
+            credentials_path: Some(dir.path().join("acme/account.json")),
+            ..detent_web::AcmeConfig::default()
+        };
+        let provider = Box::new(detent_acme::CloudflareProvider::new(SECRET, ZONE_ID)?);
+        let runner = idle_runner()?;
+        let runner_pid = runner.child_pid;
+        let messages = Messages::new(Some("en-US"));
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let mut input = std::io::empty();
+        let started = super::start_acme(
+            provider,
+            hooks,
+            runner,
+            config.clone(),
+            &settings(dir.path(), dir.path().join("detent.toml")),
+            &renderer(&messages),
+            &mut crate::run::Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        let notes = String::from_utf8(notes)?;
+        assert!(!notes.contains(SECRET), "{notes}");
+        match started {
+            Ok((_, Some(acme), runner, back)) => {
+                assert_eq!(runner.child_pid, runner_pid);
+                assert_eq!(back, config);
+                // The child's greeting sees the channel closed: it exits 1.
+                acme.channel.shutdown_write()?;
+                assert_eq!(acme.wait()?, Some(1));
+            }
+            Ok((_, None, _, _)) => return Err("no acme handle".into()),
+            Err(exit) => {
+                assert!(is_root(), "{notes}");
+                assert_eq!(exit, Exit::Privilege, "{notes}");
+                assert!(notes.contains("worker account"), "{notes}");
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "acme-dns-providers"))]
+    #[test]
+    fn preflight_refuses_acme_in_a_build_without_providers() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let (outcome, notes) = preflight_acme(dir.path(), &complete_acme(dir.path()), dir.path())?;
+        assert_eq!(outcome, Err(Exit::Failed));
+        assert!(notes.contains("acme-dns-providers"), "{notes}");
+        assert!(notes.contains("self-signed"), "{notes}");
+        Ok(())
+    }
+
     #[cfg(not(feature = "acme-dns-providers"))]
     #[test]
     fn preflight_refuses_a_provider_this_build_cannot_use() -> R {
@@ -1517,6 +2016,47 @@ mod web_tests {
         )?;
         assert_eq!(outcome, Err(Exit::Failed));
         assert!(notes.contains("acme-dns-providers"), "{notes}");
+        Ok(())
+    }
+
+    /// With the worker's end of the acme channel, the bound worker answers
+    /// the acme process on its own thread.
+    #[cfg(feature = "acme-dns-providers")]
+    #[tokio::test]
+    async fn bind_web_server_answers_the_acme_process_once_bound() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let (handle, thread, monitor) = engine_fixture(dir.path())?;
+        let auth_state =
+            detent_web::AuthState::open(dir.path(), &detent_web::AuthConfig::default(), 4096)?;
+        let (acme_end, worker_end) = Channel::pair()?;
+        let messages = Messages::new(Some("en-US"));
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let mut input = std::io::empty();
+        let bound = bind_web_server(
+            super::WorkerConfig {
+                web: cheap_web_config(dir.path()),
+                acme: Some(worker_end),
+            },
+            &["box.example".to_owned()],
+            handle,
+            auth_state,
+            dir.path().to_path_buf(),
+            &renderer(&messages),
+            &mut crate::run::Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )
+        .await
+        .ok_or("bind_web_server must succeed against a fresh temp dir")?;
+        let mut client = detent_platform::privsep::acme::AcmeClient::new(acme_end);
+        client.hello()?;
+        drop(client);
+        drop(bound);
+        thread.join().map_err(|err| format!("{err:?}"))?;
+        monitor.join().map_err(|_| "monitor thread panicked")?;
         Ok(())
     }
 
@@ -1543,7 +2083,7 @@ mod web_tests {
         };
 
         let bound = bind_web_server(
-            config,
+            worker_config(config),
             &["box.example".to_owned()],
             handle,
             auth_state,
@@ -1600,7 +2140,7 @@ mod web_tests {
         };
 
         let server = bind_web_server(
-            config,
+            worker_config(config),
             &["box.example".to_owned()],
             handle,
             auth_state,
@@ -1644,7 +2184,7 @@ mod web_tests {
         };
 
         let server = bind_web_server(
-            config,
+            worker_config(config),
             &["box.example".to_owned()],
             handle,
             auth_state,
@@ -1698,7 +2238,7 @@ mod web_tests {
             client,
             Detected::default(),
             Vec::new(),
-            config,
+            worker_config(config),
             &settings(dir.path(), dir.path().join("absent.toml")),
             &renderer,
             &mut streams,
@@ -1731,7 +2271,7 @@ mod web_tests {
             client,
             Detected::default(),
             Vec::new(),
-            config,
+            worker_config(config),
             &settings(dir.path(), dir.path().join("absent.toml")),
             &renderer,
             &mut crate::run::Streams {
@@ -1778,7 +2318,7 @@ mod web_tests {
             client,
             Detected::default(),
             Vec::new(),
-            config,
+            worker_config(config),
             &settings(dir.path(), dir.path().join("absent.toml")),
             &renderer,
             &mut streams,
@@ -1832,7 +2372,7 @@ mod web_tests {
             client,
             Detected::default(),
             Vec::new(),
-            config,
+            worker_config(config),
             &settings(dir.path(), dir.path().join("absent.toml")),
             &renderer,
             &mut streams,
@@ -1984,7 +2524,7 @@ mod web_tests {
             let mut notes = Vec::new();
             let mut input = std::io::empty();
             let bound = bind_web_server(
-                cheap_web_config(dir.path()),
+                worker_config(cheap_web_config(dir.path())),
                 &["box.example".to_owned()],
                 handle,
                 auth_state,

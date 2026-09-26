@@ -92,8 +92,23 @@ privilege.
   parent gets the handle back). The pair forked after it inherits
   the worker's end of its socket pair: the monitor drops it, the worker
   answers on it (`serve_acme`: `Hello`, then `Install { chain, key }` →
-  `Installed` or `Refused`). Status: the process and its channel exist
-  (slice C1); `serve` does not start it yet.
+  `Installed` or `Refused`). `serve` starts it (`start_acme` in
+  `serve.rs`, `fork_acme` in `crates/detent/src/acme.rs`) only when
+  preflight built a provider, that is with `tls.bootstrap = "acme"`.
+  Preflight (`preflight_acme`) refuses a missing `acme.directory_url`,
+  `acme.domains`, `acme.credentials_path` or `acme.provider`, and a
+  credentials directory or `tls.cert_dir` that is not under the state root
+  (compared lexically; `..` refused). The child drops the runner handle and
+  the full `detent_web::Config` first. The worker answers on a thread it
+  starts once its `CertStore` exists (`spawn_installs`); it keeps serving
+  if that thread ends.
+- Shutdown order: the worker exits (SIGTERM/SIGINT) and the monitor reaps
+  it; the monitor drops the runner channel and reaps the runner; the acme
+  process sees its channel readable during its wait between rounds
+  (`wait_or_peer`), ends with status 0, and the monitor reaps it last. The
+  monitor has no `CAP_KILL`: it can only wait. During a round the acme
+  process ends at its next install or wait, so the last reap can take as
+  long as one order.
 - The worker binds the listener, so the port must be ≥ 1024
   (`PRIVILEGED_PORT_CEILING`, `serve.rs`).
 - The dns-01 provider secret lives in `secrets.toml`, next to `detent.toml`
@@ -103,9 +118,12 @@ privilege.
   `crates/detent-web/src/secrets.rs` (`load`: `O_NOFOLLOW`, regular file,
   ≤ 64 KiB, no group/other bits, owner = euid). A secret that reaches the
   worker gets there only as memory inherited across the fork: the worker
-  runs as uid `detent` and cannot reread the `0600` file. Today `serve`
-  only proves that `[acme.provider]` and the secret build a provider, then
-  drops both; the renewal loop that keeps them is not built yet.
+  runs as uid `detent` and cannot reread the `0600` file. With
+  `tls.bootstrap = "acme"` the built provider moves into the acme child's
+  body, which the parent drops when `spawn_acme` returns, so the monitor
+  and the worker do not hold it (`the_parent_drops_the_issuer_at_the_fork_and_keeps_what_it_passed`,
+  `acme.rs`). Without it, a configured provider is only checked and
+  dropped.
 
 ### 3.2 One-shot CLI commands and `detent mcp`
 
