@@ -251,22 +251,9 @@ fn verify_inclusion(
 
     leaf_point: &[u8],
 ) -> Result<(), VerificationError> {
-    // The leaf hash covers the canonicalized tlog entry: its fields, JSON,
-    // keys sorted (serde_json's default map), the sigstore canonical form.
-    // ponytail: assumes sigstore's canonical-JSON field order (sorted keys);
-    // the Phase 9 real-bundle capture is what proves it against production.
-    let entry = serde_json::json!({
-        "canonicalizedBody": base64_of(&decoded.body),
-        "integratedTime": decoded.integrated_time,
-        "kindVersion": { "kind": decoded.kind, "version": decoded.kind_version },
-        "logId": { "keyId": base64_of(&decoded.log_key_id) },
-        "logIndex": decoded.log_index,
-    });
-    let entry_bytes = serde_json::to_vec(&entry).map_err(|_| VerificationError::SetInvalid)?;
-    let mut leaf_hasher = Sha256::new();
-    leaf_hasher.update([0x00]);
-    leaf_hasher.update(&entry_bytes);
-    let leaf_hash: [u8; 32] = leaf_hasher.finalize().into();
+    // The Merkle leaf covers the canonicalized body only. integratedTime,
+    // logIndex and logID are bound by the SET (`verify_set`), not here.
+    let leaf_hash = rekor_leaf_hash(&decoded.body);
 
     let path: Vec<[u8; 32]> = decoded
         .path_hashes
@@ -342,6 +329,16 @@ fn verify_inclusion(
     // signing key the envelope carries (ADR-014 step 6).
     verify_body_agreement(decoded, leaf_point)?;
     Ok(())
+}
+
+/// The Rekor Merkle leaf of an entry: `SHA-256(0x00 || canonicalizedBody)`
+/// (RFC 6962 §2.1 leaf hash; Rekor stores the body bytes as the leaf).
+#[must_use]
+pub fn rekor_leaf_hash(body: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update([0x00]);
+    hasher.update(body);
+    hasher.finalize().into()
 }
 
 /// The bytes a Rekor signed entry timestamp (SET) signs: the RFC 8785
@@ -628,6 +625,128 @@ mod tests {
         let cert = params.self_signed(&key).expect("fixture cert");
         let (_, parsed) = X509Certificate::from_der(cert.der()).expect("parse fixture cert");
         assert!(has_embedded_sct(&parsed));
+    }
+
+    #[test]
+    fn the_leaf_hash_is_the_rfc6962_hash_of_the_body() {
+        // Pinned hex computed outside this crate:
+        // python3 -c 'import hashlib; print(hashlib.sha256(b"\x00" + b"{\"kind\":\"hashedrekord\"}").hexdigest())'
+        assert_eq!(
+            hex_lower(&rekor_leaf_hash(br#"{"kind":"hashedrekord"}"#)),
+            "caf6b539d9cbed2236739ae10e4008b6fce2f4fe0fc3d828088cc3c5249efb8a"
+        );
+    }
+
+    #[test]
+    fn a_real_rekor_proof_reaches_its_root_from_the_body_leaf() {
+        // A Rekor staging entry and its inclusion proof, copied from
+        // sigstore-python `test/assets/bundle_v3.txt.sigstore`: the leaf
+        // hash of the body plus the proof path must give Rekor's root hash.
+        let raw: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/rekor-staging-proof.json"))
+                .expect("vector json");
+        let text = |pointer: &str| {
+            raw.pointer(pointer)
+                .and_then(serde_json::Value::as_str)
+                .expect(pointer)
+        };
+        let body = BASE64
+            .decode(text("/entry/canonicalizedBody"))
+            .expect("body");
+        let leaf = rekor_leaf_hash(&body);
+        assert_eq!(hex_lower(&leaf), text("/leafHash"));
+        let path: Vec<[u8; 32]> = raw
+            .pointer("/entry/inclusionProof/hashes")
+            .and_then(serde_json::Value::as_array)
+            .expect("hashes")
+            .iter()
+            .map(|hash| {
+                BASE64
+                    .decode(hash.as_str().expect("hash"))
+                    .expect("hash")
+                    .try_into()
+                    .expect("32 bytes")
+            })
+            .collect();
+        let root = root_from_path(
+            text("/entry/inclusionProof/logIndex")
+                .parse()
+                .expect("index"),
+            text("/entry/inclusionProof/treeSize")
+                .parse()
+                .expect("size"),
+            leaf,
+            &path,
+        )
+        .expect("proof");
+        assert_eq!(BASE64.encode(root), text("/entry/inclusionProof/rootHash"));
+    }
+
+    /// A hand-built single-leaf log. The checkpoint commits to
+    /// SHA-256(0x00 || body), the RFC 6962 leaf of a Rekor entry, and each
+    /// entry field outside the body is varied: none of them may move the leaf.
+    #[test]
+    fn the_leaf_hash_covers_the_body_only() {
+        use p256::ecdsa::SigningKey;
+        use p256::ecdsa::signature::Signer as _;
+
+        let rekor = SigningKey::from_slice(&[0x41; 32]).expect("fixed scalar");
+        let trust = TrustRoot {
+            fulcio_roots: Vec::new(),
+            rekor_key: *rekor.verifying_key(),
+            root_windows: Vec::new(),
+        };
+        let payload = br#"{"_type":"https://in-toto.io/Statement/v1"}"#.to_vec();
+        let dsse_signature = vec![0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01];
+        let body = serde_json::json!({
+            "apiVersion": "0.0.1",
+            "kind": "dsse",
+            "spec": {
+                "payloadHash": { "algorithm": "sha256", "value": hex_lower(&Sha256::digest(&payload)) },
+                "signatures": [{ "signature": BASE64.encode(&dsse_signature) }]
+            }
+        })
+        .to_string()
+        .into_bytes();
+
+        let mut leaf = Sha256::new();
+        leaf.update([0x00]);
+        leaf.update(&body);
+        let root: [u8; 32] = leaf.finalize().into();
+        let note = format!("test-log 1\n{}\n", BASE64.encode(Sha256::digest(root)));
+        let note_sig: Signature = rekor.sign(note.as_bytes());
+        let checkpoint = format!(
+            "{note}\n\u{2014} test-log {}\n",
+            BASE64.encode(note_sig.to_der().as_bytes())
+        );
+
+        for (integrated_time, log_index, log_key_id, kind_version) in [
+            (1_786_780_800, 0, vec![1_u8, 2, 3], "0.0.1"),
+            (1, 99, vec![9_u8; 32], "0.0.2"),
+        ] {
+            let decoded = Decoded {
+                integrated_time,
+                certs: Vec::new(),
+                statement: bundle::Statement {
+                    statement_type: bundle::STATEMENT_TYPE.to_owned(),
+                    subject: Vec::new(),
+                },
+                dsse_payload: payload.clone(),
+                dsse_payload_type: bundle::DSSE_PAYLOAD_TYPE.to_owned(),
+                dsse_signature: dsse_signature.clone(),
+                log_index,
+                log_key_id,
+                kind: "dsse".to_owned(),
+                kind_version: kind_version.to_owned(),
+                body: body.clone(),
+                tree_size: 1,
+                proof_log_index: 0,
+                path_hashes: Vec::new(),
+                checkpoint: checkpoint.clone(),
+                signed_entry_timestamp: Vec::new(),
+            };
+            assert_eq!(verify_inclusion(&decoded, &trust, &[]), Ok(()));
+        }
     }
 
     #[test]

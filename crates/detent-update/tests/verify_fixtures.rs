@@ -239,11 +239,9 @@ fn a_wrong_subject_digest_is_refused() {
 #[test]
 fn a_forged_integrated_time_is_refused() {
     // integratedTime moved by one minute, still inside the leaf's validity
-    // window, so step 2 passes. The verifier's leaf hash covers the whole
-    // tlog entry including integratedTime, so the Merkle root no longer
-    // matches the signed checkpoint and step 6 refuses. No Rekor SET
-    // (inclusionPromise) is verified: this binding exists only through the
-    // entry-shaped leaf hash.
+    // window, so step 2 passes. The Merkle leaf covers the body only, so the
+    // inclusion proof and checkpoint still verify; only the Rekor SET
+    // (inclusionPromise) signs integratedTime, and the SET check refuses.
     let raw = std::fs::read(fixtures().join("valid.json")).expect("fixture");
     let mut bundle: serde_json::Value = serde_json::from_slice(&raw).expect("fixture json");
     let time = bundle
