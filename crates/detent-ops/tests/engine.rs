@@ -2066,7 +2066,7 @@ fn update_apply_is_swapped_through_the_monitor_and_audited_once() -> TestResult 
         .join("state");
     fx.engine.set_state_root(&state_root);
 
-    plant_update(&state_root)?;
+    let staged = plant_update(&state_root)?;
 
     let outcome = fx.run(Operation::UpdateApply {
         version: UPDATE_FIXTURE_TAG.to_owned(),
@@ -2085,6 +2085,12 @@ fn update_apply_is_swapped_through_the_monitor_and_audited_once() -> TestResult 
     let first = records.get(1).ok_or("the success was audited")?;
     assert_eq!(first.op, OpKind::UpdateApply);
     assert_eq!(first.result, AuditResult::Ok);
+    // The record names the digest of the binary that was installed, which
+    // is what is now on disk at the swapped path.
+    let installed = Sha256Digest::of(&staged).to_string();
+    assert_eq!(first.new_hash.as_deref(), Some(installed.as_str()));
+    assert_eq!(first.after_hash, first.new_hash);
+    assert_eq!(fx.digest()?.to_string(), installed);
     fx.finish()
 }
 #[test]

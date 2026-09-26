@@ -344,7 +344,7 @@ impl OpsEngine {
             // through the monitor's `ReplaceBinary` (`ops-unsupported` when
             // the staged file is missing or refused, like `CertRenew`).
             Operation::UpdateApply { version } => self
-                .update_apply(&version)
+                .update_apply(&version, hashes)
                 .map(|()| OpOutcome::UpdateApplied { version }),
         }
     }
@@ -388,7 +388,8 @@ impl OpsEngine {
     /// digest-named path, authenticate it, and swap it over the running binary.
     /// The worker only hashes the bytes it asks the monitor to install; the
     /// monitor owns materialization and performs the authenticity gate.
-    fn update_apply(&mut self, version: &str) -> Result<(), OpsError> {
+    /// On success `hashes.new` is the digest of the installed binary.
+    fn update_apply(&mut self, version: &str, hashes: &mut Hashes) -> Result<(), OpsError> {
         let Some(state_root) = self.state_root.as_ref() else {
             return Err(OpsError::Unsupported {
                 what: "update_apply",
@@ -412,6 +413,7 @@ impl OpsEngine {
         self.client
             .replace_binary(version, len, sha256)
             .map_err(map_client)?;
+        hashes.new = Some(sha256);
         Ok(())
     }
 
