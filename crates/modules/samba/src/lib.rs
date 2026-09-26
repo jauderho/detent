@@ -102,10 +102,11 @@ pub struct Model {
 
 /// Builds a fuzz-friendly name: 1–8 characters of `[a-z0-9_-]`, the shape of
 /// every real section name (`global`, `homes`, `print$`) and of every word of a
-/// multi-word parameter name.
+/// multi-word parameter name, plus the characters smb.conf treats as syntax
+/// (`\ # ; [ ] "`, L-MODA11), which `apply` must refuse or write back exactly.
 #[cfg(feature = "fuzzing")]
 fn arbitrary_name(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<String> {
-    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789_-";
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789_-#;[]\"\\";
     let len = u.int_in_range(1..=8usize)?;
     let mut name = String::with_capacity(len);
     for _ in 0..len {
@@ -133,11 +134,11 @@ fn arbitrary_key(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Strin
 
 /// Builds a fuzz-friendly value: 0–12 characters of the alphabet real values
 /// use, including the delimiters this format treats as ordinary data (`%`,
-/// `=`, `[`, `]`, `;`), so the fuzz `edit` target exercises them instead of
-/// only the alphabet-shaped cases.
+/// `=`, `[`, `]`, `;`, `#`, `"`) and the continuation `\`, so the fuzz `edit`
+/// target exercises them instead of only the alphabet-shaped cases.
 #[cfg(feature = "fuzzing")]
 fn arbitrary_value(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<String> {
-    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789._%=/[];-";
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789._%=/[];-#\"\\";
     let len = u.int_in_range(0..=12usize)?;
     let mut value = String::with_capacity(len);
     for _ in 0..len {
@@ -1818,6 +1819,29 @@ mod tests {
     }
 
     // ------------------------------------------------------------------ fuzzing
+
+    /// L-MODA11: the fuzz models carry every character smb.conf treats as
+    /// syntax somewhere, so `fuzz_samba_edit` tries them.
+    #[cfg(feature = "fuzzing")]
+    #[test]
+    fn arbitrary_models_reach_smb_conf_syntax() {
+        use arbitrary::{Arbitrary, Unstructured};
+        let data: Vec<u8> = (0..65_536_u32)
+            .map(|i| u8::try_from(i.wrapping_mul(2_654_435_761) >> 24).unwrap_or(0))
+            .collect();
+        let mut seen = String::new();
+        for chunk in data.chunks(256) {
+            let m = Model::arbitrary(&mut Unstructured::new(chunk)).unwrap_or_default();
+            for e in m.entries {
+                seen.push_str(&e.section.unwrap_or_default());
+                seen.push_str(&e.key);
+                seen.push_str(&e.value);
+            }
+        }
+        for c in ['\\', '#', ';', '[', ']', '"', '-'] {
+            assert!(seen.contains(c), "no fuzz model carries {c:?}");
+        }
+    }
 
     #[cfg(feature = "fuzzing")]
     #[test]
