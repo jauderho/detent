@@ -709,6 +709,27 @@ mod tests {
         Ok(())
     }
 
+    /// A store that has not refreshed since another store revoked a token
+    /// must write the current file, not its stale copy (H10).
+    #[test]
+    fn a_stale_store_write_does_not_bring_back_a_revoked_token() -> R {
+        let root = tempfile::tempdir()?;
+        let a = TokenStore::load(root.path())?;
+        let (token, view) = a.issue("laptop", Scope::Read, None)?;
+        let b = TokenStore::load(root.path())?;
+        b.revoke(&view.id)?;
+        // `a` writes next, with no refresh before it.
+        a.issue("ci", Scope::Read, None)?;
+        let fresh = TokenStore::load(root.path())?;
+        match fresh.authenticate(token.expose(), 0) {
+            Err(AuthError::UnknownToken) => {}
+            other => return Err(format!("revoked token came back: {other:?}").into()),
+        }
+        let labels: Vec<_> = fresh.list().into_iter().map(|v| v.label).collect();
+        assert_eq!(labels, vec!["ci".to_owned()]);
+        Ok(())
+    }
+
     #[test]
     fn a_record_debug_shows_its_metadata_but_never_its_digest() -> R {
         let root = tempfile::tempdir()?;

@@ -964,6 +964,26 @@ mod tests {
         Ok(())
     }
 
+    /// A store that has not refreshed since another store removed a user
+    /// must write the current file, not its stale copy (H10).
+    #[test]
+    fn a_stale_store_write_does_not_bring_back_a_removed_user() -> R {
+        let root = tempfile::tempdir()?;
+        let hasher = hasher()?;
+        let a = open(root.path())?;
+        a.create(&hasher, "alice", "hunter2", false)?;
+        a.create(&hasher, "bob", "hunter2", false)?;
+        let b = open(root.path())?;
+        b.remove("alice")?;
+        // `a` writes next, with no refresh before it.
+        a.create(&hasher, "carol", "hunter2", false)?;
+        let fresh = open(root.path())?;
+        let names: Vec<_> = fresh.list().into_iter().map(|u| u.name).collect();
+        assert_eq!(names, vec!["bob".to_owned(), "carol".to_owned()]);
+        assert!(fresh.verify_password(&hasher, "alice", "hunter2").is_err());
+        Ok(())
+    }
+
     #[test]
     fn totp_counter_cannot_be_reused_or_go_backwards() -> R {
         let root = tempfile::tempdir()?;
