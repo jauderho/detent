@@ -447,9 +447,11 @@ impl<'a> Monitor<'a> {
                 idle_timeout
             };
             if channel.read_timeout() != want {
-                channel
-                    .set_read_timeout(want)
-                    .map_err(MonitorError::Channel)?;
+                match channel.set_read_timeout(want) {
+                    Ok(()) => {}
+                    Err(ChannelError::Closed) => return Ok(ExitReason::PeerClosed),
+                    Err(err) => return Err(MonitorError::Channel(err)),
+                }
             }
 
             match channel.poll_recv::<Request>() {

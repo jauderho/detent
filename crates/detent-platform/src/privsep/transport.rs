@@ -157,7 +157,8 @@ impl Channel {
     ///
     /// # Errors
     ///
-    /// [`ChannelError::Io`] when the socket option cannot be set.
+    /// [`ChannelError::Closed`] when the peer is gone (macOS refuses the
+    /// option then), [`ChannelError::Io`] when the option cannot be set.
     pub fn set_read_timeout(&mut self, timeout: Duration) -> Result<(), ChannelError> {
         self.apply_read_timeout(timeout)?;
         self.read_timeout = timeout;
@@ -167,7 +168,7 @@ impl Channel {
     fn apply_read_timeout(&self, timeout: Duration) -> Result<(), ChannelError> {
         self.stream
             .set_read_timeout(Some(timeout))
-            .map_err(ChannelError::Io)
+            .map_err(|err| map_timeout_error(err, timeout))
     }
 
     /// Encode and send one message.
@@ -288,6 +289,17 @@ fn is_timeout(err: &std::io::Error) -> bool {
     matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
 }
 
+/// macOS refuses `SO_RCVTIMEO` with `EINVAL` once the peer has closed, so a
+/// non-zero timeout refused as invalid means the peer is gone. A zero timeout
+/// is refused by `std` itself and stays an I/O error.
+fn map_timeout_error(err: std::io::Error, timeout: Duration) -> ChannelError {
+    if err.kind() == ErrorKind::InvalidInput && !timeout.is_zero() {
+        ChannelError::Closed
+    } else {
+        ChannelError::Io(err)
+    }
+}
+
 fn map_write_error(err: std::io::Error) -> ChannelError {
     match err.kind() {
         ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::UnexpectedEof => {
@@ -300,7 +312,10 @@ fn map_write_error(err: std::io::Error) -> ChannelError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Channel, ChannelError, DEFAULT_TIMEOUT, HEADER_LEN, is_timeout, map_write_error};
+    use super::{
+        Channel, ChannelError, DEFAULT_TIMEOUT, HEADER_LEN, is_timeout, map_timeout_error,
+        map_write_error,
+    };
     use crate::privsep::proto::{MAX_FRAME, PROTO_VERSION, Request, Response, TargetId};
     use serde::Serialize;
     use std::io::Write as _;
@@ -412,6 +427,23 @@ mod tests {
         ));
         assert_eq!(HEADER_LEN, 4);
         Ok(())
+    }
+
+    #[test]
+    fn a_timeout_refused_as_invalid_reports_closure_unless_the_timeout_was_zero() {
+        let invalid = || std::io::Error::from(std::io::ErrorKind::InvalidInput);
+        assert!(matches!(
+            map_timeout_error(invalid(), Duration::from_millis(5)),
+            ChannelError::Closed
+        ));
+        assert!(matches!(
+            map_timeout_error(invalid(), Duration::ZERO),
+            ChannelError::Io(_)
+        ));
+        assert!(matches!(
+            map_timeout_error(std::io::Error::other("x"), Duration::from_millis(5)),
+            ChannelError::Io(_)
+        ));
     }
 
     #[test]
