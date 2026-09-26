@@ -540,7 +540,11 @@ impl Document {
     /// Where the section containing line `from - 1` ends: the next line in
     /// `from..limit` that opens a section, or `limit`, moved back over the blank
     /// and comment lines just before it but never before `from`.
-    fn section_end(
+    ///
+    /// [`Document::plan_entries`] puts a new section header here; a module that
+    /// builds its own [`EntryPlan`] does the same with it.
+    #[must_use]
+    pub fn section_end(
         &self,
         from: usize,
         limit: usize,

@@ -499,40 +499,59 @@ fn an_edited_value_reaches_the_rendered_file() -> Result<(), String> {
     Ok(())
 }
 
+/// The section header in force at the line that holds `needle`: the last
+/// `[...]` line above it.
+fn section_above(rendered: &str, needle: &str) -> Option<String> {
+    let mut current = None;
+    for line in rendered.lines() {
+        if line.contains(needle) {
+            return current;
+        }
+        if line.starts_with('[') {
+            current = Some(line.to_owned());
+        }
+    }
+    None
+}
+
 #[test]
 fn edit_keeps_unknown_keys_under_their_section() -> Result<(), String> {
-    // UnknownKey lives under [Network] — its position must not move outside the section.
+    // H16: `UnknownKey` is not modelled, so it stays where it is. The edit adds
+    // a `[Route]` section; that section must not land between `[Network]` and
+    // `UnknownKey`, or networkd reads `UnknownKey` as a route key.
     let src = "[Match]\nName=eth0\n\n[UnknownSection]\nFoo=bar\n\n[Network]\nDHCP=yes\nUnknownKey=value\n\n[DHCP]\nRouteMetric=100\n";
     let mut doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
     let mut model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
-    // edit one modeled value
-    if let Some(iface) = model.interfaces.iter_mut().find(|i| i.name == "eth0") {
-        iface.dhcp_v4 = false;
-        iface.dhcp_v6 = false;
-        iface.addresses = vec!["10.0.0.5/24".to_owned()];
-    }
+    let iface = model
+        .interfaces
+        .iter_mut()
+        .find(|i| i.name == "eth0")
+        .ok_or("no eth0 in the model")?;
+    iface.dhcp_v4 = false;
+    iface.dhcp_v6 = false;
+    iface.addresses = vec!["10.0.0.5/24".to_owned()];
+    iface.routes = vec![detent_module_network::Route {
+        to: "10.1.0.0/16".to_owned(),
+        via: "10.0.0.1".to_owned(),
+    }];
     NetworkModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
     let rendered = NetworkModule::render(&doc);
-    // UnknownKey must still be under [Network], before [DHCP]
-    let pos_network = rendered.find("[Network]").unwrap_or(usize::MAX);
-    let pos_unknown = rendered.find("UnknownKey").unwrap_or(usize::MAX);
-    let pos_dhcp = rendered.find("[DHCP]").unwrap_or(usize::MAX);
-    assert!(
-        pos_network < pos_unknown,
-        "UnknownKey must be after [Network] was {rendered:?}"
+    assert_eq!(
+        section_above(&rendered, "UnknownKey").as_deref(),
+        Some("[Network]"),
+        "{rendered:?}"
     );
-    assert!(
-        pos_unknown < pos_dhcp,
-        "UnknownKey must stay before [DHCP] was {rendered:?}"
+    assert_eq!(
+        section_above(&rendered, "Foo=bar").as_deref(),
+        Some("[UnknownSection]"),
+        "{rendered:?}"
     );
-    // The preserved UnknownSection before it must also survive.
-    assert!(rendered.contains("UnknownSection"));
-    assert!(rendered.contains("Foo=bar"));
-    // UnknownSection before [Network] stays there.
-    let pos_unknown_section = rendered.find("[UnknownSection]").unwrap_or(usize::MAX);
-    assert!(
-        pos_unknown_section < pos_network,
-        "UnknownSection before Network"
+    assert_eq!(
+        section_above(&rendered, "RouteMetric").as_deref(),
+        Some("[DHCP]"),
+        "{rendered:?}"
     );
+    let back = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+    assert_eq!(back, model);
     Ok(())
 }
