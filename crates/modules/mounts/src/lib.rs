@@ -222,15 +222,22 @@ static CHECKS: &[ExternalCheck] = &[ExternalCheck {
     expects: CheckExpectation::ExitZero,
 }];
 
-/// The services a change to these files affects. Applying a fstab change means
-/// a daemon-reload plus mounting the new entries, both driven by the
-/// operations layer's monitor — there is no daemon unit to bind, so this stays
-/// empty (`hosts` does the same for the same reason).
+/// The services a change to these files affects. There is no daemon unit to
+/// bind, so this stays empty (`hosts` does the same for the same reason).
+/// Nothing reloads or mounts after an apply: the monitor does not reload
+/// systemd, and it answers `Request::Mount` with `Unsupported`. The new table
+/// takes effect at the next boot or the next manual `mount -a`.
 static SERVICES: &[ServiceBinding] = &[];
 
 /// The descriptor. `commit_confirm` is `true` because a bad fstab can leave
 /// the host unbootable at the next restart (ADR-012): every apply needs a
 /// second confirmation.
+///
+/// Commit-confirm cannot protect fstab the way it protects a network change.
+/// Nothing reads the new table before the next boot, so a bad entry does not
+/// break the session that must confirm it, and the automatic rollback never
+/// triggers. The confirmation is only a second look; `validate` and
+/// `findmnt --verify` are the real guard.
 static DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     id: "mounts",
     display_name_id: MessageId::new("mounts-name"),
@@ -384,6 +391,10 @@ const NOAUTO_WITHOUT_USER: MessageId = MessageId::new("mounts-noauto-without-use
 const MISSING_BOOT_ESCAPE: MessageId = MessageId::new("mounts-missing-boot-escape");
 /// Fluent id: a critical boot mount is marked not to mount.
 const CRITICAL_NO_AUTO: MessageId = MessageId::new("mounts-critical-noauto");
+/// Fluent id: the mount point is not an absolute path.
+const RELATIVE_MOUNTPOINT: MessageId = MessageId::new("mounts-relative-mountpoint");
+/// Fluent id: the table has entries but none mounts `/`.
+const NO_ROOT_ENTRY: MessageId = MessageId::new("mounts-no-root-entry");
 
 /// Whether `mountpoint` is required before the system can continue booting.
 fn is_boot_critical(mountpoint: &str) -> bool {
@@ -468,8 +479,9 @@ fn has_boot_escape(options: &[String]) -> bool {
 /// Checks one entry against the fstab(5) rules and the hardening conventions.
 ///
 /// * [`Severity::Error`] — the entry is invalid and must not be applied (empty
-///   columns, an fstype shape no filesystem type uses, a fsck pass above 2,
-///   or a critical boot mount disabled with `noauto`).
+///   columns, a mount point that is not an absolute path or `none`/`swap`,
+///   an fstype shape no filesystem type uses, a fsck pass above 2, or a
+///   critical boot mount disabled with `noauto`).
 /// * [`Severity::Warning`] — valid, but likely not what the admin meant (root
 ///   not in fsck pass 1, a local mount without `nofail`/`noauto`, removable
 ///   media without `nofail`, or data mounts without guards).
@@ -491,6 +503,15 @@ fn validate_entry(entry: &Entry, index: usize, diagnostics: &mut Diagnostics) {
             Diagnostic::new(Severity::Error, EMPTY_MOUNTPOINT)
                 .with_field(field("mountpoint"))
                 .with_arg("index", index.to_string()),
+        );
+    } else if !entry.mountpoint.starts_with('/')
+        && !matches!(entry.mountpoint.as_str(), "none" | "swap")
+    {
+        diagnostics.push(
+            Diagnostic::new(Severity::Error, RELATIVE_MOUNTPOINT)
+                .with_field(field("mountpoint"))
+                .with_arg("index", index.to_string())
+                .with_arg("mountpoint", entry.mountpoint.clone()),
         );
     }
     if !is_valid_fstype(&entry.fstype) {
@@ -642,6 +663,15 @@ impl ConfigModule for MountsModule {
         for (index, entry) in model.entries.iter().enumerate() {
             validate_entry(entry, index, &mut diagnostics);
         }
+        // An empty table is the documented default; a table without `/`
+        // relies on something else (the kernel command line, systemd's GPT
+        // auto-generator) to mount the root filesystem.
+        if !model.entries.is_empty() && !model.entries.iter().any(|e| e.mountpoint == "/") {
+            diagnostics.push(
+                Diagnostic::new(Severity::Warning, NO_ROOT_ENTRY)
+                    .with_field(FieldPath::new("entries")),
+            );
+        }
         diagnostics
     }
 
@@ -668,8 +698,9 @@ mod tests {
     use super::{
         CRITICAL_NO_AUTO, DESCRIPTOR, EMPTY_MOUNTPOINT, EMPTY_SPEC, Entry, INVALID_FSTYPE,
         MISSING_BOOT_ESCAPE, MISSING_GUARDS, MISSING_NOFAIL, MOUNT_GUARDS, Model, MountsModule,
-        NETWORK_AUTOMOUNT, NOAUTO_WITHOUT_USER, PASS_TOO_HIGH, ROOT_PASS, classify,
-        is_valid_fstype, missing_guards, parse_entry, render_entry, schema_with_hints,
+        NETWORK_AUTOMOUNT, NO_ROOT_ENTRY, NOAUTO_WITHOUT_USER, PASS_TOO_HIGH, RELATIVE_MOUNTPOINT,
+        ROOT_PASS, classify, is_valid_fstype, missing_guards, parse_entry, render_entry,
+        schema_with_hints,
     };
     use detent_core::descriptor::{HostProfile, InitSystem, Os, ValidationCtx};
     use detent_core::diag::{MessageId, Severity};
@@ -710,6 +741,8 @@ mod tests {
             "mounts-noauto-without-user",
             "mounts-missing-boot-escape",
             "mounts-critical-noauto",
+            "mounts-relative-mountpoint",
+            "mounts-no-root-entry",
         ] {
             assert!(
                 CORE_FTL.contains(&format!("{id} =")),
@@ -1049,6 +1082,53 @@ mod tests {
         };
         assert!(has(&model, EMPTY_SPEC, Severity::Error));
         assert!(has(&model, EMPTY_MOUNTPOINT, Severity::Error));
+    }
+
+    /// The fields of the findings `validate` reports with this id and severity.
+    fn findings(model: &Model, id: MessageId, severity: Severity) -> Vec<String> {
+        let host = host();
+        let ctx = ValidationCtx::new(&host);
+        MountsModule::validate(model, &ctx)
+            .iter()
+            .filter(|d| d.id.as_str() == id.as_str() && d.severity == severity)
+            .map(|d| d.field.as_ref().map_or("", |f| f.as_str()).to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn validate_flags_relative_mountpoint() {
+        let model = Model {
+            entries: vec![
+                entry("a", "/", "ext4", &["defaults"], 0, 1),
+                entry("b", "mnt/data", "ext4", &["nofail"], 0, 2),
+                entry("c", "none", "swap", &["sw"], 0, 0),
+                entry("d", "swap", "swap", &["sw"], 0, 0),
+                entry("e", "", "ext4", &["nofail"], 0, 2),
+                entry("f", "./data", "ext4", &["nofail"], 0, 2),
+            ],
+        };
+        assert_eq!(
+            findings(&model, RELATIVE_MOUNTPOINT, Severity::Error),
+            vec!["entries/1/mountpoint", "entries/5/mountpoint"]
+        );
+    }
+
+    #[test]
+    fn validate_warns_when_root_entry_absent() {
+        let data = entry("a", "/data", "ext4", &["nofail"], 0, 2);
+        let without_root = Model {
+            entries: vec![data.clone()],
+        };
+        assert_eq!(
+            findings(&without_root, NO_ROOT_ENTRY, Severity::Warning),
+            vec!["entries"]
+        );
+        let with_root = Model {
+            entries: vec![entry("r", "/", "ext4", &["defaults"], 0, 1), data],
+        };
+        assert!(findings(&with_root, NO_ROOT_ENTRY, Severity::Warning).is_empty());
+        // An empty table is the documented default, not a finding.
+        assert!(findings(&Model::default(), NO_ROOT_ENTRY, Severity::Warning).is_empty());
     }
 
     #[test]
