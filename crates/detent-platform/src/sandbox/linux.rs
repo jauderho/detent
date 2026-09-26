@@ -685,6 +685,170 @@ mod tests {
         }
     }
 
+    /// `EPERM` from the `Acme` filter's default action.
+    fn refused<T>(result: std::io::Result<T>) -> bool {
+        result.err().and_then(|err| err.raw_os_error()) == Some(1)
+    }
+
+    /// A one-shot HTTPS/1.1 server on `listener`: reads one request head,
+    /// answers `200` with the body `pong`.
+    fn serve_one_https(
+        listener: &std::net::TcpListener,
+        config: std::sync::Arc<rustls::ServerConfig>,
+    ) -> Result<(), String> {
+        use std::io::{Read as _, Write as _};
+        let (mut tcp, _) = listener.accept().map_err(|err| err.to_string())?;
+        let mut conn = rustls::ServerConnection::new(config).map_err(|err| err.to_string())?;
+        let mut tls = rustls::Stream::new(&mut conn, &mut tcp);
+        let mut head = Vec::new();
+        let mut buf = [0_u8; 1024];
+        while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = tls.read(&mut buf).map_err(|err| err.to_string())?;
+            if read == 0 {
+                return Err("the client closed before the request ended".to_owned());
+            }
+            head.extend_from_slice(buf.get(..read).unwrap_or_default());
+        }
+        tls.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 4\r\nconnection: close\r\n\r\npong")
+            .map_err(|err| err.to_string())?;
+        tls.conn.send_close_notify();
+        tls.flush().map_err(|err| err.to_string())
+    }
+
+    /// `GET https://localhost:<port>/` with the client stack `detent-acme`
+    /// uses (`crate::order::tls13_connector` there): hyper-util's legacy
+    /// client, hyper-rustls, TLS 1.3 only on aws-lc-rs, trusting `trusted`.
+    /// The connector resolves `localhost` on a `spawn_blocking` thread.
+    async fn fetch_over_tls(
+        port: u16,
+        trusted: rustls_pki_types::CertificateDer<'static>,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        use http_body_util::BodyExt as _;
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(trusted)?;
+        let config = rustls::ClientConfig::builder_with_provider(
+            rustls::crypto::aws_lc_rs::default_provider().into(),
+        )
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        let connector = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_tls_config(config)
+            .https_only()
+            .enable_http1()
+            .build();
+        let client =
+            hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+                .pool_max_idle_per_host(0)
+                .build::<_, http_body_util::Empty<hyper::body::Bytes>>(connector);
+        let response = client
+            .get(format!("https://localhost:{port}/").parse()?)
+            .await?;
+        if response.status() != hyper::StatusCode::OK {
+            return Err(format!("status {}", response.status()).into());
+        }
+        Ok(response.into_body().collect().await?.to_bytes().to_vec())
+    }
+
+    /// The acme child's work under its enforced filter. Returns `0`, or the
+    /// number of the first step that failed.
+    fn acme_probe(
+        port: u16,
+        trusted: rustls_pki_types::CertificateDer<'static>,
+        unlistened: tokio::net::TcpSocket,
+        credentials: &Path,
+    ) -> i32 {
+        use std::net::ToSocketAddrs as _;
+        // glibc/musl `getaddrinfo`, on this thread.
+        if !("localhost", port)
+            .to_socket_addrs()
+            .is_ok_and(|mut addrs| addrs.next().is_some())
+        {
+            return 10;
+        }
+        // No new listening socket: `bind` is refused.
+        if !refused(std::net::TcpListener::bind("127.0.0.1:0")) {
+            return 11;
+        }
+        // The credentials store: write, sync and rename inside its directory.
+        let staged = credentials.join("account.json.tmp");
+        let written = std::fs::write(&staged, b"{}")
+            .and_then(|()| std::fs::File::open(&staged)?.sync_all())
+            .and_then(|()| std::fs::rename(&staged, credentials.join("account.json")));
+        if written.is_err() {
+            return 12;
+        }
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return 13;
+        };
+        runtime.block_on(async move {
+            // A socket bound before the filter still cannot listen.
+            if !refused(unlistened.listen(1)) {
+                return 14;
+            }
+            match fetch_over_tls(port, trusted).await {
+                Ok(body) if body == b"pong" => 0,
+                Ok(_) => 15,
+                Err(_) => 16,
+            }
+        })
+    }
+
+    /// ADR-015, through the production path: `spawn_acme` with the real
+    /// [`Hooks`] confines the child as `Role::Acme`. Under that enforced
+    /// filter the child resolves `localhost`, writes its credentials
+    /// directory, and fetches `https://localhost:<port>/` from the parent over
+    /// TLS 1.3 on a current-thread tokio runtime; `bind` and `listen` answer
+    /// `EPERM`.
+    #[test]
+    fn enforce_mode_acme_reaches_out_but_cannot_listen() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::privsep::spawn::{SpawnConfig, spawn_acme};
+        let dir = tempfile::tempdir()?;
+        let credentials = dir.path().join("acme");
+        std::fs::create_dir(&credentials)?;
+        let allow = fixture_allowlist(dir.path())?;
+        let hooks = Hooks::new(Policy::monitor(&allow), Policy::worker(&allow))
+            .with_acme(Policy::acme(&credentials));
+
+        let key = rcgen::KeyPair::generate()?;
+        let cert =
+            rcgen::CertificateParams::new(vec!["localhost".to_owned()])?.self_signed(&key)?;
+        let tls_config = rustls::ServerConfig::builder_with_provider(
+            rustls::crypto::aws_lc_rs::default_provider().into(),
+        )
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![cert.der().clone()],
+            rustls_pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+        )?;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let unlistened = tokio::net::TcpSocket::new_v4()?;
+        unlistened.bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))?;
+        let trusted = cert.der().clone();
+
+        // The fork happens before the server thread starts.
+        let handle = spawn_acme(&SpawnConfig::unprivileged(), &hooks, move |_channel| {
+            acme_probe(addr.port(), trusted, unlistened, &credentials)
+        })?;
+        let server_thread = std::thread::spawn(move || {
+            let served = serve_one_https(&listener, std::sync::Arc::new(tls_config));
+            (served, listener)
+        });
+        let status = handle.wait()?;
+        // Unblock `accept` if the child never connected.
+        drop(std::net::TcpStream::connect(addr));
+        let (served, _listener) = server_thread.join().map_err(|_| "server thread panicked")?;
+        assert_eq!(status, Some(0), "the acme probe failed; server: {served:?}");
+        assert!(served.is_ok(), "{served:?}");
+        assert!(dir.path().join("acme/account.json").is_file());
+        Ok(())
+    }
+
     /// Not `privsep::spawn::spawn_pair` itself (that is `spawn.rs`'s own
     /// coverage) — a manual fork exercising [`Hooks`] on both sides of a real
     /// process split and a real channel, which is what [`Hooks`] exists for.

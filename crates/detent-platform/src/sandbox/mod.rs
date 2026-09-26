@@ -1,5 +1,6 @@
 //! Linux sandboxing: capability drop, `no_new_privs`, Landlock, and seccomp
-//! for the monitor and worker roles (PLAN §2.4; ADR-001; `docs/spikes/02-sandbox.md`).
+//! for the monitor, worker and acme roles (PLAN §2.4; ADR-001; ADR-015;
+//! `docs/spikes/02-sandbox.md`).
 //!
 //! # Portability
 //!
@@ -52,7 +53,7 @@ mod linux;
 pub mod seccomp;
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -63,13 +64,15 @@ use crate::privsep::monitor::DEFAULT_STAGING_DIR;
 use crate::privsep::proto::TargetId;
 use crate::privsep::spawn::{SandboxError as SpawnSandboxError, SandboxHooks};
 
-/// Which half of the privsep pair is being confined.
+/// Which process is being confined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     /// The privileged monitor.
     Monitor,
     /// The unprivileged worker.
     Worker,
+    /// The acme process: an outbound-only ACME client (ADR-015).
+    Acme,
 }
 
 /// The generic tri-state outcome for a confinement step with nothing extra
@@ -284,6 +287,22 @@ impl Policy {
             require_seccomp: true,
         }
     }
+
+    /// The acme process's policy (ADR-015): write access to `writable_dir`
+    /// (the ACME account credentials) only, no retained capabilities.
+    /// Reads stay open (CA roots, `/etc/resolv.conf`, the served
+    /// certificate). As for the worker, the process has already dropped to
+    /// an unprivileged uid, and Landlock degrades with a warning.
+    #[must_use]
+    pub fn acme(writable_dir: &Path) -> Self {
+        Self {
+            writable_paths: vec![writable_dir.to_path_buf()],
+            retained_caps: Vec::new(),
+            require_landlock: false,
+            require_caps: false,
+            require_seccomp: true,
+        }
+    }
 }
 
 /// Every target in `allowlist`, in id order.
@@ -362,6 +381,7 @@ pub fn confine(role: Role, policy: &Policy) -> Result<Confinement, SandboxError>
 pub struct Hooks {
     monitor_policy: Policy,
     worker_policy: Policy,
+    acme_policy: Option<Policy>,
     result: std::sync::OnceLock<Confinement>,
 }
 
@@ -373,8 +393,19 @@ impl Hooks {
         Self {
             monitor_policy,
             worker_policy,
+            acme_policy: None,
             result: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Also confine the acme process ([`spawn_acme`]) with `acme_policy`.
+    /// Without it, [`SandboxHooks::confine_acme`] refuses.
+    ///
+    /// [`spawn_acme`]: crate::privsep::spawn::spawn_acme
+    #[must_use]
+    pub fn with_acme(mut self, acme_policy: Policy) -> Self {
+        self.acme_policy = Some(acme_policy);
+        self
     }
 
     /// What [`confine`] applied to *this* process, once its hook has run.
@@ -399,6 +430,16 @@ impl SandboxHooks for Hooks {
         let _ = self.result.set(confinement);
         Ok(())
     }
+
+    fn confine_acme(&self) -> Result<(), SpawnSandboxError> {
+        let Some(policy) = &self.acme_policy else {
+            return Err(SpawnSandboxError("no acme policy was given".to_owned()));
+        };
+        let confinement =
+            confine(Role::Acme, policy).map_err(|err| SpawnSandboxError(err.to_string()))?;
+        let _ = self.result.set(confinement);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -411,10 +452,10 @@ mod tests {
     // directly: on Linux, `confine` is the real thing (irreversible — see
     // `linux.rs`'s own test module for why it always runs in a forked child
     // there instead).
+    use super::Hooks;
     #[cfg(not(target_os = "linux"))]
-    use super::{Confinement, Hooks, Role, confine};
+    use super::{Confinement, Role, confine};
     use crate::privsep::allowlist::{Allowlist, Config};
-    #[cfg(not(target_os = "linux"))]
     use crate::privsep::spawn::SandboxHooks;
     use detent_core::descriptor::{
         HostProfile, ModuleDescriptor, Owner, PathSpec, Target, TargetKind, Upstream,
@@ -547,6 +588,33 @@ mod tests {
         );
         assert!(policy.retained_caps.is_empty());
         assert!(!policy.require_landlock);
+        Ok(())
+    }
+
+    /// ADR-015: the acme process writes only its credentials directory,
+    /// keeps no capability, and must have its seccomp filter.
+    #[test]
+    fn acme_policy_writes_only_its_directory_with_no_capabilities() {
+        let dir = Path::new("/tmp/detent-sandbox-test-acme");
+        let policy = Policy::acme(dir);
+        assert_eq!(policy.writable_paths, vec![dir.to_path_buf()]);
+        assert!(policy.retained_caps.is_empty());
+        assert!(policy.require_seccomp);
+        assert!(!policy.require_landlock);
+        assert!(!policy.require_caps);
+    }
+
+    /// Hooks built without an acme policy refuse to confine an acme process
+    /// instead of leaving it unconfined. Nothing is confined on this path,
+    /// so it runs in the test thread on every platform.
+    #[test]
+    fn hooks_without_an_acme_policy_refuse_to_confine_one() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let root = Path::new("/tmp/detent-sandbox-test-no-acme");
+        let allow = fixture(root)?;
+        let hooks = Hooks::new(Policy::monitor(&allow), Policy::worker(&allow));
+        assert!(hooks.confine_acme().is_err());
+        assert!(hooks.confinement().is_none());
         Ok(())
     }
 

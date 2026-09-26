@@ -1,4 +1,4 @@
-//! Per-architecture seccomp allow-lists for the monitor and worker roles
+//! Per-architecture seccomp allow-lists for the monitor, worker and acme roles
 //! (PLAN §2.4; spike 02).
 //!
 //! # Derivation
@@ -53,6 +53,18 @@
 //! until the live trace showed no `seccomp(SECCOMP_SET_MODE_FILTER, …)`
 //! call for its pid. `epoll_pwait` (present on both architectures) replaced
 //! it.
+//!
+//! **ADR-015 addendum (the acme process, `ACME`):** traced live with `strace
+//! -f` on `x86_64` (glibc test run and a glibc/musl name-lookup probe; see the
+//! table's doc comment). That trace also showed two things the tables did
+//! not know. glibc on `x86_64` issues `epoll_wait`, not `epoll_pwait`: without
+//! it tokio's I/O driver panics on its first poll. `WORKER` lists only
+//! `epoll_pwait`, which holds for the shipped musl binary and for aarch64 but
+//! not for a glibc `x86_64` build. And **musl's resolver `bind`s its UDP socket
+//! to port 0 before each DNS query** (`res_msend`); with `bind` refused, a
+//! musl build resolves only names in `/etc/hosts`. `ACME` still refuses
+//! `bind`, as ADR-015 states; the choice between allowing `bind` (still no
+//! `listen`/`accept4`) and another resolver is open.
 //!
 //! Only `x86_64` and `aarch64` are covered (PLAN §1.6 defers armv7 and riscv64);
 //! [`Arch::parse`] and [`Arch::host`] report anything else as
@@ -384,6 +396,109 @@ const WORKER: &[&str] = &[
     "getdents64",
 ];
 
+/// Syscalls the acme process needs (ADR-015): an outbound HTTPS/TCP client
+/// on a current-thread `tokio` runtime with hyper-rustls, plus glibc/musl
+/// name lookup. Derived from [`WORKER`] minus everything that serves
+/// (`bind`, `listen`, `accept4`) and the worker's own state-file calls, then
+/// traced live with `strace -f` in three runs (`x86_64`): the
+/// `enforce_mode_acme_reaches_out_but_cannot_listen` test (glibc; `spawn_acme`
+/// with the real hooks, `/etc/hosts` lookup, TLS 1.3 fetch through
+/// hyper-rustls, a credentials write), and a small probe that resolves a
+/// public name through `/etc/resolv.conf` under this filter, built once for
+/// glibc and once for musl. Calls the traces showed refused and tolerated
+/// are left out on purpose: `uname` (glibc resolver setup), `ioctl(FIONREAD)`
+/// (glibc resolver), `prctl(PR_SET_NAME)` (thread names), and `bind` on the
+/// `AF_NETLINK` socket glibc opens to sort addresses.
+const ACME: &[&str] = &[
+    // IPC with the worker (`Channel` over a `UnixStream`), file reads and
+    // allocator/runtime housekeeping: all seen live.
+    "read",
+    "write",
+    "close",
+    "fstat",
+    "newfstatat",
+    "lseek",
+    "fcntl",
+    "futex",
+    "mmap",
+    "munmap",
+    "mprotect",
+    "madvise",
+    "mremap",
+    "brk",
+    "getrandom", // rustls key shares and nonces (aws-lc-rs).
+    "rt_sigprocmask",
+    "sigaltstack",
+    "gettid",
+    "exit",
+    "exit_group",
+    // Kept from `WORKER` for the same runtime code, not hit by the traces:
+    // `clock_gettime` is the vDSO's syscall fallback, and a process that
+    // gets a signal with a handler needs `rt_sigaction`/`rt_sigreturn`/
+    // `restart_syscall` (see the `WORKER` comment on `rt_sigreturn`).
+    "clock_gettime",
+    "restart_syscall",
+    "rt_sigaction",
+    "rt_sigreturn",
+    // Threads: hyper-util's resolver runs `getaddrinfo` on a tokio
+    // `spawn_blocking` thread (`clone3` seen; `clone` is what musl's
+    // `pthread_create` issues), and glibc registers each new thread (`rseq`,
+    // `set_robust_list`); `sched_getaffinity` is the runtime builder's
+    // `available_parallelism`.
+    "clone",
+    "clone3",
+    "rseq",
+    "set_robust_list",
+    "sched_getaffinity",
+    // The runtime's reactor and waker. glibc on x86_64 issues `epoll_wait`
+    // (seen; its absence made the traced run panic in tokio's I/O driver);
+    // musl and every aarch64 libc issue `epoll_pwait`. `epoll_wait` has no
+    // aarch64 number, so it resolves on x86_64 only (like `poll`).
+    // `socketpair` is tokio's signal-driver pipe, created at runtime build.
+    "epoll_create1",
+    "epoll_ctl",
+    "epoll_wait",
+    "epoll_pwait",
+    "eventfd2",
+    "socketpair",
+    // Outbound TCP, all seen: `socket` + non-blocking `connect`, then
+    // `getsockopt(SO_ERROR)` for the result; `setsockopt` (`TCP_NODELAY`,
+    // `IP_RECVERR` in the glibc resolver); `getpeername`/`getsockname`
+    // (hyper-util's connection info, glibc's address sort); `writev`,
+    // `recvfrom` and `sendto` for the TLS records; `shutdown` on close. The
+    // same `connect` reaches `/var/run/nscd/socket`, which glibc tries first.
+    "socket",
+    "connect",
+    "getsockopt",
+    "setsockopt",
+    "getpeername",
+    "getsockname",
+    "writev",
+    "recvfrom",
+    "sendto",
+    "shutdown",
+    // Name lookup: `/etc/hosts`, `/etc/resolv.conf`, `/etc/nsswitch.conf`
+    // (`openat`; musl on x86_64 uses `open`), then the DNS query. glibc:
+    // UDP `connect`, `poll` for `POLLOUT`, `sendmmsg` (A and AAAA at once),
+    // `recvfrom`. musl: `sendto`, `poll`, `recvmsg` — seen only in a probe
+    // run that also allowed `bind`, see the note in the module docs.
+    // aarch64 has no `poll` or `open`: its libcs issue `ppoll`/`openat`.
+    "openat",
+    "open",
+    "poll",
+    "ppoll",
+    "sendmmsg",
+    "recvmsg",
+    // Writes under the credentials directory, seen in the test's write +
+    // sync + rename. glibc and musl on x86_64 issue `rename`; aarch64 has no
+    // `rename`, and its libcs issue `renameat`. The rest of the credentials
+    // store (create, chmod, remove) is added with its own trace in the
+    // renewal-loop slice.
+    "fsync",
+    "rename",
+    "renameat",
+];
+
 /// The syscall names allowed for `role`, by name (see the module docs for
 /// how this list was derived).
 #[must_use]
@@ -391,15 +506,18 @@ pub const fn syscalls_for(role: Role) -> &'static [&'static str] {
     match role {
         Role::Monitor => MONITOR,
         Role::Worker => WORKER,
+        Role::Acme => ACME,
     }
 }
 
 /// `(name, x86_64 number, aarch64 number)`, `-1` meaning "no such syscall on
 /// this architecture". See the module docs: both columns were read from
-/// `<asm/unistd.h>` inside `debian:bookworm`, not typed from memory. Every
-/// row is used by [`MONITOR`] or [`WORKER`], except `poll`, kept as the one
-/// architecture-asymmetric example exercised by this module's tests: `aarch64`
-/// never had a `poll` syscall, only `ppoll`.
+/// `<asm/unistd.h>` inside `debian:bookworm`, not typed from memory (the rows
+/// the `ACME` table added were read from the `x86_64` `<asm/unistd_64.h>` and
+/// the aarch64 `<asm-generic/unistd.h>` of the build container). Every row is
+/// used by [`MONITOR`], [`WORKER`] or [`ACME`]. `aarch64` never had `poll`,
+/// `open`, `rename` or `epoll_wait`, only their `ppoll`/`openat`/`renameat`/
+/// `epoll_pwait` forms.
 const SYSCALL_NUMBERS: &[(&str, i64, i64)] = &[
     ("read", 0, 63),
     ("write", 1, 64),
@@ -486,6 +604,13 @@ const SYSCALL_NUMBERS: &[(&str, i64, i64)] = &[
     ("clock_nanosleep", 230, 115),
     ("prlimit64", 302, 261),
     ("set_tid_address", 218, 96),
+    ("connect", 42, 203),
+    ("getsockopt", 55, 209),
+    ("getpeername", 52, 205),
+    ("recvmsg", 47, 212),
+    ("sendmmsg", 307, 269),
+    ("rename", 82, -1),
+    ("epoll_wait", 232, -1),
 ];
 
 /// `name`'s raw syscall number on `arch`, or `None` if it is not in
@@ -557,7 +682,7 @@ pub fn compile(
             // treating an unavailable optional syscall as "not supported")
             // more gracefully than being killed outright; `Errno` keeps that
             // option open without weakening what is actually allowed.
-            Role::Worker => SeccompAction::Errno(EPERM),
+            Role::Worker | Role::Acme => SeccompAction::Errno(EPERM),
         },
     };
     let filter = SeccompFilter::new(rules, default_action, SeccompAction::Allow, target)
@@ -588,7 +713,7 @@ mod tests {
 
     #[test]
     fn every_table_entry_resolves_or_is_arch_specific() -> Result<(), Box<dyn std::error::Error>> {
-        for role in [Role::Monitor, Role::Worker] {
+        for role in [Role::Monitor, Role::Worker, Role::Acme] {
             let names = syscalls_for(role);
             assert!(!names.is_empty());
             for arch in [Arch::X86_64, Arch::Aarch64] {
@@ -652,6 +777,41 @@ mod tests {
             assert!(monitor.contains(&shared), "monitor lost {shared}");
             assert!(worker.contains(&shared), "worker lost {shared}");
         }
+    }
+
+    /// ADR-015: the acme process is an outbound client only. It can open a
+    /// connection and has nothing that accepts one; the worker and the
+    /// monitor still cannot connect out.
+    #[test]
+    fn the_acme_table_connects_out_and_never_accepts() {
+        let acme = syscalls_for(Role::Acme);
+        for needed in ["socket", "connect", "getsockopt", "getpeername", "ppoll"] {
+            assert!(acme.contains(&needed), "acme table lacks {needed}");
+            assert!(super::number(needed, Arch::X86_64).is_some());
+            assert!(super::number(needed, Arch::Aarch64).is_some());
+        }
+        for server_only in ["bind", "listen", "accept4"] {
+            assert!(!acme.contains(&server_only), "acme table has {server_only}");
+        }
+        for role in [Role::Worker, Role::Monitor] {
+            assert!(
+                !syscalls_for(role).contains(&"connect"),
+                "{role:?} can connect"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn every_role_compiles_on_both_arches() -> Result<(), SeccompError> {
+        for role in [Role::Monitor, Role::Worker, Role::Acme] {
+            for arch in [Arch::X86_64, Arch::Aarch64] {
+                for mode in [super::SeccompMode::Enforce, super::SeccompMode::Log] {
+                    assert!(!super::compile(role, arch, mode)?.is_empty());
+                }
+            }
+        }
+        Ok(())
     }
 
     #[test]

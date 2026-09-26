@@ -76,3 +76,18 @@ update = ["dep:detent-update"]
 caps = { workspace = true }
 landlock = { workspace = true }
 seccompiler = { workspace = true }
+
+# Only for `sandbox::linux::tests`, which prove the `Acme` seccomp table
+# (ADR-015) with the client stack `detent-acme` really uses: a current-thread
+# tokio runtime, hyper-util's legacy client and hyper-rustls, TLS 1.3 on
+# aws-lc-rs, against a local rcgen-signed server. All of them are already in
+# the lock through detent-acme, detent-update and detent-web.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["client"] }
+hyper-rustls = { workspace = true }
+hyper-util = { workspace = true, features = ["client", "client-legacy"] }
+rcgen = { workspace = true, features = ["aws_lc_rs"] }
+rustls = { workspace = true, features = ["aws_lc_rs"] }
+rustls-pki-types = { workspace = true }
+tokio = { workspace = true }

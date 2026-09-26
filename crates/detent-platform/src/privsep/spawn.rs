@@ -364,6 +364,9 @@ impl AcmeHandle {
     }
 }
 
+/// The acme child's exit status when `body` panics (Rust's own panic status).
+const PANIC_STATUS: i32 = 101;
+
 /// Fork the acme process (ADR-015). Call it after [`spawn_runner`] and before
 /// [`spawn_pair`], before any thread or runtime starts.
 ///
@@ -371,9 +374,9 @@ impl AcmeHandle {
 /// `config.worker_user` as the worker does, runs
 /// [`SandboxHooks::confine_acme`], and then runs `body` on its end of the
 /// channel. It exits with `body`'s return value and never returns to the
-/// caller. A child that cannot drop or confine itself exits `1` without
-/// running `body`. The child inherits every other descriptor of the parent;
-/// `body` drops what it must not keep.
+/// caller: it exits `101` when `body` panics. A child that cannot drop or
+/// confine itself exits `1` without running `body`. The child inherits every
+/// other descriptor of the parent; `body` drops what it must not keep.
 ///
 /// The channel's timeouts are [`ACME_TIMEOUT`](super::acme::ACME_TIMEOUT),
 /// not `config`'s.
@@ -407,7 +410,10 @@ where
             if drop_and_confine(credentials, || sandbox.confine_acme()).is_err() {
                 abort_child(1);
             }
-            abort_confined_child(body(acme_end));
+            // A panic must not unwind into the caller's stack in the child.
+            let status = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(acme_end)))
+                .unwrap_or(PANIC_STATUS);
+            abort_confined_child(status);
         }
     }
 }
@@ -648,6 +654,21 @@ mod tests {
         );
         assert_eq!(handle.wait()?, Some(7));
         assert!(NoSandbox.confine_acme().is_ok());
+        Ok(())
+    }
+
+    /// A panicking body ends the child with status 101; it never unwinds
+    /// into the caller's stack (here: the test harness) in the child.
+    #[test]
+    fn a_panicking_acme_body_exits_101() -> Result<(), Box<dyn std::error::Error>> {
+        let handle = spawn_acme(&SpawnConfig::unprivileged(), &NoSandbox, |_| {
+            // A second mutable borrow of a `RefCell` panics.
+            let cell = std::cell::RefCell::new(0);
+            let _first = cell.borrow_mut();
+            let _second = cell.borrow_mut();
+            0
+        })?;
+        assert_eq!(handle.wait()?, Some(101));
         Ok(())
     }
 
