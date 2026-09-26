@@ -46,7 +46,10 @@ that reaches a `write` endpoint without the scope is refused with `403` and
 Every scope denial is also recorded as an auth audit event. The operations
 audit log is fsynced and hash-chained; `FileAudit::verify` checks sequence and
 link hashes, and its terminal sequence/hash must be retained as an external
-anchor to detect truncation of the log's tail.
+anchor to detect truncation of the log's tail. A `plan` that ran a module's
+external validators writes one `plan` audit record; a `plan` whose model has
+error diagnostics runs no validator. Validator detail in a plan or apply
+report is cut to 512 bytes.
 
 ## CSRF
 
