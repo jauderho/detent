@@ -86,6 +86,17 @@ pub(crate) enum Outcome {
     },
 }
 
+/// An issued pair the worker has not installed yet. The loop keeps it and
+/// retries the install, so a refusal does not order a new certificate: a CA
+/// allows few duplicate certificates a week.
+#[derive(Debug)]
+pub(crate) struct Held {
+    chain_pem: String,
+    key: KeyPem,
+    /// The leaf's end of validity, Unix seconds.
+    not_after: i64,
+}
+
 /// Why one renewal check failed.
 #[derive(Debug)]
 pub(crate) enum RenewError {
@@ -240,12 +251,13 @@ fn warn_expiry(used_percent: u8, not_after: i64) {
 ///
 /// [`RenewError::Issue`] when the CA fails, [`RenewError::Chain`] when it
 /// sends a chain that does not parse, [`RenewError::Install`] when the
-/// worker does not install the new pair.
+/// worker does not install the new pair. The pair is then in `held`.
 pub(crate) async fn renew_once(
     now: i64,
     served: Option<&CertifiedKeyPair>,
     issuer: &mut impl Issuer,
     installer: &mut impl Installer,
+    held: &mut Option<Held>,
 ) -> Result<Outcome, RenewError> {
     if let Some(pair) = served {
         if let Ok((not_before, not_after)) =
@@ -264,28 +276,63 @@ pub(crate) async fn renew_once(
     let Issued { chain_pem, key_pem } = issuer.issue().await.map_err(RenewError::Issue)?;
     let (_, not_after) =
         detent_acme::leaf_validity_pem(&chain_pem).map_err(|_| RenewError::Chain)?;
-    installer
-        .install(chain_pem, KeyPem::new(key_pem))
-        .map_err(RenewError::Install)?;
-    Ok(Outcome::Renewed { not_after })
+    install(
+        Held {
+            chain_pem,
+            key: KeyPem::new(key_pem),
+            not_after,
+        },
+        installer,
+        held,
+    )
 }
 
-/// One round of the loop: read the served pair from `cert_dir`, then
-/// [`renew_once`].
+/// Ask the worker to install `pair`; keep it in `held` when that fails.
+fn install(
+    pair: Held,
+    installer: &mut impl Installer,
+    held: &mut Option<Held>,
+) -> Result<Outcome, RenewError> {
+    match installer.install(pair.chain_pem.clone(), pair.key.clone()) {
+        Ok(()) => Ok(Outcome::Renewed {
+            not_after: pair.not_after,
+        }),
+        Err(err) => {
+            *held = Some(pair);
+            Err(RenewError::Install(err))
+        }
+    }
+}
+
+/// One round of the loop. A held pair that is still valid at `now` is
+/// installed again and nothing is ordered. Otherwise: read the served pair
+/// from `cert_dir`, then [`renew_once`].
 async fn round(
     now: i64,
     cert_dir: &Path,
     issuer: &mut impl Issuer,
     installer: &mut impl Installer,
+    held: &mut Option<Held>,
 ) -> Result<Outcome, RenewError> {
+    if let Some(pair) = held.take() {
+        if now <= pair.not_after {
+            return install(pair, installer, held);
+        }
+        tracing::warn!(
+            not_after = pair.not_after,
+            "the held certificate expired before the worker installed it"
+        );
+    }
     let served = detent_web::load_acme(cert_dir).map_err(RenewError::Load)?;
-    renew_once(now, served.as_ref(), issuer, installer).await
+    renew_once(now, served.as_ref(), issuer, installer, held).await
 }
 
 /// The renewal loop: one round at once, then one every hour.
 ///
 /// After a failure the next round comes after [`FIRST_RETRY`], doubled for
-/// each further failure up to [`MAX_RETRY`]; a success resets it. `now`
+/// each further failure up to [`MAX_RETRY`]; a success resets it. After a
+/// failed install the next rounds retry that install until the pair
+/// expires; only then is a new certificate ordered. `now`
 /// reads the clock in Unix seconds and `sleep` waits, so a test drives the
 /// rounds without real time. The loop returns when the worker closes the
 /// channel.
@@ -299,8 +346,9 @@ pub(crate) async fn run_loop<F>(
     F: Future<Output = ()>,
 {
     let mut retry = FIRST_RETRY;
+    let mut held = None;
     loop {
-        let delay = match round(now(), cert_dir, issuer, installer).await {
+        let delay = match round(now(), cert_dir, issuer, installer, &mut held).await {
             Ok(outcome) => {
                 if let Outcome::Renewed { not_after } = outcome {
                     tracing::info!(not_after, "the worker serves a new ACME certificate");
@@ -614,7 +662,7 @@ mod tests {
         let cert = Cert::new(&["a.example"])?;
         let mut issuer = FakeIssuer::answering([Ok(cert.issued())]);
         let mut installer = FakeInstaller::default();
-        let outcome = block_on(renew_once(0, None, &mut issuer, &mut installer))?;
+        let outcome = block_on(renew_once(0, None, &mut issuer, &mut installer, &mut None))?;
         assert_eq!(
             outcome.ok(),
             Some(Outcome::Renewed {
@@ -636,6 +684,7 @@ mod tests {
             Some(&pair),
             &mut issuer,
             &mut installer,
+            &mut None,
         ))?;
         assert_eq!(outcome.ok(), Some(Outcome::NotDue { used_percent: 1 }));
         assert_eq!(issuer.calls, 0);
@@ -655,6 +704,7 @@ mod tests {
             Some(&pair),
             &mut issuer,
             &mut installer,
+            &mut None,
         ))?;
         assert_eq!(
             outcome.ok(),
@@ -680,6 +730,7 @@ mod tests {
             Some(&pair),
             &mut issuer,
             &mut installer,
+            &mut None,
         ))?;
         assert!(
             matches!(outcome, Ok(Outcome::Renewed { .. })),
@@ -697,6 +748,7 @@ mod tests {
             Some(&pair),
             &mut issuer,
             &mut installer,
+            &mut None,
         ))?;
         assert_eq!(outcome.ok(), Some(Outcome::NotDue { used_percent: 10 }));
         Ok(())
@@ -708,7 +760,13 @@ mod tests {
         let broken = CertifiedKeyPair::new(b"not a certificate".to_vec(), Vec::new());
         let mut issuer = FakeIssuer::answering([Ok(cert.issued())]);
         let mut installer = FakeInstaller::default();
-        let outcome = block_on(renew_once(0, Some(&broken), &mut issuer, &mut installer))?;
+        let outcome = block_on(renew_once(
+            0,
+            Some(&broken),
+            &mut issuer,
+            &mut installer,
+            &mut None,
+        ))?;
         assert!(
             matches!(outcome, Ok(Outcome::Renewed { .. })),
             "{outcome:?}"
@@ -720,7 +778,7 @@ mod tests {
     fn an_issue_error_installs_nothing() -> R {
         let mut issuer = FakeIssuer::answering([Err(AcmeError::NoDns01Challenge)]);
         let mut installer = FakeInstaller::default();
-        let outcome = block_on(renew_once(0, None, &mut issuer, &mut installer))?;
+        let outcome = block_on(renew_once(0, None, &mut issuer, &mut installer, &mut None))?;
         assert!(
             matches!(outcome, Err(RenewError::Issue(AcmeError::NoDns01Challenge))),
             "{outcome:?}"
@@ -732,7 +790,7 @@ mod tests {
             chain_pem: "no certificate here".to_owned(),
             key_pem: String::new(),
         })]);
-        let outcome = block_on(renew_once(0, None, &mut issuer, &mut installer))?;
+        let outcome = block_on(renew_once(0, None, &mut issuer, &mut installer, &mut None))?;
         assert!(matches!(outcome, Err(RenewError::Chain)), "{outcome:?}");
         assert!(installer.installed.is_empty());
         Ok(())
@@ -748,7 +806,8 @@ mod tests {
             ))]),
             ..FakeInstaller::default()
         };
-        let outcome = block_on(renew_once(0, None, &mut issuer, &mut installer))?;
+        let mut held = None;
+        let outcome = block_on(renew_once(0, None, &mut issuer, &mut installer, &mut held))?;
         assert!(
             matches!(
                 outcome,
@@ -756,6 +815,11 @@ mod tests {
             ),
             "{outcome:?}"
         );
+        // The pair is kept for the next round.
+        let held = held.ok_or("the refused pair is not held")?;
+        assert_eq!(held.chain_pem, cert.chain_pem);
+        assert_eq!(held.key.expose(), cert.key_pem);
+        assert_eq!(held.not_after, cert.not_after);
         Ok(())
     }
 
@@ -773,6 +837,7 @@ mod tests {
                     Some(&pair),
                     &mut issuer,
                     &mut installer,
+                    &mut None,
                 ))
             });
             assert!(outcome?.is_ok());
@@ -823,6 +888,94 @@ mod tests {
         // The loop stopped at the closed channel: nothing is left to issue.
         assert_eq!(issuer.calls, 11);
         assert!(issuer.results.is_empty());
+        Ok(())
+    }
+
+    /// Runs the loop over an empty `cert_dir` with the clock reading `times`
+    /// in turn, and returns the delays it slept.
+    fn drive(
+        issuer: &mut FakeIssuer,
+        installer: &mut FakeInstaller,
+        times: Vec<i64>,
+    ) -> Result<Vec<Duration>, Box<dyn std::error::Error>> {
+        let dir = tempfile::TempDir::new()?;
+        let mut times = times.into_iter();
+        let mut delays = Vec::new();
+        let ended = block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                run_loop(
+                    issuer,
+                    installer,
+                    dir.path(),
+                    || times.next().unwrap_or(0),
+                    |delay| {
+                        delays.push(delay);
+                        // A loop that should have stopped by now waits for
+                        // the timeout instead of spinning.
+                        tokio::time::sleep(if delays.len() > 10 {
+                            Duration::from_secs(60)
+                        } else {
+                            Duration::ZERO
+                        })
+                    },
+                ),
+            )
+            .await
+        })?;
+        ended.map_err(|_| format!("the loop did not stop; slept {delays:?}"))?;
+        Ok(delays)
+    }
+
+    /// A refused install must not order again: a CA allows few duplicate
+    /// certificates a week. The loop retries the install of the pair it
+    /// holds.
+    #[test]
+    fn a_refused_install_is_retried_without_a_new_order() -> R {
+        let first = Cert::new(&["a.example"])?;
+        let second = Cert::valid(&["a.example"], (2026, 1, 5), (2026, 1, 15))?;
+        let mut issuer = FakeIssuer::answering([Ok(first.issued()), Ok(second.issued())]);
+        let refused = || Err(AcmeChannelError::Refused("disk full".to_owned()));
+        let mut installer = FakeInstaller {
+            results: VecDeque::from([refused(), refused(), Ok(()), Err(closed())]),
+            ..FakeInstaller::default()
+        };
+        let times = vec![first.at(1), first.at(2), first.at(3), first.at(90)];
+        let delays = drive(&mut issuer, &mut installer, times)?;
+        assert_eq!(
+            installer.installed,
+            vec![
+                first.chain_pem.clone(),
+                first.chain_pem.clone(),
+                first.chain_pem,
+                second.chain_pem
+            ]
+        );
+        // One order for the three installs of the first pair.
+        assert_eq!(issuer.calls, 2);
+        assert_eq!(
+            delays,
+            vec![FIRST_RETRY, FIRST_RETRY.saturating_mul(2), MAX_RETRY]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_held_pair_that_expired_is_ordered_again() -> R {
+        let first = Cert::new(&["a.example"])?;
+        let second = Cert::valid(&["a.example"], (2026, 1, 11), (2026, 1, 21))?;
+        let mut issuer = FakeIssuer::answering([Ok(first.issued()), Ok(second.issued())]);
+        let mut installer = FakeInstaller {
+            results: VecDeque::from([
+                Err(AcmeChannelError::Refused("disk full".to_owned())),
+                Err(closed()),
+            ]),
+            ..FakeInstaller::default()
+        };
+        let times = vec![first.at(1), first.not_after.saturating_add(1)];
+        drive(&mut issuer, &mut installer, times)?;
+        assert_eq!(issuer.calls, 2);
+        assert_eq!(installer.installed, vec![first.chain_pem, second.chain_pem]);
         Ok(())
     }
 
