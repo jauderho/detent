@@ -134,6 +134,32 @@ fn valid_bundle_passes_all_six_steps() {
 }
 
 #[test]
+fn a_v03_single_certificate_bundle_passes() {
+    // Sigstore bundle v0.3 carries the leaf alone in
+    // `verificationMaterial.certificate` (no `x509CertificateChain`); the
+    // chain is then leaf -> embedded root with no intermediates (H17 step 2).
+    let raw = std::fs::read(fixtures().join("valid.json")).expect("fixture");
+    let mut bundle: serde_json::Value = serde_json::from_slice(&raw).expect("fixture json");
+    let material = bundle
+        .pointer_mut("/verificationMaterial")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("verificationMaterial");
+    let chain = material
+        .remove("x509CertificateChain")
+        .expect("valid.json carries a chain");
+    material.insert(
+        "certificate".to_owned(),
+        serde_json::json!({ "rawBytes": chain["certificates"][0] }),
+    );
+    let decoded = detent_update::bundle::parse(&serde_json::to_vec(&bundle).expect("json"))
+        .expect("v0.3 certificate form parses");
+    assert_eq!(decoded.certs.len(), 1);
+    let digest: [u8; 32] =
+        Sha256::digest(std::fs::read(fixtures().join("binary.bin")).expect("binary")).into();
+    assert_eq!(verify(&decoded, &digest, FIXTURE_TAG, &trust()), Ok(()));
+}
+
+#[test]
 fn a_bundle_with_no_covering_root_is_unavailable_not_invalid() {
     // trust gap: every embedded root's window misses integratedTime (a
     // rotation gap), so verification stops before the chain is attempted.
