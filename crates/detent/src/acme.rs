@@ -614,10 +614,24 @@ mod tests {
     }
 
     fn block_on<F: std::future::Future>(future: F) -> std::io::Result<F::Output> {
-        Ok(tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
-            .build()?
-            .block_on(future))
+            .build()?;
+        Ok(logged(|| runtime.block_on(future)))
+    }
+
+    /// Runs `body` under a subscriber: [`capture`]'s when one is set, else a
+    /// new one whose logs are dropped.
+    ///
+    /// A callsite first reached on a thread with no subscriber can cache
+    /// "never" for every thread (the tracing callsite cache is global), and
+    /// a later [`capture`] then misses that line. So no test runs this
+    /// module's code without a subscriber.
+    fn logged<T>(body: impl FnOnce() -> T) -> T {
+        let unset = tracing::dispatcher::get_default(|current| {
+            current.is::<tracing::subscriber::NoSubscriber>()
+        });
+        if unset { capture(body).0 } else { body() }
     }
 
     /// A log sink the tests can read back.
@@ -1151,7 +1165,7 @@ mod tests {
             Ok(matches!(hello, AcmeMessage::Hello { .. })
                 && matches!(install, Ok(AcmeMessage::Install { .. })))
         });
-        let status = acme_main(acme_end, issuer, dir.path());
+        let status = logged(|| acme_main(acme_end, issuer, dir.path()));
         let saw = worker.join().map_err(|_| "worker thread panicked")?;
         if version == ACME_PROTO_VERSION {
             assert_eq!(saw.ok(), Some(true));
@@ -1204,14 +1218,16 @@ mod tests {
         let (store, bootstrap) = bootstrap_store()?;
         let cert = Cert::new(&["a.example", "b.example"])?;
         let key = KeyPem::new(cert.key_pem.clone());
-        check_and_install(
-            &cert.chain_pem,
-            &key,
-            &domains(),
-            cert.at(50),
-            dir.path(),
-            &store,
-        )?;
+        logged(|| {
+            check_and_install(
+                &cert.chain_pem,
+                &key,
+                &domains(),
+                cert.at(50),
+                dir.path(),
+                &store,
+            )
+        })?;
         let leaf = cert.pair()?.cert_der().to_vec();
         assert_ne!(served_leaf(&store), bootstrap);
         assert_eq!(served_leaf(&store), leaf);
@@ -1280,14 +1296,16 @@ mod tests {
             ),
         ];
         for (case, chain, key_pem, names, now) in cases {
-            let refused = check_and_install(
-                chain,
-                &KeyPem::new(key_pem.to_owned()),
-                &names,
-                now,
-                dir.path(),
-                &store,
-            );
+            let refused = logged(|| {
+                check_and_install(
+                    chain,
+                    &KeyPem::new(key_pem.to_owned()),
+                    &names,
+                    now,
+                    dir.path(),
+                    &store,
+                )
+            });
             let Err(reason) = refused else {
                 return Err(format!("{case}: installed").into());
             };
