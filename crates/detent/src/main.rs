@@ -152,7 +152,10 @@ mod tests {
                 continue;
             }
             // Test modules build their own fixtures and assert on literals.
-            let code = text.split("#[cfg(test)]").next().unwrap_or("");
+            // Skip only the test module, which closes the file by convention:
+            // a `#[cfg(test)]` on one helper above production code must not
+            // hide the rest of the file from the scan.
+            let code = text.split("#[cfg(test)]\nmod ").next().unwrap_or("");
             for (number, line) in code.lines().enumerate() {
                 let Some(rest) = [
                     "println!(",

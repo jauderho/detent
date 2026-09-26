@@ -3255,7 +3255,7 @@ mod tests {
     /// `Unsupported` today: the error surfaces as an ordinary failure rather
     /// than being special-cased in the CLI.
     #[test]
-    fn commit_rollback_surfaces_whatever_the_operations_layer_says() -> R {
+    fn commit_rollback_of_an_unknown_commit_fails_and_names_it() -> R {
         let dir = tempfile::TempDir::new()?;
         let state = dir.path().join("state").display().to_string();
         let cli = parse(&["detent", "commit", "rollback", "1", "--state-root", &state])?;
@@ -3270,8 +3270,12 @@ mod tests {
                 notes: &mut notes,
             },
         );
-        assert_ne!(exit, Exit::Usage);
-        assert!(!notes.is_empty());
+        // No commit is pending, so the monitor refuses id 1 and the CLI
+        // reports that refusal, not a usage error or a silent success.
+        assert_eq!(exit, Exit::Failed);
+        let notes = String::from_utf8(notes)?;
+        assert!(notes.contains("unknown commit id 1"), "{notes}");
+        assert!(out.is_empty());
         Ok(())
     }
 
