@@ -1,8 +1,10 @@
 # STAGE4 — Handoff to oh-my-pi (2026-09-25)
 
 Written by the orchestrator (Claude) at the end of a cloud session, for
-oh-my-pi. Read this file, then `docs/STAGE3.md` §00 (still binding), §11.8 and
-§12. `docs/PROGRESS.md` has one entry per landed item.
+oh-my-pi. Read this file, then `docs/STAGE3.md` (the remaining items and
+the binding rules in its §00). The full STAGE3 history, including §11 and the
+old §12, is `git show 08e08fa:docs/STAGE3.md`. `docs/PROGRESS.md` has one
+entry per landed item.
 
 ## 1. State now
 
@@ -77,7 +79,7 @@ Already verified with failing-first evidence this session (skip): C1-e, H3, H10-
 
 ### 4.1b Update 2026-09-26
 
-All §11.9 PARTIAL items, the vacuous tests and the §12 follow-ups (H17 leaf + SET, aligned edits, network gaps) are closed: see STAGE3 §11.10 for commits and tests, and its "Still open" list. §4.2 items 1–4 below are done. Allow count **111**. Local builds: `docs/TOOLS.md` "Faster local builds" (sccache, mold, Cranelift `server-dev`, per machine). Next: §4.3 (Phase 6).
+All §11.9 PARTIAL items, the vacuous tests and the §12 follow-ups (H17 leaf + SET, aligned edits, network gaps) are closed: see `git show 08e08fa:docs/STAGE3.md` §11.10 for commits and tests. What is still open is now the whole of `docs/STAGE3.md` (rewritten 2026-09-26), worked by the owner with a010. §4.2 items 1–4 below are done. Allow count **111**. Local builds: `docs/TOOLS.md` "Faster local builds" (sccache, mold, Cranelift `server-dev`, per machine). Next: §4.3 (Phase 6).
 
 ### 4.2 STAGE3 §12 follow-ups
 
