@@ -22,14 +22,17 @@ const TABS: &str = include_str!("../../../../fixtures/nfs/edge/tabs-and-spacing.
 /// parens, a quoted path with spaces, the deprecated `@(netgroup)(...)` spelling.
 const UNKNOWN: &str = include_str!("../../../../fixtures/nfs/edge/unknown-directives.exports");
 
-/// Valid models: 0–10 exports, each an absolute path of `/`-separated segments
-/// and 0–3 clients, each 0–3 bare option tokens — no whitespace, no parens, so
-/// every generated model survives `render_line` and the invariants 3/4 checks
-/// are never vacuous.
+/// Models: 0–10 exports, each an absolute path of `/`-separated segments and
+/// 0–3 clients, each 0–3 option tokens — no whitespace, no parens. Paths, hosts
+/// and options also carry the characters exports(5) treats as syntax
+/// (`\ # ; [ ] " -`, L-MODA11), so the invariants 3/4 checks see them. `apply`
+/// refuses a model it cannot write back exactly; those cases are skipped, and
+/// `invariants_3_and_4_run_on_generated_inputs` keeps the checks from going
+/// vacuous.
 fn model_strategy() -> impl Strategy<Value = Model> {
-    let path = "[a-z]{1,8}(/[a-z0-9_-]{1,8}){0,2}".prop_map(|p| format!("/{p}"));
-    let host = "[a-z0-9*?@][a-z0-9*?@.-]{0,8}";
-    let option = "[a-z0-9_]{1,10}";
+    let path = "[a-z]{1,8}(/[a-z0-9_#;\\[\\]\"\\\\-]{1,8}){0,2}".prop_map(|p| format!("/{p}"));
+    let host = "[a-z0-9*?@#;\\[\\]\"\\\\-][a-z0-9*?@.#;\\[\\]\"\\\\-]{0,8}";
+    let option = "[a-z0-9_#;\\[\\]\"\\\\-]{1,10}";
     let client = (host, proptest::collection::vec(option, 0..=3))
         .prop_map(|(host, options)| Client { host, options });
     let export = (path, proptest::collection::vec(client, 0..=3))
@@ -105,6 +108,30 @@ detent_core::module_conformance!(
 );
 
 /// Every fixture must render back byte for byte.
+/// L-MODA11: the generated models carry every character exports(5) treats as
+/// syntax somewhere, so invariants 3 and 4 see them.
+#[test]
+fn model_strategy_reaches_exports_syntax() {
+    use proptest::strategy::ValueTree as _;
+    let mut runner = proptest::test_runner::TestRunner::deterministic();
+    let mut seen = String::new();
+    for _ in 0..512 {
+        let Ok(tree) = model_strategy().new_tree(&mut runner) else {
+            continue;
+        };
+        for export in tree.current().entries {
+            seen.push_str(&export.path);
+            for client in export.clients {
+                seen.push_str(&client.host);
+                seen.push_str(&client.options.concat());
+            }
+        }
+    }
+    for c in ['\\', '#', ';', '[', ']', '"', '-'] {
+        assert!(seen.contains(c), "no generated model carries {c:?}");
+    }
+}
+
 #[test]
 fn fixtures_round_trip_losslessly() {
     for fixture in [DEFAULT, CRLF, NO_NEWLINE, TABS, UNKNOWN] {

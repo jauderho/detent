@@ -23,17 +23,19 @@ const TABS: &str = include_str!("../../../../fixtures/samba/edge/tabs-and-spacin
 /// an empty header — all `Unknown` — next to lines the module does model.
 const UNKNOWN: &str = include_str!("../../../../fixtures/samba/edge/unknown-directives");
 
-/// Valid models: 0–10 entries, each either a `[section]` header (a name of
-/// `[a-z0-9_-]`) or a `key = value` directive whose key is 1–3 words and whose
-/// value carries none of the characters that would make `render_line` refuse
-/// it — so every generated model survives `apply` and the invariants 3/4
-/// checks are never vacuous.
+/// Models: 0–10 entries, each either a `[section]` header or a `key = value`
+/// directive whose key is 1–3 words. Names, keys and values also carry the
+/// characters smb.conf treats as syntax (`\ # ; [ ] " -`, L-MODA11), so the
+/// invariants 3/4 checks see them. `apply` refuses a model it cannot write
+/// back exactly; those cases are skipped, and
+/// `invariants_3_and_4_run_on_generated_inputs` keeps the checks from going
+/// vacuous.
 fn model_strategy() -> impl Strategy<Value = Model> {
     let item = (
         proptest::bool::ANY,
-        "[a-z0-9_-]{1,8}",
-        "[a-z0-9_-]{1,8}( [a-z0-9_-]{1,8}){0,2}",
-        "[a-z0-9_.%=/-]{0,12}",
+        "[a-z0-9_#;\\[\\]\"\\\\-]{1,8}",
+        "[a-z0-9_#;\\[\\]\"\\\\-]{1,8}( [a-z0-9_#;\\[\\]\"\\\\-]{1,8}){0,2}",
+        "[a-z0-9_.%=/#;\\[\\]\"\\\\-]{0,12}",
     )
         .prop_map(|(header, section, key, value)| {
             if header {
@@ -113,6 +115,28 @@ detent_core::module_conformance!(
         section_probe("bad\\"),
     ],
 );
+
+/// L-MODA11: the generated models carry every character smb.conf treats as
+/// syntax somewhere, so invariants 3 and 4 see them, not only `[a-z0-9_-]`.
+#[test]
+fn model_strategy_reaches_smb_conf_syntax() {
+    use proptest::strategy::ValueTree as _;
+    let mut runner = proptest::test_runner::TestRunner::deterministic();
+    let mut seen = String::new();
+    for _ in 0..512 {
+        let Ok(tree) = model_strategy().new_tree(&mut runner) else {
+            continue;
+        };
+        for entry in tree.current().entries {
+            seen.push_str(&entry.section.unwrap_or_default());
+            seen.push_str(&entry.key);
+            seen.push_str(&entry.value);
+        }
+    }
+    for c in ['\\', '#', ';', '[', ']', '"', '-'] {
+        assert!(seen.contains(c), "no generated model carries {c:?}");
+    }
+}
 
 /// Every fixture must render back byte for byte.
 #[test]

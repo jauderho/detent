@@ -107,7 +107,7 @@ pub struct Model {
 /// never needs wildcards-with-options quoting to exercise `apply`).
 #[cfg(feature = "fuzzing")]
 fn arbitrary_host(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<String> {
-    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789*?@.-/";
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789*?@.-/#;[]\"\\";
     let len = u.int_in_range(1..=12usize)?;
     let mut host = String::with_capacity(len);
     for _ in 0..len {
@@ -122,7 +122,7 @@ fn arbitrary_host(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Stri
 /// letters, digits, `.` and `_`, never a segment with whitespace or parens.
 #[cfg(feature = "fuzzing")]
 fn arbitrary_path(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<String> {
-    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789._";
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789._-#;[]\"\\";
     let segments = u.int_in_range(1..=3usize)?;
     let mut path = String::from("/");
     for segment in 0..segments {
@@ -144,7 +144,7 @@ fn arbitrary_path(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Stri
 /// folded into the token alphabet).
 #[cfg(feature = "fuzzing")]
 fn arbitrary_option(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<String> {
-    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789_=";
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789_=-#;[]\"\\";
     let len = u.int_in_range(1..=10usize)?;
     let mut option = String::with_capacity(len);
     for _ in 0..len {
@@ -1418,6 +1418,31 @@ mod tests {
     }
 
     // --------------------------------------------------------------------- fuzzing
+
+    /// L-MODA11: the fuzz models carry every character exports(5) treats as
+    /// syntax somewhere, so `fuzz_nfs_edit` tries them.
+    #[cfg(feature = "fuzzing")]
+    #[test]
+    fn arbitrary_models_reach_exports_syntax() {
+        use arbitrary::{Arbitrary, Unstructured};
+        let data: Vec<u8> = (0..65_536_u32)
+            .map(|i| u8::try_from(i.wrapping_mul(2_654_435_761) >> 24).unwrap_or(0))
+            .collect();
+        let mut seen = String::new();
+        for chunk in data.chunks(256) {
+            let m = Model::arbitrary(&mut Unstructured::new(chunk)).unwrap_or_default();
+            for e in m.entries {
+                seen.push_str(&e.path);
+                for c in e.clients {
+                    seen.push_str(&c.host);
+                    seen.push_str(&c.options.concat());
+                }
+            }
+        }
+        for c in ['\\', '#', ';', '[', ']', '"', '-'] {
+            assert!(seen.contains(c), "no fuzz model carries {c:?}");
+        }
+    }
 
     #[cfg(feature = "fuzzing")]
     #[test]
