@@ -285,6 +285,11 @@ fn start_acme(
         match crate::acme::AcmeIssuer::new(&config.acme, provider, crate::acme::ORDER_POLICY) {
             Ok(issuer) => issuer,
             Err(setting) => {
+                // Dropping the runner handle closes its channel: the runner
+                // ends, and is reaped here as on a spawn failure below.
+                let runner_pid = runner.child_pid;
+                drop(runner);
+                reap_child(runner_pid);
                 renderer.line(
                     streams.notes,
                     MessageId::new("cli-serve-acme-setting-missing"),
@@ -1993,6 +1998,54 @@ mod web_tests {
                 assert!(notes.contains("worker account"), "{notes}");
             }
         }
+        Ok(())
+    }
+
+    /// `start_acme` checks the `[acme]` settings again before it forks:
+    /// with one missing it names it, forks nothing, and reaps the runner.
+    #[cfg(feature = "acme-dns-providers")]
+    #[test]
+    fn start_acme_names_a_missing_setting_and_reaps_the_runner() -> R {
+        use detent_platform::sandbox::{Hooks as SandboxHooks, Policy};
+        let dir = tempfile::TempDir::new()?;
+        let allow = Allowlist::from_modules(&[], &AllowConfig::with_state_root(dir.path()))?;
+        let hooks = SandboxHooks::new(Policy::monitor(&allow), Policy::worker(&allow));
+        let mut config = cheap_web_config(dir.path());
+        config.acme = detent_web::AcmeConfig {
+            domains: vec!["box.example".to_owned()],
+            credentials_path: Some(dir.path().join("acme/account.json")),
+            ..detent_web::AcmeConfig::default()
+        };
+        let provider = Box::new(detent_acme::CloudflareProvider::new(SECRET, ZONE_ID)?);
+        let runner = idle_runner()?;
+        let runner_pid = runner.child_pid;
+        let messages = Messages::new(Some("en-US"));
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let mut input = std::io::empty();
+        let started = super::start_acme(
+            provider,
+            hooks,
+            runner,
+            config,
+            &settings(dir.path(), dir.path().join("detent.toml")),
+            &renderer(&messages),
+            &mut crate::run::Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        let notes = String::from_utf8(notes)?;
+        assert_eq!(started.err(), Some(Exit::Failed), "{notes}");
+        assert!(notes.contains("acme.directory_url"), "{notes}");
+        assert!(!notes.contains(SECRET), "{notes}");
+        // Reaped already: there is no child left to wait for.
+        let pid = rustix::process::Pid::from_raw(runner_pid).ok_or("pid")?;
+        assert_eq!(
+            rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG).err(),
+            Some(rustix::io::Errno::CHILD)
+        );
         Ok(())
     }
 
