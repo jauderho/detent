@@ -136,3 +136,4 @@ cli-doctor-privsep = privilege separation can fork a working pair: {$detail}
 cli-doctor-landlock = landlock: {$detail}
 cli-doctor-seccomp = seccomp: {$detail}
 cli-doctor-confinement = sandbox confinement: {$detail}
+cli-doctor-serve-confinement = confinement at the last serve start: {$detail}
