@@ -479,6 +479,7 @@ async fn apply_module_renders_the_engine_answer() -> R {
         backed_up: false,
         service: None,
         commit: None,
+        checks: Vec::new(),
     };
     let fixture = stub_state(OpOutcome::Applied(Box::new(report)))?;
     let (_read, write) = tokens(&fixture.state)?;

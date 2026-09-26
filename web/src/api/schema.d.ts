@@ -405,8 +405,17 @@ export interface components {
              *     has something to roll back to.
              */
             backed_up: boolean;
+            /**
+             * @description The external validators run against the written bytes. Apply refuses
+             *     unless every one ran and passed. Empty when the module declares none
+             *     or the apply changed nothing.
+             */
+            checks: components["schemas"]["CheckReport"][];
             commit?: null | components["schemas"]["PendingCommit"];
-            /** @description Whether the target did not exist before. */
+            /**
+             * @description Whether the target did not exist before. Always `false`: apply never
+             *     creates a target and refuses a missing one.
+             */
             created: boolean;
             /** @description The module. */
             module: string;

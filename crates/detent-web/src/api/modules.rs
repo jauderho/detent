@@ -565,6 +565,7 @@ mod tests {
             backed_up: false,
             service: None,
             commit: None,
+            checks: Vec::new(),
         };
         assert!(render_applied(OpOutcome::Applied(Box::new(report))).is_ok());
         assert!(render_applied(wrong_outcome()).is_err());
