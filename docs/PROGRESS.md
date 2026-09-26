@@ -4,6 +4,12 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-26 - H17 core: Rekor body leaf and SET verification (STAGE4 4.2 item 1)
+
+The Merkle leaf is now `SHA-256(0x00 ‖ canonicalizedBody)`, and step 6 verifies the Rekor SET (`inclusionPromise`, now required) with the embedded Rekor key over the RFC 8785 JSON `{"body","integratedTime","logID","logIndex"}`. This closes the 2026-09-25 SET gap below: `a_forged_integrated_time_is_refused` now fails with the SET check removed. Real Rekor vectors check both formats: a public-good SET (`rekor-public-good-set.json`, from sigstore-go) and a staging inclusion proof (`rekor-staging-proof.json`, from sigstore-python). The old `bad-set.json` is now `bad-inclusion-path.json`; the new `bad-set.json` carries a SET from another key. All fixtures were re-minted. `a_v03_single_certificate_bundle_passes` covers the `verificationMaterial.certificate` form. `h17-set-partial.patch` is deleted.
+
+Still open in H17: step 1 (`release.yml` ships a cosign messageSignature bundle), step 5 (the checkpoint is not parsed as Rekor's signed note), step 6 (unknown kinds fall through to hashedrekord), step 7 (placeholder trust files, no Fulcio intermediate), step 8 (a captured real release bundle needs a release tag). Rekor v2 entries carry no SET and would be refused.
+
 ## 2026-09-25 - STAGE3 REOPEN items closed; ARCHITECTURE.md
 
 All nine REOPEN items from the §11.9 verification pass are fixed, each test
