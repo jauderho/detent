@@ -407,8 +407,9 @@ pub(crate) fn acme_main(channel: Channel, mut issuer: impl Issuer, cert_dir: &Pa
 }
 
 /// The worker's check of a pair from the acme process: it must parse, the
-/// key must match the leaf, the leaf must be valid for every one of
-/// `domains` and at `now`. Then the pair is stored in `cert_dir` and served
+/// key must match the leaf, every one of `domains` must equal a DNS name
+/// of the leaf (ASCII case-insensitive), and the leaf must be valid at
+/// `now`. Then the pair is stored in `cert_dir` and served
 /// from `store` ([`detent_web::install_acme`]).
 ///
 /// # Errors
@@ -431,13 +432,14 @@ pub(crate) fn check_and_install(
     // Before `install_acme`, which stores the pair before it parses it.
     pair.to_certified_key().map_err(|err| err.to_string())?;
     let leaf_der = CertificateDer::from(pair.cert_der());
-    let leaf = webpki::EndEntityCert::try_from(&leaf_der)
-        .map_err(|_| "the certificate does not parse".to_owned())?;
+    let names = detent_acme::leaf_dns_names_der(std::slice::from_ref(&leaf_der))
+        .map_err(|_| "the certificate names do not parse".to_owned())?;
+    // Exact names, not wildcard matching: a configured `*.example.com`
+    // needs the SAN `*.example.com` (dns-01 is the only way to one).
     for domain in domains {
-        let name = rustls_pki_types::ServerName::try_from(domain.as_str())
-            .map_err(|_| format!("the configured domain {domain} is not a valid name"))?;
-        leaf.verify_is_valid_for_subject_name(&name)
-            .map_err(|_| format!("the certificate does not cover {domain}"))?;
+        if !names.iter().any(|name| name.eq_ignore_ascii_case(domain)) {
+            return Err(format!("the certificate does not cover {domain}"));
+        }
     }
     let (not_before, not_after) =
         detent_acme::leaf_validity_der(std::slice::from_ref(&leaf_der))
@@ -1233,6 +1235,43 @@ mod tests {
         assert_eq!(served_leaf(&store), leaf);
         let stored = detent_web::load_acme(dir.path())?.ok_or("no stored pair")?;
         assert_eq!(stored.cert_der(), leaf.as_slice());
+        Ok(())
+    }
+
+    /// dns-01 is the only way to a wildcard certificate. A configured name
+    /// must equal a subjectAltName entry: `*.example.com` covers the
+    /// configured `*.example.com`, not `a.example.com`.
+    #[test]
+    fn a_wildcard_pair_installs_for_the_same_wildcard_only() -> R {
+        let (store, bootstrap) = bootstrap_store()?;
+        let cert = Cert::new(&["*.example.com"])?;
+        let key = KeyPem::new(cert.key_pem.clone());
+        let dir = tempfile::TempDir::new()?;
+        let refused = logged(|| {
+            check_and_install(
+                &cert.chain_pem,
+                &key,
+                &["a.example.com".to_owned()],
+                cert.at(50),
+                dir.path(),
+                &store,
+            )
+        });
+        let reason = refused.err().ok_or("a.example.com: installed")?;
+        assert!(reason.contains("does not cover a.example.com"), "{reason}");
+        assert_eq!(served_leaf(&store), bootstrap);
+
+        logged(|| {
+            check_and_install(
+                &cert.chain_pem,
+                &key,
+                &["*.EXAMPLE.com".to_owned()],
+                cert.at(50),
+                dir.path(),
+                &store,
+            )
+        })?;
+        assert_eq!(served_leaf(&store), cert.pair()?.cert_der());
         Ok(())
     }
 

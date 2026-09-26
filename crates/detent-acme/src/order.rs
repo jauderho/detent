@@ -401,6 +401,40 @@ pub fn leaf_validity_der(chain: &[CertificateDer<'_>]) -> Result<(i64, i64), Acm
     ))
 }
 
+/// The DNS names in the subjectAltName extension of the leaf of `chain`,
+/// in certificate order, as written (a wildcard stays `*.example.com`).
+/// Other name kinds (IP addresses, e-mail) are left out; a leaf with no
+/// subjectAltName extension gives an empty list.
+///
+/// # Errors
+///
+/// [`AcmeError::Config`] when `chain` is empty, the leaf does not parse, or
+/// its subjectAltName extension does not parse.
+pub fn leaf_dns_names_der(chain: &[CertificateDer<'_>]) -> Result<Vec<String>, AcmeError> {
+    use x509_parser::extensions::GeneralName;
+    use x509_parser::prelude::FromDer as _;
+    let leaf = chain
+        .first()
+        .ok_or_else(|| AcmeError::Config("certificate chain is empty".into()))?;
+    let (_, cert) = x509_parser::certificate::X509Certificate::from_der(leaf)
+        .map_err(|e| AcmeError::Config(format!("leaf certificate does not parse: {e}")))?;
+    let san = cert
+        .subject_alternative_name()
+        .map_err(|e| AcmeError::Config(format!("leaf subjectAltName does not parse: {e}")))?;
+    Ok(san
+        .map(|ext| {
+            ext.value
+                .general_names
+                .iter()
+                .filter_map(|name| match name {
+                    GeneralName::DNSName(dns) => Some((*dns).to_owned()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 /// PEM-chain wrapper over [`leaf_validity_der`]: extracts the leaf's DER
 /// before handing it to the shared parser.
 ///
@@ -950,6 +984,39 @@ mod tests {
         assert_eq!(got_before, not_before);
         assert_eq!(got_after, not_after);
         Ok(())
+    }
+
+    #[test]
+    fn leaf_dns_names_der_lists_the_leaf_dns_names_as_written() -> Result<(), String> {
+        use rcgen::{CertificateParams, KeyPair, SanType};
+        let mut params = CertificateParams::new(vec![
+            "*.example.com".to_owned(),
+            "Plain.Example.com".to_owned(),
+        ])
+        .map_err(|e| format!("fixture params must build: {e}"))?;
+        params
+            .subject_alt_names
+            .push(SanType::IpAddress(std::net::IpAddr::V4(
+                std::net::Ipv4Addr::LOCALHOST,
+            )));
+        let key = KeyPair::generate().map_err(|e| format!("fixture key must generate: {e}"))?;
+        let cert = params
+            .self_signed(&key)
+            .map_err(|e| format!("fixture cert must sign: {e}"))?;
+        let chain = [CertificateDer::from(cert.der().to_vec())];
+        let names = leaf_dns_names_der(&chain).map_err(|e| format!("names must parse: {e}"))?;
+        assert_eq!(names, vec!["*.example.com", "Plain.Example.com"]);
+        Ok(())
+    }
+
+    #[test]
+    fn leaf_dns_names_der_rejects_an_empty_chain_and_garbage() {
+        assert!(matches!(leaf_dns_names_der(&[]), Err(AcmeError::Config(_))));
+        let chain = [CertificateDer::from(vec![0u8, 1, 2, 3])];
+        assert!(matches!(
+            leaf_dns_names_der(&chain),
+            Err(AcmeError::Config(_))
+        ));
     }
 
     #[test]

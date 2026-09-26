@@ -36,7 +36,7 @@ pub use instant_acme::{Account, RetryPolicy};
 pub use order::fuzz_acme_json;
 pub use order::{
     EabCredentials, IssueRequest, Issued, account_and_order, ari_identifier, ari_identifier_der,
-    cleanup_challenges, finalize, issue, leaf_validity_der, leaf_validity_pem,
+    cleanup_challenges, finalize, issue, leaf_dns_names_der, leaf_validity_der, leaf_validity_pem,
     present_attest_challenges, present_challenges, should_renew_ari, wait_ready,
 };
 #[cfg(feature = "fuzzing")]
