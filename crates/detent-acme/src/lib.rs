@@ -34,7 +34,8 @@ pub use attest::Attestor;
 #[cfg(feature = "fuzzing")]
 pub use order::fuzz_acme_json;
 pub use order::{
-    EabCredentials, account_and_order, ari_identifier, cleanup_challenges, finalize,
+    EabCredentials, IssueRequest, Issued, account_and_order, ari_identifier, ari_identifier_der,
+    cleanup_challenges, finalize, issue, leaf_validity_der, leaf_validity_pem,
     present_attest_challenges, present_challenges, should_renew_ari, wait_ready,
 };
 #[cfg(feature = "fuzzing")]

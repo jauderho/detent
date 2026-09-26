@@ -7,7 +7,10 @@
 //! embed a runtime in the library.
 //!
 //! No sleeps live here: the caller steps [`present_challenges`],
-//! [`wait_ready`], and [`finalize`] through their retry loops.
+//! [`wait_ready`], and [`finalize`] through their retry loops, or runs the
+//! whole flow at once through [`issue`]. [`leaf_validity_der`]/
+//! [`leaf_validity_pem`] and [`ari_identifier_der`]/[`ari_identifier`] parse
+//! a leaf certificate's validity window and ARI identifier, DER or PEM.
 
 use crate::{AcmeError, DnsProvider, DnsRecord};
 use hyper::body::Bytes;
@@ -100,7 +103,7 @@ pub(crate) fn tls13_connector(
 pub async fn present_challenges(
     order: &mut Order,
     provider: &dyn DnsProvider,
-    publish: &dyn Fn(&DnsRecord) -> Result<(), AcmeError>,
+    publish: &(dyn Fn(&DnsRecord) -> Result<(), AcmeError> + Sync),
 ) -> Result<Vec<DnsRecord>, AcmeError> {
     let mut presented: Vec<DnsRecord> = Vec::new();
     let mut authorizations = order.authorizations();
@@ -254,7 +257,75 @@ pub async fn finalize(order: &mut Order, policy: &RetryPolicy) -> Result<Issued,
     Ok(Issued { chain_pem, key_pem })
 }
 
-/// The ARI identifier for the leaf of `chain_pem`: the DER-encoded AKI
+/// The [`account_and_order`] arguments, grouped for [`issue`].
+pub struct IssueRequest<'a> {
+    /// The ACME directory URL.
+    pub directory_url: &'a str,
+    /// The domains to request a certificate for.
+    pub domains: &'a [&'a str],
+    /// Where the ACME account credentials are cached.
+    pub credentials_path: &'a Path,
+    /// The CA root to trust, or `None` for the built-in webpki roots.
+    pub ca_root: Option<&'a Path>,
+    /// The CA profile to request, or `None` where the server advertises
+    /// none.
+    pub profile: Option<&'a str>,
+    /// Contact URIs recorded on fresh account registration.
+    pub contacts: &'a [&'a str],
+    /// External account binding for fresh account registration.
+    pub eab: Option<&'a EabCredentials>,
+}
+
+/// Runs a whole dns-01 order end to end: account, order, challenges,
+/// finalization. Challenge records are cleaned up through `provider` on
+/// every path once they are presented — a failed `wait_ready` or a
+/// non-`ready` status or a failed `finalize` all withdraw them before the
+/// error returns.
+///
+/// Returning the [`Account`] alongside [`Issued`] lets the caller ask ARI
+/// for the new certificate without restoring the account credentials again.
+///
+/// # Errors
+///
+/// As [`account_and_order`], [`present_challenges`], [`wait_ready`] and
+/// [`finalize`]; [`AcmeError::InvalidOrder`] when the order does not reach
+/// `ready`.
+pub async fn issue(
+    req: &IssueRequest<'_>,
+    provider: &dyn DnsProvider,
+    publish: &(dyn Fn(&DnsRecord) -> Result<(), AcmeError> + Sync),
+    policy: &RetryPolicy,
+) -> Result<(Issued, Account), AcmeError> {
+    let (account, mut order) = account_and_order(
+        req.directory_url,
+        req.domains,
+        req.credentials_path,
+        req.ca_root,
+        req.profile,
+        req.contacts,
+        req.eab,
+    )
+    .await?;
+    // `present_challenges` cleans up on its own failure paths; only a
+    // presentation that succeeded needs cleanup after `wait_ready`/`finalize`.
+    let records = present_challenges(&mut order, provider, publish).await?;
+    let issued = finish_order(&mut order, policy).await;
+    cleanup_challenges(provider, &records);
+    Ok((issued?, account))
+}
+
+/// The `wait_ready` → status check → `finalize` tail of [`issue`], split out
+/// so [`issue`] can run [`cleanup_challenges`] once regardless of which step
+/// fails.
+async fn finish_order(order: &mut Order, policy: &RetryPolicy) -> Result<Issued, AcmeError> {
+    let status = wait_ready(order, policy).await?;
+    if status != OrderStatus::Ready {
+        return Err(AcmeError::InvalidOrder(status));
+    }
+    finalize(order, policy).await
+}
+
+/// The ARI identifier for the leaf of `chain`: the DER-encoded AKI
 /// `keyIdentifier` octet string and DER-encoded serial `instant-acme` needs
 /// for [`Account::renewal_info`](instant_acme::Account::renewal_info).
 ///
@@ -264,14 +335,16 @@ pub async fn finalize(order: &mut Order, policy: &RetryPolicy) -> Result<Issued,
 ///
 /// # Errors
 ///
-/// [`AcmeError::Config`] when the chain does not parse or carries no AKI.
-pub fn ari_identifier(
-    chain_pem: &str,
+/// [`AcmeError::Config`] when `chain` is empty, the leaf does not parse, or
+/// carries no AKI.
+pub fn ari_identifier_der(
+    chain: &[CertificateDer<'_>],
 ) -> Result<instant_acme::CertificateIdentifier<'static>, AcmeError> {
     use x509_parser::prelude::FromDer as _;
-    let leaf_der = pem_block(chain_pem)
-        .ok_or_else(|| AcmeError::Config("ARI: certificate chain has no PEM block".into()))?;
-    let (_, cert) = x509_parser::certificate::X509Certificate::from_der(&leaf_der)
+    let leaf = chain
+        .first()
+        .ok_or_else(|| AcmeError::Config("ARI: certificate chain is empty".into()))?;
+    let (_, cert) = x509_parser::certificate::X509Certificate::from_der(leaf)
         .map_err(|e| AcmeError::Config(format!("ARI: leaf certificate does not parse: {e}")))?;
     let aki = cert
         .iter_extensions()
@@ -292,6 +365,53 @@ pub fn ari_identifier(
         rustls_pki_types::Der::from(serial),
     )
     .into_owned())
+}
+
+/// PEM-chain wrapper over [`ari_identifier_der`]: extracts the leaf's DER
+/// before handing it to the shared parser.
+///
+/// # Errors
+///
+/// [`AcmeError::Config`] when the chain has no PEM block, the leaf does not
+/// parse, or carries no AKI.
+pub fn ari_identifier(
+    chain_pem: &str,
+) -> Result<instant_acme::CertificateIdentifier<'static>, AcmeError> {
+    let leaf_der = pem_block(chain_pem)
+        .ok_or_else(|| AcmeError::Config("ARI: certificate chain has no PEM block".into()))?;
+    ari_identifier_der(&[CertificateDer::from(leaf_der)])
+}
+
+/// `not_before`/`not_after` of the leaf of `chain`, in Unix seconds.
+///
+/// # Errors
+///
+/// [`AcmeError::Config`] when `chain` is empty or the leaf does not parse.
+pub fn leaf_validity_der(chain: &[CertificateDer<'_>]) -> Result<(i64, i64), AcmeError> {
+    use x509_parser::prelude::FromDer as _;
+    let leaf = chain
+        .first()
+        .ok_or_else(|| AcmeError::Config("certificate chain is empty".into()))?;
+    let (_, cert) = x509_parser::certificate::X509Certificate::from_der(leaf)
+        .map_err(|e| AcmeError::Config(format!("leaf certificate does not parse: {e}")))?;
+    let validity = cert.validity();
+    Ok((
+        validity.not_before.timestamp(),
+        validity.not_after.timestamp(),
+    ))
+}
+
+/// PEM-chain wrapper over [`leaf_validity_der`]: extracts the leaf's DER
+/// before handing it to the shared parser.
+///
+/// # Errors
+///
+/// [`AcmeError::Config`] when the chain has no PEM block or the leaf does
+/// not parse.
+pub fn leaf_validity_pem(chain_pem: &str) -> Result<(i64, i64), AcmeError> {
+    let leaf_der = pem_block(chain_pem)
+        .ok_or_else(|| AcmeError::Config("certificate chain has no PEM block".into()))?;
+    leaf_validity_der(&[CertificateDer::from(leaf_der)])
 }
 
 /// First PEM block of a chain as DER, std-only (same shape as the Pebble
@@ -783,6 +903,114 @@ mod tests {
         Ok(())
     }
 
+    /// Builds a self-signed leaf with an AKI extension and an explicit
+    /// validity window, as both PEM and DER: one fixture, so the PEM and DER
+    /// helper tests exercise the same certificate.
+    fn aki_cert_with_validity(
+        not_before: i64,
+        not_after: i64,
+    ) -> Result<(String, Vec<u8>), String> {
+        use rcgen::{CertificateParams, DnType, IsCa, KeyPair};
+        let mut params = CertificateParams::new(vec!["validity.example".to_owned()])
+            .map_err(|e| format!("fixture params must build: {e}"))?;
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "validity.example");
+        params.is_ca = IsCa::NoCa;
+        params.use_authority_key_identifier_extension = true;
+        params.not_before = time::OffsetDateTime::from_unix_timestamp(not_before)
+            .map_err(|e| format!("not_before must build: {e}"))?;
+        params.not_after = time::OffsetDateTime::from_unix_timestamp(not_after)
+            .map_err(|e| format!("not_after must build: {e}"))?;
+        let key = KeyPair::generate().map_err(|e| format!("fixture key must generate: {e}"))?;
+        let cert = params
+            .self_signed(&key)
+            .map_err(|e| format!("fixture cert must sign: {e}"))?;
+        Ok((cert.pem(), cert.der().to_vec()))
+    }
+
+    #[test]
+    fn leaf_validity_pem_reads_the_leaf_window() -> Result<(), String> {
+        let (not_before, not_after) = (1_700_000_000_i64, 1_700_600_000_i64);
+        let (chain_pem, _der) = aki_cert_with_validity(not_before, not_after)?;
+        let (got_before, got_after) =
+            leaf_validity_pem(&chain_pem).map_err(|e| format!("validity must parse: {e}"))?;
+        assert_eq!(got_before, not_before);
+        assert_eq!(got_after, not_after);
+        Ok(())
+    }
+
+    #[test]
+    fn leaf_validity_der_reads_the_leaf_window() -> Result<(), String> {
+        let (not_before, not_after) = (1_700_000_000_i64, 1_700_600_000_i64);
+        let (_pem, der) = aki_cert_with_validity(not_before, not_after)?;
+        let chain = [CertificateDer::from(der)];
+        let (got_before, got_after) =
+            leaf_validity_der(&chain).map_err(|e| format!("validity must parse: {e}"))?;
+        assert_eq!(got_before, not_before);
+        assert_eq!(got_after, not_after);
+        Ok(())
+    }
+
+    #[test]
+    fn leaf_validity_der_rejects_an_empty_chain() {
+        assert!(matches!(leaf_validity_der(&[]), Err(AcmeError::Config(_))));
+    }
+
+    #[test]
+    fn leaf_validity_der_rejects_garbage() {
+        let chain = [CertificateDer::from(vec![0u8, 1, 2, 3])];
+        assert!(matches!(
+            leaf_validity_der(&chain),
+            Err(AcmeError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn leaf_validity_pem_rejects_garbage_and_a_non_certificate_block() {
+        // No PEM block at all.
+        assert!(matches!(
+            leaf_validity_pem("not a certificate"),
+            Err(AcmeError::Config(_))
+        ));
+        // A PEM block that is not a certificate.
+        let key_pem = "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n";
+        assert!(matches!(
+            leaf_validity_pem(key_pem),
+            Err(AcmeError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn ari_identifier_der_matches_the_pem_form() -> Result<(), String> {
+        let (chain_pem, der) = aki_cert_with_validity(1_700_000_000, 1_700_600_000)?;
+        let from_pem =
+            ari_identifier(&chain_pem).map_err(|e| format!("PEM form must parse: {e}"))?;
+        let chain = [CertificateDer::from(der)];
+        let from_der =
+            ari_identifier_der(&chain).map_err(|e| format!("DER form must parse: {e}"))?;
+        assert_eq!(from_pem.serial, from_der.serial);
+        assert_eq!(
+            from_pem.authority_key_identifier,
+            from_der.authority_key_identifier
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ari_identifier_der_rejects_an_empty_chain() {
+        assert!(matches!(ari_identifier_der(&[]), Err(AcmeError::Config(_))));
+    }
+
+    #[test]
+    fn ari_identifier_der_rejects_garbage() {
+        let chain = [CertificateDer::from(vec![0u8, 1, 2, 3])];
+        assert!(matches!(
+            ari_identifier_der(&chain),
+            Err(AcmeError::Config(_))
+        ));
+    }
+
     /// A credential file that exists but cannot be read must not be mistaken
     /// for "no account yet".
     ///
@@ -940,6 +1168,45 @@ mod tests {
             "expected the read failure to propagate, got {err:?}"
         );
         assert!(occupied.is_dir(), "the existing path must be left alone");
+        Ok(())
+    }
+
+    /// [`issue`] runs [`account_and_order`] first, so the same unreadable
+    /// credential file refuses before any provider or client is touched.
+    #[tokio::test]
+    async fn issue_refuses_before_it_builds_a_client() -> Result<(), Box<dyn std::error::Error>> {
+        struct NoOpProvider;
+        impl crate::DnsProvider for NoOpProvider {
+            fn present(&self, _record: &crate::DnsRecord) -> Result<(), AcmeError> {
+                Ok(())
+            }
+            fn delete(&self, _record: &crate::DnsRecord) -> Result<(), AcmeError> {
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir()?;
+        let occupied = dir.path().join("account.json");
+        std::fs::create_dir(&occupied)?;
+
+        let req = IssueRequest {
+            directory_url: "https://acme.invalid/directory",
+            domains: &["example.com"],
+            credentials_path: &occupied,
+            ca_root: None,
+            profile: Some("shortlived"),
+            contacts: &[],
+            eab: None,
+        };
+        let err = issue(&req, &NoOpProvider, &|_| Ok(()), &RetryPolicy::new())
+            .await
+            .err()
+            .ok_or("an unreadable credential file must fail the order")?;
+
+        assert!(
+            matches!(err, AcmeError::Io(_)),
+            "expected the read failure to propagate, got {err:?}"
+        );
         Ok(())
     }
 

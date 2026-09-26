@@ -17,10 +17,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use detent_acme::{
-    HookProvider, account_and_order, cleanup_challenges, finalize, present_challenges, wait_ready,
-};
-use instant_acme::{OrderStatus, RetryPolicy};
+use detent_acme::{HookProvider, IssueRequest, issue};
+use instant_acme::RetryPolicy;
 
 const TEST_DOMAIN: &str = "le.wtf";
 
@@ -120,40 +118,26 @@ fn pebble_dns01_issuance() -> Result<(), Box<dyn std::error::Error>> {
     let _ = std::fs::remove_file(&creds_path); // fresh account per full run
 
     let (issued, ari) = runtime()?.block_on(async {
-        let (account, mut order) = account_and_order(
-            &directory,
-            &[TEST_DOMAIN],
-            &creds_path,
-            ca.as_deref(),
-            None,
-            &[],
-            None,
-        )
-        .await?;
-        println!("account: {}", account.id());
-        println!("order:   {}", order.url());
-
+        let req = IssueRequest {
+            directory_url: &directory,
+            domains: &[TEST_DOMAIN],
+            credentials_path: &creds_path,
+            ca_root: ca.as_deref(),
+            profile: None,
+            contacts: &[],
+            eab: None,
+        };
         let hook = HookProvider::new(&state_dir);
         let bridge = |record: &detent_acme::DnsRecord| {
             publish_to_challtestsrv(&state_dir, record, &challtestsrv)?;
             Ok(())
         };
-        let records = present_challenges(&mut order, &hook, &bridge).await?;
-        println!("challenges presented and marked ready");
-
         // Caller-owned retry loop: no sleeps in the library.
         let policy = RetryPolicy::new()
             .initial_delay(Duration::from_millis(200))
             .timeout(Duration::from_secs(30));
-        let status = wait_ready(&mut order, &policy).await?;
-        println!("status:  {status:?}");
-        if status != OrderStatus::Ready {
-            return Err(detent_acme::AcmeError::InvalidOrder(status).into());
-        }
-
-        let issued = finalize(&mut order, &policy).await;
-        cleanup_challenges(&hook, &records);
-        let issued = issued?;
+        let (issued, account) = issue(&req, &hook, &bridge, &policy).await?;
+        println!("account: {}", account.id());
         println!(
             "chain:   {} PEM block(s)",
             issued.chain_pem.matches("BEGIN CERTIFICATE").count()
