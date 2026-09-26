@@ -4528,13 +4528,12 @@ mod tests {
         let work = TempDir::new()?;
         let inputs = work.path().join(STAGED_DIR);
         std::fs::create_dir_all(&inputs)?;
-        rustix::fs::mknodat(
-            rustix::fs::CWD,
-            inputs.join("v2.0.0"),
-            rustix::fs::FileType::Fifo,
-            rustix::fs::Mode::from_bits_truncate(0o600),
-            0,
-        )?;
+        // `mkfifo(1)` rather than `mknodat`, which rustix does not offer
+        // on macOS.
+        let made = std::process::Command::new("mkfifo")
+            .arg(inputs.join("v2.0.0"))
+            .status()?;
+        assert!(made.success(), "mkfifo failed: {made}");
         let state_root = work.path().to_path_buf();
         let staging = work.path().join("monitor-staging");
         let (sender, receiver) = std::sync::mpsc::channel();
