@@ -373,10 +373,16 @@ const PANIC_STATUS: i32 = 101;
 /// The child hardens itself (`no_new_privs`, not dumpable), drops to
 /// `config.worker_user` as the worker does, runs
 /// [`SandboxHooks::confine_acme`], and then runs `body` on its end of the
-/// channel. It exits with `body`'s return value and never returns to the
-/// caller: it exits `101` when `body` panics. A child that cannot drop or
-/// confine itself exits `1` without running `body`. The child inherits every
-/// other descriptor of the parent; `body` drops what it must not keep.
+/// channel and `inherited`. It exits with `body`'s return value and never
+/// returns to the caller: it exits `101` when `body` panics. A child that
+/// cannot drop or confine itself exits `1` without running `body`.
+///
+/// The child inherits every descriptor of the parent. The caller puts in
+/// `inherited` every value the acme process must not keep, above all the
+/// [`RunnerHandle`]: the runner is privileged and unconfined, and the acme
+/// process must never be able to send it a request. `body` must drop
+/// `inherited` first, before it runs any other code. The parent gets
+/// `inherited` back unchanged.
 ///
 /// The channel's timeouts are [`ACME_TIMEOUT`](super::acme::ACME_TIMEOUT),
 /// not `config`'s.
@@ -384,14 +390,16 @@ const PANIC_STATUS: i32 = 101;
 /// # Errors
 ///
 /// [`SpawnError::Account`] (checked before the fork), [`SpawnError::Channel`]
-/// and [`SpawnError::Fork`].
-pub fn spawn_acme<F>(
+/// and [`SpawnError::Fork`]. The parent's `inherited` is dropped with the
+/// error.
+pub fn spawn_acme<T, F>(
     config: &SpawnConfig,
     sandbox: &dyn SandboxHooks,
+    inherited: T,
     body: F,
-) -> Result<AcmeHandle, SpawnError>
+) -> Result<(AcmeHandle, T), SpawnError>
 where
-    F: FnOnce(Channel) -> i32,
+    F: FnOnce(Channel, T) -> i32,
 {
     let credentials = resolve_worker_account(config)?;
     let (worker_end, acme_end) =
@@ -400,10 +408,13 @@ where
     match fork()? {
         Side::Parent(child_pid) => {
             drop(acme_end);
-            Ok(AcmeHandle {
-                child_pid,
-                channel: worker_end,
-            })
+            Ok((
+                AcmeHandle {
+                    child_pid,
+                    channel: worker_end,
+                },
+                inherited,
+            ))
         }
         Side::Child => {
             drop(worker_end);
@@ -411,8 +422,10 @@ where
                 abort_child(1);
             }
             // A panic must not unwind into the caller's stack in the child.
-            let status = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(acme_end)))
-                .unwrap_or(PANIC_STATUS);
+            let status = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                body(acme_end, inherited)
+            }))
+            .unwrap_or(PANIC_STATUS);
             abort_confined_child(status);
         }
     }
@@ -636,15 +649,20 @@ mod tests {
     fn spawn_acme_runs_the_body_in_a_child_and_reports_its_status()
     -> Result<(), Box<dyn std::error::Error>> {
         let parent = rustix::process::getpid();
-        let mut handle = spawn_acme(&SpawnConfig::unprivileged(), &NoSandbox, |mut channel| {
-            let in_child = rustix::process::getppid() == Some(parent);
-            let sent = channel
-                .send(&AcmeMessage::Hello {
-                    version: ACME_PROTO_VERSION,
-                })
-                .is_ok();
-            if in_child && sent { 7 } else { 1 }
-        })?;
+        let (mut handle, ()) = spawn_acme(
+            &SpawnConfig::unprivileged(),
+            &NoSandbox,
+            (),
+            |mut channel, ()| {
+                let in_child = rustix::process::getppid() == Some(parent);
+                let sent = channel
+                    .send(&AcmeMessage::Hello {
+                        version: ACME_PROTO_VERSION,
+                    })
+                    .is_ok();
+                if in_child && sent { 7 } else { 1 }
+            },
+        )?;
         assert_eq!(handle.channel.read_timeout(), ACME_TIMEOUT);
         assert_eq!(
             handle.channel.recv::<AcmeMessage>()?,
@@ -661,7 +679,7 @@ mod tests {
     /// into the caller's stack (here: the test harness) in the child.
     #[test]
     fn a_panicking_acme_body_exits_101() -> Result<(), Box<dyn std::error::Error>> {
-        let handle = spawn_acme(&SpawnConfig::unprivileged(), &NoSandbox, |_| {
+        let (handle, ()) = spawn_acme(&SpawnConfig::unprivileged(), &NoSandbox, (), |_, ()| {
             // A second mutable borrow of a `RefCell` panics.
             let cell = std::cell::RefCell::new(0);
             let _first = cell.borrow_mut();
@@ -672,9 +690,42 @@ mod tests {
         Ok(())
     }
 
+    /// The parent gets `inherited` back, and the child's copy is gone once
+    /// the body drops it: the peer of an inherited channel sees `Closed`
+    /// while the child is still alive. A child that kept its copy would make
+    /// `recv` time out instead.
+    #[test]
+    fn the_acme_child_drops_what_it_inherits_and_the_parent_keeps_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let short = Duration::from_secs(5);
+        let (kept, mut peer) = Channel::pair_with(short, short)?;
+        let (mut handle, kept) = spawn_acme(
+            &SpawnConfig::unprivileged(),
+            &NoSandbox,
+            kept,
+            |mut channel, inherited| {
+                drop(inherited);
+                // Stay alive until the parent has checked the peer.
+                i32::from(channel.recv::<AcmeMessage>().is_err())
+            },
+        )?;
+        assert_eq!(kept.read_timeout(), short);
+        drop(kept);
+        assert!(matches!(
+            peer.recv::<AcmeMessage>(),
+            Err(ChannelError::Closed)
+        ));
+        handle.channel.send(&AcmeMessage::Hello {
+            version: ACME_PROTO_VERSION,
+        })?;
+        assert_eq!(handle.wait()?, Some(0));
+        Ok(())
+    }
+
     #[test]
     fn a_failed_acme_setup_exits_before_the_body_runs() -> Result<(), Box<dyn std::error::Error>> {
-        let mut handle = spawn_acme(&SpawnConfig::unprivileged(), &RefusesAcme, |_| 0)?;
+        let (mut handle, ()) =
+            spawn_acme(&SpawnConfig::unprivileged(), &RefusesAcme, (), |_, ()| 0)?;
         assert_eq!(handle.wait()?, Some(1));
         assert!(matches!(
             handle.channel.recv::<AcmeMessage>(),

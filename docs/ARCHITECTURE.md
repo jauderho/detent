@@ -85,7 +85,11 @@ privilege.
 - The acme process (ADR-015; `spawn_acme` in `spawn.rs`,
   `crates/detent-platform/src/privsep/acme.rs`) hardens itself, drops to
   uid `detent` and confines itself with `Policy::acme` and the `ACME`
-  seccomp table before it runs its body. The pair forked after it inherits
+  seccomp table before it runs its body. It is forked after the runner, so
+  it inherits the monitor's end of the runner channel: the caller passes
+  the `RunnerHandle` to `spawn_acme` as `inherited`, and the body drops it
+  first, so the acme process can never send the runner a request (the
+  parent gets the handle back). The pair forked after it inherits
   the worker's end of its socket pair: the monitor drops it, the worker
   answers on it (`serve_acme`: `Hello`, then `Install { chain, key }` →
   `Installed` or `Refused`). Status: the process and its channel exist

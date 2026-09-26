@@ -836,9 +836,12 @@ mod tests {
         let trusted = cert.der().clone();
 
         // The fork happens before the server thread starts.
-        let handle = spawn_acme(&SpawnConfig::unprivileged(), &hooks, move |_channel| {
-            acme_probe(addr.port(), trusted, unlistened, &credentials)
-        })?;
+        let (handle, ()) = spawn_acme(
+            &SpawnConfig::unprivileged(),
+            &hooks,
+            (),
+            move |_channel, ()| acme_probe(addr.port(), trusted, unlistened, &credentials),
+        )?;
         let server_thread = std::thread::spawn(move || {
             let served = serve_one_https(&listener, std::sync::Arc::new(tls_config));
             (served, listener)
