@@ -208,12 +208,14 @@ pub fn verify(
     }
 
     // Step 6: Rekor inclusion — Merkle recompute, checkpoint signature
-    // against the embedded log key, tree sizes, and body agreement.
+    // against the embedded log key, tree sizes, and body agreement; then
+    // the SET, which binds integratedTime.
     verify_inclusion(
         decoded,
         trust,
         parsed_leaf.public_key().subject_public_key.data.as_ref(),
     )?;
+    verify_set(decoded, &trust.rekor_key)?;
     Ok(())
 }
 
@@ -340,6 +342,50 @@ fn verify_inclusion(
     // signing key the envelope carries (ADR-014 step 6).
     verify_body_agreement(decoded, leaf_point)?;
     Ok(())
+}
+
+/// The bytes a Rekor signed entry timestamp (SET) signs: the RFC 8785
+/// canonical JSON of `{"body","integratedTime","logID","logIndex"}`. `body`
+/// is the base64 `canonicalizedBody`, `logID` the lowercase hex of the log's
+/// key id. The keys are written in RFC 8785 order (`logID` sorts before
+/// `logIndex`), base64 and hex need no JSON escaping, and the integers are
+/// plain decimals.
+///
+/// This is what Rekor signs and what sigstore-go checks: `RekorPayload`
+/// marshalled and then `jsoncanonicalizer.Transform`ed, in sigstore-go
+/// `pkg/tlog/entry.go` (`VerifySET`) and Rekor `pkg/verify/verify.go`
+/// (`VerifySignedEntryTimestamp`). The unit test
+/// `a_real_public_good_set_verifies` checks it against a production entry.
+#[must_use]
+pub fn rekor_set_payload(
+    body: &[u8],
+    integrated_time: i64,
+    log_id: &[u8],
+    log_index: i64,
+) -> String {
+    format!(
+        r#"{{"body":"{}","integratedTime":{integrated_time},"logID":"{}","logIndex":{log_index}}}"#,
+        base64_of(body),
+        hex_lower(log_id),
+    )
+}
+
+/// Step 6, SET: the Rekor signed entry timestamp is an ECDSA P-256 (SHA-256)
+/// signature by the embedded Rekor key over [`rekor_set_payload`]. It is the
+/// only signature over `integratedTime`, the instant step 2 checks the leaf
+/// at.
+fn verify_set(decoded: &Decoded, rekor_key: &VerifyingKey) -> Result<(), VerificationError> {
+    let payload = rekor_set_payload(
+        &decoded.body,
+        decoded.integrated_time,
+        &decoded.log_key_id,
+        decoded.log_index,
+    );
+    let signature = Signature::from_der(&decoded.signed_entry_timestamp)
+        .map_err(|_| VerificationError::SetInvalid)?;
+    rekor_key
+        .verify(payload.as_bytes(), &signature)
+        .map_err(|_| VerificationError::SetInvalid)
 }
 
 /// Returns true only for a non-empty SCT list parsed by x509-parser.
@@ -477,6 +523,72 @@ fn base64_of(bytes: &[u8]) -> String {
 )]
 mod tests {
     use super::*;
+
+    /// A production Rekor entry and the public-good Rekor key, copied from
+    /// sigstore-go `examples/bundle-provenance.json` and
+    /// `examples/trusted-root-public-good.json`. Returns the SET-relevant
+    /// fields as a [`Decoded`] and the key.
+    fn public_good_set() -> (Decoded, VerifyingKey) {
+        let raw: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/rekor-public-good-set.json"))
+                .expect("vector json");
+        let text = |pointer: &str| raw.pointer(pointer).and_then(serde_json::Value::as_str);
+        let b64 = |pointer: &str| BASE64.decode(text(pointer).expect(pointer)).expect(pointer);
+        let int = |pointer: &str| text(pointer).expect(pointer).parse::<i64>().expect(pointer);
+        let spki = b64("/rekorPublicKey");
+        let (_, spki) = x509_parser::x509::SubjectPublicKeyInfo::from_der(&spki).expect("spki");
+        let key = VerifyingKey::from_sec1_bytes(spki.subject_public_key.data.as_ref())
+            .expect("P-256 key");
+        let decoded = Decoded {
+            integrated_time: int("/entry/integratedTime"),
+            certs: Vec::new(),
+            statement: bundle::Statement {
+                statement_type: bundle::STATEMENT_TYPE.to_owned(),
+                subject: Vec::new(),
+            },
+            dsse_payload: Vec::new(),
+            dsse_payload_type: bundle::DSSE_PAYLOAD_TYPE.to_owned(),
+            dsse_signature: Vec::new(),
+            log_index: int("/entry/logIndex"),
+            log_key_id: b64("/entry/logId/keyId"),
+            kind: "intoto".to_owned(),
+            kind_version: "0.0.2".to_owned(),
+            body: b64("/entry/canonicalizedBody"),
+            tree_size: 0,
+            proof_log_index: 0,
+            path_hashes: Vec::new(),
+            checkpoint: String::new(),
+            signed_entry_timestamp: b64("/entry/inclusionPromise/signedEntryTimestamp"),
+        };
+        (decoded, key)
+    }
+
+    #[test]
+    fn a_real_public_good_set_verifies() {
+        // Proves rekor_set_payload is the canonical form Rekor signs.
+        let (decoded, key) = public_good_set();
+        assert_eq!(verify_set(&decoded, &key), Ok(()));
+    }
+
+    #[test]
+    fn a_real_set_does_not_cover_a_changed_field() {
+        type Change = fn(&mut Decoded);
+        let changes: [(&str, Change); 4] = [
+            ("integratedTime", |d| d.integrated_time += 1),
+            ("logIndex", |d| d.log_index += 1),
+            ("logID", |d| d.log_key_id[0] ^= 1),
+            ("body", |d| d.body[0] ^= 1),
+        ];
+        for (field, change) in changes {
+            let (mut decoded, key) = public_good_set();
+            change(&mut decoded);
+            assert_eq!(
+                verify_set(&decoded, &key),
+                Err(VerificationError::SetInvalid),
+                "{field}"
+            );
+        }
+    }
 
     #[test]
     fn an_sct_octet_string_must_parse_as_a_nonempty_list() {

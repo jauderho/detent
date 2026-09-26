@@ -60,15 +60,20 @@ fn pem(label: &str, der: &[u8]) -> String {
     out
 }
 
-/// P-256 SPKI PEM for a verifying key.
-fn spki_pem(key: &SigningKey) -> String {
+/// P-256 SPKI DER for a verifying key.
+fn spki_der(key: &SigningKey) -> Vec<u8> {
     let point = key.verifying_key().to_encoded_point(false);
     let mut der = vec![
         0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08,
         0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
     ];
     der.extend_from_slice(point.as_bytes());
-    pem("PUBLIC KEY", &der)
+    der
+}
+
+/// P-256 SPKI PEM for a verifying key.
+fn spki_pem(key: &SigningKey) -> String {
+    pem("PUBLIC KEY", &spki_der(key))
 }
 
 fn pkcs8(key: &SigningKey) -> Vec<u8> {
@@ -157,8 +162,24 @@ fn bundle_for(material: &Material, digest_hex: &str, mutate: &str) -> Value {
     let body = tlog_body(material, &sig, digest_hex, mutate);
 
     // Inclusion proof over a two-leaf tree: this entry and a fixed neighbor.
-    let log_key_digest = Sha256::digest(spki_pem(&material.rekor_key).as_bytes());
+    // Rekor's log id is the SHA-256 of its public key's SPKI DER.
+    let log_key_digest = Sha256::digest(spki_der(&material.rekor_key));
     let log_key_id = BASE64.encode(&log_key_digest[..]);
+
+    // The SET: the Rekor key's signature over the canonical entry payload.
+    // bad-set is signed by another key over the same payload.
+    let set_payload = detent_update::verify::rekor_set_payload(
+        body.to_string().as_bytes(),
+        INTEGRATED_TIME,
+        &log_key_digest,
+        0,
+    );
+    let set_signer = if mutate == "bad-set" {
+        key("6162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80")
+    } else {
+        material.rekor_key.clone()
+    };
+    let set: p256::ecdsa::Signature = set_signer.sign(set_payload.as_bytes());
     let entry = json!({
         "canonicalizedBody": BASE64.encode(body.to_string().as_bytes()),
         "integratedTime": INTEGRATED_TIME,
@@ -191,7 +212,7 @@ fn bundle_for(material: &Material, digest_hex: &str, mutate: &str) -> Value {
 
     // Per-fixture mutations after the valid construction.
     match mutate {
-        "bad-set" => {
+        "bad-inclusion-path" => {
             // Corrupt one path hash: the recomputed root diverges from the
             // checkpoint, which itself still verifies - inclusion fails.
             path_hashes[0][0] ^= 0xff;
@@ -207,7 +228,7 @@ fn bundle_for(material: &Material, digest_hex: &str, mutate: &str) -> Value {
             );
         }
         "wrong-identity" | "expired-leaf" | "valid" | "bad-signature" | "bad-body-sig"
-        | "bad-body-key" => {}
+        | "bad-body-key" | "bad-set" => {}
         other => panic!("unknown fixture {other}"),
     }
 
@@ -223,6 +244,7 @@ fn bundle_for(material: &Material, digest_hex: &str, mutate: &str) -> Value {
                 "logId": { "keyId": log_key_id },
                 "kindVersion": { "kind": "hashedrekord", "version": "0.0.1" },
                 "canonicalizedBody": BASE64.encode(body.to_string().as_bytes()),
+                "inclusionPromise": { "signedEntryTimestamp": BASE64.encode(encode_sig(&set)) },
                 "inclusionProof": {
                     "logIndex": proof_log_index,
                     "treeSize": 2_u64,
@@ -330,6 +352,11 @@ fn main() {
         dir,
         "bad-signature.json",
         bundle_for(&valid, &digest_hex, "bad-signature"),
+    );
+    write(
+        dir,
+        "bad-inclusion-path.json",
+        bundle_for(&valid, &digest_hex, "bad-inclusion-path"),
     );
     write(
         dir,
