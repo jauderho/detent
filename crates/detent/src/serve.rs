@@ -1121,7 +1121,11 @@ mod web_tests {
         let (monitor_end, worker_end) = Channel::pair()?;
         let monitor = std::thread::spawn(move || {
             let mut channel = monitor_end;
-            let _ = Monitor::new(allow, MonitorHooks::default()).serve(&mut channel);
+            // Shown with the failing test's output: a monitor that stops
+            // before the handshake otherwise surfaces only as `Channel(Closed)`.
+            if let Err(err) = Monitor::new(allow, MonitorHooks::default()).serve(&mut channel) {
+                eprintln!("engine_fixture monitor stopped: {err:?}");
+            }
         });
         let mut client = Client::new(worker_end);
         client.hello()?;
