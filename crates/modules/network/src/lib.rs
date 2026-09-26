@@ -2268,12 +2268,25 @@ impl ConfigModule for NetworkModule {
                 );
             }
             previous = Some(iface.name.as_str());
-            if iface.name.is_empty() || iface.name.contains(char::is_whitespace) {
-                diagnostics.push(
-                    Diagnostic::new(Severity::Error, INVALID_CIDR)
-                        .with_field(FieldPath::new(format!("{base}/name")))
-                        .with_arg("value", iface.name.clone()),
-                );
+            // The names every renderer writes: the charset of
+            // `check_interface`, and no leading `-`, which ifup, ip and
+            // networkctl read as an option.
+            let names = std::iter::once(("name".to_owned(), &iface.name))
+                .chain(iface.vlan.iter().map(|v| ("vlan/link".to_owned(), &v.link)))
+                .chain(iface.bridge.iter().flat_map(|b| {
+                    b.members
+                        .iter()
+                        .enumerate()
+                        .map(|(pos, member)| (format!("bridge/members/{pos}"), member))
+                }));
+            for (field, name) in names {
+                if !is_valid_ifname(name) || name.starts_with('-') {
+                    diagnostics.push(
+                        Diagnostic::new(Severity::Error, INVALID_CIDR)
+                            .with_field(FieldPath::new(format!("{base}/{field}")))
+                            .with_arg("value", name.clone()),
+                    );
+                }
             }
             // Injection
             for (field, value) in [
@@ -2778,6 +2791,52 @@ mod tests {
         model.interfaces[0].addresses = vec!["192.168.1.10/24".to_owned()];
         model.interfaces[0].dns = vec!["not-an-ip".to_owned()];
         assert!(has(&model, INVALID_IP, Severity::Error));
+    }
+
+    /// The model fields that `validate` flags as an invalid name (Error).
+    fn name_errors(model: &super::Model) -> Vec<String> {
+        let host = profile(Os::Linux);
+        let ctx = ValidationCtx::new(&host);
+        NetworkModule::validate(model, &ctx)
+            .iter()
+            .filter(|d| d.severity == Severity::Error && d.id.as_str() == INVALID_CIDR.as_str())
+            .filter_map(|d| d.field.as_ref().map(|f| f.as_str().to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn validate_flags_interface_names_the_renderer_refuses() {
+        let mut model = NetworkModule::defaults(&profile(Os::Linux));
+        assert!(name_errors(&model).is_empty());
+        // Every renderer accepts ASCII alphanumerics and `-_.` only, and a
+        // leading `-` reads as an option to ifup, ip and networkctl.
+        for bad in ["eth/0", "eth0:1", "ethé", "-eth0", "eth\"0", "-"] {
+            model.interfaces[0].name = bad.to_owned();
+            assert_eq!(
+                name_errors(&model),
+                vec!["interfaces/0/name".to_owned()],
+                "{bad:?}"
+            );
+        }
+        for good in ["eth0", "br-lan", "eth0.10", "wlan_1", "e-"] {
+            model.interfaces[0].name = good.to_owned();
+            assert!(name_errors(&model).is_empty(), "{good:?}");
+        }
+        model.interfaces[0].name = "eth0".to_owned();
+        model.interfaces[0].vlan = Some(super::Vlan {
+            link: "-eth1".to_owned(),
+            id: 10,
+        });
+        model.interfaces[0].bridge = Some(super::Bridge {
+            members: vec!["eth2".to_owned(), "eth:3".to_owned()],
+        });
+        assert_eq!(
+            name_errors(&model),
+            vec![
+                "interfaces/0/vlan/link".to_owned(),
+                "interfaces/0/bridge/members/1".to_owned()
+            ]
+        );
     }
 
     #[test]
