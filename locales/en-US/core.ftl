@@ -75,7 +75,7 @@ hosts-too-many-entries = this file has {$count} entries; consider dns instead.
 
 ## mounts module — display name, security notes, schema tooltips
 mounts-name = mounts
-mounts-note-boot = a bad /etc/fstab can leave the host unbootable at the next restart; every change needs a second confirmation.
+mounts-note-boot = a bad /etc/fstab can leave the host unbootable at the next restart; every change needs a second confirmation. The confirmation cannot catch a bad entry, because nothing reads the file before the next boot.
 mounts-tip-entries = the mount entries in /etc/fstab, in file order.
 mounts-tip-spec = what is mounted: a device, `UUID=...`/`LABEL=...`, an nfs export, or `none` for swap.
 mounts-tip-mountpoint = where the filesystem is mounted, or `none`/`swap` for swap.
@@ -97,6 +97,8 @@ mounts-critical-noauto = `{$mountpoint}` is required for boot but has noauto, so
 mounts-missing-guards = `{$mountpoint}` mounts user-writable data without `{$missing}`; add them.
 mounts-network-automount = `{$mountpoint}` is a network filesystem without `x-systemd.automount`; the boot waits for the network.
 mounts-noauto-without-user = `noauto` without `user`: only root can mount it, defeating the point.
+mounts-relative-mountpoint = entry {$index} mounts on `{$mountpoint}`, which is not an absolute path.
+mounts-no-root-entry = no entry mounts `/`; check that the root filesystem is mounted another way.
 
 ## network module — display name, security notes, schema tooltips
 network-name = network
