@@ -409,11 +409,13 @@ macro_rules! module_conformance {
                 use ::proptest::strategy::{Strategy as _, ValueTree as _};
                 let mut runner = ::proptest::test_runner::TestRunner::deterministic();
                 let (mut lf, mut crlf) = (false, false);
-                for _ in 0..256 {
-                    let Ok(tree) = conformance_src_strategy().new_tree(&mut runner) else {
-                        continue;
-                    };
-                    let src = tree.current();
+                let sources = (0..256).filter_map(|_| {
+                    conformance_src_strategy()
+                        .new_tree(&mut runner)
+                        .ok()
+                        .map(|tree| tree.current())
+                });
+                for src in sources {
                     lf |= src.contains('\n');
                     crlf |= src.contains("\r\n");
                 }
@@ -428,14 +430,12 @@ macro_rules! module_conformance {
                 use ::proptest::strategy::{Strategy as _, ValueTree as _};
                 let mut runner = ::proptest::test_runner::TestRunner::deterministic();
                 let (mut edits, mut rerenders) = (0_usize, 0_usize);
-                for _ in 0..256 {
-                    let (Ok(src), Ok(model)) = (
-                        conformance_src_strategy().new_tree(&mut runner),
-                        ($strategy).new_tree(&mut runner),
-                    ) else {
-                        continue;
-                    };
-                    let (src, model) = (src.current(), model.current());
+                let cases = (0..256).filter_map(|_| {
+                    let src = conformance_src_strategy().new_tree(&mut runner).ok()?;
+                    let model = ($strategy).new_tree(&mut runner).ok()?;
+                    Some((src.current(), model.current()))
+                });
+                for (src, model) in cases {
                     let exercised = $crate::conformance::Exercised::Yes;
                     if $crate::conformance::check_edit_fidelity::<$module>(&src, &model)
                         == Ok(exercised)
