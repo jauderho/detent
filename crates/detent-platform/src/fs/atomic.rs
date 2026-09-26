@@ -460,11 +460,29 @@ pub fn list_backups(backup_dir: &Path) -> Result<Vec<BackupEntry>, AtomicError> 
 /// Same as [`write_atomic`], plus [`AtomicError::Io`] if `backup` cannot be
 /// read.
 pub fn restore_backup(backup: &Path, target: &Path) -> Result<WriteOutcome, AtomicError> {
+    restore_backup_expecting(backup, target, None)
+}
+
+/// [`restore_backup`] with an optimistic-concurrency guard: when
+/// `expected_prev` is set and `target` no longer has that digest, nothing is
+/// written.
+///
+/// # Errors
+///
+/// Same as [`restore_backup`], plus [`AtomicError::Conflict`] when `target`
+/// changed.
+pub fn restore_backup_expecting(
+    backup: &Path,
+    target: &Path,
+    expected_prev: Option<Sha256Digest>,
+) -> Result<WriteOutcome, AtomicError> {
     let backup_dir = backup.parent().ok_or_else(|| AtomicError::RelativePath {
         path: backup.to_path_buf(),
     })?;
     let (contents, _) = read_with_digest(backup)?;
-    write_atomic(&WriteRequest::new(target, &contents, backup_dir))
+    let mut request = WriteRequest::new(target, &contents, backup_dir);
+    request.expected_prev = expected_prev;
+    write_atomic(&request)
 }
 
 // ---------------------------------------------------------------------------

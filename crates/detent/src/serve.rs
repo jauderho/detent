@@ -733,6 +733,7 @@ mod tests {
                     target: 0,
                     path: target.clone(),
                     backup,
+                    new_digest: None,
                 }],
                 service: None,
             })?,

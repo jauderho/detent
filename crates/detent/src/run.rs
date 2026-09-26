@@ -3410,6 +3410,7 @@ mod tests {
                     target: 0,
                     path: target.to_path_buf(),
                     backup: backup.to_path_buf(),
+                    new_digest: None,
                 }],
                 service: None,
             })?,
