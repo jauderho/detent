@@ -1712,10 +1712,10 @@ fn write_temp_and_swap(
             err.kind()
         )));
     }
-    // Fsync the target directory so the rename itself is durable.
-    if let Ok(dir) = std::fs::File::open(target_dir)
-        && let Err(err) = dir.sync_all()
-    {
+    // Fsync the target directory so the rename itself is durable. A directory
+    // that cannot be opened is an error too: skipping the fsync silently would
+    // report a swap whose rename may not survive a crash.
+    if let Err(err) = std::fs::File::open(target_dir).and_then(|dir| dir.sync_all()) {
         return Err(ProtoError::Io(format!(
             "sync target directory: {}",
             err.kind()
@@ -1746,7 +1746,7 @@ mod tests {
         CheckRunner, ExitReason, HookError, Hooks, MAX_CONFIRM_TIMEOUT_S, MONITOR_LOCK, Monitor,
         PENDING_COMMIT_MARKER, PREVIOUS_SUFFIX, PendingCommitMarker, STAGED_DIR, ServiceControl,
         finish_send_error, materialize_staged, read_staged_verified, staged_path,
-        swap_running_binary,
+        swap_running_binary, write_temp_and_swap,
     };
     use crate::fs::atomic::{AtomicError, Sha256Digest};
     use crate::privsep::allowlist::{Allowlist, AllowlistError, Config};
@@ -4487,6 +4487,60 @@ mod tests {
             Err(ProtoError::Io(message)) if message.starts_with("stage binary in target dir")
         ));
         assert_eq!(std::fs::read(&target)?, b"old-binary");
+        Ok(())
+    }
+
+    #[test]
+    fn write_temp_and_swap_never_writes_through_a_file_at_the_temp_name()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let target = swap_target(work.path(), "detent-excl", b"old-binary")?;
+        let permissions = std::fs::metadata(&target)?.permissions();
+        let victim = work.path().join("victim");
+        std::fs::write(&victim, b"victim")?;
+        // A symlink and a regular file at the temp name: without `O_EXCL`
+        // the first write lands in `victim`, the second reuses the file.
+        let symlinked = work.path().join("symlinked.tmp");
+        std::os::unix::fs::symlink(&victim, &symlinked)?;
+        let regular = work.path().join("regular.tmp");
+        std::fs::write(&regular, b"leftover")?;
+        for tmp in [&symlinked, &regular] {
+            assert!(matches!(
+                write_temp_and_swap(
+                    b"new",
+                    &work.path().join("staged"),
+                    &target,
+                    work.path(),
+                    tmp,
+                    &permissions,
+                ),
+                Err(ProtoError::Io(message)) if message.starts_with("stage binary in target dir")
+            ));
+        }
+        assert_eq!(std::fs::read(&victim)?, b"victim");
+        assert_eq!(std::fs::read(&target)?, b"old-binary");
+        Ok(())
+    }
+
+    #[test]
+    fn write_temp_and_swap_reports_a_directory_it_cannot_open_for_fsync()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let target = swap_target(work.path(), "detent-dirsync", b"old-binary")?;
+        let permissions = std::fs::metadata(&target)?.permissions();
+        let tmp = work.path().join("dirsync.tmp");
+        let result = write_temp_and_swap(
+            b"new",
+            &work.path().join("staged"),
+            &target,
+            &work.path().join("absent-directory"),
+            &tmp,
+            &permissions,
+        );
+        assert!(matches!(
+            result,
+            Err(ProtoError::Io(message)) if message.starts_with("sync target directory")
+        ));
         Ok(())
     }
 
