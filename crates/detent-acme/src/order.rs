@@ -615,10 +615,12 @@ mod tests {
     fn issued_debug_redacts_private_key() {
         let issued = Issued {
             chain_pem: "certificate".to_owned(),
-            key_pem: "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----".to_owned(),
+            // A plain marker, not PEM armour: a PEM block here reads as a
+            // real private key to the secret scanner in CI.
+            key_pem: "private-key-material".to_owned(),
         };
         let dump = format!("{issued:?}");
-        assert!(!dump.contains("PRIVATE KEY"));
+        assert!(!dump.contains("private-key-material"));
         assert!(dump.contains("[redacted]"));
     }
 
@@ -723,7 +725,7 @@ mod tests {
         ));
         // A PEM block that is not a certificate (Pebble serves chains, not
         // keys, so wrong-armour input is a caller bug worth refusing).
-        let key_pem = "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n";
+        let key_pem = "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n";
         assert!(matches!(ari_identifier(key_pem), Err(AcmeError::Config(_))));
     }
 
@@ -979,7 +981,7 @@ mod tests {
     fn eab_debug_redacts_the_key_but_names_the_kid() {
         let creds = EabCredentials {
             kid: "ca-kid-1".into(),
-            key_b64: "s3cr3t-key-material".into(),
+            key_b64: "not-a-real-key".into(),
         };
         let dump = format!("{creds:?}");
         assert!(
@@ -987,7 +989,7 @@ mod tests {
             "kid must stay visible, got {dump}"
         );
         assert!(
-            !dump.contains("s3cr3t-key-material"),
+            !dump.contains("not-a-real-key"),
             "raw key must not leak, got {dump}"
         );
         assert!(
