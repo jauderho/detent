@@ -300,6 +300,7 @@ mod tests {
             (AuthError::TokenLimit, StatusCode::CONFLICT),
             (AuthError::AmbiguousCredentials, StatusCode::BAD_REQUEST),
             (AuthError::SessionLimit, StatusCode::SERVICE_UNAVAILABLE),
+            (AuthError::Busy, StatusCode::SERVICE_UNAVAILABLE),
             (AuthError::Hash, StatusCode::INTERNAL_SERVER_ERROR),
         ];
         for (error, status) in cases {

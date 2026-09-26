@@ -299,13 +299,14 @@ async fn attempt(
         return Err(AuthError::InvalidCredentials);
     }
     let presented = cookie_id(headers);
+    // Refuse rather than queue: a queued login holds its request open until
+    // a slot frees, so a flood would pile up behind the cap (L-WEB12).
     let permit = state
         .auth
         .argon2_permits
         .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| AuthError::Hash)?;
+        .try_acquire_owned()
+        .map_err(|_| AuthError::Busy)?;
     let auth = state.auth.clone();
     let subject = subject.to_owned();
     let password = request.password.clone();
@@ -387,6 +388,12 @@ fn audit_failure(state: &AppState, error: &AuthError, subject: &str, ip: IpAddr,
     // knock lets an attacker grow the log at will (M10).
     if matches!(error, AuthError::RateLimited { .. }) {
         tracing::debug!(subject = %subject, %ip, "login rate-limited");
+        return;
+    }
+    // A login refused because every hashing slot was taken is not audited
+    // either: no credential was checked, and a flood must not grow the log.
+    if matches!(error, AuthError::Busy) {
+        tracing::debug!(subject = %subject, %ip, "login refused: hashing cap reached");
         return;
     }
     state.auth.record(
@@ -1173,6 +1180,42 @@ mod tests {
         assert!(rendered.contains("alice"), "{rendered}");
         assert!(!rendered.contains("hunter2"), "{rendered}");
         assert!(!rendered.contains("123456"), "{rendered}");
+    }
+
+    /// L-WEB12: at most two logins hash at once. A third is refused with 503
+    /// `web-auth-busy` at once, not queued behind the other two, and the
+    /// refusal writes no audit record.
+    #[tokio::test]
+    async fn logins_beyond_the_hashing_cap_are_refused_not_queued() -> R {
+        let fixture = fixture_with_alice()?;
+        assert_eq!(fixture.state.auth.argon2_permits.available_permits(), 2);
+        let held = fixture
+            .state
+            .auth
+            .argon2_permits
+            .clone()
+            .acquire_many_owned(2)
+            .await?;
+        let refused = tokio::time::timeout(
+            Duration::from_secs(5),
+            app(&fixture.state).oneshot(login_request(&credentials("alice", "hunter2"))?),
+        )
+        .await
+        .map_err(|_elapsed| "the login was queued behind the hashing cap")??;
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = json(refused).await?;
+        assert_eq!(
+            body.pointer("/message_id").and_then(|v| v.as_str()),
+            Some("web-auth-busy")
+        );
+        assert!(fixture.audit.events().is_empty());
+
+        drop(held);
+        let accepted = app(&fixture.state)
+            .oneshot(login_request(&credentials("alice", "hunter2"))?)
+            .await?;
+        assert_eq!(accepted.status(), StatusCode::OK);
+        Ok(())
     }
 
     /// M10: a refused-because-locked attempt must not extend the audit log.

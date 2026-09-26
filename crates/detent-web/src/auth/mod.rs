@@ -117,6 +117,10 @@ pub enum AuthError {
     /// is a memory-exhaustion primitive.
     #[error("no more sessions can be established right now")]
     SessionLimit,
+    /// Every password-hashing slot is taken. The login is refused rather than
+    /// queued, so a flood of logins cannot hold requests open (L-WEB12).
+    #[error("too many logins are being checked right now")]
+    Busy,
     /// The request carried no credential at all.
     #[error("authentication is required")]
     Unauthenticated,
@@ -184,6 +188,7 @@ impl AuthError {
             Self::InvalidCredentials => MessageId::new("web-auth-invalid-credentials"),
             Self::RateLimited { .. } => MessageId::new("web-auth-rate-limited"),
             Self::SessionLimit => MessageId::new("web-auth-session-limit"),
+            Self::Busy => MessageId::new("web-auth-busy"),
             Self::Unauthenticated => MessageId::new("web-auth-unauthenticated"),
             Self::AmbiguousCredentials => MessageId::new("web-auth-ambiguous-credentials"),
             Self::CsrfRejected => MessageId::new("web-auth-csrf-rejected"),
@@ -208,7 +213,7 @@ impl AuthError {
         match *self {
             Self::InvalidCredentials | Self::Unauthenticated => S::UNAUTHORIZED,
             Self::RateLimited { .. } => S::TOO_MANY_REQUESTS,
-            Self::SessionLimit => S::SERVICE_UNAVAILABLE,
+            Self::SessionLimit | Self::Busy => S::SERVICE_UNAVAILABLE,
             Self::CsrfRejected => S::FORBIDDEN,
             Self::UserExists | Self::TokenLimit => S::CONFLICT,
             Self::UnknownUser | Self::UnknownToken => S::NOT_FOUND,
@@ -325,6 +330,7 @@ mod tests {
                 retry_after_secs: 4,
             },
             AuthError::SessionLimit,
+            AuthError::Busy,
             AuthError::Unauthenticated,
             AuthError::AmbiguousCredentials,
             AuthError::CsrfRejected,
