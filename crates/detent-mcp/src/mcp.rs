@@ -86,29 +86,14 @@ pub trait TokenVerifier: Send + Sync {
     fn authenticate(&self, token: &str) -> AuthOutcome;
 }
 
-/// A verifier that admits exactly the SHA-256 hex digests in `digests`.
-///
-/// Intended for tests and for callers that have already resolved a token to
-/// its digest. Real deployments use the web layer's token store.
+/// A verifier that admits exactly the token it was built from, compared by
+/// SHA-256 digest in constant time. `detent mcp` uses it for the startup
+/// token; liveness in the token store is checked separately.
 pub struct ConstantTimeTokenVerifier {
     digests: Vec<[u8; 32]>,
 }
 
 impl ConstantTimeTokenVerifier {
-    /// Build from the SHA-256 of every acceptable token.
-    #[must_use]
-    pub fn from_digests<I: IntoIterator<Item = String>>(digests: I) -> Self {
-        let mut out = Vec::new();
-        for d in digests {
-            if d.len() == 64
-                && let Some(bytes) = hex_to_32(&d)
-            {
-                out.push(bytes);
-            }
-        }
-        Self { digests: out }
-    }
-
     /// Build from a single token, hashing it.
     #[must_use]
     pub fn from_token(token: &str) -> Self {
@@ -136,20 +121,6 @@ impl TokenVerifier for ConstantTimeTokenVerifier {
         }
         AuthOutcome::Denied(AuthError::Invalid)
     }
-}
-
-fn hex_to_32(hex: &str) -> Option<[u8; 32]> {
-    let bytes = hex.as_bytes();
-    if bytes.len() != 64 {
-        return None;
-    }
-    let mut out = [0_u8; 32];
-    let (pairs, _) = bytes.as_chunks::<2>();
-    for (slot, pair) in out.iter_mut().zip(pairs) {
-        let text = std::str::from_utf8(pair).ok()?;
-        *slot = u8::from_str_radix(text, 16).ok()?;
-    }
-    Some(out)
 }
 
 // ---------------------------------------------------------------------------
