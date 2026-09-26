@@ -1299,7 +1299,6 @@ fn render_ifupdown(iface: &Interface) -> Result<Vec<String>, EditError> {
 }
 
 /// Render the whole model as netplan YAML lines.
-#[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
 fn render_netplan(model: &Model) -> Result<Vec<String>, EditError> {
     let mut out = Vec::new();
     out.push("network:".to_owned());
@@ -1320,38 +1319,7 @@ fn render_netplan(model: &Model) -> Result<Vec<String>, EditError> {
                 continue;
             }
             out.push(format!("    {}:", iface.name));
-            out.push(format!(
-                "      dhcp4: {}",
-                if iface.dhcp_v4 { "true" } else { "false" }
-            ));
-            out.push(format!(
-                "      dhcp6: {}",
-                if iface.dhcp_v6 { "true" } else { "false" }
-            ));
-            if !iface.addresses.is_empty() {
-                out.push("      addresses:".to_owned());
-                for addr in &iface.addresses {
-                    out.push(format!("        - {addr}"));
-                }
-            }
-            if let Some(gw) = iface.gateway_v4.as_deref() {
-                out.push(format!("      gateway4: {gw}"));
-            }
-            if let Some(gw) = iface.gateway_v6.as_deref() {
-                out.push(format!("      gateway6: {gw}"));
-            }
-            if !iface.dns.is_empty() {
-                out.push("      nameservers:".to_owned());
-                out.push(format!("        addresses: [{}]", iface.dns.join(", ")));
-            }
-            if !iface.routes.is_empty() {
-                out.push("      routes:".to_owned());
-                for route in &iface.routes {
-                    check_route(route, false)?;
-                    out.push(format!("        - to: {}", route.to));
-                    out.push(format!("          via: {}", route.via));
-                }
-            }
+            render_netplan_iface(&mut out, iface)?;
         }
     }
     if has_vlans {
@@ -1361,30 +1329,7 @@ fn render_netplan(model: &Model) -> Result<Vec<String>, EditError> {
                 out.push(format!("    {}:", iface.name));
                 out.push(format!("      id: {}", vlan.id));
                 out.push(format!("      link: {}", vlan.link));
-                out.push(format!(
-                    "      dhcp4: {}",
-                    if iface.dhcp_v4 { "true" } else { "false" }
-                ));
-                out.push(format!(
-                    "      dhcp6: {}",
-                    if iface.dhcp_v6 { "true" } else { "false" }
-                ));
-                if !iface.addresses.is_empty() {
-                    out.push("      addresses:".to_owned());
-                    for addr in &iface.addresses {
-                        out.push(format!("        - {addr}"));
-                    }
-                }
-                if let Some(gw) = iface.gateway_v4.as_deref() {
-                    out.push(format!("      gateway4: {gw}"));
-                }
-                if let Some(gw) = iface.gateway_v6.as_deref() {
-                    out.push(format!("      gateway6: {gw}"));
-                }
-                if !iface.dns.is_empty() {
-                    out.push("      nameservers:".to_owned());
-                    out.push(format!("        addresses: [{}]", iface.dns.join(", ")));
-                }
+                render_netplan_iface(&mut out, iface)?;
             }
         }
     }
@@ -1394,28 +1339,49 @@ fn render_netplan(model: &Model) -> Result<Vec<String>, EditError> {
             if let Some(bridge) = iface.bridge.as_ref() {
                 out.push(format!("    {}:", iface.name));
                 out.push(format!("      interfaces: [{}]", bridge.members.join(", ")));
-                out.push(format!(
-                    "      dhcp4: {}",
-                    if iface.dhcp_v4 { "true" } else { "false" }
-                ));
-                out.push(format!(
-                    "      dhcp6: {}",
-                    if iface.dhcp_v6 { "true" } else { "false" }
-                ));
-                if !iface.addresses.is_empty() {
-                    out.push("      addresses:".to_owned());
-                    for addr in &iface.addresses {
-                        out.push(format!("        - {addr}"));
-                    }
-                }
-                if !iface.dns.is_empty() {
-                    out.push("      nameservers:".to_owned());
-                    out.push(format!("        addresses: [{}]", iface.dns.join(", ")));
-                }
+                render_netplan_iface(&mut out, iface)?;
             }
         }
     }
     Ok(out)
+}
+
+/// Render the keys every netplan interface kind shares: DHCP, addresses,
+/// gateways, name servers and routes.
+fn render_netplan_iface(out: &mut Vec<String>, iface: &Interface) -> Result<(), EditError> {
+    out.push(format!(
+        "      dhcp4: {}",
+        if iface.dhcp_v4 { "true" } else { "false" }
+    ));
+    out.push(format!(
+        "      dhcp6: {}",
+        if iface.dhcp_v6 { "true" } else { "false" }
+    ));
+    if !iface.addresses.is_empty() {
+        out.push("      addresses:".to_owned());
+        for addr in &iface.addresses {
+            out.push(format!("        - {addr}"));
+        }
+    }
+    if let Some(gw) = iface.gateway_v4.as_deref() {
+        out.push(format!("      gateway4: {gw}"));
+    }
+    if let Some(gw) = iface.gateway_v6.as_deref() {
+        out.push(format!("      gateway6: {gw}"));
+    }
+    if !iface.dns.is_empty() {
+        out.push("      nameservers:".to_owned());
+        out.push(format!("        addresses: [{}]", iface.dns.join(", ")));
+    }
+    if !iface.routes.is_empty() {
+        out.push("      routes:".to_owned());
+        for route in &iface.routes {
+            check_route(route, false)?;
+            out.push(format!("        - to: {}", route.to));
+            out.push(format!("          via: {}", route.via));
+        }
+    }
+    Ok(())
 }
 
 /// Render the model in the flavor's syntax, returning lines.
@@ -3794,6 +3760,65 @@ mod tests {
         assert!(netplan_text.contains("gateway6:"));
         let netplan_model = NetworkModule::to_model(&netplan_doc).map_err(|e| e.to_string())?;
         assert_eq!(netplan_model.interfaces.len(), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn netplan_writes_routes_and_gateways_for_bridges_and_vlans() -> Result<(), String> {
+        let route = |to: &str, via: &str| super::Route {
+            to: to.to_owned(),
+            via: via.to_owned(),
+        };
+        let model = super::Model {
+            interfaces: vec![
+                super::Interface {
+                    name: "br0".to_owned(),
+                    dhcp_v4: false,
+                    dhcp_v6: false,
+                    addresses: vec!["192.168.2.10/24".to_owned(), "2001:db8:2::10/64".to_owned()],
+                    gateway_v4: Some("192.168.2.1".to_owned()),
+                    gateway_v6: Some("2001:db8:2::1".to_owned()),
+                    dns: vec!["192.168.2.53".to_owned()],
+                    routes: vec![route("10.2.0.0/16", "192.168.2.254")],
+                    vlan: None,
+                    bridge: Some(super::Bridge {
+                        members: vec!["eth0".to_owned()],
+                    }),
+                },
+                super::Interface {
+                    name: "eth0".to_owned(),
+                    dhcp_v4: true,
+                    dhcp_v6: false,
+                    addresses: Vec::new(),
+                    gateway_v4: None,
+                    gateway_v6: None,
+                    dns: Vec::new(),
+                    routes: Vec::new(),
+                    vlan: None,
+                    bridge: None,
+                },
+                super::Interface {
+                    name: "vlan10".to_owned(),
+                    dhcp_v4: false,
+                    dhcp_v6: false,
+                    addresses: vec!["10.10.10.2/24".to_owned()],
+                    gateway_v4: Some("10.10.10.1".to_owned()),
+                    gateway_v6: None,
+                    dns: Vec::new(),
+                    routes: vec![route("10.20.0.0/16", "10.10.10.254")],
+                    vlan: Some(super::Vlan {
+                        link: "eth0".to_owned(),
+                        id: 10,
+                    }),
+                    bridge: None,
+                },
+            ],
+        };
+        let mut doc =
+            NetworkModule::parse("network:\n  version: 2\n").map_err(|e| e.to_string())?;
+        NetworkModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let back = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        assert_eq!(back, model, "{}", NetworkModule::render(&doc));
         Ok(())
     }
 
