@@ -109,7 +109,15 @@ struct TlogEntryJson {
     log_id: LogIdJson,
     kind_version: KindVersionJson,
     canonicalized_body: String,
+    inclusion_promise: InclusionPromiseJson,
     inclusion_proof: InclusionProofJson,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InclusionPromiseJson {
+    /// Base64 DER ECDSA signature by the Rekor key (the SET).
+    signed_entry_timestamp: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -252,6 +260,9 @@ pub struct Decoded {
     pub path_hashes: Vec<Vec<u8>>,
     /// The checkpoint envelope text (body and signature lines).
     pub checkpoint: String,
+    /// The Rekor signed entry timestamp (`inclusionPromise`), decoded DER.
+    /// It is the only signature that binds `integratedTime` to the entry.
+    pub signed_entry_timestamp: Vec<u8>,
 }
 
 /// Parses and decodes a bundle, enforcing the 1 MiB cap and the strict field
@@ -358,6 +369,10 @@ pub fn parse(bytes: &[u8]) -> Result<Decoded, BundleError> {
         proof_log_index: tlog.inclusion_proof.log_index,
         path_hashes: decode_path(&tlog.inclusion_proof.hashes)?,
         checkpoint: tlog.inclusion_proof.checkpoint.envelope.clone(),
+        signed_entry_timestamp: decode(
+            tlog.inclusion_promise.signed_entry_timestamp.as_bytes(),
+            "signed entry timestamp",
+        )?,
     })
 }
 
@@ -400,6 +415,7 @@ mod tests {
                     "logId": { "keyId": "AAAA" },
                     "kindVersion": { "kind": "hashedrekord", "version": "0.0.1" },
                     "canonicalizedBody": "AAAA",
+                    "inclusionPromise": { "signedEntryTimestamp": "AAAA" },
                     "inclusionProof": {
                         "logIndex": 0, "treeSize": 1,
                         "checkpoint": { "envelope": "name 1\nAAAA\n\nQUJD\n" },
@@ -457,6 +473,23 @@ mod tests {
     }
 
     #[test]
+    fn a_bundle_without_a_set_is_refused() {
+        // Real v0.3 bundles carry the Rekor SET; without it integratedTime is
+        // unauthenticated, so the bundle is refused at parse time.
+        for field in [
+            "/verificationMaterial/tlogEntries/0/inclusionPromise",
+            "/verificationMaterial/tlogEntries/0/inclusionPromise/signedEntryTimestamp",
+        ] {
+            let mut value = minimal();
+            remove_pointer(&mut value, field);
+            assert!(
+                matches!(parse_json(&value), Err(BundleError::Malformed(_))),
+                "missing {field} must be refused"
+            );
+        }
+    }
+
+    #[test]
     fn refuses_oversized() {
         let filler = vec![b'a'; MAX_BUNDLE_BYTES + 1];
         assert!(matches!(parse(&filler), Err(BundleError::Oversized)));
@@ -508,6 +541,7 @@ mod tests {
             "/verificationMaterial/tlogEntries/0/logId/keyId",
             "/verificationMaterial/tlogEntries/0/canonicalizedBody",
             "/verificationMaterial/tlogEntries/0/inclusionProof/hashes/0",
+            "/verificationMaterial/tlogEntries/0/inclusionPromise/signedEntryTimestamp",
         ] {
             let mut value = minimal();
             let slot = pointer_mut(&mut value, field);

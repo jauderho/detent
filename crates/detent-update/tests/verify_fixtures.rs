@@ -194,8 +194,16 @@ fn corrupted_dsse_signature_is_refused_at_step_4() {
 
 #[test]
 fn corrupted_inclusion_path_is_refused_at_step_6() {
-    let error = run("bad-set.json").expect_err("corrupt inclusion path must be refused");
+    let error = run("bad-inclusion-path.json").expect_err("corrupt inclusion path must be refused");
     assert!(matches!(error, VerificationError::SetInvalid), "{error:?}");
+}
+
+#[test]
+fn a_bad_set_is_refused() {
+    // The Rekor SET is a well-formed ECDSA signature over the right payload,
+    // but by a key other than the embedded Rekor key. The inclusion proof,
+    // checkpoint and body are valid, so only the SET check can refuse it.
+    assert_eq!(run("bad-set.json"), Err(VerificationError::SetInvalid));
 }
 
 #[test]
@@ -270,8 +278,8 @@ fn a_subject_digest_that_misses_the_file_is_refused_at_step_5() {
 #[test]
 fn an_empty_inclusion_path_is_refused_at_step_6() {
     // A tlog entry stripped of its inclusion-proof hashes: the Merkle
-    // recompute has no path to walk. Distinct from bad-set.json, where the
-    // path is present but one hash is corrupted.
+    // recompute has no path to walk. Distinct from bad-inclusion-path.json,
+    // where the path is present but one hash is corrupted.
     let dir = fixtures();
     let raw = std::fs::read(dir.join("valid.json")).unwrap();
     let mut decoded = detent_update::bundle::parse(&raw).unwrap();
