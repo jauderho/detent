@@ -1968,7 +1968,16 @@ fn edit_networkd_sections(
         if placed.contains_key(&pi) {
             continue;
         }
-        if let Some((_, &at)) = placed.range(..pi).next_back() {
+        if let Some((_, &after)) = placed.range(..pi).next_back() {
+            // A new section header goes at the end of the section before it,
+            // after that section's unknown keys, so they keep their section.
+            let at = if parse_section(raw).is_some() {
+                doc.section_end(after, doc.len(), &|line: &str| {
+                    parse_section(line).is_some()
+                })
+            } else {
+                after
+            };
             plan.insert(at, (*raw).clone())?;
             placed.insert(pi, at);
         } else {
