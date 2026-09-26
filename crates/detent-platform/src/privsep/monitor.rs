@@ -1364,6 +1364,48 @@ fn staged_input_path(state_root: &Path, tag: &str) -> Result<PathBuf, ProtoError
     Ok(state_root.join(STAGED_DIR).join(tag))
 }
 
+/// Open the worker-written input `<state_root>/update/staged/<tag>` for
+/// reading without following a symlink at any component below `state_root`.
+///
+/// Each directory is opened with `openat(O_NOFOLLOW | O_DIRECTORY)` and must
+/// have the same owner as `state_root`, so a worker cannot point `update` or
+/// `staged` at a root-readable directory elsewhere. The file is opened
+/// `O_NONBLOCK` and must be a regular file: a planted FIFO would otherwise
+/// block the monitor, and with it the commit-confirm deadline.
+fn open_staged_input(state_root: &Path, tag: &str) -> Result<std::fs::File, ProtoError> {
+    use rustix::fs::{FileType, Mode, OFlags, fstat, openat};
+    use rustix::io::Errno;
+    let open_error = |err: Errno| ProtoError::Io(format!("open staged binary: {err}"));
+    let stat_error = |err: Errno| ProtoError::Io(format!("stat staged binary: {err}"));
+    let untrusted = || ProtoError::Io("staged input directory is not trusted".to_owned());
+    let dir_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut dir = rustix::fs::open(state_root, dir_flags, Mode::empty()).map_err(open_error)?;
+    let owner = fstat(&dir).map_err(stat_error)?.st_uid;
+    for component in STAGED_DIR.split('/') {
+        dir = match openat(&dir, component, dir_flags, Mode::empty()) {
+            Ok(fd) => fd,
+            Err(Errno::LOOP | Errno::NOTDIR) => return Err(untrusted()),
+            Err(err) => return Err(open_error(err)),
+        };
+        if fstat(&dir).map_err(stat_error)?.st_uid != owner {
+            return Err(untrusted());
+        }
+    }
+    let fd = openat(
+        &dir,
+        tag,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(open_error)?;
+    if FileType::from_raw_mode(fstat(&fd).map_err(stat_error)?.st_mode) != FileType::RegularFile {
+        return Err(ProtoError::Io(
+            "staged binary is not a regular file".to_owned(),
+        ));
+    }
+    Ok(fd.into())
+}
+
 fn ensure_staging_dir(monitor_staging_dir: &Path) -> Result<PathBuf, ProtoError> {
     use std::os::unix::fs::MetadataExt as _;
     std::fs::create_dir_all(monitor_staging_dir).map_err(|err| {
@@ -1397,13 +1439,7 @@ fn materialize_staged(
         return Err(ProtoError::VerificationFailed);
     }
     let mut bytes = Vec::new();
-    let source_fd = rustix::fs::open(
-        &source,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|err| ProtoError::Io(format!("open staged binary: {err}")))?;
-    let source_file: std::fs::File = source_fd.into();
+    let source_file = open_staged_input(state_root, tag)?;
     if let Err(err) = (&source_file)
         .take(u64::from(u32::MAX))
         .read_to_end(&mut bytes)
@@ -4272,15 +4308,71 @@ mod tests {
         let digest = Sha256Digest::of(b"image");
         let inputs = work.path().join(STAGED_DIR);
         let staging = work.path().join("monitor-staging");
+        // A directory is refused by the regular-file check, before any read.
         std::fs::create_dir_all(inputs.join("v1.0.0"))?;
         assert!(matches!(
             materialize_staged(work.path(), &staging, "v1.0.0", 5, digest),
-            Err(ProtoError::Io(message)) if message.starts_with("read staged binary")
+            Err(ProtoError::Io(message)) if message == "staged binary is not a regular file"
         ));
         std::fs::write(inputs.join("v2.0.0"), b"image")?;
         assert!(matches!(
             materialize_staged(work.path(), &staging, "v2.0.0", 6, digest),
             Err(ProtoError::Io(message)) if message == "staged binary size does not match the request"
+        ));
+        assert!(!staged_path(&staging, digest).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn materialize_staged_refuses_a_fifo_without_blocking() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let work = TempDir::new()?;
+        let inputs = work.path().join(STAGED_DIR);
+        std::fs::create_dir_all(&inputs)?;
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            inputs.join("v2.0.0"),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_bits_truncate(0o600),
+            0,
+        )?;
+        let state_root = work.path().to_path_buf();
+        let staging = work.path().join("monitor-staging");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = materialize_staged(
+                &state_root,
+                &staging,
+                "v2.0.0",
+                5,
+                Sha256Digest::of(b"image"),
+            );
+            let _ = sender.send(result);
+        });
+        // With no writer, a blocking open of the FIFO never returns.
+        let result = receiver.recv_timeout(Duration::from_secs(5))?;
+        assert!(matches!(
+            result,
+            Err(ProtoError::Io(message)) if message == "staged binary is not a regular file"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn materialize_staged_refuses_a_symlinked_staged_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let digest = Sha256Digest::of(b"image");
+        let elsewhere = work.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere)?;
+        std::fs::write(elsewhere.join("v2.0.0"), b"image")?;
+        let state_root = work.path().join("state");
+        std::fs::create_dir_all(state_root.join("update"))?;
+        std::os::unix::fs::symlink(&elsewhere, state_root.join(STAGED_DIR))?;
+        let staging = work.path().join("monitor-staging");
+        assert!(matches!(
+            materialize_staged(&state_root, &staging, "v2.0.0", 5, digest),
+            Err(ProtoError::Io(message)) if message == "staged input directory is not trusted"
         ));
         assert!(!staged_path(&staging, digest).exists());
         Ok(())
