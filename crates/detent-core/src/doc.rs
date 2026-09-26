@@ -157,6 +157,37 @@ impl EntryPlan {
         self.remove.extend(other.remove);
         self.insert.extend(other.insert);
     }
+
+    /// Adds: rewrite line `line` as `raw`, keeping its terminator. A plan
+    /// takes at most one rewrite or removal per line.
+    ///
+    /// # Errors
+    ///
+    /// [`EditError::LineBreakInValue`] if `raw` contains `\n`, `\r` or NUL.
+    pub fn replace(&mut self, line: usize, raw: String) -> Result<(), EditError> {
+        check_raw(&raw)?;
+        self.replace.push((line, raw));
+        Ok(())
+    }
+
+    /// Adds: remove line `line`. A plan takes at most one rewrite or removal
+    /// per line.
+    pub fn remove(&mut self, line: usize) {
+        self.remove.push(line);
+    }
+
+    /// Adds: insert `raw` as a new line before original line `at`; `at` at or
+    /// past the end appends. Inserts at the same `at` keep the order they were
+    /// added in.
+    ///
+    /// # Errors
+    ///
+    /// [`EditError::LineBreakInValue`] if `raw` contains `\n`, `\r` or NUL.
+    pub fn insert(&mut self, at: usize, raw: String) -> Result<(), EditError> {
+        check_raw(&raw)?;
+        self.insert.push((at, raw));
+        Ok(())
+    }
 }
 
 /// Where one wanted entry of [`Document::plan_entries`] ends up.
@@ -1101,6 +1132,30 @@ mod tests {
             doc.apply_plan(super::EntryPlan::default()),
             EditReport::default()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_plan_built_by_hand_applies_in_one_pass() -> Result<(), EditError> {
+        let mut doc = Document::parse("a=1\nb=1\nc=1", ini);
+        let mut plan = super::EntryPlan::default();
+        plan.replace(0, "a=2".to_owned())?;
+        plan.remove(1);
+        plan.insert(2, "x=1".to_owned())?;
+        plan.insert(2, "y=1".to_owned())?;
+        plan.insert(9, "z=1".to_owned())?;
+        assert_eq!(doc.apply_plan(plan), report(1, 3, 1));
+        assert_eq!(doc.render(), "a=2\nx=1\ny=1\nc=1\nz=1");
+        let mut refused = super::EntryPlan::default();
+        assert!(matches!(
+            refused.replace(0, "a\nb".to_owned()),
+            Err(EditError::LineBreakInValue { .. })
+        ));
+        assert!(matches!(
+            refused.insert(0, "a\rb".to_owned()),
+            Err(EditError::LineBreakInValue { .. })
+        ));
+        assert_eq!(refused, super::EntryPlan::default());
         Ok(())
     }
 
