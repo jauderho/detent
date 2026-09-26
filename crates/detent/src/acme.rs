@@ -1,0 +1,951 @@
+//! The two ends of the acme channel (ADR-015), as plain functions.
+//!
+//! ```text
+//!   acme process                               worker
+//!   ────────────                               ──────
+//!   acme_main ─▶ hello ─▶ run_loop             serve_installs
+//!                           │ every hour           ▲
+//!                           ▼                      │
+//!                        renew_once ── Install ────┘ check_and_install
+//!                           │  Issuer (the CA)         └─▶ install_acme
+//!                           └─ Installer (AcmeClient)
+//! ```
+//!
+//! Nothing here forks, opens a socket of its own or needs root: the CA and
+//! the channel are seams ([`Issuer`], [`Installer`]), so the tests drive
+//! every path in-process. `serve` wires them to `spawn_acme` and the worker.
+//!
+//! # Logs
+//!
+//! The acme process holds the dns-01 provider secret and the new private
+//! key. No log line carries either: a provider error is logged by its kind
+//! only, because a provider can quote its request, and the request carries
+//! the secret. Only the ACME server's own error text is logged in full.
+
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use detent_acme::{
+    Account, AcmeError, DnsProvider, DnsRecord, IssueRequest, Issued, RetryPolicy, Warning,
+};
+use detent_platform::privsep::acme::{AcmeChannelError, AcmeClient, KeyPem};
+use detent_platform::privsep::transport::{Channel, ChannelError};
+use detent_web::{AcmeConfig, CertifiedKeyPair, TlsError};
+use rustls_pki_types::CertificateDer;
+
+/// Time between two checks of the served certificate.
+const CHECK_INTERVAL: Duration = Duration::from_hours(1);
+
+/// Wait before the first retry after a failure. Each further failure doubles
+/// it, up to [`MAX_RETRY`].
+const FIRST_RETRY: Duration = Duration::from_secs(60);
+
+/// The longest wait between two attempts after failures.
+const MAX_RETRY: Duration = CHECK_INTERVAL;
+
+/// The CA: issues a certificate and tells when to renew one.
+pub(crate) trait Issuer {
+    /// Order and fetch a new certificate for the configured domains.
+    fn issue(&mut self) -> impl Future<Output = Result<Issued, AcmeError>>;
+
+    /// The ARI suggested renewal window of the leaf `leaf_der`, in Unix
+    /// seconds, or `None` when the CA gives none.
+    fn renewal_window(&mut self, leaf_der: &[u8]) -> impl Future<Output = Option<(i64, i64)>>;
+}
+
+/// The hand-over to the worker.
+pub(crate) trait Installer {
+    /// Ask the worker to serve `chain_pem` with `key`.
+    ///
+    /// # Errors
+    ///
+    /// As [`AcmeClient::install`].
+    fn install(&mut self, chain_pem: String, key: KeyPem) -> Result<(), AcmeChannelError>;
+}
+
+impl Installer for AcmeClient {
+    fn install(&mut self, chain_pem: String, key: KeyPem) -> Result<(), AcmeChannelError> {
+        Self::install(self, chain_pem, key)
+    }
+}
+
+/// What one renewal check did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    /// A new certificate is issued and the worker serves it.
+    Renewed {
+        /// The new leaf's end of validity, Unix seconds.
+        not_after: i64,
+    },
+    /// The served certificate does not need renewal yet.
+    NotDue {
+        /// How much of its lifetime is used, in percent.
+        used_percent: u8,
+    },
+}
+
+/// Why one renewal check failed.
+#[derive(Debug)]
+pub(crate) enum RenewError {
+    /// The served certificate could not be read from `cert_dir`.
+    Load(TlsError),
+    /// The CA or the dns-01 provider failed.
+    Issue(AcmeError),
+    /// The CA sent a chain whose leaf does not parse.
+    Chain,
+    /// The worker did not install the new certificate.
+    Install(AcmeChannelError),
+}
+
+impl RenewError {
+    /// A log line for this failure. It never quotes a provider's text or a
+    /// PEM (see the module documentation).
+    fn reason(&self) -> String {
+        match self {
+            Self::Load(err) => err.to_string(),
+            Self::Issue(err) => issue_reason(err),
+            Self::Chain => "the CA sent a certificate that does not parse".to_owned(),
+            Self::Install(err) => err.to_string(),
+        }
+    }
+}
+
+/// A log line for an issue failure: the ACME server's own text, or a fixed
+/// sentence for everything the provider or the local files report.
+fn issue_reason(err: &AcmeError) -> String {
+    match err {
+        AcmeError::Acme(inner) => format!("the ACME server or client failed: {inner}"),
+        AcmeError::InvalidOrder(status) => format!("the order ended as {status:?}"),
+        AcmeError::Io(inner) => format!("a local file operation failed: {}", inner.kind()),
+        AcmeError::Credentials(_) => {
+            "the ACME account credentials could not be read or written".to_owned()
+        }
+        AcmeError::NoDns01Challenge => "the CA offered no dns-01 challenge".to_owned(),
+        _ => "the dns-01 provider failed".to_owned(),
+    }
+}
+
+/// The real CA: `detent_acme::issue` over the configured dns-01 provider.
+///
+/// The provider holds the secret from `secrets.toml`; it is built before the
+/// fork and lives only in the acme process (ADR-015).
+pub(crate) struct AcmeIssuer {
+    provider: Box<dyn DnsProvider>,
+    directory_url: String,
+    domains: Vec<String>,
+    credentials_path: PathBuf,
+    ca_root: Option<PathBuf>,
+    profile: Option<String>,
+    contacts: Vec<String>,
+    policy: RetryPolicy,
+    /// The account of the last successful order, for ARI.
+    account: Option<Account>,
+}
+
+impl AcmeIssuer {
+    /// An issuer for `config` over `provider`.
+    ///
+    /// # Errors
+    ///
+    /// The name of the first `[acme]` setting that is missing:
+    /// `directory_url`, `credentials_path` or `domains`.
+    pub(crate) fn new(
+        config: &AcmeConfig,
+        provider: Box<dyn DnsProvider>,
+        policy: RetryPolicy,
+    ) -> Result<Self, &'static str> {
+        let directory_url = config.directory_url.clone().ok_or("directory_url")?;
+        let credentials_path = config.credentials_path.clone().ok_or("credentials_path")?;
+        if config.domains.is_empty() {
+            return Err("domains");
+        }
+        Ok(Self {
+            provider,
+            directory_url,
+            domains: config.domains.clone(),
+            credentials_path,
+            ca_root: config.ca_root.clone(),
+            profile: config.profile.clone(),
+            contacts: config.contacts.clone(),
+            policy,
+            account: None,
+        })
+    }
+}
+
+impl Issuer for AcmeIssuer {
+    async fn issue(&mut self) -> Result<Issued, AcmeError> {
+        let domains: Vec<&str> = self.domains.iter().map(String::as_str).collect();
+        let contacts: Vec<&str> = self.contacts.iter().map(String::as_str).collect();
+        let request = IssueRequest {
+            directory_url: &self.directory_url,
+            domains: &domains,
+            credentials_path: &self.credentials_path,
+            ca_root: self.ca_root.as_deref(),
+            profile: self.profile.as_deref(),
+            contacts: &contacts,
+            eab: None,
+        };
+        let (issued, account) = detent_acme::issue(
+            &request,
+            self.provider.as_ref(),
+            // The provider alone publishes the record: nothing to push.
+            &|_: &DnsRecord| Ok(()),
+            &self.policy,
+        )
+        .await?;
+        self.account = Some(account);
+        Ok(issued)
+    }
+
+    async fn renewal_window(&mut self, leaf_der: &[u8]) -> Option<(i64, i64)> {
+        let account = self.account.as_ref()?;
+        let id = detent_acme::ari_identifier_der(&[CertificateDer::from(leaf_der)]).ok()?;
+        let (info, _) = account.renewal_info(&id).await.ok()?;
+        Some((
+            info.suggested_window.start.unix_timestamp(),
+            info.suggested_window.end.unix_timestamp(),
+        ))
+    }
+}
+
+/// Log the expiry warning for `used_percent`, if one is due.
+fn warn_expiry(used_percent: u8, not_after: i64) {
+    match detent_acme::warning_for(used_percent) {
+        Some(Warning::Half) => tracing::warn!(
+            used_percent,
+            not_after,
+            "half of the served certificate's lifetime is used"
+        ),
+        Some(Warning::Quarter) => tracing::warn!(
+            used_percent,
+            not_after,
+            "a quarter or less of the served certificate's lifetime is left"
+        ),
+        None => {}
+    }
+}
+
+/// One renewal check at `now`.
+///
+/// `served` is the stored ACME pair; `None` means the worker still serves
+/// the bootstrap certificate, so a certificate is issued at once. A served
+/// pair whose validity cannot be read is renewed too. Otherwise the
+/// certificate is renewed when the ARI window has started, or else at two
+/// thirds of its lifetime.
+///
+/// # Errors
+///
+/// [`RenewError::Issue`] when the CA fails, [`RenewError::Chain`] when it
+/// sends a chain that does not parse, [`RenewError::Install`] when the
+/// worker does not install the new pair.
+pub(crate) async fn renew_once(
+    now: i64,
+    served: Option<&CertifiedKeyPair>,
+    issuer: &mut impl Issuer,
+    installer: &mut impl Installer,
+) -> Result<Outcome, RenewError> {
+    if let Some(pair) = served {
+        if let Ok((not_before, not_after)) =
+            detent_acme::leaf_validity_der(&[CertificateDer::from(pair.cert_der())])
+        {
+            let used_percent = detent_acme::percent_used(not_before, not_after, now);
+            warn_expiry(used_percent, not_after);
+            let window = issuer.renewal_window(pair.cert_der()).await;
+            if !detent_acme::should_renew_in_window(not_before, not_after, now, window) {
+                return Ok(Outcome::NotDue { used_percent });
+            }
+        } else {
+            tracing::warn!("the served certificate's validity cannot be read");
+        }
+    }
+    let Issued { chain_pem, key_pem } = issuer.issue().await.map_err(RenewError::Issue)?;
+    let (_, not_after) =
+        detent_acme::leaf_validity_pem(&chain_pem).map_err(|_| RenewError::Chain)?;
+    installer
+        .install(chain_pem, KeyPem::new(key_pem))
+        .map_err(RenewError::Install)?;
+    Ok(Outcome::Renewed { not_after })
+}
+
+/// One round of the loop: read the served pair from `cert_dir`, then
+/// [`renew_once`].
+async fn round(
+    now: i64,
+    cert_dir: &Path,
+    issuer: &mut impl Issuer,
+    installer: &mut impl Installer,
+) -> Result<Outcome, RenewError> {
+    let served = detent_web::load_acme(cert_dir).map_err(RenewError::Load)?;
+    renew_once(now, served.as_ref(), issuer, installer).await
+}
+
+/// The renewal loop: one round at once, then one every hour.
+///
+/// After a failure the next round comes after [`FIRST_RETRY`], doubled for
+/// each further failure up to [`MAX_RETRY`]; a success resets it. `now`
+/// reads the clock in Unix seconds and `sleep` waits, so a test drives the
+/// rounds without real time. The loop returns when the worker closes the
+/// channel.
+pub(crate) async fn run_loop<F>(
+    issuer: &mut impl Issuer,
+    installer: &mut impl Installer,
+    cert_dir: &Path,
+    mut now: impl FnMut() -> i64,
+    mut sleep: impl FnMut(Duration) -> F,
+) where
+    F: Future<Output = ()>,
+{
+    let mut retry = FIRST_RETRY;
+    loop {
+        let delay = match round(now(), cert_dir, issuer, installer).await {
+            Ok(outcome) => {
+                if let Outcome::Renewed { not_after } = outcome {
+                    tracing::info!(not_after, "the worker serves a new ACME certificate");
+                }
+                retry = FIRST_RETRY;
+                CHECK_INTERVAL
+            }
+            Err(RenewError::Install(AcmeChannelError::Channel(ChannelError::Closed))) => {
+                tracing::info!("the worker closed the acme channel");
+                return;
+            }
+            Err(err) => {
+                let delay = retry;
+                tracing::warn!(
+                    reason = %err.reason(),
+                    retry_secs = delay.as_secs(),
+                    "certificate renewal failed"
+                );
+                retry = retry.saturating_mul(2).min(MAX_RETRY);
+                delay
+            }
+        };
+        sleep(delay).await;
+    }
+}
+
+/// The acme process's body, run by `spawn_acme` on its end of the channel.
+///
+/// Builds a current-thread runtime, greets the worker and runs
+/// [`run_loop`] with the real clock. Returns `0` when the worker closed the
+/// channel, `1` when the runtime or the greeting failed.
+pub(crate) fn acme_main(channel: Channel, mut issuer: impl Issuer, cert_dir: &Path) -> i32 {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            tracing::error!(reason = %err, "the acme process cannot start its runtime");
+            return 1;
+        }
+    };
+    let mut client = AcmeClient::new(channel);
+    if let Err(err) = client.hello() {
+        tracing::error!(reason = %err, "the worker did not accept the acme process");
+        return 1;
+    }
+    runtime.block_on(run_loop(
+        &mut issuer,
+        &mut client,
+        cert_dir,
+        detent_web::auth::extract::unix_now,
+        tokio::time::sleep,
+    ));
+    0
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::future::Future;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use detent_acme::{AcmeError, Issued, RetryPolicy};
+    use detent_platform::privsep::acme::{
+        ACME_PROTO_VERSION, AcmeChannelError, AcmeMessage, KeyPem, WorkerMessage,
+    };
+    use detent_platform::privsep::transport::{Channel, ChannelError};
+    use detent_web::CertifiedKeyPair;
+
+    use super::{
+        AcmeIssuer, FIRST_RETRY, Installer, Issuer, MAX_RETRY, Outcome, RenewError, acme_main,
+        renew_once, run_loop,
+    };
+
+    type R = Result<(), Box<dyn std::error::Error>>;
+
+    /// A stand-in secret: low entropy on purpose (CI runs gitleaks).
+    const SECRET: &str = "not-a-real-token";
+
+    /// A certificate with chosen names and validity, made at run time.
+    struct Cert {
+        chain_pem: String,
+        key_pem: String,
+        not_before: i64,
+        not_after: i64,
+    }
+
+    impl Cert {
+        /// Valid for ten days from 2026-01-01.
+        fn new(names: &[&str]) -> Result<Self, Box<dyn std::error::Error>> {
+            Self::valid(names, (2026, 1, 1), (2026, 1, 11))
+        }
+
+        fn valid(
+            names: &[&str],
+            from: (i32, u8, u8),
+            to: (i32, u8, u8),
+        ) -> Result<Self, Box<dyn std::error::Error>> {
+            let key = rcgen::KeyPair::generate()?;
+            let mut params = rcgen::CertificateParams::new(
+                names
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect::<Vec<_>>(),
+            )?;
+            params.not_before = rcgen::date_time_ymd(from.0, from.1, from.2);
+            params.not_after = rcgen::date_time_ymd(to.0, to.1, to.2);
+            let chain_pem = params.self_signed(&key)?.pem();
+            let (not_before, not_after) = detent_acme::leaf_validity_pem(&chain_pem)?;
+            Ok(Self {
+                chain_pem,
+                key_pem: key.serialize_pem(),
+                not_before,
+                not_after,
+            })
+        }
+
+        /// The instant `percent` of the lifetime is used.
+        fn at(&self, percent: i64) -> i64 {
+            let lifetime = self.not_after.saturating_sub(self.not_before);
+            self.not_before
+                .saturating_add(lifetime.saturating_mul(percent).div_euclid(100))
+        }
+
+        fn pair(&self) -> Result<CertifiedKeyPair, detent_web::TlsError> {
+            CertifiedKeyPair::from_acme_pem(&self.chain_pem, &self.key_pem)
+        }
+
+        fn issued(&self) -> Issued {
+            Issued {
+                chain_pem: self.chain_pem.clone(),
+                key_pem: self.key_pem.clone(),
+            }
+        }
+    }
+
+    /// A CA that answers from a script.
+    #[derive(Default)]
+    struct FakeIssuer {
+        results: VecDeque<Result<Issued, AcmeError>>,
+        window: Option<(i64, i64)>,
+        calls: usize,
+    }
+
+    impl FakeIssuer {
+        fn answering(results: impl IntoIterator<Item = Result<Issued, AcmeError>>) -> Self {
+            Self {
+                results: results.into_iter().collect(),
+                ..Self::default()
+            }
+        }
+    }
+
+    impl Issuer for FakeIssuer {
+        fn issue(&mut self) -> impl Future<Output = Result<Issued, AcmeError>> {
+            self.calls = self.calls.saturating_add(1);
+            std::future::ready(
+                self.results
+                    .pop_front()
+                    .unwrap_or_else(|| Err(AcmeError::Config("script ended".to_owned()))),
+            )
+        }
+
+        fn renewal_window(&mut self, _leaf_der: &[u8]) -> impl Future<Output = Option<(i64, i64)>> {
+            std::future::ready(self.window)
+        }
+    }
+
+    /// A worker that answers from a script, `Ok` once the script ends.
+    #[derive(Default)]
+    struct FakeInstaller {
+        results: VecDeque<Result<(), AcmeChannelError>>,
+        installed: Vec<String>,
+    }
+
+    impl Installer for FakeInstaller {
+        fn install(&mut self, chain_pem: String, _key: KeyPem) -> Result<(), AcmeChannelError> {
+            self.installed.push(chain_pem);
+            self.results.pop_front().unwrap_or(Ok(()))
+        }
+    }
+
+    fn closed() -> AcmeChannelError {
+        AcmeChannelError::Channel(ChannelError::Closed)
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> std::io::Result<F::Output> {
+        Ok(tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(future))
+    }
+
+    /// A log sink the tests can read back.
+    #[derive(Clone, Default)]
+    struct Logs(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Logs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .map_err(|_| std::io::Error::other("log sink poisoned"))?
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Runs `body` with a subscriber that records every event, and returns
+    /// what it recorded.
+    fn capture<T>(body: impl FnOnce() -> T) -> (T, String) {
+        let logs = Logs::default();
+        let sink = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || sink.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        let out = tracing::subscriber::with_default(subscriber, body);
+        let text = logs
+            .0
+            .lock()
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+        (out, text)
+    }
+
+    #[test]
+    fn the_bootstrap_certificate_is_replaced_at_once() -> R {
+        let cert = Cert::new(&["a.example"])?;
+        let mut issuer = FakeIssuer::answering([Ok(cert.issued())]);
+        let mut installer = FakeInstaller::default();
+        let outcome = block_on(renew_once(0, None, &mut issuer, &mut installer))?;
+        assert_eq!(
+            outcome.ok(),
+            Some(Outcome::Renewed {
+                not_after: cert.not_after
+            })
+        );
+        assert_eq!(installer.installed, vec![cert.chain_pem]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_fresh_certificate_is_not_due() -> R {
+        let cert = Cert::new(&["a.example"])?;
+        let pair = cert.pair()?;
+        let mut issuer = FakeIssuer::default();
+        let mut installer = FakeInstaller::default();
+        let outcome = block_on(renew_once(
+            cert.at(1),
+            Some(&pair),
+            &mut issuer,
+            &mut installer,
+        ))?;
+        assert_eq!(outcome.ok(), Some(Outcome::NotDue { used_percent: 1 }));
+        assert_eq!(issuer.calls, 0);
+        assert!(installer.installed.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_certificate_past_two_thirds_is_renewed() -> R {
+        let cert = Cert::new(&["a.example"])?;
+        let pair = cert.pair()?;
+        let next = Cert::valid(&["a.example"], (2026, 1, 8), (2026, 1, 18))?;
+        let mut issuer = FakeIssuer::answering([Ok(next.issued())]);
+        let mut installer = FakeInstaller::default();
+        let outcome = block_on(renew_once(
+            cert.at(70),
+            Some(&pair),
+            &mut issuer,
+            &mut installer,
+        ))?;
+        assert_eq!(
+            outcome.ok(),
+            Some(Outcome::Renewed {
+                not_after: next.not_after
+            })
+        );
+        assert_eq!(installer.installed, vec![next.chain_pem]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_started_ari_window_renews_early() -> R {
+        let cert = Cert::new(&["a.example"])?;
+        let pair = cert.pair()?;
+        let mut issuer = FakeIssuer {
+            window: Some((cert.at(5), cert.at(20))),
+            ..FakeIssuer::answering([Ok(cert.issued())])
+        };
+        let mut installer = FakeInstaller::default();
+        let outcome = block_on(renew_once(
+            cert.at(10),
+            Some(&pair),
+            &mut issuer,
+            &mut installer,
+        ))?;
+        assert!(
+            matches!(outcome, Ok(Outcome::Renewed { .. })),
+            "{outcome:?}"
+        );
+        assert_eq!(installer.installed.len(), 1);
+
+        // A window that has not started yet waits.
+        let mut issuer = FakeIssuer {
+            window: Some((cert.at(20), cert.at(30))),
+            ..FakeIssuer::default()
+        };
+        let outcome = block_on(renew_once(
+            cert.at(10),
+            Some(&pair),
+            &mut issuer,
+            &mut installer,
+        ))?;
+        assert_eq!(outcome.ok(), Some(Outcome::NotDue { used_percent: 10 }));
+        Ok(())
+    }
+
+    #[test]
+    fn a_served_pair_without_a_readable_validity_is_renewed() -> R {
+        let cert = Cert::new(&["a.example"])?;
+        let broken = CertifiedKeyPair::new(b"not a certificate".to_vec(), Vec::new());
+        let mut issuer = FakeIssuer::answering([Ok(cert.issued())]);
+        let mut installer = FakeInstaller::default();
+        let outcome = block_on(renew_once(0, Some(&broken), &mut issuer, &mut installer))?;
+        assert!(
+            matches!(outcome, Ok(Outcome::Renewed { .. })),
+            "{outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_issue_error_installs_nothing() -> R {
+        let mut issuer = FakeIssuer::answering([Err(AcmeError::NoDns01Challenge)]);
+        let mut installer = FakeInstaller::default();
+        let outcome = block_on(renew_once(0, None, &mut issuer, &mut installer))?;
+        assert!(
+            matches!(outcome, Err(RenewError::Issue(AcmeError::NoDns01Challenge))),
+            "{outcome:?}"
+        );
+        assert!(installer.installed.is_empty());
+
+        // A chain that does not parse is not sent to the worker.
+        let mut issuer = FakeIssuer::answering([Ok(Issued {
+            chain_pem: "no certificate here".to_owned(),
+            key_pem: String::new(),
+        })]);
+        let outcome = block_on(renew_once(0, None, &mut issuer, &mut installer))?;
+        assert!(matches!(outcome, Err(RenewError::Chain)), "{outcome:?}");
+        assert!(installer.installed.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_refusal_by_the_worker_is_an_error() -> R {
+        let cert = Cert::new(&["a.example"])?;
+        let mut issuer = FakeIssuer::answering([Ok(cert.issued())]);
+        let mut installer = FakeInstaller {
+            results: VecDeque::from([Err(AcmeChannelError::Refused(
+                "the certificate does not cover b.example".to_owned(),
+            ))]),
+            ..FakeInstaller::default()
+        };
+        let outcome = block_on(renew_once(0, None, &mut issuer, &mut installer))?;
+        assert!(
+            matches!(
+                outcome,
+                Err(RenewError::Install(AcmeChannelError::Refused(_)))
+            ),
+            "{outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn expiry_warnings_go_to_the_log_at_half_and_a_quarter() -> R {
+        let cert = Cert::new(&["a.example"])?;
+        let pair = cert.pair()?;
+        let mut logs = Vec::new();
+        for percent in [55, 80, 10] {
+            let mut issuer = FakeIssuer::answering([Ok(cert.issued())]);
+            let mut installer = FakeInstaller::default();
+            let (outcome, text) = capture(|| {
+                block_on(renew_once(
+                    cert.at(percent),
+                    Some(&pair),
+                    &mut issuer,
+                    &mut installer,
+                ))
+            });
+            assert!(outcome?.is_ok());
+            logs.push(text);
+        }
+        let not_after = format!("not_after={}", cert.not_after);
+        let [half, quarter, none] = logs.as_slice() else {
+            return Err("three runs".into());
+        };
+        assert!(half.contains("WARN"), "{half}");
+        assert!(half.contains("half"), "{half}");
+        assert!(half.contains("used_percent=55"), "{half}");
+        assert!(half.contains(&not_after), "{half}");
+        assert!(quarter.contains("quarter"), "{quarter}");
+        assert!(quarter.contains("used_percent=80"), "{quarter}");
+        assert!(!quarter.contains("BEGIN"), "{quarter}");
+        assert!(!none.contains("WARN"), "{none}");
+        Ok(())
+    }
+
+    #[test]
+    fn failures_back_off_from_one_minute_to_an_hour_and_a_success_resets() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let cert = Cert::new(&["a.example"])?;
+        let failure = || Err(AcmeError::NoDns01Challenge);
+        let mut script: Vec<Result<Issued, AcmeError>> = (0..8).map(|_| failure()).collect();
+        script.extend([Ok(cert.issued()), failure(), Ok(cert.issued())]);
+        let mut issuer = FakeIssuer::answering(script);
+        let mut installer = FakeInstaller {
+            results: VecDeque::from([Ok(()), Err(closed())]),
+            ..FakeInstaller::default()
+        };
+        let mut delays = Vec::new();
+        block_on(run_loop(
+            &mut issuer,
+            &mut installer,
+            dir.path(),
+            || 0,
+            |delay| {
+                delays.push(delay);
+                std::future::ready(())
+            },
+        ))?;
+        let minutes: Vec<u64> = delays.iter().map(|d| d.as_secs() / 60).collect();
+        assert_eq!(minutes, vec![1, 2, 4, 8, 16, 32, 60, 60, 60, 1]);
+        assert_eq!(delays.first(), Some(&FIRST_RETRY));
+        assert_eq!(delays.get(6), Some(&MAX_RETRY));
+        // The loop stopped at the closed channel: nothing is left to issue.
+        assert_eq!(issuer.calls, 11);
+        assert!(issuer.results.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_served_certificate_that_cannot_be_read_is_a_failure() -> R {
+        let dir = tempfile::TempDir::new()?;
+        // A directory in the pair file's place: reading it fails.
+        std::fs::create_dir(dir.path().join(detent_web::ACME_PAIR_FILE))?;
+        let cert = Cert::new(&["a.example"])?;
+        let mut issuer = FakeIssuer::answering([Ok(cert.issued())]);
+        let mut installer = FakeInstaller {
+            results: VecDeque::from([Err(closed())]),
+            ..FakeInstaller::default()
+        };
+        let mut delays = Vec::new();
+        let (done, logs) = capture(|| {
+            block_on(run_loop(
+                &mut issuer,
+                &mut installer,
+                dir.path(),
+                || 0,
+                |delay| {
+                    // Replace the unreadable file after the first failure.
+                    if delays.is_empty() {
+                        let _ = std::fs::remove_dir(dir.path().join(detent_web::ACME_PAIR_FILE));
+                    }
+                    delays.push(delay);
+                    std::future::ready(())
+                },
+            ))
+        });
+        done?;
+        assert_eq!(delays, vec![FIRST_RETRY]);
+        assert!(logs.contains("acme.pair"), "{logs}");
+        assert_eq!(issuer.calls, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn the_loop_logs_neither_a_provider_secret_nor_a_key() -> R {
+        let cert = Cert::new(&["a.example"])?;
+        let dir = tempfile::TempDir::new()?;
+        let mut issuer = FakeIssuer::answering([
+            Err(AcmeError::Config(format!("the provider said {SECRET}"))),
+            Err(AcmeError::NotPropagated(SECRET.to_owned())),
+            Err(AcmeError::Credentials(SECRET.to_owned())),
+            Err(AcmeError::InvalidValue(SECRET.to_owned())),
+            Ok(Issued {
+                chain_pem: format!("no certificate {SECRET}"),
+                key_pem: cert.key_pem.clone(),
+            }),
+            Ok(cert.issued()),
+        ]);
+        let mut installer = FakeInstaller {
+            results: VecDeque::from([Err(closed())]),
+            ..FakeInstaller::default()
+        };
+        let (done, logs) = capture(|| {
+            block_on(run_loop(
+                &mut issuer,
+                &mut installer,
+                dir.path(),
+                || 0,
+                |_| std::future::ready(()),
+            ))
+        });
+        done?;
+        assert_eq!(issuer.calls, 6);
+        assert!(logs.contains("renewal failed"), "{logs}");
+        assert!(logs.contains("does not parse"), "{logs}");
+        assert!(!logs.contains(SECRET), "{logs}");
+        assert!(!logs.contains("BEGIN"), "{logs}");
+        assert!(!logs.contains(cert.key_pem.trim()), "{logs}");
+        Ok(())
+    }
+
+    fn acme_config(credentials_path: &std::path::Path) -> detent_web::AcmeConfig {
+        detent_web::AcmeConfig {
+            directory_url: Some("https://127.0.0.1:9/dir".to_owned()),
+            domains: vec!["a.example".to_owned()],
+            credentials_path: Some(credentials_path.to_path_buf()),
+            ..detent_web::AcmeConfig::default()
+        }
+    }
+
+    fn provider() -> Result<Box<dyn detent_acme::DnsProvider>, AcmeError> {
+        Ok(Box::new(detent_acme::CloudflareProvider::new(
+            SECRET,
+            "0123456789abcdef0123456789abcdef",
+        )?))
+    }
+
+    #[test]
+    fn the_real_issuer_needs_a_directory_credentials_and_domains() -> R {
+        let path = std::path::Path::new("/nonexistent/account.json");
+        for (config, missing) in [
+            (
+                detent_web::AcmeConfig {
+                    directory_url: None,
+                    ..acme_config(path)
+                },
+                "directory_url",
+            ),
+            (
+                detent_web::AcmeConfig {
+                    credentials_path: None,
+                    ..acme_config(path)
+                },
+                "credentials_path",
+            ),
+            (
+                detent_web::AcmeConfig {
+                    domains: Vec::new(),
+                    ..acme_config(path)
+                },
+                "domains",
+            ),
+        ] {
+            let issuer = AcmeIssuer::new(&config, provider()?, RetryPolicy::new());
+            assert_eq!(issuer.err(), Some(missing));
+        }
+        assert!(AcmeIssuer::new(&acme_config(path), provider()?, RetryPolicy::new()).is_ok());
+        Ok(())
+    }
+
+    /// The real issuer, with a real provider that holds the secret, fails
+    /// before any network: its credentials path is a directory. The loop
+    /// logs the failure and never the secret.
+    #[test]
+    fn the_real_issuer_fails_offline_and_the_log_keeps_the_secret() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let mut issuer =
+            AcmeIssuer::new(&acme_config(dir.path()), provider()?, RetryPolicy::new())?;
+        assert_eq!(block_on(issuer.renewal_window(b"no account yet"))?, None);
+        let mut installer = FakeInstaller::default();
+        let mut rounds = 0_u32;
+        let (ended, logs) = capture(|| {
+            block_on(async {
+                tokio::time::timeout(
+                    Duration::from_secs(1),
+                    run_loop(
+                        &mut issuer,
+                        &mut installer,
+                        dir.path(),
+                        || 0,
+                        |_| {
+                            rounds = rounds.saturating_add(1);
+                            // Stop after the first round: wait forever.
+                            std::future::pending::<()>()
+                        },
+                    ),
+                )
+                .await
+            })
+        });
+        assert!(ended?.is_err(), "the loop ended on its own");
+        assert_eq!(rounds, 1);
+        assert!(installer.installed.is_empty());
+        assert!(logs.contains("a local file operation failed"), "{logs}");
+        assert!(!logs.contains(SECRET), "{logs}");
+        Ok(())
+    }
+
+    /// Runs `acme_main` against a worker thread that answers `Hello` with
+    /// `version` and then closes the channel at the first `Install`.
+    fn main_against(version: u16, issuer: FakeIssuer) -> Result<i32, Box<dyn std::error::Error>> {
+        let dir = tempfile::TempDir::new()?;
+        let (acme_end, mut worker_end) = Channel::pair()?;
+        let worker = std::thread::spawn(move || -> Result<bool, ChannelError> {
+            let hello = worker_end.recv::<AcmeMessage>()?;
+            worker_end.send(&WorkerMessage::Hello { version })?;
+            let install = worker_end.recv::<AcmeMessage>();
+            Ok(matches!(hello, AcmeMessage::Hello { .. })
+                && matches!(install, Ok(AcmeMessage::Install { .. })))
+        });
+        let status = acme_main(acme_end, issuer, dir.path());
+        let saw = worker.join().map_err(|_| "worker thread panicked")?;
+        if version == ACME_PROTO_VERSION {
+            assert_eq!(saw.ok(), Some(true));
+        }
+        Ok(status)
+    }
+
+    #[test]
+    fn acme_main_greets_installs_and_ends_when_the_worker_closes() -> R {
+        let cert = Cert::new(&["a.example"])?;
+        let status = main_against(
+            ACME_PROTO_VERSION,
+            FakeIssuer::answering([Ok(cert.issued())]),
+        )?;
+        assert_eq!(status, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn acme_main_fails_when_the_worker_refuses_the_hello() -> R {
+        let (status, logs) =
+            capture(|| main_against(ACME_PROTO_VERSION.wrapping_add(1), FakeIssuer::default()));
+        assert_eq!(status?, 1);
+        assert!(logs.contains("ERROR"), "{logs}");
+        Ok(())
+    }
+}
