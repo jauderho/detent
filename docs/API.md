@@ -43,7 +43,10 @@ update status. A `read` caller sees blank `rendered`/`unified_diff`/`diff` in `p
 rolling back a commit, restoring a backup, and acting on a service. A request
 that reaches a `write` endpoint without the scope is refused with `403` and
 `message_id: "web-denied-scope"` before anything is read or written.
-Every scope denial is also recorded as an auth audit event. The operations
+Every scope denial is also recorded as an auth audit event with result
+`denied`. The engine checks the caller's scopes again on every operation it
+runs for the web API or MCP; a refusal there, and every MCP refusal, is a
+`denied` record in the operations audit log. The operations
 audit log is fsynced and hash-chained; `FileAudit::verify` checks sequence and
 link hashes, and its terminal sequence/hash must be retained as an external
 anchor to detect truncation of the log's tail. A `plan` that ran a module's

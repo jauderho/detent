@@ -1,12 +1,12 @@
 //! The authorization hook.
 //!
-//! [`OpsEngine`](crate::OpsEngine) asks an [`Authz`] before it does anything,
-//! and records every refusal in the audit log. v1 has no RBAC (PLAN §1.2), so
-//! the only implementation here is [`AllowAll`], which is the correct policy
-//! for the CLI: its authority is already the uid of the process running it, and
-//! a second check inside the same process would be theatre. Phase 4 adds the
-//! scoped-token policy the web layer needs; it plugs in here without touching
-//! the engine.
+//! [`OpsEngine::execute`](crate::OpsEngine::execute) takes the caller's
+//! [`Authz`] with each operation, asks it before it does anything, and
+//! records every refusal in the audit log. v1 has no RBAC (PLAN §1.2), so the
+//! only implementation here is [`AllowAll`], which is the correct policy for
+//! the CLI: its authority is already the uid of the process running it, and a
+//! second check inside the same process would be theatre. The web API and MCP
+//! pass the caller's scoped-token policy (`detent_web::authz::ScopedAuthz`).
 
 use detent_core::diag::MessageId;
 

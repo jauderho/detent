@@ -99,7 +99,10 @@ pub(super) async fn list(
     }
     let op = Operation::ListBackups { id };
     authorize(&state, &caller, &op)?;
-    let outcome = state.engine.execute(op, caller.identity().clone()).await?;
+    let outcome = state
+        .engine
+        .execute(op, caller.identity().clone(), caller.authz())
+        .await?;
     render_backups(outcome)
 }
 
@@ -150,7 +153,11 @@ pub(super) async fn restore(
     authorize(&state, caller.caller(), &op)?;
     let outcome = state
         .engine
-        .execute(op, caller.caller().identity().clone())
+        .execute(
+            op,
+            caller.caller().identity().clone(),
+            caller.caller().authz(),
+        )
         .await?;
     render_restored(&outcome)
 }

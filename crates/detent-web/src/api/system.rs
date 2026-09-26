@@ -244,7 +244,11 @@ pub(super) async fn apply_update(
     authorize(&state, caller.caller(), &op)?;
     let outcome = state
         .engine
-        .execute(op, caller.caller().identity().clone())
+        .execute(
+            op,
+            caller.caller().identity().clone(),
+            caller.caller().authz(),
+        )
         .await?;
     render_applied(outcome)
 }
@@ -384,7 +388,10 @@ pub(super) async fn profile(
 ) -> Result<Json<Box<HostReport>>, ApiError> {
     let op = Operation::HostProfile;
     authorize(&state, &caller, &op)?;
-    let outcome = state.engine.execute(op, caller.identity().clone()).await?;
+    let outcome = state
+        .engine
+        .execute(op, caller.identity().clone(), caller.authz())
+        .await?;
     render_host(outcome)
 }
 
@@ -416,7 +423,10 @@ pub(super) async fn audit(
     }
     let op = Operation::AuditQuery(params.into());
     authorize(&state, &caller, &op)?;
-    let outcome = state.engine.execute(op, caller.identity().clone()).await?;
+    let outcome = state
+        .engine
+        .execute(op, caller.identity().clone(), caller.authz())
+        .await?;
     render_audit(outcome)
 }
 

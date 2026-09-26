@@ -227,7 +227,7 @@ pub fn authorize(state: &AppState, caller: &Caller, op: &Operation) -> Result<()
                 &AuthRecord::new(
                     AuthEvent::ScopeDenied,
                     &caller.identity().subject,
-                    AuditResult::Error,
+                    AuditResult::Denied,
                 )
                 .with_detail(denied.id),
             );
@@ -448,7 +448,7 @@ mod tests {
         assert_eq!(record.event, AuthEvent::ScopeDenied);
         assert_eq!(record.subject, caller.identity().subject);
         assert!(record.subject.contains(&view.id), "{record:?}");
-        assert_eq!(record.result, AuditResult::Error);
+        assert_eq!(record.result, AuditResult::Denied);
         assert_eq!(record.detail.as_deref(), Some("web-denied-scope"));
         Ok(())
     }

@@ -31,7 +31,7 @@ use axum::http::{Method, Request, StatusCode, header};
 use detent_core::descriptor::{HostProfile, InitSystem, ModuleDescriptor, Os, Upstream};
 use detent_core::diag::{Diagnostics, MessageId};
 use detent_ops::report::{ApplyReport, ModuleView, PlanReport};
-use detent_ops::{AllowAll, NullAudit, OpOutcome, OpsEngine};
+use detent_ops::{NullAudit, OpOutcome, OpsEngine};
 use detent_platform::fs::atomic::Sha256Digest;
 use detent_platform::host::{Detected, HostFacts};
 use detent_platform::privsep::allowlist::{Allowlist, Config as AllowlistConfig};
@@ -88,7 +88,6 @@ impl Live {
             client,
             host,
             Box::new(NullAudit),
-            Box::new(AllowAll),
             service::for_host(InitSystem::Systemd),
         );
         let (handle, engine) = spawn_engine(ops_engine);

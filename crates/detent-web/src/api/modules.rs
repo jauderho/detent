@@ -173,7 +173,10 @@ pub(super) async fn list(
 ) -> Result<Json<Vec<&'static ModuleDescriptor>>, ApiError> {
     let op = Operation::ListModules;
     authorize(&state, &caller, &op)?;
-    let outcome = state.engine.execute(op, caller.identity().clone()).await?;
+    let outcome = state
+        .engine
+        .execute(op, caller.identity().clone(), caller.authz())
+        .await?;
     render_modules(outcome)
 }
 
@@ -208,7 +211,10 @@ pub(super) async fn get_one(
     }
     let op = Operation::GetModule { id: id.clone() };
     authorize(&state, &caller, &op)?;
-    let outcome = state.engine.execute(op, caller.identity().clone()).await?;
+    let outcome = state
+        .engine
+        .execute(op, caller.identity().clone(), caller.authz())
+        .await?;
     let mut view = render_module(outcome)?.0;
     if !caller.scopes().allows(Scope::Write) {
         redact_view(&mut view);
@@ -357,7 +363,10 @@ pub(super) async fn validate(
         model: request.model,
     };
     authorize(&state, &caller, &op)?;
-    let outcome = state.engine.execute(op, caller.identity().clone()).await?;
+    let outcome = state
+        .engine
+        .execute(op, caller.identity().clone(), caller.authz())
+        .await?;
     render_validated(outcome)
 }
 
@@ -399,7 +408,10 @@ pub(super) async fn plan(
         model: request.model,
     };
     authorize(&state, &caller, &op)?;
-    let outcome = state.engine.execute(op, caller.identity().clone()).await?;
+    let outcome = state
+        .engine
+        .execute(op, caller.identity().clone(), caller.authz())
+        .await?;
     let Json(mut report) = render_planned(outcome)?;
     if !caller.scopes().allows(Scope::Write) {
         blank_plan(&mut report);
@@ -457,7 +469,11 @@ pub(super) async fn apply(
     authorize(&state, caller.caller(), &op)?;
     let outcome = state
         .engine
-        .execute(op, caller.caller().identity().clone())
+        .execute(
+            op,
+            caller.caller().identity().clone(),
+            caller.caller().authz(),
+        )
         .await?;
     render_applied(outcome)
 }

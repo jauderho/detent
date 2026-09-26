@@ -434,6 +434,8 @@ struct Harness {
     target: PathBuf,
     /// The monitor's check runner, when `Setup::hooks` wired it up.
     checks: &'static FakeChecks,
+    /// The policy every operation runs under.
+    authz: Box<dyn Authz>,
     _dir: TempDir,
 }
 
@@ -444,7 +446,7 @@ fn who() -> Identity {
 
 impl Harness {
     fn run(&mut self, op: Operation) -> Result<OpOutcome, OpsError> {
-        self.engine.execute(op, &who())
+        self.engine.execute(op, &who(), self.authz.as_ref())
     }
 
     fn contents(&self) -> Result<String, Box<dyn std::error::Error>> {
@@ -552,7 +554,6 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
         client,
         host(),
         Box::new(SharedAudit(Arc::clone(&audit))),
-        authz,
         services,
     );
 
@@ -562,6 +563,7 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
         handle: Some(handle),
         target,
         checks,
+        authz,
         _dir: dir,
     })
 }
@@ -2363,7 +2365,6 @@ fn the_audit_log_never_contains_the_configuration_body() -> TestResult {
         client,
         host(),
         Box::new(audit_file.clone()),
-        Box::new(AllowAll),
         fake_services(),
     );
     let who = Identity::new("operator", IdentityKind::Session);
@@ -2376,9 +2377,10 @@ fn the_audit_log_never_contains_the_configuration_body() -> TestResult {
             confirm: None,
         },
         &who,
+        &AllowAll,
     )?;
     // Also drive a failing apply, so the failure path is checked too.
-    let _ = engine.execute(apply("BAD\n", None), &who);
+    let _ = engine.execute(apply("BAD\n", None), &who, &AllowAll);
 
     let contents = std::fs::read_to_string(audit_file.path())?;
     assert_eq!(contents.lines().count(), 4);
@@ -2427,10 +2429,9 @@ fn an_unwritable_audit_sink_refuses_the_mutation() -> TestResult {
         client,
         host(),
         Box::new(FileAudit::new(blocker.join("audit.jsonl"))),
-        Box::new(AllowAll),
         fake_services(),
     );
-    let Err(err) = engine.execute(apply("v2\n", None), &Identity::local("root")) else {
+    let Err(err) = engine.execute(apply("v2\n", None), &Identity::local("root"), &AllowAll) else {
         return Err("audit-unavailable must refuse the mutation".into());
     };
     assert!(

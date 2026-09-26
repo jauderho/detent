@@ -458,7 +458,7 @@ impl McpServer {
         };
         if self.authz.permit(&who, op).is_err() {
             return Err(ErrorData::new(
-                ErrorCode(-32004),
+                POLICY_REFUSED,
                 "operation refused by policy",
                 None,
             ));
@@ -521,7 +521,14 @@ impl ServerHandler for McpServer {
 // provides `serve`, `call_tool`, etc. for any `ServerHandler`, so no manual
 // `Service` impl is needed here.
 
+/// JSON-RPC code of a refusal by policy, from [`McpServer::check_auth`] or
+/// from the engine's own check.
+const POLICY_REFUSED: ErrorCode = ErrorCode(-32004);
+
 fn op_err(e: &OpsError) -> ErrorData {
+    if matches!(e, OpsError::Denied(_)) {
+        return ErrorData::new(POLICY_REFUSED, "operation refused by policy", None);
+    }
     ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None)
 }
 
@@ -998,6 +1005,20 @@ pub use rmcp::transport::Transport;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A refusal by the engine's policy reaches the client with the same
+    /// code as a refusal by the tool-level policy (STAGE3 M4).
+    #[test]
+    fn an_engine_denial_is_a_policy_refusal_on_the_wire() {
+        let denied = OpsError::Denied(detent_ops::Denied::new(detent_core::diag::MessageId::new(
+            "web-denied-scope",
+        )));
+        let error = op_err(&denied);
+        assert_eq!(error.code, ErrorCode(-32004));
+        assert_eq!(error.message, "operation refused by policy");
+        let other = op_err(&OpsError::Unsupported { what: "x" });
+        assert_eq!(other.code, ErrorCode::INTERNAL_ERROR);
+    }
 
     fn server() -> (McpServer, Arc<RecordingExecutor>) {
         let executor = Arc::new(RecordingExecutor::new());

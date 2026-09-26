@@ -38,6 +38,8 @@ use detent_ops::report::PendingCommit;
 use detent_ops::{Identity, OpOutcome, Operation, OpsEngine, OpsError};
 use tokio::sync::oneshot;
 
+use crate::authz::ScopedAuthz;
+
 /// One unit of work for the engine thread.
 #[derive(Debug)]
 enum Job {
@@ -47,6 +49,8 @@ enum Job {
         op: Operation,
         /// On whose behalf.
         who: Identity,
+        /// The caller's policy, which the engine checks and audits.
+        authz: ScopedAuthz,
         /// Where the answer goes. Dropped when the caller gave up.
         reply: oneshot::Sender<Result<OpOutcome, OpsError>>,
     },
@@ -141,16 +145,27 @@ impl EngineHandle {
         Self::from_sender(jobs)
     }
 
-    /// Run `op` on behalf of `who`, waiting for the engine thread.
+    /// Run `op` on behalf of `who` under `authz`, waiting for the engine
+    /// thread. The engine refuses and audits what `authz` does not permit.
     ///
     /// # Errors
     ///
     /// [`EngineError::Ops`] when the engine ran the operation and it failed,
     /// [`EngineError::Stopped`] when the engine thread is gone.
-    pub async fn execute(&self, op: Operation, who: Identity) -> Result<OpOutcome, EngineError> {
+    pub async fn execute(
+        &self,
+        op: Operation,
+        who: Identity,
+        authz: ScopedAuthz,
+    ) -> Result<OpOutcome, EngineError> {
         let (reply, answer) = oneshot::channel();
         self.jobs
-            .send(Job::Execute { op, who, reply })
+            .send(Job::Execute {
+                op,
+                who,
+                authz,
+                reply,
+            })
             .map_err(|_closed| EngineError::Stopped)?;
         answer
             .await
@@ -228,8 +243,13 @@ pub fn spawn(engine: OpsEngine) -> (EngineHandle, EngineThread) {
         let mut engine = engine;
         while let Ok(job) = inbox.recv() {
             match job {
-                Job::Execute { op, who, reply } => {
-                    let outcome = engine.execute(op, &who);
+                Job::Execute {
+                    op,
+                    who,
+                    authz,
+                    reply,
+                } => {
+                    let outcome = engine.execute(op, &who, &authz);
                     // The caller may have gone away mid-operation. The work is done
                     // and audited either way, so an unsendable answer is dropped.
                     let _ = reply.send(outcome);
@@ -258,7 +278,14 @@ mod tests {
     use std::thread;
 
     use detent_core::descriptor::{HostProfile, InitSystem, Os};
-    use detent_ops::{AllowAll, Identity, NullAudit, OpOutcome, Operation, OpsEngine, OpsError};
+    use std::sync::Arc;
+
+    use detent_ops::audit::{AuditError, AuditQuery, AuditRecord, AuditResult, AuditSink};
+    use detent_ops::{
+        CaptureAudit, Identity, NullAudit, OpOutcome, Operation, OpsEngine, OpsError,
+    };
+
+    use crate::authz::{DENIED_SCOPE_ID, ScopedAuthz, Scopes};
     use detent_platform::host::{Detected, HostFacts};
     use detent_platform::privsep::allowlist::{Allowlist, Config};
     use detent_platform::privsep::monitor::{Hooks, Monitor};
@@ -284,6 +311,11 @@ mod tests {
         /// bridge (`ListModules`, `HostProfile`, and an unknown module) without
         /// depending on any module's behaviour, and without writing a file.
         fn new() -> Result<Self, Box<dyn std::error::Error>> {
+            Self::with_audit(Box::new(NullAudit))
+        }
+
+        /// The same engine, auditing into `audit`.
+        fn with_audit(audit: Box<dyn AuditSink>) -> Result<Self, Box<dyn std::error::Error>> {
             let dir = TempDir::new()?;
             let config = Config::with_state_root(dir.path().join("state"));
             let allow = Allowlist::from_modules(&[], &config)?;
@@ -308,8 +340,7 @@ mod tests {
                 Vec::new(),
                 client,
                 host,
-                Box::new(NullAudit),
-                Box::new(AllowAll),
+                audit,
                 service::for_host(InitSystem::Systemd),
             );
             Ok(Self {
@@ -340,16 +371,74 @@ mod tests {
         Identity::local("tester")
     }
 
+    /// The policy of a caller that holds every scope.
+    const fn all() -> ScopedAuthz {
+        ScopedAuthz::new(Scopes::read_write())
+    }
+
+    /// Shares one [`CaptureAudit`] between the engine thread and the test.
+    struct Shared(Arc<CaptureAudit>);
+
+    impl AuditSink for Shared {
+        fn record(&self, record: &AuditRecord) -> Result<(), AuditError> {
+            self.0.record(record)
+        }
+
+        fn query(&self, query: &AuditQuery) -> Result<Vec<AuditRecord>, AuditError> {
+            self.0.query(query)
+        }
+    }
+
+    /// The engine checks the caller's own policy: a read-scoped caller is
+    /// refused a write operation, and the refusal is in the operations audit
+    /// log as `denied`.
+    #[tokio::test]
+    async fn a_scope_denial_is_audited() -> R {
+        let audit = Arc::new(CaptureAudit::new());
+        let mut fixture = Fixture::with_audit(Box::new(Shared(Arc::clone(&audit))))?;
+        let (handle, thread) = fixture.spawn()?;
+
+        let read = ScopedAuthz::new(Scopes::read_only());
+        assert!(
+            handle
+                .execute(Operation::ListModules, who(), read)
+                .await
+                .is_ok()
+        );
+        let err = handle
+            .execute(Operation::CertRenew, who(), read)
+            .await
+            .err()
+            .ok_or("a read caller was allowed to renew the certificate")?;
+        assert!(
+            matches!(err, EngineError::Ops(OpsError::Denied(_))),
+            "{err:?}"
+        );
+        assert_eq!(err.message_id().as_str(), DENIED_SCOPE_ID);
+
+        let records = audit.records();
+        let [record] = records.as_slice() else {
+            return Err(format!("expected one audit record, got {records:?}").into());
+        };
+        assert_eq!(record.result, AuditResult::Denied);
+        assert_eq!(record.who, "tester");
+        assert_eq!(record.error_id.as_deref(), Some(DENIED_SCOPE_ID));
+
+        drop(handle);
+        thread.join()?;
+        fixture.finish()
+    }
+
     #[tokio::test]
     async fn an_operation_crosses_the_thread_and_comes_back() -> R {
         let mut fixture = Fixture::new()?;
         let (handle, thread) = fixture.spawn()?;
 
-        match handle.execute(Operation::ListModules, who()).await? {
+        match handle.execute(Operation::ListModules, who(), all()).await? {
             OpOutcome::Modules(modules) => assert!(modules.is_empty()),
             other => return Err(format!("unexpected outcome {other:?}").into()),
         }
-        match handle.execute(Operation::HostProfile, who()).await? {
+        match handle.execute(Operation::HostProfile, who(), all()).await? {
             OpOutcome::Host(report) => assert_eq!(report.profile.hostname, "detent-test"),
             other => return Err(format!("unexpected outcome {other:?}").into()),
         }
@@ -371,6 +460,7 @@ mod tests {
                     id: "no-such-module".to_owned(),
                 },
                 who(),
+                all(),
             )
             .await
             .err()
@@ -397,7 +487,7 @@ mod tests {
         for _ in 0_u8..8 {
             let handle = handle.clone();
             tasks.push(tokio::spawn(async move {
-                handle.execute(Operation::ListModules, who()).await
+                handle.execute(Operation::ListModules, who(), all()).await
             }));
         }
         for task in tasks {
@@ -414,7 +504,12 @@ mod tests {
     async fn join_stops_the_loop_and_returns_the_engines_shutdown_result() -> R {
         let mut fixture = Fixture::new()?;
         let (handle, thread) = fixture.spawn()?;
-        assert!(handle.execute(Operation::ListModules, who()).await.is_ok());
+        assert!(
+            handle
+                .execute(Operation::ListModules, who(), all())
+                .await
+                .is_ok()
+        );
         drop(handle);
         thread.join()?;
         fixture.finish()
@@ -435,7 +530,7 @@ mod tests {
         drop(inbox);
         let dead = EngineHandle::from_sender(jobs);
         let err = dead
-            .execute(Operation::ListModules, who())
+            .execute(Operation::ListModules, who(), all())
             .await
             .err()
             .ok_or("expected a stopped engine")?;

@@ -41,7 +41,6 @@ use detent_mcp::{
     McpServer, ServiceExt as _, StreamableHttpServerConfig, StreamableHttpService, TokenVerifier,
     stdio,
 };
-use detent_ops::authz::Authz as _;
 use detent_ops::{Identity, IdentityKind, OpOutcome, Operation, OpsError};
 use detent_web::auth::TokenStore;
 use detent_web::auth::extract::unix_now;
@@ -107,8 +106,9 @@ pub fn run(
     }
 
     let store = Arc::new(StoreVerifier::new(settings.state_root.clone()));
-    let authz: Arc<dyn detent_mcp::Authz> = Arc::new(ScopeAuthz::new(scopes));
-    let executor: Arc<dyn EngineExecutor> = Arc::new(SessionExecutor::new(session, dryrun, who));
+    let authz: Arc<dyn detent_mcp::Authz> = Arc::new(EngineDecides);
+    let executor: Arc<dyn EngineExecutor> =
+        Arc::new(SessionExecutor::new(session, dryrun, who, scopes));
     let server = McpServer::new(
         executor.clone(),
         authz,
@@ -251,20 +251,17 @@ fn start_session(
     }
 }
 
-/// The scope one token holds, as the policy the tools check.
-struct ScopeAuthz(ScopedAuthz);
+/// The tool-level policy: permit, and leave the scope check to the engine.
+///
+/// [`SessionExecutor`] runs every operation under the token's
+/// [`ScopedAuthz`], so the engine refuses what the scopes do not permit and
+/// writes a `denied` audit record (STAGE3 M4). A check here as well would
+/// refuse first and leave no record.
+struct EngineDecides;
 
-impl ScopeAuthz {
-    const fn new(scopes: detent_web::authz::Scopes) -> Self {
-        Self(ScopedAuthz::new(scopes))
-    }
-}
-
-impl detent_mcp::Authz for ScopeAuthz {
-    fn permit(&self, who: &Identity, op: &Operation) -> Result<(), detent_mcp::AuthError> {
-        self.0
-            .permit(who, op)
-            .map_err(|_| detent_mcp::AuthError::Denied)
+impl detent_mcp::Authz for EngineDecides {
+    fn permit(&self, _who: &Identity, _op: &Operation) -> Result<(), detent_mcp::AuthError> {
+        Ok(())
     }
 }
 
@@ -274,14 +271,22 @@ struct SessionExecutor {
     session: std::sync::Mutex<Session>,
     dryrun: bool,
     who: Identity,
+    /// The token's scopes, which the engine checks for every operation.
+    authz: ScopedAuthz,
 }
 
 impl SessionExecutor {
-    fn new(session: Session, dryrun: bool, who: Identity) -> Self {
+    fn new(
+        session: Session,
+        dryrun: bool,
+        who: Identity,
+        scopes: detent_web::authz::Scopes,
+    ) -> Self {
         Self {
             session: std::sync::Mutex::new(session),
             dryrun,
             who,
+            authz: ScopedAuthz::new(scopes),
         }
     }
 }
@@ -298,9 +303,9 @@ impl EngineExecutor for SessionExecutor {
                 what: "dryrun_mutation",
             });
         }
-        // The engine audits under this identity; authz already ran in
-        // `McpServer::check_auth` against the same scopes.
-        match guard.execute_as(op, false, &self.who) {
+        // The engine checks the token's scopes and audits under this
+        // identity, a refusal included.
+        match guard.execute_as(op, false, &self.who, &self.authz) {
             Ok(crate::run::Executed::Ran(outcome)) => Ok(outcome),
             Ok(crate::run::Executed::WouldRun(_)) => Err(OpsError::Unsupported {
                 what: "dryrun_mutation",
@@ -497,9 +502,10 @@ fn http_config() -> StreamableHttpServerConfig {
 #[cfg(test)]
 mod tests {
     use super::{
-        BearerGate, EngineExecutor, Exit, Identity, IdentityKind, McpServer, OpOutcome, Operation,
-        OpsError, Scope, ScopeAuthz, SessionExecutor, StoreVerifier, TokenStore, TokenVerifier,
-        bearer_of, check_bind, http_config, http_transport_allowed, serve_http, unix_now,
+        BearerGate, EngineDecides, EngineExecutor, Exit, Identity, IdentityKind, McpServer,
+        OpOutcome, Operation, OpsError, Scope, SessionExecutor, StoreVerifier, TokenStore,
+        TokenVerifier, bearer_of, check_bind, http_config, http_transport_allowed, serve_http,
+        unix_now,
     };
     use std::sync::Arc;
 
@@ -519,8 +525,12 @@ mod tests {
     fn mcp_server(state_root: &std::path::Path, token: &str) -> McpServer {
         let verifier: Arc<dyn TokenVerifier> =
             Arc::new(StoreVerifier::new(state_root.to_path_buf()));
-        let authz = Arc::new(ScopeAuthz::new(detent_web::authz::Scopes::of(Scope::Write)));
-        McpServer::new(Arc::new(NoEngine), authz, verifier, Some(Arc::from(token)))
+        McpServer::new(
+            Arc::new(NoEngine),
+            Arc::new(EngineDecides),
+            verifier,
+            Some(Arc::from(token)),
+        )
     }
 
     /// STAGE3 H10: a tool call re-checks the token, so a token revoked
@@ -656,7 +666,12 @@ mod tests {
         let crate::tests_support::Harness {
             session, target, ..
         } = harness;
-        let executor = SessionExecutor::new(session, false, token_identity());
+        let executor = SessionExecutor::new(
+            session,
+            false,
+            token_identity(),
+            detent_web::authz::Scopes::of(Scope::Write),
+        );
 
         let applied = executor.execute(apply("v2\n"))?;
         assert!(matches!(applied, OpOutcome::Applied(_)), "{applied:?}");
@@ -697,7 +712,12 @@ mod tests {
         let crate::tests_support::Harness {
             session, target, ..
         } = harness;
-        let executor = SessionExecutor::new(session, true, token_identity());
+        let executor = SessionExecutor::new(
+            session,
+            true,
+            token_identity(),
+            detent_web::authz::Scopes::of(Scope::Write),
+        );
 
         let refused = executor.execute(apply("v2\n"));
         assert!(
@@ -719,17 +739,50 @@ mod tests {
         Ok(())
     }
 
-    /// A read-scoped token may read and is denied every mutation.
+    /// A read-scoped token may read. The engine refuses every mutation,
+    /// writes nothing, and audits the refusal under the token (STAGE3 M4).
     #[test]
-    fn a_read_scope_permits_reads_and_denies_mutations() {
+    fn a_read_scope_permits_reads_and_the_engine_denies_and_audits_mutations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let harness = crate::tests_support::Harness::start(b"v1\n", false)?;
+        let crate::tests_support::Harness {
+            session, target, ..
+        } = harness;
+        let executor = SessionExecutor::new(
+            session,
+            false,
+            token_identity(),
+            detent_web::authz::Scopes::of(Scope::Read),
+        );
+
+        let listed = executor.execute(Operation::ListModules)?;
+        assert!(matches!(listed, OpOutcome::Modules(_)), "{listed:?}");
+
+        let refused = executor.execute(apply("v2\n"));
+        assert!(matches!(refused, Err(OpsError::Denied(_))), "{refused:?}");
+        assert_eq!(std::fs::read(&target)?, b"v1\n");
+
+        let audit = executor.execute(Operation::AuditQuery(detent_ops::AuditQuery::default()))?;
+        let records = crate::tests_support::records_of(audit).ok_or("audit answers records")?;
+        assert!(
+            records.iter().any(|record| record.who == "token:t1"
+                && record.op == detent_ops::OpKind::Apply
+                && record.result == detent_ops::AuditResult::Denied
+                && record.error_id.as_deref() == Some("web-denied-scope")),
+            "{records:?}"
+        );
+        Ok(())
+    }
+
+    /// The tool-level policy defers to the engine.
+    #[test]
+    fn the_tool_policy_leaves_the_scope_check_to_the_engine() {
         use detent_mcp::Authz as _;
-        let authz = ScopeAuthz::new(detent_web::authz::Scopes::of(Scope::Read));
-        let who = token_identity();
-        assert!(authz.permit(&who, &Operation::ListModules).is_ok());
-        assert!(matches!(
-            authz.permit(&who, &apply("x\n")),
-            Err(detent_mcp::AuthError::Denied)
-        ));
+        assert!(
+            EngineDecides
+                .permit(&token_identity(), &apply("x\n"))
+                .is_ok()
+        );
     }
 
     /// The HTTP gate admits only the startup token, and only while the
