@@ -270,62 +270,16 @@ fn render_dnsmasq(setting: &DnsmasqSetting) -> Result<String, EditError> {
 ///
 /// Pass 1 is read-only: every changed line is rendered *before* the document
 /// is touched, so a rejected value leaves the file exactly as it was. Pass 2
-/// rewrites, drops and appends; new lines go after the last existing setting
-/// so a trailing comment block stays trailing.
+/// is one pass over the file. Settings are aligned with the model
+/// ([`Document::edit_entries`]), so dropping or adding one never rewrites or
+/// moves another; a new line goes directly after the setting before it, so a
+/// trailing comment block stays trailing.
 ///
 /// # Errors
 ///
 /// As [`render_dnsmasq`].
 fn apply_dnsmasq(doc: &mut Document, settings: &[DnsmasqSetting]) -> Result<EditReport, EditError> {
-    let mut planned: Vec<Option<String>> = Vec::with_capacity(settings.len());
-    for line in doc
-        .lines()
-        .iter()
-        .filter(|l| l.kind() == LineKind::Directive)
-    {
-        let Some(wanted) = settings.get(planned.len()) else {
-            break;
-        };
-        let unchanged = parse_dnsmasq(line.raw()).as_ref() == Some(wanted);
-        planned.push(if unchanged {
-            None
-        } else {
-            Some(render_dnsmasq(wanted)?)
-        });
-    }
-    for wanted in settings.iter().skip(planned.len()) {
-        planned.push(Some(render_dnsmasq(wanted)?));
-    }
-
-    let mut report = EditReport::default();
-    let mut index = 0usize;
-    let mut matched = 0usize;
-    let mut after_last_directive: Option<usize> = None;
-    while index < doc.len() {
-        if doc.lines().get(index).map(detent_core::doc::Line::kind) != Some(LineKind::Directive) {
-            index = index.saturating_add(1);
-            continue;
-        }
-        let Some(slot) = planned.get(matched) else {
-            doc.remove_line(index)?;
-            report.removed = report.removed.saturating_add(1);
-            continue;
-        };
-        if let Some(raw) = slot.as_deref() {
-            doc.replace_raw(index, raw)?;
-            report.changed_lines = report.changed_lines.saturating_add(1);
-        }
-        matched = matched.saturating_add(1);
-        index = index.saturating_add(1);
-        after_last_directive = Some(index);
-    }
-    let mut at = after_last_directive.unwrap_or_else(|| doc.len());
-    for raw in planned.iter().skip(matched).flatten() {
-        doc.insert_line(at, raw)?;
-        at = at.saturating_add(1);
-        report.added = report.added.saturating_add(1);
-    }
-    Ok(report)
+    doc.edit_entries(settings, parse_dnsmasq, render_dnsmasq, |_| false)
 }
 
 // ------------------------------------------------------------------ JSONC lexer
@@ -3439,6 +3393,59 @@ mod tests {
             "# c\ninterface=lo\nbind-interfaces\n# tail\n"
         );
         let _ = report;
+        Ok(())
+    }
+
+    #[test]
+    fn deleting_the_first_entry_rewrites_no_other_line() -> Result<(), String> {
+        let src = "interface=lo\ndhcp-range = 10.0.0.2,10.0.0.9\n# note\nbind-interfaces\n";
+        let mut doc = DhcpModule::parse(src).map_err(|e| e.to_string())?;
+        let mut model = DhcpModule::to_model(&doc).map_err(|e| e.to_string())?;
+        model.dnsmasq.remove(0);
+        let report = DhcpModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        assert_eq!(
+            report,
+            EditReport {
+                changed_lines: 0,
+                added: 0,
+                removed: 1,
+            }
+        );
+        assert_eq!(
+            DhcpModule::render(&doc),
+            "dhcp-range = 10.0.0.2,10.0.0.9\n# note\nbind-interfaces\n"
+        );
+        Ok(())
+    }
+
+    /// The fastest of three runs of `apply` with an empty model on a dnsmasq
+    /// file of `lines` settings. Checks that every line goes.
+    fn time_empty_apply(lines: usize) -> Result<std::time::Duration, String> {
+        let src = "dhcp-host=host,10.0.0.1\n".repeat(lines);
+        let mut fastest = std::time::Duration::MAX;
+        for _ in 0..3 {
+            let mut doc = DhcpModule::parse(&src).map_err(|e| e.to_string())?;
+            let started = std::time::Instant::now();
+            let report =
+                DhcpModule::apply(&mut doc, &Model::default()).map_err(|e| e.to_string())?;
+            fastest = fastest.min(started.elapsed());
+            assert_eq!(report.removed, lines);
+            assert_eq!(DhcpModule::render(&doc), "");
+        }
+        Ok(fastest)
+    }
+
+    #[test]
+    fn apply_is_linear_in_file_size() -> Result<(), String> {
+        // M21: ten times the lines must cost far less than a hundred times the
+        // time. Linear work gives a ratio near 10, quadratic work near 100. A
+        // ratio, not an absolute bound, so a slow or loaded runner still passes.
+        let small = time_empty_apply(5_000)?;
+        let large = time_empty_apply(50_000)?;
+        assert!(
+            large < small.saturating_mul(30),
+            "5k lines took {small:?}, 50k lines took {large:?}"
+        );
         Ok(())
     }
 
