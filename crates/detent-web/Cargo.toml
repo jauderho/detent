@@ -31,6 +31,8 @@ rcgen = { workspace = true }
 # Only pulled in by the `ui` feature (PLAN §4.2); see `src/spa.rs`.
 rust-embed = { workspace = true, optional = true }
 rustls = { workspace = true }
+# `secrets.toml` is opened `O_NOFOLLOW` and checked against the effective uid.
+rustix = { workspace = true }
 # The running version, for the update check's report.
 semver = { workspace = true }
 serde = { workspace = true }

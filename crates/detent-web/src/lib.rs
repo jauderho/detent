@@ -58,6 +58,7 @@ pub mod csrf;
 pub mod engine;
 pub mod error;
 pub mod headers;
+pub mod secrets;
 pub mod server;
 pub mod spa;
 pub mod state;

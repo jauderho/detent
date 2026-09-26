@@ -946,6 +946,7 @@ dependencies = [
  "proptest",
  "rcgen",
  "rust-embed",
+ "rustix",
  "rustls",
  "semver",
  "serde",
