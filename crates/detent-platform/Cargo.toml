@@ -54,6 +54,9 @@ xattr = { workspace = true }
 
 [dev-dependencies]
 detent-modules = { path = "../detent-modules", features = ["module-samba"] }
+# `event` for `rustix::event::poll` in the `transport` test of
+# `Channel`'s `AsFd`. Tests only; no new crate.
+rustix = { workspace = true, features = ["event"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 

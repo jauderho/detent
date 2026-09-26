@@ -275,6 +275,19 @@ impl Channel {
     }
 }
 
+/// The underlying socket's descriptor, borrowed.
+///
+/// It exists so a caller can wait until the channel is readable, for example
+/// with tokio's `AsyncFd`: the acme process sleeps between checks and must
+/// notice when the worker closes the channel. The caller must not read or
+/// write through the descriptor, and must not change its flags: the framing
+/// and the timeouts belong to [`Channel`].
+impl std::os::fd::AsFd for Channel {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.stream.as_fd()
+    }
+}
+
 /// Outcome of a best-effort fill of a buffer.
 enum Filled {
     /// The buffer is full.
@@ -602,5 +615,35 @@ mod tests {
         ));
         assert!(!ChannelError::Closed.to_string().is_empty());
         assert!(!ChannelError::Timeout.to_string().is_empty());
+    }
+
+    /// True when `channel`'s descriptor polls readable now (zero timeout).
+    fn polls_readable(channel: &Channel) -> Result<bool, rustix::io::Errno> {
+        use rustix::event::{PollFd, PollFlags, Timespec, poll};
+        let mut fds = [PollFd::new(channel, PollFlags::IN)];
+        let now = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        poll(&mut fds, Some(&now))?;
+        Ok(fds.iter().any(|fd| fd.revents().contains(PollFlags::IN)))
+    }
+
+    /// The borrowed descriptor is what a caller waits on (with tokio's
+    /// `AsyncFd`): it polls readable once the peer sends or closes, and not
+    /// before.
+    #[test]
+    fn the_descriptor_polls_readable_after_the_peer_sends_or_closes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut a, mut b) = Channel::pair()?;
+        assert!(!polls_readable(&a)?);
+        b.send(&Response::ShuttingDown)?;
+        assert!(polls_readable(&a)?);
+        assert_eq!(a.recv::<Response>()?, Response::ShuttingDown);
+        assert!(!polls_readable(&a)?);
+        drop(b);
+        assert!(polls_readable(&a)?);
+        assert!(matches!(a.recv::<Response>(), Err(ChannelError::Closed)));
+        Ok(())
     }
 }
