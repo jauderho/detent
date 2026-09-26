@@ -978,12 +978,20 @@
           "path",
           "new_hash",
           "created",
-          "backed_up"
+          "backed_up",
+          "checks"
         ],
         "properties": {
           "backed_up": {
             "type": "boolean",
             "description": "Whether a backup was retained, and therefore whether commit-confirm\nhas something to roll back to."
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckReport"
+            },
+            "description": "The external validators run against the written bytes. Apply refuses\nunless every one ran and passed. Empty when the module declares none\nor the apply changed nothing."
           },
           "commit": {
             "oneOf": [

@@ -560,16 +560,11 @@ impl OpsEngine {
         let current = decode(&contents.bytes, &wiring.path)?;
         let rendered = find_module(&self.modules, id)?.apply_json(&current, model)?;
         if current == rendered {
-            return Ok(ApplyReport {
-                module: descriptor.id.to_owned(),
-                path: wiring.path,
-                prev_hash: Some(contents.digest),
-                new_hash: contents.digest,
-                created: false,
-                backed_up: false,
-                service: None,
-                commit: None,
-            });
+            return Ok(unchanged_report(
+                descriptor.id,
+                wiring.path,
+                contents.digest,
+            ));
         }
         let checks = self.run_checks(&wiring, rendered.as_bytes());
 
@@ -640,6 +635,7 @@ impl OpsEngine {
             backed_up: receipt.backed_up,
             service,
             commit,
+            checks,
         })
     }
 
@@ -852,6 +848,22 @@ const fn command(action: WireServiceAction) -> Option<ServiceCommand> {
         WireServiceAction::Start => Some(ServiceCommand::Start),
         WireServiceAction::Stop => Some(ServiceCommand::Stop),
         WireServiceAction::Status => None,
+    }
+}
+
+/// The report of an apply whose rendered file equals the current one: nothing
+/// was written, backed up, checked or armed.
+fn unchanged_report(module: &str, path: String, digest: Sha256Digest) -> ApplyReport {
+    ApplyReport {
+        module: module.to_owned(),
+        path,
+        prev_hash: Some(digest),
+        new_hash: digest,
+        created: false,
+        backed_up: false,
+        service: None,
+        commit: None,
+        checks: Vec::new(),
     }
 }
 

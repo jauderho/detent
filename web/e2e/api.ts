@@ -135,6 +135,7 @@ export const APPLY_REPORT = {
     rollback_targets: 1,
   },
   service: null,
+  checks: [],
 }
 
 /** Every request this stub records, so a test can assert what was sent. */

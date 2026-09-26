@@ -290,6 +290,7 @@ pub fn applied_without_commit() -> OpOutcome {
         backed_up: false,
         service: None,
         commit: None,
+        checks: Vec::new(),
     }))
 }
 
@@ -339,6 +340,7 @@ pub fn every_outcome() -> Vec<OpOutcome> {
                 deadline: "2026-09-04T00:00:00Z".to_owned(),
                 rollback_targets: 1,
             }),
+            checks: Vec::new(),
         })),
         OpOutcome::CommitConfirmed {
             commit_id: CommitId(1),

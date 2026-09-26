@@ -475,6 +475,7 @@ describe('ModuleDetailPage — apply', () => {
     const user = userEvent.setup()
     const REPORT: ApplyReport = {
       backed_up: true,
+      checks: [],
       commit: {
         commit_id: 7,
         deadline: new Date(Date.now() + 60_000).toISOString(),

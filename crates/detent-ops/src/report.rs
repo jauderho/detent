@@ -153,6 +153,10 @@ pub struct ApplyReport {
     /// The armed commit-confirm window, for a module whose descriptor sets
     /// `commit_confirm`.
     pub commit: Option<PendingCommit>,
+    /// The external validators run against the written bytes. Apply refuses
+    /// unless every one ran and passed. Empty when the module declares none
+    /// or the apply changed nothing.
+    pub checks: Vec<CheckReport>,
 }
 
 /// What was detected about this host.

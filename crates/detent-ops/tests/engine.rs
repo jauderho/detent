@@ -279,7 +279,25 @@ impl ServiceControl for OkServices {
     }
 }
 
+/// A validator that runs and rejects every candidate.
+struct FailChecks;
+impl CheckRunner for FailChecks {
+    fn run_check(
+        &self,
+        _check: &ExternalCheck,
+        _candidate: &Path,
+    ) -> Result<CheckOutcome, HookError> {
+        Ok(CheckOutcome {
+            check: CheckId(0),
+            passed: false,
+            exit_code: Some(1),
+            detail: "line 1: bad directive".to_owned(),
+        })
+    }
+}
+
 static OK_CHECKS: OkChecks = OkChecks;
+static FAIL_CHECKS: FailChecks = FailChecks;
 static OK_SERVICES: OkServices = OkServices;
 
 /// A [`ServiceManager`] that reports a fixed status and refuses mutation, so
@@ -379,6 +397,8 @@ struct Setup {
     shape: Shape,
     /// Give the monitor working check/service collaborators.
     hooks: bool,
+    /// With `hooks`, give the monitor a check runner that rejects everything.
+    fail_checks: bool,
     /// Refuse every operation.
     deny: bool,
     /// Register the module under a name the allow-list does not know.
@@ -465,7 +485,11 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
         let mut channel = monitor_end;
         let hooks = if setup.hooks {
             Hooks {
-                checks: &OK_CHECKS,
+                checks: if setup.fail_checks {
+                    &FAIL_CHECKS
+                } else {
+                    &OK_CHECKS
+                },
                 services: &OK_SERVICES,
             }
         } else {
@@ -1083,6 +1107,7 @@ fn apply_refuses_a_candidate_a_declared_check_rejects() -> TestResult {
     ));
     // Nothing was written: the target and its content are untouched.
     assert_eq!(fx.contents()?, "v1\n");
+    assert_no_backups(&mut fx)?;
 
     let records = fx.records();
     assert_eq!(records.len(), 2);
@@ -1091,6 +1116,81 @@ fn apply_refuses_a_candidate_a_declared_check_rejects() -> TestResult {
         records.get(1).and_then(|r| r.error_id.clone()),
         Some("ops-check-failed".to_owned())
     );
+    fx.finish()
+}
+
+/// No backup of the module's target exists.
+fn assert_no_backups(fx: &mut Harness) -> TestResult {
+    let OpOutcome::Backups(backups) = fx.run(Operation::ListBackups {
+        id: MODULE.to_owned(),
+    })?
+    else {
+        return Err("ListBackups must answer with a listing".into());
+    };
+    assert!(backups.is_empty(), "a refused apply created a backup");
+    Ok(())
+}
+
+#[test]
+fn apply_refuses_when_an_external_check_fails() -> TestResult {
+    // The validator runs and rejects the candidate.
+    let mut fx = harness(
+        b"v1\n",
+        Setup {
+            shape: Shape {
+                check: true,
+                ..Shape::default()
+            },
+            hooks: true,
+            fail_checks: true,
+            ..Setup::default()
+        },
+    )?;
+    let err = fx.run(apply("v2\n", None));
+    assert!(
+        matches!(
+            err,
+            Err(OpsError::CheckFailed { ref program, ref detail })
+                if program == "/nonexistent/detent-ops-check" && detail.contains("bad directive")
+        ),
+        "{err:?}"
+    );
+    assert_eq!(fx.contents()?, "v1\n");
+    assert_no_backups(&mut fx)?;
+
+    let records = fx.records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records.get(1).map(|r| r.result), Some(AuditResult::Error));
+    assert_eq!(
+        records.get(1).and_then(|r| r.error_id.clone()),
+        Some("ops-check-failed".to_owned())
+    );
+    assert_eq!(records.get(1).and_then(|r| r.new_hash.clone()), None);
+    fx.finish()
+}
+
+#[test]
+fn apply_reports_the_checks_that_passed() -> TestResult {
+    let mut fx = harness(
+        b"v1\n",
+        Setup {
+            shape: Shape {
+                check: true,
+                ..Shape::default()
+            },
+            hooks: true,
+            ..Setup::default()
+        },
+    )?;
+    let OpOutcome::Applied(report) = fx.run(apply("v2\n", None))? else {
+        return Err("Apply must answer with an apply report".into());
+    };
+    assert_eq!(fx.contents()?, "v2\n");
+    assert_eq!(report.checks.len(), 1);
+    let check = report.checks.first().ok_or("one check report")?;
+    assert_eq!(check.program, "/nonexistent/detent-ops-check");
+    assert!(check.ran && check.passed);
+    assert_eq!(check.exit_code, Some(0));
     fx.finish()
 }
 
