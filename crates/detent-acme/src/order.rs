@@ -59,6 +59,17 @@ fn account_builder(ca_root: Option<&Path>) -> Result<AccountBuilder, AcmeError> 
         }
         None => roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
     }
+    let client = Client::builder(TokioExecutor::new()).build(tls13_connector(roots)?);
+    Ok(Account::builder_with_http(Box::new(Tls13HttpClient(
+        client,
+    ))))
+}
+
+/// The one client TLS posture: TLS 1.3 only, aws-lc-rs, `https://` only,
+/// HTTP/1.1, trusting exactly `roots`.
+pub(crate) fn tls13_connector(
+    roots: rustls::RootCertStore,
+) -> Result<HttpsConnector<HttpConnector>, AcmeError> {
     let versions = &[&rustls::version::TLS13];
     let config = rustls::ClientConfig::builder_with_provider(
         rustls::crypto::aws_lc_rs::default_provider().into(),
@@ -67,15 +78,11 @@ fn account_builder(ca_root: Option<&Path>) -> Result<AccountBuilder, AcmeError> 
     .map_err(|err| AcmeError::Config(format!("TLS 1.3 client: {err}")))?
     .with_root_certificates(roots)
     .with_no_client_auth();
-    let https = hyper_rustls::HttpsConnectorBuilder::new()
+    Ok(hyper_rustls::HttpsConnectorBuilder::new()
         .with_tls_config(config)
         .https_only()
         .enable_http1()
-        .build();
-    let client = Client::builder(TokioExecutor::new()).build(https);
-    Ok(Account::builder_with_http(Box::new(Tls13HttpClient(
-        client,
-    ))))
+        .build())
 }
 
 /// Runs the dns-01 challenge presentation step of an order.

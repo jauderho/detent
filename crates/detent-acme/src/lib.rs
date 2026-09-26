@@ -21,6 +21,8 @@ use std::path::PathBuf;
 use std::{fs, io};
 
 pub mod attest;
+#[cfg(any(feature = "dns-providers", feature = "fuzzing"))]
+mod https;
 pub mod order;
 #[cfg(any(feature = "dns-providers", feature = "fuzzing"))]
 pub mod providers;

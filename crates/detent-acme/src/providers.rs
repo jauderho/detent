@@ -5,12 +5,11 @@
 //! refresh, `delete` tolerates an already-gone record. Every constructor
 //! validates its inputs, so a misconfigured provider cannot be built.
 //!
-//! Each HTTPS provider drives its API through a small transport seam that the
-//! unit tests stub out with recorded fixtures; detent-acme itself links no
-//! TLS client, so without one the wire calls fail with a
-//! [`AcmeError::Config`] naming exactly what is missing. RFC 2136 builds the
-//! full UPDATE message but refuses to send it unsigned (TSIG needs HMAC).
-//! None of the providers sleep: propagation timing stays with the caller.
+//! Each HTTPS provider drives its API through a small transport seam. The
+//! real transport is the crate's TLS 1.3 client (`https.rs`); the unit tests
+//! swap in recorded fixtures. RFC 2136 builds the full UPDATE message but
+//! refuses to send it unsigned (TSIG needs HMAC). None of the providers
+//! sleep: propagation timing stays with the caller.
 
 use std::fmt;
 
@@ -22,11 +21,11 @@ use crate::{AcmeError, DnsProvider, DnsRecord, validate_fqdn, validate_value};
 
 /// One built-but-unsent request to a provider's HTTP API.
 #[derive(Clone, PartialEq, Eq)]
-struct HttpRequest {
-    method: &'static str,
-    url: String,
-    headers: Vec<(&'static str, String)>,
-    body: String,
+pub(crate) struct HttpRequest {
+    pub(crate) method: &'static str,
+    pub(crate) url: String,
+    pub(crate) headers: Vec<(&'static str, String)>,
+    pub(crate) body: String,
 }
 
 impl fmt::Debug for HttpRequest {
@@ -48,16 +47,12 @@ impl fmt::Debug for HttpRequest {
 /// Sends a built request and returns `(status, body)`.
 type HttpTransport = dyn Fn(&HttpRequest) -> Result<(u16, String), AcmeError> + Send + Sync;
 
-/// Why a wire call cannot run yet: detent-acme has no TLS-capable HTTP
-/// client. Adding one (e.g. `ureq`) is a new dependency and awaits the ADR-011
-/// cooldown; request building and response parsing are implemented and
-/// unit-tested against fixtures in the meantime.
-fn transport_missing(provider: &str) -> AcmeError {
-    AcmeError::Config(format!(
-        "{provider}: no HTTPS transport is linked — detent-acme has no TLS client \
-         yet (new dependency awaits ADR-011); request building and parsing are \
-         implemented and unit-tested against recorded fixtures"
-    ))
+/// The real transport: [`crate::https::HttpsTransport`] over the webpki roots.
+fn https_transport() -> Result<Box<HttpTransport>, AcmeError> {
+    let transport = crate::https::HttpsTransport::new()?;
+    Ok(Box::new(move |request: &HttpRequest| {
+        transport.send(request)
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -76,7 +71,7 @@ const CLOUDFLARE_API: &str = "https://api.cloudflare.com/client/v4/zones";
 pub struct CloudflareProvider {
     token: String,
     zone_id: String,
-    send: Option<Box<HttpTransport>>,
+    send: Box<HttpTransport>,
 }
 
 impl CloudflareProvider {
@@ -102,13 +97,13 @@ impl CloudflareProvider {
         Ok(Self {
             token,
             zone_id,
-            send: None,
+            send: https_transport()?,
         })
     }
 
     #[cfg(test)]
     fn with_transport(mut self, send: Box<HttpTransport>) -> Self {
-        self.send = Some(send);
+        self.send = send;
         self
     }
 
@@ -119,10 +114,7 @@ impl CloudflareProvider {
     /// Lists the zone's TXT records under `record`'s name and returns the id
     /// of the one carrying our value, if any.
     fn find_own(&self, record: &DnsRecord) -> Result<Option<String>, AcmeError> {
-        let send = self
-            .send
-            .as_deref()
-            .ok_or_else(|| transport_missing("cloudflare"))?;
+        let send = &*self.send;
         let list = HttpRequest {
             method: "GET",
             url: format!(
@@ -145,10 +137,7 @@ impl CloudflareProvider {
 
 impl DnsProvider for CloudflareProvider {
     fn present(&self, record: &DnsRecord) -> Result<(), AcmeError> {
-        let send = self
-            .send
-            .as_deref()
-            .ok_or_else(|| transport_missing("cloudflare"))?;
+        let send = &*self.send;
         let (method, url) = match self.find_own(record)? {
             Some(id) => (
                 "PUT",
@@ -185,10 +174,7 @@ impl DnsProvider for CloudflareProvider {
         let Some(id) = self.find_own(record)? else {
             return Ok(()); // already gone is the success delete promises
         };
-        let send = self
-            .send
-            .as_deref()
-            .ok_or_else(|| transport_missing("cloudflare"))?;
+        let send = &*self.send;
         let remove = HttpRequest {
             method: "DELETE",
             url: format!("{CLOUDFLARE_API}/{}/dns_records/{id}", self.zone_id),
@@ -256,7 +242,7 @@ pub struct AcmeDnsProvider {
     server: String,
     username: String,
     password: String,
-    send: Option<Box<HttpTransport>>,
+    send: Box<HttpTransport>,
 }
 
 impl AcmeDnsProvider {
@@ -291,13 +277,13 @@ impl AcmeDnsProvider {
             server,
             username,
             password,
-            send: None,
+            send: https_transport()?,
         })
     }
 
     #[cfg(test)]
     fn with_transport(mut self, send: Box<HttpTransport>) -> Self {
-        self.send = Some(send);
+        self.send = send;
         self
     }
 
@@ -314,10 +300,7 @@ impl AcmeDnsProvider {
     }
 
     fn post_update(&self, txt: &str) -> Result<(), AcmeError> {
-        let send = self
-            .send
-            .as_deref()
-            .ok_or_else(|| transport_missing("acme-dns"))?;
+        let send = &*self.send;
         let (status, _) = send(&self.update_request(txt))?;
         if (200..300).contains(&status) {
             Ok(())
@@ -366,7 +349,7 @@ const DESEC_API: &str = "https://desec.io/api/v1/domains";
 pub struct DeSecProvider {
     token: String,
     domain: String,
-    send: Option<Box<HttpTransport>>,
+    send: Box<HttpTransport>,
 }
 
 impl DeSecProvider {
@@ -390,13 +373,13 @@ impl DeSecProvider {
         Ok(Self {
             token,
             domain,
-            send: None,
+            send: https_transport()?,
         })
     }
 
     #[cfg(test)]
     fn with_transport(mut self, send: Box<HttpTransport>) -> Self {
-        self.send = Some(send);
+        self.send = send;
         self
     }
 
@@ -428,10 +411,7 @@ impl DeSecProvider {
 impl DnsProvider for DeSecProvider {
     fn present(&self, record: &DnsRecord) -> Result<(), AcmeError> {
         let subname = self.subname(record)?;
-        let send = self
-            .send
-            .as_deref()
-            .ok_or_else(|| transport_missing("deSEC"))?;
+        let send = &*self.send;
         let put = HttpRequest {
             method: "PUT",
             url: self.rrset_url(subname),
@@ -456,10 +436,7 @@ impl DnsProvider for DeSecProvider {
 
     fn delete(&self, record: &DnsRecord) -> Result<(), AcmeError> {
         let subname = self.subname(record)?;
-        let send = self
-            .send
-            .as_deref()
-            .ok_or_else(|| transport_missing("deSEC"))?;
+        let send = &*self.send;
         let remove = HttpRequest {
             method: "DELETE",
             url: self.rrset_url(subname),
@@ -478,10 +455,7 @@ impl DnsProvider for DeSecProvider {
 
     fn wait_propagated(&self, record: &DnsRecord) -> Result<(), AcmeError> {
         let subname = self.subname(record)?;
-        let send = self
-            .send
-            .as_deref()
-            .ok_or_else(|| transport_missing("deSEC"))?;
+        let send = &*self.send;
         let get = HttpRequest {
             method: "GET",
             url: format!(
@@ -965,26 +939,6 @@ mod tests {
         assert!(matches!(
             cf.wait_propagated(&record()?),
             Err(AcmeError::NotPropagated(_))
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn networked_providers_without_transport_name_what_is_missing() -> R {
-        let cf = CloudflareProvider::new("cf-token-123", "a".repeat(32))?;
-        assert!(matches!(
-            cf.present(&record()?),
-            Err(AcmeError::Config(m)) if m.contains("no HTTPS transport")
-        ));
-        let ad = AcmeDnsProvider::new("https://dns.example", "user", "pass")?;
-        assert!(matches!(
-            ad.present(&record()?),
-            Err(AcmeError::Config(m)) if m.contains("no HTTPS transport")
-        ));
-        let ds = DeSecProvider::new("tok", "example.com")?;
-        assert!(matches!(
-            ds.delete(&record()?),
-            Err(AcmeError::Config(m)) if m.contains("no HTTPS transport")
         ));
         Ok(())
     }
