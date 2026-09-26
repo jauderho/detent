@@ -211,6 +211,9 @@ samba-rec-load-printers = `load printers` is {$value}; set no unless this host a
 samba-rec-interfaces = no `interfaces` directive is set; bind samba to explicit addresses instead of listening on every interface.
 samba-writable-exposure = this share permits writes through writeable, read only, or write list; confirm every client should have write access.
 samba-root-command = `{$key}` runs a command with root privileges on every matching connection.
+samba-client-command = `{$key}` lets a client make samba run a command; the client controls what the command gets.
+samba-usershare-guests = `usershare allow guests` is {$value}; users can publish shares that anyone opens without a password.
+samba-wide-links = `wide links` is {$value}; symbolic links can lead clients out of the share.
 
 ## module template — copy-me example
 TEMPLATE-name = module template
