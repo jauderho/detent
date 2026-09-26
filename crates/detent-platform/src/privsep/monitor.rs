@@ -658,16 +658,14 @@ impl<'a> Monitor<'a> {
         {
             return Response::Error(err);
         }
+        // From here the monitor holds a copy of the candidate. Remove it on
+        // every path that does not swap it in (the swap consumes it itself).
+        let _copy = StagedCopy(&staged);
         let bytes = match read_staged_verified(&staged, len, sha256) {
             Ok(bytes) => bytes,
             Err(err) => return Response::Error(err),
         };
-        let tag_path = match staged_input_path(self.allow.state_root(), tag) {
-            Ok(path) => path,
-            Err(err) => return Response::Error(err),
-        };
-        let bundle_path = tag_path.with_file_name(format!("{tag}.sigstore.json"));
-        if let Err(err) = self.verify_release(&bundle_path, tag, sha256) {
+        if let Err(err) = self.verify_release(&format!("{tag}.sigstore.json"), tag, sha256) {
             return Response::Error(err);
         }
         let target = self
@@ -686,12 +684,18 @@ impl<'a> Monitor<'a> {
     #[cfg(feature = "update")]
     fn verify_release(
         &self,
-        bundle_path: &Path,
+        bundle_name: &str,
         tag: &str,
         sha256: crate::fs::atomic::Sha256Digest,
     ) -> Result<(), ProtoError> {
-        let Ok(bundle) = read_bounded_file(bundle_path, detent_update::bundle::MAX_BUNDLE_BYTES)
-        else {
+        // The worker writes the bundle, so open it as the staged binary is
+        // opened: no symlink, no FIFO, no directory outside the state root's
+        // owner.
+        let opened = open_staged_input(self.allow.state_root(), bundle_name).map_err(|err| {
+            tracing::warn!(error = ?err, "staged release bundle refused");
+            ProtoError::VerificationFailed
+        })?;
+        let Ok(bundle) = read_bounded_file(&opened, detent_update::bundle::MAX_BUNDLE_BYTES) else {
             return Err(ProtoError::VerificationFailed);
         };
         let Ok(decoded) = detent_update::bundle::parse(&bundle) else {
@@ -715,13 +719,13 @@ impl<'a> Monitor<'a> {
     #[cfg(not(feature = "update"))]
     fn verify_release(
         &self,
-        bundle_path: &Path,
+        bundle_name: &str,
         tag: &str,
         _sha256: crate::fs::atomic::Sha256Digest,
     ) -> Result<(), ProtoError> {
         tracing::warn!(
             tag,
-            bundle = %bundle_path.display(),
+            bundle = bundle_name,
             staging = %self.staging_dir.display(),
             "staged release refused: built without the update feature"
         );
@@ -1445,7 +1449,7 @@ fn staged_input_path(state_root: &Path, tag: &str) -> Result<PathBuf, ProtoError
     Ok(state_root.join(STAGED_DIR).join(tag))
 }
 
-/// Open the worker-written input `<state_root>/update/staged/<tag>` for
+/// Open the worker-written input `<state_root>/update/staged/<name>` for
 /// reading without following a symlink at any component below `state_root`.
 ///
 /// Each directory is opened with `openat(O_NOFOLLOW | O_DIRECTORY)` and must
@@ -1453,7 +1457,7 @@ fn staged_input_path(state_root: &Path, tag: &str) -> Result<PathBuf, ProtoError
 /// `staged` at a root-readable directory elsewhere. The file is opened
 /// `O_NONBLOCK` and must be a regular file: a planted FIFO would otherwise
 /// block the monitor, and with it the commit-confirm deadline.
-fn open_staged_input(state_root: &Path, tag: &str) -> Result<std::fs::File, ProtoError> {
+fn open_staged_input(state_root: &Path, name: &str) -> Result<std::fs::File, ProtoError> {
     use rustix::fs::{FileType, Mode, OFlags, fstat, openat};
     use rustix::io::Errno;
     let open_error = |err: Errno| ProtoError::Io(format!("open staged binary: {err}"));
@@ -1474,7 +1478,7 @@ fn open_staged_input(state_root: &Path, tag: &str) -> Result<std::fs::File, Prot
     }
     let fd = openat(
         &dir,
-        tag,
+        name,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     )
@@ -1503,6 +1507,17 @@ fn ensure_staging_dir(monitor_staging_dir: &Path) -> Result<PathBuf, ProtoError>
         ));
     }
     Ok(monitor_staging_dir.to_path_buf())
+}
+
+/// The monitor's own copy of a candidate binary. Dropping the guard removes
+/// the file, so no failure path leaves an unauthenticated image behind; a
+/// missing file (already swapped in) is not an error.
+struct StagedCopy<'a>(&'a Path);
+
+impl Drop for StagedCopy<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.0);
+    }
 }
 
 fn materialize_staged(
@@ -1549,19 +1564,24 @@ fn materialize_staged(
     )
     .map_err(|err| ProtoError::Io(format!("materialize staged binary: {err}")))?;
     let file: std::fs::File = fd.into();
-    write_all_and_sync(&file, &bytes)
-        .map_err(|err| ProtoError::Io(format!("materialize staged binary: {}", err.kind())))?;
-    std::fs::File::open(dir)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|err| ProtoError::Io(format!("sync staging directory: {}", err.kind())))?;
-    Ok(())
+    let written = write_all_and_sync(&file, &bytes)
+        .map_err(|err| ProtoError::Io(format!("materialize staged binary: {}", err.kind())))
+        .and_then(|()| {
+            std::fs::File::open(dir)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|err| ProtoError::Io(format!("sync staging directory: {}", err.kind())))
+        });
+    if written.is_err() {
+        // The copy is incomplete or not durable: do not leave it to be found.
+        let _ = std::fs::remove_file(&destination);
+    }
+    written
 }
 
 #[cfg(feature = "update")]
-fn read_bounded_file(path: &Path, max: usize) -> Result<Vec<u8>, std::io::Error> {
+fn read_bounded_file(file: &std::fs::File, max: usize) -> Result<Vec<u8>, std::io::Error> {
     let mut bytes = Vec::new();
-    std::fs::File::open(path)?
-        .take(u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1))
+    file.take(u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1))
         .read_to_end(&mut bytes)?;
     if bytes.len() > max {
         return Err(std::io::Error::other("file exceeds size cap"));
@@ -4968,6 +4988,131 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn replace_binary_refuses_a_symlinked_bundle() -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let state_root = work.path().join("state");
+        std::fs::create_dir_all(&state_root)?;
+        let target = swap_target(work.path(), "detent-link", b"old-binary")?;
+        let (digest, bytes) = plant_release(&state_root, "valid.json")?;
+        // The linked file is the valid bundle, so only the open can refuse it.
+        let elsewhere = work.path().join("elsewhere.sigstore.json");
+        let bundle_path = state_root
+            .join(STAGED_DIR)
+            .join(format!("{FIXTURE_TAG}.sigstore.json"));
+        std::fs::rename(&bundle_path, &elsewhere)?;
+        std::os::unix::fs::symlink(&elsewhere, &bundle_path)?;
+        let staging_dir = work.path().join("monitor-staging");
+        let mut monitor = update_monitor(&state_root, &staging_dir, target.clone())?;
+        let response = monitor.dispatch(Request::ReplaceBinary {
+            tag: FIXTURE_TAG.to_owned(),
+            len: bytes.len() as u64,
+            sha256: digest,
+        })?;
+        assert!(matches!(
+            response,
+            Response::Error(ProtoError::VerificationFailed)
+        ));
+        assert_eq!(std::fs::read(&target)?, b"old-binary");
+        assert!(!staged_path(&staging_dir, digest).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn replace_binary_refuses_a_fifo_bundle_without_blocking()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let state_root = work.path().join("state");
+        std::fs::create_dir_all(&state_root)?;
+        let target = swap_target(work.path(), "detent-fifo", b"old-binary")?;
+        let (digest, bytes) = plant_release(&state_root, "valid.json")?;
+        let bundle_path = state_root
+            .join(STAGED_DIR)
+            .join(format!("{FIXTURE_TAG}.sigstore.json"));
+        std::fs::remove_file(&bundle_path)?;
+        let made = std::process::Command::new("mkfifo")
+            .arg(&bundle_path)
+            .status()?;
+        assert!(made.success(), "mkfifo failed: {made}");
+        let staging_dir = work.path().join("monitor-staging");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let thread_target = target.clone();
+        std::thread::spawn(move || {
+            let outcome = update_monitor(&state_root, &staging_dir, thread_target)
+                .and_then(|mut monitor| {
+                    monitor
+                        .dispatch(Request::ReplaceBinary {
+                            tag: FIXTURE_TAG.to_owned(),
+                            len: bytes.len() as u64,
+                            sha256: digest,
+                        })
+                        .map_err(Into::into)
+                })
+                .map_err(|err| err.to_string());
+            let _ = sender.send((outcome, staged_path(&staging_dir, digest).exists()));
+        });
+        // With no writer, a blocking open of the FIFO never returns.
+        let (outcome, copy_left) = receiver.recv_timeout(Duration::from_secs(5))?;
+        assert!(matches!(
+            outcome,
+            Ok(Response::Error(ProtoError::VerificationFailed))
+        ));
+        assert!(!copy_left);
+        assert_eq!(std::fs::read(&target)?, b"old-binary");
+        Ok(())
+    }
+
+    #[test]
+    fn replace_binary_leaves_no_copy_after_a_failed_verification()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let state_root = work.path().join("state");
+        std::fs::create_dir_all(&state_root)?;
+        let target = swap_target(work.path(), "detent-leftover", b"old-binary")?;
+        let (digest, bytes) = plant_release(&state_root, "wrong-identity.json")?;
+        std::fs::write(
+            state_root
+                .join(STAGED_DIR)
+                .join(format!("{FIXTURE_TAG}.sigstore.json")),
+            b"not a sigstore bundle",
+        )?;
+        let staging_dir = work.path().join("monitor-staging");
+        let mut monitor = update_monitor(&state_root, &staging_dir, target.clone())?;
+        let response = monitor.dispatch(Request::ReplaceBinary {
+            tag: FIXTURE_TAG.to_owned(),
+            len: bytes.len() as u64,
+            sha256: digest,
+        })?;
+        assert!(matches!(
+            response,
+            Response::Error(ProtoError::VerificationFailed)
+        ));
+        assert!(!staged_path(&staging_dir, digest).exists());
+        assert_eq!(std::fs::read(&target)?, b"old-binary");
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn replace_binary_leaves_no_copy_after_a_failed_swap() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let work = TempDir::new()?;
+        let state_root = work.path().join("state");
+        std::fs::create_dir_all(&state_root)?;
+        let (digest, bytes) = plant_release(&state_root, "valid.json")?;
+        let staging_dir = work.path().join("monitor-staging");
+        let mut monitor =
+            update_monitor(&state_root, &staging_dir, work.path().join("detent-gone"))?;
+        let response = monitor.dispatch(Request::ReplaceBinary {
+            tag: FIXTURE_TAG.to_owned(),
+            len: bytes.len() as u64,
+            sha256: digest,
+        })?;
+        assert_eq!(io_message(&response), Some("running binary is missing"));
+        assert!(!staged_path(&staging_dir, digest).exists());
+        Ok(())
+    }
+
     #[cfg(feature = "update")]
     #[test]
     fn replace_binary_verifies_against_the_embedded_roots_by_default()
@@ -5029,8 +5174,9 @@ mod tests {
         let work = TempDir::new()?;
         let path = work.path().join("bundle");
         std::fs::write(&path, b"1234")?;
-        assert_eq!(super::read_bounded_file(&path, 4)?, b"1234");
-        assert!(super::read_bounded_file(&path, 3).is_err());
+        let file = std::fs::File::open(&path)?;
+        assert_eq!(super::read_bounded_file(&file, 4)?, b"1234");
+        assert!(super::read_bounded_file(&std::fs::File::open(&path)?, 3).is_err());
         Ok(())
     }
 

@@ -148,12 +148,6 @@ Owner decisions that block or change items are in §4.
 
 In this order (highest risk first):
 
-3. **B4 (C1-b) — the bundle open and the leftover copy.** In the
-   `ReplaceBinary` path, open `<tag>.sigstore.json` the way
-   `open_staged_input` opens the binary (per-component `O_NOFOLLOW`, owner
-   check, regular file, `O_NONBLOCK`), and remove the `O_EXCL` copy on every
-   failure path. Tests: symlinked bundle refused; FIFO bundle does not block;
-   no copy left after a failed verify.
 5. **B9 (L-PLAT7) — trust the staging directory.** Create it `0700`, then
    require owner = monitor euid and no group/other write. Test: mode `0777` or
    another owner is refused.
