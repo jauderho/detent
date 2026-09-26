@@ -1842,7 +1842,7 @@ fn is_valid_cidr(s: &str) -> bool {
     let Some((ip_part, prefix_part)) = s.split_once('/') else {
         return false;
     };
-    if ip_part.is_empty() || prefix_part.is_empty() {
+    if ip_part.is_empty() || !prefix_part.bytes().all(|b| b.is_ascii_digit()) {
         return false;
     }
     if !is_valid_ip(ip_part) {
@@ -2781,6 +2781,15 @@ mod tests {
         assert!(is_valid_ip("192.168.1.1"));
         assert!(is_valid_ip("2001:db8::1"));
         assert!(!is_valid_ip("not-an-ip"));
+    }
+
+    #[test]
+    fn is_valid_cidr_refuses_a_signed_prefix() {
+        // `u8::from_str` takes a leading `+`; no backend does.
+        assert!(!is_valid_cidr("10.0.0.1/+24"));
+        assert!(!is_valid_cidr("2001:db8::1/+64"));
+        assert!(!is_valid_cidr("10.0.0.1/-1"));
+        assert!(is_valid_cidr("10.0.0.1/0"));
     }
 
     #[test]
