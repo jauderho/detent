@@ -243,7 +243,7 @@ fn record_confinement(
     role: &str,
 ) -> std::io::Result<()> {
     use rustix::fs::{
-        AtFlags, FileType, Gid, Mode, OFlags, Uid, fchown, fstat, mkdirat, openat, renameat,
+        AtFlags, CWD, FileType, Gid, Mode, OFlags, Uid, fchown, fstat, mkdirat, openat, renameat,
         statat, unlinkat,
     };
     use rustix::io::Errno;
@@ -251,7 +251,9 @@ fn record_confinement(
 
     let json = serde_json::to_vec_pretty(confinement).map_err(std::io::Error::other)?;
     let dir_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let root = rustix::fs::open(state_root, dir_flags, Mode::empty())?;
+    // `openat(CWD, …)`, not `open`: rustix issues `open(2)` for `open` on
+    // x86_64, and the worker's seccomp table allows only `openat`.
+    let root = openat(CWD, state_root, dir_flags, Mode::empty())?;
     let created = match mkdirat(&root, CONFINEMENT_DIR, Mode::from_bits_truncate(0o700)) {
         Ok(()) => true,
         Err(Errno::EXIST) => false,
@@ -260,16 +262,17 @@ fn record_confinement(
     let dir = openat(&root, CONFINEMENT_DIR, dir_flags, Mode::empty())?;
     // The worker keeps its own state here too (`detent_web::auth`): a
     // directory the root monitor created must belong to the state root's
-    // owner. `EPERM` means this process is not root, so it is that owner.
+    // owner. Only a creator that is not that owner calls `fchown`: the worker
+    // creates it as its own owner and never does, because its seccomp table
+    // has no `fchown`.
     if created {
-        let owner = fstat(&root)?;
-        match fchown(
-            &dir,
-            Some(Uid::from_raw(owner.st_uid)),
-            Some(Gid::from_raw(owner.st_gid)),
-        ) {
-            Ok(()) | Err(Errno::PERM) => {}
-            Err(err) => return Err(err.into()),
+        let (owner, made) = (fstat(&root)?, fstat(&dir)?);
+        if (made.st_uid, made.st_gid) != (owner.st_uid, owner.st_gid) {
+            fchown(
+                &dir,
+                Some(Uid::from_raw(owner.st_uid)),
+                Some(Gid::from_raw(owner.st_gid)),
+            )?;
         }
     }
     let name = confinement_record_name(role);
@@ -941,6 +944,70 @@ mod tests {
         );
         assert_eq!((state.uid(), state.gid()), (root.uid(), root.gid()));
         Ok(())
+    }
+
+    /// Confines the forked child with `policy` as `role`, and leaves this
+    /// (test) process unconfined.
+    struct ConfineChildAs(
+        detent_platform::sandbox::Role,
+        detent_platform::sandbox::Policy,
+    );
+
+    impl detent_platform::privsep::spawn::SandboxHooks for ConfineChildAs {
+        fn confine_worker(&self) -> Result<(), detent_platform::privsep::spawn::SandboxError> {
+            detent_platform::sandbox::confine(self.0, &self.1)
+                .map(|_| ())
+                .map_err(|err| detent_platform::privsep::spawn::SandboxError(err.to_string()))
+        }
+    }
+
+    /// Fork, confine the child with `role`'s production policy, and have it
+    /// record its confinement into a state root with no `state/` yet. The
+    /// record is written after confinement in `serve`, so every syscall on
+    /// its path must be in that role's seccomp table.
+    fn record_in_a_confined_child(role: detent_platform::sandbox::Role, name: &str) -> R {
+        use detent_platform::privsep::allowlist::Allowlist;
+        use detent_platform::privsep::spawn::{Role, SpawnConfig, abort_child, spawn_pair};
+        use detent_platform::sandbox::Policy;
+
+        let dir = tempfile::TempDir::new()?;
+        let state_root = dir.path().join("root");
+        std::fs::create_dir(&state_root)?;
+        let allow = Allowlist::from_modules(&[], &AllowConfig::with_state_root(&state_root))?;
+        let policy = match role {
+            detent_platform::sandbox::Role::Monitor => Policy::monitor(&allow),
+            detent_platform::sandbox::Role::Worker => Policy::worker(&allow),
+        };
+        let spawned = spawn_pair(&SpawnConfig::unprivileged(), &ConfineChildAs(role, policy))?;
+        match spawned.role {
+            Role::Worker(_client) => {
+                let ok = record_confinement(&full_confinement(), &state_root, name).is_ok();
+                abort_child(i32::from(!ok));
+            }
+            Role::Monitor(handle) => {
+                assert_eq!(
+                    handle.wait()?,
+                    Some(0),
+                    "child exited non-zero or was killed by a signal"
+                );
+                assert!(
+                    state_root
+                        .join(format!("state/confinement-{name}.json"))
+                        .is_file()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_confined_worker_records_its_confinement_on_a_first_start() -> R {
+        record_in_a_confined_child(detent_platform::sandbox::Role::Worker, "worker")
+    }
+
+    #[test]
+    fn a_confined_monitor_records_its_confinement_on_a_first_start() -> R {
+        record_in_a_confined_child(detent_platform::sandbox::Role::Monitor, "monitor")
     }
 
     #[test]
