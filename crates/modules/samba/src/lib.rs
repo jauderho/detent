@@ -467,6 +467,48 @@ const REC_INTERFACES: MessageId = MessageId::new("samba-rec-interfaces");
 const WRITABLE_EXPOSURE: MessageId = MessageId::new("samba-writable-exposure");
 /// Fluent id: a share runs a command with root privileges.
 const ROOT_COMMAND: MessageId = MessageId::new("samba-root-command");
+/// Fluent id: a client can make samba run a command.
+const CLIENT_COMMAND: MessageId = MessageId::new("samba-client-command");
+/// Fluent id: `usershare allow guests` lets users publish guest shares.
+const USERSHARE_GUESTS: MessageId = MessageId::new("samba-usershare-guests");
+/// Fluent id: `wide links` lets symbolic links lead out of a share.
+const WIDE_LINKS: MessageId = MessageId::new("samba-wide-links");
+
+/// Parameters whose value is a command samba runs as root (smb.conf(5)), as
+/// [`normalise`]d names.
+const ROOT_COMMANDS: &[&str] = &[
+    "rootpreexec",
+    "rootpostexec",
+    "adduserscript",
+    "deleteuserscript",
+    "addgroupscript",
+    "deletegroupscript",
+    "addusertogroupscript",
+    "deleteuserfromgroupscript",
+    "setprimarygroupscript",
+    "addmachinescript",
+    "renameuserscript",
+    "usernamemapscript",
+    "panicaction",
+    "shutdownscript",
+    "abortshutdownscript",
+    "addsharecommand",
+    "changesharecommand",
+    "deletesharecommand",
+];
+
+/// Parameters that let a client make samba run a command: the text of a
+/// `WinPopup` message, or a file the client writes with the magic name. As
+/// [`normalise`]d names.
+const CLIENT_COMMANDS: &[&str] = &["messagecommand", "magicscript"];
+
+/// Whether an smb.conf boolean is true: `yes`, `true`, `on` or `1`, any case.
+fn is_true(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "yes" | "true" | "on" | "1"
+    )
+}
 
 /// Checks one entry's shape: a directive needs a key, a header a name. Both
 /// can only fail for a model that arrived through the JSON API — `parse_entry`
@@ -651,6 +693,13 @@ fn validate_scope(
     {
         out.push(Diagnostic::new(Severity::Warning, WRITABLE_EXPOSURE));
     }
+    if let Some(value) = value_of_in_section(entries, section, &["widelinks"])
+        && is_true(value)
+    {
+        out.push(
+            Diagnostic::new(Severity::Warning, WIDE_LINKS).with_arg("value", value.to_owned()),
+        );
+    }
     if recommendations {
         match value_of_in_section(entries, section, &["serversigning"]) {
             Some(value) if !value.eq_ignore_ascii_case("mandatory") => out.push(
@@ -691,14 +740,28 @@ fn validate_values(entries: &[Entry], out: &mut Diagnostics) {
         {
             sections.push(section);
         }
-        if entry.section.is_none()
-            && !entry.value.is_empty()
-            && ["rootpreexec", "rootpostexec"].contains(&normalise(&entry.key).as_str())
-        {
-            out.push(
-                Diagnostic::new(Severity::Warning, ROOT_COMMAND).with_arg("key", entry.key.clone()),
-            );
+        if entry.section.is_none() && !entry.value.is_empty() {
+            let name = normalise(&entry.key);
+            let id = if ROOT_COMMANDS.contains(&name.as_str()) {
+                Some(ROOT_COMMAND)
+            } else if CLIENT_COMMANDS.contains(&name.as_str()) {
+                Some(CLIENT_COMMAND)
+            } else {
+                None
+            };
+            if let Some(id) = id {
+                out.push(Diagnostic::new(Severity::Warning, id).with_arg("key", entry.key.clone()));
+            }
         }
+    }
+    // A global-only parameter: checked once, not per share.
+    if let Some(value) = value_of_in_section(entries, None, &["usershareallowguests"])
+        && is_true(value)
+    {
+        out.push(
+            Diagnostic::new(Severity::Warning, USERSHARE_GUESTS)
+                .with_arg("value", value.to_owned()),
+        );
     }
     validate_scope(entries, None, true, out);
     for section in sections {
@@ -822,11 +885,11 @@ impl ConfigModule for SambaModule {
 #[cfg(test)]
 mod tests {
     use super::{
-        BAD_KEY, BAD_SECTION, BAD_VALUE, EMPTY_KEY, EMPTY_SECTION, Entry, GUEST_OK, MAP_TO_GUEST,
-        MIN_PROTOCOL, Model, REC_INTERFACES, REC_LOAD_PRINTERS, REC_SERVER_SIGNING,
-        RESTRICT_ANONYMOUS, ROOT_COMMAND, SMB_ENCRYPT, SambaModule, WRITABLE_EXPOSURE, classify,
-        entry, hardened_global, parse_entry, protocol_rank, render_line, schema_with_hints,
-        value_of_in_section,
+        BAD_KEY, BAD_SECTION, BAD_VALUE, CLIENT_COMMAND, EMPTY_KEY, EMPTY_SECTION, Entry, GUEST_OK,
+        MAP_TO_GUEST, MIN_PROTOCOL, Model, REC_INTERFACES, REC_LOAD_PRINTERS, REC_SERVER_SIGNING,
+        RESTRICT_ANONYMOUS, ROOT_COMMAND, SMB_ENCRYPT, SambaModule, USERSHARE_GUESTS, WIDE_LINKS,
+        WRITABLE_EXPOSURE, classify, entry, hardened_global, parse_entry, protocol_rank,
+        render_line, schema_with_hints, value_of_in_section,
     };
     use detent_core::descriptor::{
         ArgTemplate, CheckExpectation, ExternalCheck, HostProfile, InitSystem, Os, ValidationCtx,
@@ -866,6 +929,9 @@ mod tests {
             "samba-rec-interfaces",
             "samba-writable-exposure",
             "samba-root-command",
+            "samba-client-command",
+            "samba-usershare-guests",
+            "samba-wide-links",
         ] {
             assert!(
                 CORE_FTL.contains(&format!("{id} =")),
@@ -1434,6 +1500,64 @@ mod tests {
             entry(None, "postexec", "/usr/bin/user-hook"),
         ]);
         assert!(!has(&user, ROOT_COMMAND, Severity::Warning));
+    }
+
+    #[test]
+    fn validate_warns_root_exec_parameters() {
+        // Names are matched as smb.conf(5) reads them: any case, any spacing.
+        for key in [
+            "Add User Script",
+            "delete user script",
+            "add group script",
+            "deletegroupscript",
+            "add user to group script",
+            "delete user from group script",
+            "set primary group script",
+            "add machine script",
+            "rename user script",
+            "username map script",
+            "panic  action",
+            "shutdown script",
+            "abort shutdown script",
+            "add share command",
+            "change share command",
+            "delete share command",
+        ] {
+            let m = model(vec![entry(None, key, "/usr/local/bin/hook %u")]);
+            assert!(has(&m, ROOT_COMMAND, Severity::Warning), "{key:?}");
+            assert!(!has(&m, CLIENT_COMMAND, Severity::Warning), "{key:?}");
+            let unset = model(vec![entry(None, key, "")]);
+            assert!(!has(&unset, ROOT_COMMAND, Severity::Warning), "{key:?}");
+        }
+        for key in ["message command", "Magic Script"] {
+            let m = model(vec![
+                entry(Some("share"), "", ""),
+                entry(None, key, "/bin/sh -c '%s'"),
+            ]);
+            assert!(has(&m, CLIENT_COMMAND, Severity::Warning), "{key:?}");
+            assert!(!has(&m, ROOT_COMMAND, Severity::Warning), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn validate_warns_exposure_parameters() {
+        let open = model(vec![
+            entry(Some("global"), "", ""),
+            entry(None, "usershare allow guests", "Yes"),
+            entry(Some("data"), "", ""),
+            entry(None, "widelinks", "true"),
+        ]);
+        assert!(has(&open, USERSHARE_GUESTS, Severity::Warning));
+        assert!(has(&open, WIDE_LINKS, Severity::Warning));
+        let closed = model(vec![
+            entry(Some("global"), "", ""),
+            entry(None, "usershare allow guests", "no"),
+            entry(Some("data"), "", ""),
+            entry(None, "wide links", "0"),
+        ]);
+        assert!(!has(&closed, USERSHARE_GUESTS, Severity::Warning));
+        assert!(!has(&closed, WIDE_LINKS, Severity::Warning));
+        assert!(!has(&model(Vec::new()), WIDE_LINKS, Severity::Warning));
     }
 
     #[test]
