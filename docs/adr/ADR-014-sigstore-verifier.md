@@ -40,6 +40,7 @@ emitted by GitHub `actions/attest`:
       "logId": { "keyId": "<base64>" },
       "kindVersion": { "kind": "hashedrekord", "version": "0.0.1" },
       "canonicalizedBody": "<base64 hashedrekord JSON>",
+      "inclusionPromise": { "signedEntryTimestamp": "<base64 DER ECDSA by the Rekor key>" },
       "inclusionProof": {
         "logIndex": 123, "treeSize": 456,
         "checkpoint": { "envelope": "<Rekor checkpoint text>" },
@@ -48,7 +49,7 @@ emitted by GitHub `actions/attest`:
     } ]
   },
   "dsseEnvelope": {
-    "payloadType": "application/vnd.dsse.envelope.v1+json",
+    "payloadType": "application/vnd.in-toto+json",
     "payload": "<base64 in-toto statement>",
     "signatures": [ { "keyid": "", "sig": "<base64 ECDSA-P256 over PAE>" } ]
   }
@@ -61,7 +62,9 @@ The `payload` decodes to an in-toto v1 statement:
 Parsing uses `deny_unknown_fields`-style strictness on the envelope fields the
 verifier consumes; unknown extra fields are tolerated (GitHub may extend
 predicates), but a missing `mediaType`, `verificationMaterial`, `tlogEntries`,
-`inclusionProof`, or `dsseEnvelope` is a hard error.
+`inclusionProof`, `inclusionPromise`, or `dsseEnvelope` is a hard error. The
+v0.3 single-certificate form `verificationMaterial.certificate` (`{"rawBytes":
+…}`) is accepted in place of `x509CertificateChain`.
 
 ### Verification steps, in order
 
@@ -87,15 +90,26 @@ No partial state, no retries with weaker checks.
    entry whose `digest.sha256` equals the SHA-256 of the downloaded file.
    Zero or multiple matching subjects = refuse (ambiguous).
 6. **Rekor inclusion** — verify `inclusionProof`: recompute the Merkle
-   root from `hashes` + the leaf hash (RFC 6962), verify the `checkpoint`
+   root from `hashes` + the leaf hash `SHA-256(0x00 ‖ canonicalizedBody)`
+   (RFC 6962; the leaf covers the body only), verify the `checkpoint`
    envelope's signature against the **embedded Rekor log public key**, and
    check the checkpoint's tree size ≥ the proof's tree size. The
    `canonicalizedBody` must agree with the envelope: for `hashedrekord`, the
    same signature bytes and a public key equal to the leaf certificate's key;
    for `dsse`/`intoto`, the same signature bytes and a payload hash equal to
-   the SHA-256 of the envelope payload. The Rekor signed entry timestamp (SET)
-   is not verified, and embedded SCTs are only checked for presence (a
-   non-empty SCT list), not against CT log keys (tracked by STAGE3 H17/M16).
+   the SHA-256 of the envelope payload. Then verify the Rekor signed entry
+   timestamp (`inclusionPromise.signedEntryTimestamp`): an ECDSA P-256
+   SHA-256 signature by the embedded Rekor key over the RFC 8785 JSON
+   `{"body":<base64 canonicalizedBody>,"integratedTime":…,"logID":<hex keyId>,"logIndex":…}`
+   (as Rekor `VerifySignedEntryTimestamp` and sigstore-go `VerifySET`). The
+   SET is the only signature over `integratedTime`, the instant step 2 uses.
+
+   **Not verified:** embedded SCTs are only checked for presence (a
+   non-empty SCT list), not against CT log keys. The checkpoint is read as
+   `<origin> <size>` / base64(SHA-256(root)), not as Rekor's signed note
+   (origin line, size line, base64 root, key-hint signature), and its size
+   is checked with ≥, not = (STAGE3 H17 step 5). Unknown entry kinds fall
+   through to the `hashedrekord` body check (H17 step 6).
 
 ### Embedded trust root and refresh procedure
 
@@ -117,10 +131,15 @@ Refresh procedure (per release, and out-of-band when Sigstore rotates roots):
 
 ### Test vectors
 
-Fixtures are real `actions/attest` bundles captured from a `v0.0.1-rc`
-release (per PLAN Phase 9 task 3), stored under
-`crates/detent-update/tests/fixtures/`. Required set — every one must fail or
-pass for the stated reason, asserted by test:
+The bundle fixtures under `crates/detent-update/tests/fixtures/` are
+self-minted by `gen-fixtures` (a test Fulcio root and a test Rekor key; real
+ECDSA over the real PAE, checkpoint and SET bytes). A captured real
+`actions/attest` release bundle (PLAN Phase 9 task 3, STAGE3 H17 step 8)
+still needs a release tag. Two real Rekor vectors check the formats against
+production: `rekor-public-good-set.json` (a public-good SET and the Rekor
+key, from sigstore-go) and `rekor-staging-proof.json` (a body, leaf hash and
+inclusion proof to Rekor's root hash, from sigstore-python). Required set —
+every one must fail or pass for the stated reason, asserted by test:
 
 | Fixture | Expected |
 |---|---|
@@ -131,7 +150,8 @@ pass for the stated reason, asserted by test:
 | `bad-checkpoint-sig.json` | step 6 fails: checkpoint signature does not verify against the embedded Rekor key |
 | `bad-body-sig.json` | step 6 fails: tlog body carries a signature other than the envelope's |
 | `bad-body-key.json` | step 6 fails: tlog body names a key other than the leaf's |
-| `bad-set.json` | step 6 fails: inclusion proof fails to verify against the embedded Rekor key |
+| `bad-inclusion-path.json` | step 6 fails: a corrupted path hash gives a root the checkpoint does not sign |
+| `bad-set.json` | step 6 fails: the SET is signed by a key other than the embedded Rekor key |
 
 ### Error taxonomy
 
@@ -144,7 +164,7 @@ enum VerificationError {
     IssuerMismatch,       // step 3: OIDC issuer extension != GitHub Actions issuer
     SignatureInvalid,     // step 4: DSSE signature does not verify
     DigestMismatch,       // step 5: subject digest != file digest (or ambiguous subject)
-    SetInvalid,           // step 6: Rekor inclusion proof / checkpoint fails
+    SetInvalid,           // step 6: Rekor inclusion proof / checkpoint / body / SET fails
     TrustRootUnavailable, // no embedded root valid at integratedTime (rotation gap)
 }
 ```
