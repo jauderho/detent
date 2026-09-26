@@ -203,6 +203,16 @@ mod tests {
         assert_eq!(chosen.tag, "v0.0.2");
     }
 
+    /// STAGE3 L-SUP12: the API lists the backport `v0.0.3` first because it
+    /// was published later; the newer `v0.1.0` must still win.
+    #[test]
+    fn a_later_published_backport_does_not_hide_a_newer_release() {
+        let releases = [candidate("v0.0.3", 3), candidate("v0.1.0", 5)];
+        let chosen = select(&releases, &current(), now(), &Policy::default())
+            .expect("both releases are past the minimum age");
+        assert_eq!(chosen.tag, "v0.1.0");
+    }
+
     #[test]
     fn backport_in_api_order_does_not_hide_newer_release() {
         let releases = [candidate("v0.1.0", 3), candidate("v0.0.2", 3)];
