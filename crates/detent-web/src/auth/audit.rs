@@ -35,7 +35,7 @@
 
 use std::fs::OpenOptions;
 use std::io::Write as _;
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -48,6 +48,9 @@ use time::format_description::well_known::Rfc3339;
 /// Mode of the auth log: readable only by the account that owns the state
 /// directory.
 const AUDIT_FILE_MODE: u32 = 0o600;
+
+/// Mode of the audit directory when this sink creates it.
+const AUDIT_DIR_MODE: u32 = 0o700;
 
 const ROTATE_AT: u64 = 16 * 1024 * 1024;
 
@@ -198,7 +201,12 @@ impl FileAuthAudit {
             serde_json::to_vec(record).map_err(|err| std::io::Error::other(err.to_string()))?;
         line.push(b'\n');
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
+            // `0700`: the directory holds the auth and the ops logs, and
+            // whichever log is written first creates it.
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(AUDIT_DIR_MODE)
+                .create(parent)?;
         }
         // Rotate to `.1` above 16 MiB (M10): best-effort, metadata only on
         // the fast path, keeps the same `0600` discipline.
@@ -305,7 +313,7 @@ impl AuthAudit for CaptureAuthAudit {
 mod tests {
     use super::{
         AUTH_LOG_FILE, AuthAudit as _, AuthEvent, AuthRecord, CaptureAuthAudit, FileAuthAudit,
-        NullAuthAudit, emit,
+        NullAuthAudit, ROTATE_AT, emit,
     };
     use detent_core::diag::MessageId;
     use detent_ops::audit::AuditResult;
@@ -366,6 +374,49 @@ mod tests {
             "the newest record should come first"
         );
         assert_eq!(sink.query(None).len(), 6);
+        Ok(())
+    }
+
+    #[test]
+    fn a_log_at_16_mib_is_rotated_to_dot_1_before_the_next_append() -> R {
+        let root = tempfile::tempdir()?;
+        let sink = FileAuthAudit::under_state_root(root.path());
+        let record = AuthRecord::new(AuthEvent::LoginFailed, "alice", AuditResult::Error);
+        sink.record(&record);
+        // One byte under the limit: no rotation.
+        std::fs::File::options()
+            .write(true)
+            .open(sink.path())?
+            .set_len(ROTATE_AT - 1)?;
+        sink.record(&record);
+        let rotated = sink.path().with_extension("jsonl.1");
+        assert!(!rotated.exists());
+        // At the limit: the full file moves to `.1` and a new one starts.
+        std::fs::File::options()
+            .write(true)
+            .open(sink.path())?
+            .set_len(ROTATE_AT)?;
+        sink.record(&record);
+        assert_eq!(std::fs::metadata(&rotated)?.len(), ROTATE_AT);
+        assert_eq!(std::fs::read_to_string(sink.path())?.lines().count(), 1);
+        assert_eq!(
+            std::fs::metadata(sink.path())?.permissions().mode() & 0o777,
+            0o600
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_sink_creates_the_audit_directory_0700() -> R {
+        let root = tempfile::tempdir()?;
+        let sink = FileAuthAudit::under_state_root(root.path());
+        sink.record(&AuthRecord::new(
+            AuthEvent::LoginSucceeded,
+            "alice",
+            AuditResult::Ok,
+        ));
+        let dir = sink.path().parent().ok_or("no parent")?;
+        assert_eq!(std::fs::metadata(dir)?.permissions().mode() & 0o777, 0o700);
         Ok(())
     }
 
