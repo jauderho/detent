@@ -4,6 +4,10 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-26 - Phase 6 C3c: `serve` starts the acme process (ADR-015)
+
+With `tls.bootstrap = "acme"`, preflight checks the `[acme]` settings and that the credentials directory and `tls.cert_dir` are under the state root, and keeps the provider it builds (the secret is read as root before any fork). `run` forks the acme process after the runner and before the pair (`start_acme`, `fork_acme`): the child drops the runner handle and the configuration, the parent drops the provider. The worker answers on a thread once its `CertStore` exists; the monitor drops its end and reaps the process last. The wait between rounds ends when the worker closes the channel (`wait_or_peer`). Next: C4 (CI Pebble job runs `serve`'s acme process under real confinement; `strace -f` proof of the `Acme` table). Traps: the credentials directory must exist and be writable by uid `detent` before start (Landlock skips a missing path); the acme `Hello` times out after 60 s if the worker is slow to bind.
+
 ## 2026-09-26 - H17 core: Rekor body leaf and SET verification (STAGE4 4.2 item 1)
 
 The Merkle leaf is now `SHA-256(0x00 ‖ canonicalizedBody)`, and step 6 verifies the Rekor SET (`inclusionPromise`, now required) with the embedded Rekor key over the RFC 8785 JSON `{"body","integratedTime","logID","logIndex"}`. This closes the 2026-09-25 SET gap below: `a_forged_integrated_time_is_refused` now fails with the SET check removed. Real Rekor vectors check both formats: a public-good SET (`rekor-public-good-set.json`, from sigstore-go) and a staging inclusion proof (`rekor-staging-proof.json`, from sigstore-python). The old `bad-set.json` is now `bad-inclusion-path.json`; the new `bad-set.json` carries a SET from another key. All fixtures were re-minted. `a_v03_single_certificate_bundle_passes` covers the `verificationMaterial.certificate` form. `h17-set-partial.patch` is deleted.

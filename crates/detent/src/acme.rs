@@ -33,6 +33,9 @@ use detent_acme::{
     Account, AcmeError, DnsProvider, DnsRecord, IssueRequest, Issued, RetryPolicy, Warning,
 };
 use detent_platform::privsep::acme::{AcmeChannelError, AcmeClient, KeyPem};
+use detent_platform::privsep::spawn::{
+    AcmeHandle, SandboxHooks, SpawnConfig, SpawnError, spawn_acme,
+};
 use detent_platform::privsep::transport::{Channel, ChannelError};
 use detent_web::{AcmeConfig, CertStore, CertifiedKeyPair, TlsError};
 use rustls_pki_types::CertificateDer;
@@ -48,6 +51,16 @@ const FIRST_RETRY: Duration = Duration::from_secs(60);
 
 /// The longest wait between two attempts after failures.
 const MAX_RETRY: Duration = CHECK_INTERVAL;
+
+/// How one order polls the CA for a ready order and for the certificate:
+/// first after one second, then at doubling delays, for at most five
+/// minutes. A real CA validates dns-01 and issues in seconds to a minute;
+/// the library default gives up after 30 seconds, and a failed order uses
+/// up CA rate limits. Five minutes is well inside the hour between checks,
+/// and the doubling keeps it to about nine polls.
+pub(crate) const ORDER_POLICY: RetryPolicy = RetryPolicy::new()
+    .initial_delay(Duration::from_secs(1))
+    .timeout(Duration::from_secs(300));
 
 /// The CA: issues a certificate and tells when to renew one.
 pub(crate) trait Issuer {
@@ -441,6 +454,32 @@ pub(crate) fn acme_main(channel: Channel, mut issuer: impl Issuer, cert_dir: &Pa
     0
 }
 
+/// Forks the acme process with [`spawn_acme`]. The child drops
+/// `inherited` first, then runs [`acme_main`] with `issuer`; the parent gets
+/// `inherited` back.
+///
+/// Put in `inherited` what the acme process must not keep: above all the
+/// runner handle, whose channel reaches the privileged runner. `issuer`
+/// holds the dns-01 provider and its secret. It moves into the child's
+/// body, which the parent drops when this returns, so only the acme
+/// process keeps the secret.
+///
+/// # Errors
+///
+/// As [`spawn_acme`]; the parent's `inherited` is dropped with the error.
+pub(crate) fn fork_acme<T>(
+    config: &SpawnConfig,
+    sandbox: &dyn SandboxHooks,
+    issuer: impl Issuer,
+    cert_dir: PathBuf,
+    inherited: T,
+) -> Result<(AcmeHandle, T), SpawnError> {
+    spawn_acme(config, sandbox, inherited, move |channel, inherited| {
+        drop(inherited);
+        acme_main(channel, issuer, &cert_dir)
+    })
+}
+
 /// The worker's check of a pair from the acme process: it must parse, the
 /// key must match the leaf, every one of `domains` must equal a DNS name
 /// of the leaf (ASCII case-insensitive), and the leaf must be valid at
@@ -519,6 +558,24 @@ pub(crate) fn serve_installs(
     }
 }
 
+/// Starts [`serve_installs`] on its own thread, as the worker does once its
+/// certificate store exists. Nothing joins the thread: when it ends, the
+/// worker keeps serving the last certificate.
+///
+/// # Errors
+///
+/// The thread could not be started.
+pub(crate) fn spawn_installs(
+    channel: Channel,
+    domains: Vec<String>,
+    cert_dir: PathBuf,
+    store: Arc<CertStore>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("acme-installs".to_owned())
+        .spawn(move || serve_installs(channel, domains, cert_dir, store))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -536,7 +593,7 @@ mod tests {
 
     use super::{
         AcmeIssuer, FIRST_RETRY, Installer, Issuer, MAX_RETRY, Outcome, RenewError, acme_main,
-        check_and_install, renew_once, run_loop, serve_installs, wait_or_peer,
+        check_and_install, renew_once, run_loop, serve_installs, spawn_installs, wait_or_peer,
     };
 
     type R = Result<(), Box<dyn std::error::Error>>;
@@ -1514,6 +1571,84 @@ mod tests {
         assert!(dir.path().join(detent_web::ACME_PAIR_FILE).exists());
         assert!(logs.contains(&pair.fingerprint()), "{logs}");
         assert!(!logs.contains("BEGIN"), "{logs}");
+        Ok(())
+    }
+
+    /// The thread the worker starts: the acme process installs a good pair
+    /// over the channel, and the store then serves it.
+    #[test]
+    fn the_worker_thread_installs_a_pair_and_the_store_serves_it() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let (store, bootstrap) = bootstrap_store()?;
+        let store = Arc::new(store);
+        let good = Cert::valid(&["a.example", "b.example"], (2020, 1, 1), (2099, 1, 1))?;
+        let (acme_end, worker_end) = Channel::pair()?;
+        let (thread, logs) = capture(|| {
+            spawn_installs(
+                worker_end,
+                domains(),
+                dir.path().to_path_buf(),
+                Arc::clone(&store),
+            )
+        });
+        let thread = thread?;
+        assert_eq!(thread.thread().name(), Some("acme-installs"), "{logs}");
+        let mut client = AcmeClient::new(acme_end);
+        client.hello()?;
+        client.install(good.chain_pem.clone(), KeyPem::new(good.key_pem.clone()))?;
+        drop(client);
+        thread.join().map_err(|_| "install thread panicked")?;
+        assert_ne!(served_leaf(&store), bootstrap);
+        assert_eq!(served_leaf(&store), good.pair()?.cert_der());
+        Ok(())
+    }
+
+    /// An issuer that records when it is dropped.
+    struct Tracked(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl Issuer for Tracked {
+        fn issue(&mut self) -> impl Future<Output = Result<Issued, AcmeError>> {
+            std::future::ready(Err(AcmeError::NoDns01Challenge))
+        }
+
+        fn renewal_window(&mut self, _leaf_der: &[u8]) -> impl Future<Output = Option<(i64, i64)>> {
+            std::future::ready(None)
+        }
+    }
+
+    /// After the fork the parent holds no issuer (it holds the provider
+    /// and its secret) and gets back what it passed as `inherited`.
+    #[test]
+    fn the_parent_drops_the_issuer_at_the_fork_and_keeps_what_it_passed() -> R {
+        use detent_platform::privsep::spawn::{NoSandbox, SpawnConfig};
+        let dir = tempfile::TempDir::new()?;
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (kept, mut peer) = Channel::pair()?;
+        let (mut handle, mut kept) = logged(|| {
+            super::fork_acme(
+                &SpawnConfig::unprivileged(),
+                &NoSandbox,
+                Tracked(Arc::clone(&dropped)),
+                dir.path().to_path_buf(),
+                kept,
+            )
+        })?;
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+        // The child greets; a wrong version ends it with status 1.
+        let hello = handle.channel.recv::<AcmeMessage>()?;
+        assert!(matches!(hello, AcmeMessage::Hello { .. }), "{hello:?}");
+        handle.channel.send(&WorkerMessage::Hello {
+            version: ACME_PROTO_VERSION.wrapping_add(1),
+        })?;
+        assert_eq!(handle.wait()?, Some(1));
+        kept.send(&7_u8)?;
+        assert_eq!(peer.recv::<u8>()?, 7);
         Ok(())
     }
 
