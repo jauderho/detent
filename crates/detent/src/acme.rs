@@ -980,16 +980,25 @@ mod tests {
             ..FakeInstaller::default()
         };
         let mut delays = Vec::new();
-        block_on(run_loop(
-            &mut issuer,
-            &mut installer,
-            dir.path(),
-            || 0,
-            |delay| {
-                delays.push(delay);
-                std::future::ready(ControlFlow::Continue(()))
-            },
-        ))?;
+        let (ended, logs) = capture(|| {
+            block_on(run_loop(
+                &mut issuer,
+                &mut installer,
+                dir.path(),
+                || 0,
+                |delay| {
+                    delays.push(delay);
+                    std::future::ready(ControlFlow::Continue(()))
+                },
+            ))
+        });
+        ended?;
+        assert!(logs.contains("certificate renewal failed"), "{logs}");
+        assert!(logs.contains("retry_secs=60"), "{logs}");
+        assert!(
+            logs.contains("the worker serves a new ACME certificate"),
+            "{logs}"
+        );
         let minutes: Vec<u64> = delays.iter().map(|d| d.as_secs() / 60).collect();
         assert_eq!(minutes, vec![1, 2, 4, 8, 16, 32, 60, 60, 60, 1]);
         assert_eq!(delays.first(), Some(&FIRST_RETRY));
@@ -1344,7 +1353,10 @@ mod tests {
     }
 
     /// The runtime cannot watch a regular file: the wait still runs, to its
-    /// end, and says so in the log.
+    /// end, and says so in the log. Linux only: epoll refuses a regular file,
+    /// but kqueue (macOS) accepts one, so there this path cannot be reached
+    /// with a file.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_descriptor_that_cannot_be_watched_waits_the_full_delay() -> R {
         use std::os::fd::AsFd as _;
