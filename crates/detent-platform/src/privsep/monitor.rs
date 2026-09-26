@@ -3960,9 +3960,10 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         install_tracing();
         let fx = fixture()?;
+        let services = RecordingServices::new(&fx.target);
         let hooks = Hooks {
             checks: &super::NoChecks,
-            services: &OkServices,
+            services: &services,
         };
         let mut monitor = greeted(fx.allow()?, hooks);
         arm_commit(&mut monitor, Some(RESTART_BINDING_0))?;
@@ -3977,6 +3978,7 @@ mod tests {
             }
         ));
         assert_eq!(std::fs::read(&fx.target)?, b"v1");
+        services.assert_replayed_after_restore();
         Ok(())
     }
 
@@ -4016,6 +4018,112 @@ mod tests {
         assert!(!monitor.has_pending_commit());
         assert_eq!(std::fs::read(&fx.target)?, b"v1");
         assert!(!fx.state_root.join(PENDING_COMMIT_MARKER).exists());
+        Ok(())
+    }
+
+    /// Records each service call with the target's contents at call time, so
+    /// a test can check the replay ran and ran after the file was restored.
+    struct RecordingServices {
+        target: PathBuf,
+        calls: std::cell::RefCell<Vec<(CoreServiceAction, Vec<u8>)>>,
+    }
+
+    impl RecordingServices {
+        fn new(target: &Path) -> Self {
+            Self {
+                target: target.to_path_buf(),
+                calls: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        /// The one call every rollback path must make: a restart, seen
+        /// after the file is back to `v1`.
+        fn assert_replayed_after_restore(&self) {
+            assert_eq!(
+                *self.calls.borrow(),
+                vec![(CoreServiceAction::Restart, b"v1".to_vec())]
+            );
+        }
+    }
+
+    impl ServiceControl for RecordingServices {
+        fn service(
+            &self,
+            _binding: &ServiceBinding,
+            action: CoreServiceAction,
+        ) -> Result<ServiceOutcome, HookError> {
+            let contents = std::fs::read(&self.target).unwrap_or_default();
+            self.calls.borrow_mut().push((action, contents));
+            Ok(ServiceOutcome {
+                binding: BindingId(0),
+                active: true,
+                detail: "running".to_owned(),
+            })
+        }
+    }
+
+    #[test]
+    fn an_expired_commit_replays_the_service_action() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let services = RecordingServices::new(&fx.target);
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &services,
+        };
+        let mut monitor = greeted(fx.allow()?, hooks);
+        arm_commit(&mut monitor, Some(RESTART_BINDING_0))?;
+        assert!(services.calls.borrow().is_empty());
+        if let Some(pending) = monitor.pending.as_mut() {
+            pending.deadline = std::time::Instant::now();
+        }
+        monitor.enforce_deadline()?;
+        assert!(!monitor.has_pending_commit());
+        services.assert_replayed_after_restore();
+        Ok(())
+    }
+
+    #[test]
+    fn a_monitor_exit_with_a_pending_commit_replays_the_service_action()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let services = RecordingServices::new(&fx.target);
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &services,
+        };
+        let mut monitor = greeted(fx.allow()?, hooks);
+        arm_commit(&mut monitor, Some(RESTART_BINDING_0))?;
+        let (mut monitor_end, worker_end) = Channel::pair()?;
+        drop(worker_end);
+        let lock = Monitor::lock(&fx.state_root)?;
+        assert_eq!(
+            monitor.serve_locked(&mut monitor_end, lock)?,
+            ExitReason::PeerClosed
+        );
+        services.assert_replayed_after_restore();
+        Ok(())
+    }
+
+    #[test]
+    fn recover_pending_replays_the_service_action_at_start()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        {
+            let mut monitor = greeted(fx.allow()?, Hooks::default());
+            arm_commit(&mut monitor, Some(RESTART_BINDING_0))?;
+            // Dropped without confirming, as if the process died.
+        }
+        let services = RecordingServices::new(&fx.target);
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &services,
+        };
+        let monitor = Monitor::new(fx.allow()?, hooks);
+        let recovered = monitor
+            .recover_pending()?
+            .ok_or("expected a recovered commit")?;
+        assert!(recovered.failures.is_empty(), "{:?}", recovered.failures);
+        services.assert_replayed_after_restore();
         Ok(())
     }
 
