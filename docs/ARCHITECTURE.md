@@ -59,7 +59,12 @@ privilege.
        1. spawn_runner ────────┼──────────────▶ runner (root, NOT confined)
                                │                  runs declared validators and
                                │                  service actions, by id only
-       2. spawn_pair ──────────┤
+       2. spawn_acme ──────────┼──────────────▶ acme (uid `detent`, confined,
+                               │                  outbound only; only with
+                               │                  `[tls] bootstrap = "acme"`)
+                               │                  ACME client, hands each
+                               │                  certificate to the worker
+       3. spawn_pair ──────────┤
                                ├──▶ monitor (root, confined: caps, Landlock,
                                │      seccomp, no_new_privs, not dumpable)
                                │      the only process that writes targets
@@ -77,6 +82,14 @@ privilege.
   (`become_worker`) and confines itself.
 - The monitor confines itself in `spawn_pair` before it releases the worker
   (`sandbox.confine_monitor()`, then the start byte).
+- The acme process (ADR-015; `spawn_acme` in `spawn.rs`,
+  `crates/detent-platform/src/privsep/acme.rs`) hardens itself, drops to
+  uid `detent` and confines itself with `Policy::acme` and the `ACME`
+  seccomp table before it runs its body. The pair forked after it inherits
+  the worker's end of its socket pair: the monitor drops it, the worker
+  answers on it (`serve_acme`: `Hello`, then `Install { chain, key }` →
+  `Installed` or `Refused`). Status: the process and its channel exist
+  (slice C1); `serve` does not start it yet.
 - The worker binds the listener, so the port must be ≥ 1024
   (`PRIVILEGED_PORT_CEILING`, `serve.rs`).
 - The dns-01 provider secret lives in `secrets.toml`, next to `detent.toml`
@@ -257,17 +270,17 @@ H17, `docs/stage4-wip/h17-set-partial.patch`).
 
 ## 9. Confinement per process
 
-| | runner | monitor | worker |
-|---|---|---|---|
-| uid | root | root | `detent` |
-| Capabilities | all | bounding set cut to `DAC_OVERRIDE`, `CHOWN`, `FOWNER`; start fails if the cut fails (`require_caps`) | none |
-| `no_new_privs` / not dumpable | no / no | yes / yes | yes / yes |
-| Landlock (writes) | none | target parent dirs, backup dirs, state root, `/run/detent/staging`, the binary's dir; degrades with a warning if absent (`require_landlock` off by default) | state root only |
-| seccomp | none | `MONITOR` table, kill on violation; start fails if it does not install (`require_seccomp`) | `WORKER` table, same rule |
-| Reachable by | monitor only (socket pair) | worker only (socket pair) | network |
+| | runner | monitor | worker | acme |
+|---|---|---|---|---|
+| uid | root | root | `detent` | `detent` |
+| Capabilities | all | bounding set cut to `DAC_OVERRIDE`, `CHOWN`, `FOWNER`; start fails if the cut fails (`require_caps`) | none | none |
+| `no_new_privs` / not dumpable | no / no | yes / yes | yes / yes | yes / yes |
+| Landlock (writes) | none | target parent dirs, backup dirs, state root, `/run/detent/staging`, the binary's dir; degrades with a warning if absent (`require_landlock` off by default) | state root only | ACME credentials dir only |
+| seccomp | none | `MONITOR` table, kill on violation; start fails if it does not install (`require_seccomp`) | `WORKER` table, `EPERM` on violation, same rule | `ACME` table (outbound client: `connect`, no `bind`/`listen`/`accept4`), `EPERM`, same rule |
+| Reachable by | monitor only (socket pair) | worker only (socket pair) | network | worker only (socket pair); no listening socket |
 
 Sources: `crates/detent-platform/src/sandbox/mod.rs` (`Policy::monitor`,
-`Policy::worker`), `sandbox/linux.rs` (`confine`), `sandbox/seccomp.rs`
+`Policy::worker`, `Policy::acme`), `sandbox/linux.rs` (`confine`), `sandbox/seccomp.rs`
 (tables and their derivation). `detent doctor` and the startup notes report
 any degraded step (`report_confinement`, `serve.rs`).
 
