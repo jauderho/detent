@@ -536,7 +536,7 @@ fn prepare_worker(
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> Option<PreparedWorker> {
-    use detent_ops::{AllowAll, AuditSink, FileAudit, OpsEngine};
+    use detent_ops::{AuditSink, FileAudit, OpsEngine};
 
     if client.hello().is_err() {
         let _ = renderer.line(
@@ -553,14 +553,7 @@ fn prepare_worker(
     hostnames.push(host.profile.hostname.clone());
 
     let audit: Box<dyn AuditSink> = Box::new(FileAudit::under_state_root(&settings.state_root));
-    let mut engine = OpsEngine::new(
-        registry,
-        client,
-        host,
-        audit,
-        Box::new(AllowAll),
-        service::for_host(init),
-    );
+    let mut engine = OpsEngine::new(registry, client, host, audit, service::for_host(init));
     engine.set_state_root(settings.state_root.clone());
     let (engine_handle, engine_thread) = detent_web::spawn_engine(engine);
 
@@ -1073,7 +1066,7 @@ mod web_tests {
     use crate::output::{Exit, Renderer};
     use crate::run::Settings;
     use detent_core::descriptor::InitSystem;
-    use detent_ops::{AllowAll, NullAudit, OpsEngine};
+    use detent_ops::{NullAudit, OpsEngine};
     use detent_platform::host::Detected;
     use detent_platform::privsep::allowlist::{Allowlist, Config as AllowConfig};
     use detent_platform::privsep::monitor::{Hooks as MonitorHooks, Monitor};
@@ -1127,7 +1120,6 @@ mod web_tests {
             client,
             Detected::default(),
             Box::new(NullAudit),
-            Box::new(AllowAll),
             detent_platform::service::for_host(InitSystem::Systemd),
         );
         let (handle, thread) = detent_web::spawn_engine(engine);

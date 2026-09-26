@@ -37,8 +37,8 @@ use detent_core::diag::MessageId;
 use detent_core::module::DynModule;
 use detent_ops::report::OpOutcome;
 use detent_ops::{
-    AllowAll, AuditQuery, AuditSink, FileAudit, Identity, NullAudit, OpKind, Operation, OpsEngine,
-    OpsError,
+    AllowAll, AuditQuery, AuditSink, Authz, FileAudit, Identity, NullAudit, OpKind, Operation,
+    OpsEngine, OpsError,
 };
 use detent_platform::fs::atomic::Sha256Digest;
 use detent_platform::host::Detected;
@@ -1210,14 +1210,7 @@ impl Session {
         } else {
             Box::new(FileAudit::under_state_root(&settings.state_root))
         };
-        let engine = OpsEngine::new(
-            registry,
-            client,
-            host,
-            audit,
-            Box::new(AllowAll),
-            service::for_host(init),
-        );
+        let engine = OpsEngine::new(registry, client, host, audit, service::for_host(init));
         Ok(Self {
             engine,
             monitor: Some(monitor),
@@ -1236,13 +1229,15 @@ impl Session {
     ///
     /// Whatever the operations layer reports.
     pub fn execute(&mut self, operation: Operation, dryrun: bool) -> Result<Executed, OpsError> {
-        self.execute_as(operation, dryrun, &caller())
+        self.execute_as(operation, dryrun, &caller(), &AllowAll)
     }
 
-    /// Runs one operation as `who`, honouring `--dryrun`.
+    /// Runs one operation as `who` under `authz`, honouring `--dryrun`.
     ///
-    /// [`execute`](Self::execute) is this with the local caller; the MCP
-    /// transport passes its token identity so the audit log names it.
+    /// [`execute`](Self::execute) is this with the local caller and
+    /// [`AllowAll`]; the MCP transport passes its token identity, so the audit
+    /// log names it, and the token's scopes, so the engine refuses and audits
+    /// what they do not permit.
     ///
     /// # Errors
     ///
@@ -1252,16 +1247,23 @@ impl Session {
         operation: Operation,
         dryrun: bool,
         who: &Identity,
+        authz: &dyn Authz,
     ) -> Result<Executed, OpsError> {
         if !dryrun || !operation.is_mutating() {
-            return self.engine.execute(operation, who).map(Executed::Ran);
+            return self
+                .engine
+                .execute(operation, who, authz)
+                .map(Executed::Ran);
         }
         let kind = operation.kind();
         let module = operation.module().map(ToOwned::to_owned);
         // An apply still shows its diff: the plan it implies writes nothing.
         let plan = match operation {
             Operation::Apply { id, model, .. } => {
-                match self.engine.execute(Operation::Plan { id, model }, who)? {
+                match self
+                    .engine
+                    .execute(Operation::Plan { id, model }, who, authz)?
+                {
                     OpOutcome::Planned(plan) => Some(*plan),
                     _ => None,
                 }

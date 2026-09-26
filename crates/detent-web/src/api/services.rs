@@ -86,7 +86,10 @@ pub(super) async fn status(
     }
     let op = Operation::ServiceStatus { id };
     authorize(&state, &caller, &op)?;
-    let outcome = state.engine.execute(op, caller.identity().clone()).await?;
+    let outcome = state
+        .engine
+        .execute(op, caller.identity().clone(), caller.authz())
+        .await?;
     render_status(outcome)
 }
 
@@ -130,7 +133,11 @@ pub(super) async fn action(
     authorize(&state, caller.caller(), &op)?;
     let outcome = state
         .engine
-        .execute(op, caller.caller().identity().clone())
+        .execute(
+            op,
+            caller.caller().identity().clone(),
+            caller.caller().authz(),
+        )
         .await?;
     render_serviced(outcome)
 }

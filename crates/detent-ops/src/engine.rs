@@ -79,7 +79,6 @@ pub struct OpsEngine {
     client: Client,
     host: Detected,
     audit: Box<dyn AuditSink>,
-    authz: Box<dyn Authz>,
     services: Box<dyn ServiceManager>,
     /// Root of the monitor's mutable state. `None` means the engine cannot
     /// derive paths the request asks for (e.g. `UpdateApply`'s staged
@@ -113,7 +112,6 @@ impl OpsEngine {
         client: Client,
         host: Detected,
         audit: Box<dyn AuditSink>,
-        authz: Box<dyn Authz>,
         services: Box<dyn ServiceManager>,
     ) -> Self {
         Self {
@@ -121,7 +119,6 @@ impl OpsEngine {
             client,
             host,
             audit,
-            authz,
             services,
             state_root: None,
             next_commit: 1,
@@ -175,17 +172,24 @@ impl OpsEngine {
         self.client.shutdown().map_err(OpsError::from)
     }
 
-    /// Run one operation on behalf of `who`.
+    /// Run one operation on behalf of `who`, under the caller's policy.
     ///
-    /// Authorization happens first: a refusal writes an audit record and
-    /// touches nothing else. Every mutating operation then writes exactly one
-    /// further record, whether it succeeded or failed.
+    /// Authorization happens first, with `authz`: the front end passes the
+    /// policy of this caller ([`AllowAll`](crate::AllowAll) for the CLI, the
+    /// caller's scopes for the web API and MCP). A refusal writes an audit
+    /// record and touches nothing else. Every mutating operation then writes
+    /// exactly one further record, whether it succeeded or failed.
     ///
     /// # Errors
     ///
     /// [`OpsError`] — see its variants; [`OpsError::Denied`] when the policy
     /// refused.
-    pub fn execute(&mut self, op: Operation, who: &Identity) -> Result<OpOutcome, OpsError> {
+    pub fn execute(
+        &mut self,
+        op: Operation,
+        who: &Identity,
+        authz: &dyn Authz,
+    ) -> Result<OpOutcome, OpsError> {
         let module = op.module().and_then(|id| {
             self.modules
                 .iter()
@@ -194,7 +198,7 @@ impl OpsEngine {
         });
         let kind = op.kind();
         let mutating = op.is_mutating();
-        if let Err(denied) = self.authz.permit(who, &op) {
+        if let Err(denied) = authz.permit(who, &op) {
             let record =
                 AuditRecord::new(who, kind, module, AuditResult::Denied).with_error(denied.id);
             // Best-effort: a denial must not be hidden by an audit write failure.

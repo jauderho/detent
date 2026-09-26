@@ -128,7 +128,11 @@ pub(super) async fn confirm(
     authorize(&state, caller.caller(), &op)?;
     let outcome = state
         .engine
-        .execute(op, caller.caller().identity().clone())
+        .execute(
+            op,
+            caller.caller().identity().clone(),
+            caller.caller().authz(),
+        )
         .await?;
     render_confirmed(&outcome)
 }
@@ -169,7 +173,11 @@ pub(super) async fn rollback(
     authorize(&state, caller.caller(), &op)?;
     let outcome = state
         .engine
-        .execute(op, caller.caller().identity().clone())
+        .execute(
+            op,
+            caller.caller().identity().clone(),
+            caller.caller().authz(),
+        )
         .await?;
     render_rolled_back(&outcome)
 }
