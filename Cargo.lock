@@ -669,7 +669,7 @@ name = "detent-acme"
 version = "0.0.1"
 dependencies = [
  "aws-lc-rs",
- "base64 0.22.1",
+ "base64 0.23.1",
  "http-body-util",
  "hyper",
  "hyper-rustls",
@@ -905,7 +905,7 @@ dependencies = [
 name = "detent-update"
 version = "0.0.1"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "http-body-util",
  "hyper",
  "hyper-rustls",

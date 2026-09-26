@@ -169,7 +169,7 @@ webpki-roots = "1.0.4"
 # Release tag comparison (§2.9 step 2). Already in the lock transitively.
 semver = "1.0.28"
 # Bundle/base64 decoding. Already in the lock transitively.
-base64 = "0.22.1"
+base64 = "0.23.1"
 
 # Dependencies build without debug info. This workspace's own crates keep
 # full debug info, so backtraces and stepping through detent code are
