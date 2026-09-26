@@ -42,6 +42,9 @@ detent-acme = { path = "../detent-acme", optional = true }
 # The acme process (ADR-015): certificate DER types for the served leaf.
 # Already in the lock through rustls.
 rustls-pki-types = { workspace = true, optional = true }
+# The worker's install check (ADR-015): the new leaf must be valid for every
+# configured domain. Already in the lock through rustls.
+webpki = { workspace = true, optional = true }
 detent-update = { path = "../detent-update", optional = true }
 # `semver`/`time`: the running version and the age-gate clock, both only when
 # the self-update feature is compiled (PLAN §2.9).
@@ -81,6 +84,7 @@ acme-dns-providers = [
     "acme-dns01",
     "detent-acme/dns-providers",
     "dep:rustls-pki-types",
+    "dep:webpki",
 ]
 
 ## Implies `web`: the post-swap restart check reads `detent.toml` through
