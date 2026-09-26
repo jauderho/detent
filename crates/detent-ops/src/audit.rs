@@ -388,10 +388,10 @@ impl FileAudit {
             .append(true)
             .mode(AUDIT_FILE_MODE)
             .open(&self.path)?;
-        if is_new && let Some(parent) = parent {
-            sync_directory(parent)?;
-            if let Some(grandparent) = parent.parent() {
-                sync_directory(grandparent)?;
+        if is_new {
+            // The new file's directory, and that directory's own entry.
+            for dir in parent.into_iter().chain(parent.and_then(Path::parent)) {
+                sync_directory(dir)?;
             }
         }
         Ok(file)
@@ -430,8 +430,9 @@ impl AuditSink for FileAudit {
         // A torn line that stays behind in the rotated log is its tail, not
         // a gap in the new file.
         if !scan.gap.is_empty() && !rotate {
+            let bytes = scan.gap.len();
             tracing::warn!(
-                bytes = scan.gap.len(),
+                bytes,
                 "the audit log ends in a torn line; the next record notes its digest"
             );
             chain.torn = Some(Sha256Digest::of(&scan.gap).to_string());
@@ -671,11 +672,9 @@ fn check_link(
     gap: &[u8],
     bad: Option<String>,
 ) -> Result<(), AuditError> {
-    let Some(actual) = record.chain.as_ref() else {
-        return Err(AuditError::Chain(
-            "a record has no chain metadata".to_owned(),
-        ));
-    };
+    // Callers reject an unchained record first; this keeps the check local.
+    let no_chain = || AuditError::Chain("a record has no chain metadata".to_owned());
+    let actual = record.chain.as_ref().ok_or_else(no_chain)?;
     let sequence = actual.sequence;
     let expected_sequence = previous.map_or(1, |chain| chain.sequence.saturating_add(1));
     let expected_prev = previous.map(|chain| chain.hash.clone());
@@ -956,6 +955,50 @@ mod tests {
     }
 
     #[test]
+    fn a_record_without_chain_metadata_breaks_the_chain() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let sink = FileAudit::new(dir.path().join("audit.jsonl"));
+        let unchained = serde_json::to_string(&record("root", Some("hosts"), AuditResult::Ok))?;
+        std::fs::write(sink.path(), unchained + "\n")?;
+        assert!(
+            matches!(sink.verify(), Err(AuditError::Chain(msg)) if msg.contains("no chain metadata"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_query_finds_an_unnoted_bad_line_inside_its_window() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let sink = FileAudit::new(dir.path().join("audit.jsonl"));
+        sink.record(&record("root", Some("hosts"), AuditResult::Ok))?;
+        sink.record(&record("alice", Some("hosts"), AuditResult::Ok))?;
+        let raw = std::fs::read_to_string(sink.path())?;
+        let mut lines: Vec<&str> = raw.lines().collect();
+        lines.insert(1, "{ not json");
+        std::fs::write(sink.path(), lines.join("\n") + "\n")?;
+        assert!(matches!(
+            sink.query(&AuditQuery::default()),
+            Err(AuditError::Chain(msg)) if msg.contains("not valid JSON")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_query_of_a_log_with_no_records_is_empty() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let sink = FileAudit::new(dir.path().join("audit.jsonl"));
+        std::fs::write(sink.path(), "")?;
+        assert!(sink.query(&AuditQuery::default())?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_directory_path_syncs_the_current_directory() -> R {
+        super::sync_directory(std::path::Path::new(""))?;
+        Ok(())
+    }
+
+    #[test]
     fn a_tail_query_reads_backwards_and_verifies_only_what_it_reads() -> R {
         let dir = tempfile::TempDir::new()?;
         let sink = FileAudit::new(dir.path().join("audit.jsonl"));
@@ -1188,10 +1231,8 @@ mod tests {
         let not_json = FileAudit::new(dir.path().join("not-json.jsonl"));
         let mut first = record("root", Some("hosts"), AuditResult::Ok);
         first.chain = Some(super::make_chain(&first, None)?);
-        std::fs::write(
-            not_json.path(),
-            format!("{{ this is not json\n{}\n", serde_json::to_string(&first)?),
-        )?;
+        let text = format!("{{ this is not json\n{}\n", serde_json::to_string(&first)?);
+        std::fs::write(not_json.path(), text)?;
         assert!(
             matches!(not_json.verify(), Err(AuditError::Chain(msg)) if msg.contains("not valid JSON"))
         );
