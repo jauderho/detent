@@ -1978,10 +1978,12 @@ fn edit_networkd_sections(
     for raw in at_end {
         plan.insert(doc.len(), raw)?;
     }
+    let before = doc.clone();
     let report = doc.apply_plan(plan);
     // Refuse an edit that parses back to a different model instead of
-    // silently dropping modeled state.
+    // silently dropping modeled state, leaving the document as it was.
     if !round_trips(doc, model) {
+        *doc = before;
         return Err(EditError::Unsupported {
             message: "edit would not round-trip; refusing".to_owned(),
         });
@@ -3186,6 +3188,37 @@ mod tests {
             matches!(&err, Err(super::EditError::Unsupported { message }) if message.contains("round-trip")),
             "expected a round-trip refusal, got {err:?}"
         );
+        Ok(())
+    }
+
+    /// A refused section-aware edit leaves the document as it was, as the
+    /// flat edit does: the caller must not see a half-edited file.
+    #[test]
+    fn networkd_sections_refusal_leaves_the_document_untouched() -> Result<(), String> {
+        let src = "[Network]\nDHCP=no\nDNS=1.1.1.1\n";
+        let mut doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
+        // `[Match]` is new and has no predecessor, so it lands at the end,
+        // after the `[Network]` it should precede: the round-trip check
+        // refuses.
+        let model = super::Model {
+            interfaces: vec![super::Interface {
+                name: "eth0".to_owned(),
+                dhcp_v4: false,
+                dhcp_v6: false,
+                addresses: vec!["10.0.0.9/24".to_owned()],
+                gateway_v4: None,
+                gateway_v6: None,
+                dns: vec!["1.1.1.1".to_owned()],
+                routes: Vec::new(),
+                vlan: None,
+                bridge: None,
+            }],
+        };
+        assert!(matches!(
+            NetworkModule::apply(&mut doc, &model),
+            Err(super::EditError::Unsupported { message }) if message.contains("round-trip")
+        ));
+        assert_eq!(NetworkModule::render(&doc), src);
         Ok(())
     }
 
