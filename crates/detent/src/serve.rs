@@ -46,6 +46,7 @@ use detent_platform::privsep::spawn::{
 use detent_platform::sandbox::{
     Confinement, Hooks as SandboxHooks, LandlockOutcome, LandlockStatus, Outcome, Policy,
 };
+#[cfg(feature = "web")]
 use detent_platform::service;
 
 use crate::output::{Exit, Renderer};
