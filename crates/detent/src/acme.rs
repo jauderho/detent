@@ -24,6 +24,7 @@
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use detent_acme::{
@@ -31,7 +32,7 @@ use detent_acme::{
 };
 use detent_platform::privsep::acme::{AcmeChannelError, AcmeClient, KeyPem};
 use detent_platform::privsep::transport::{Channel, ChannelError};
-use detent_web::{AcmeConfig, CertifiedKeyPair, TlsError};
+use detent_web::{AcmeConfig, CertStore, CertifiedKeyPair, TlsError};
 use rustls_pki_types::CertificateDer;
 
 /// Time between two checks of the served certificate.
@@ -357,6 +358,82 @@ pub(crate) fn acme_main(channel: Channel, mut issuer: impl Issuer, cert_dir: &Pa
     0
 }
 
+/// The worker's check of a pair from the acme process: it must parse, the
+/// key must match the leaf, the leaf must be valid for every one of
+/// `domains` and at `now`. Then the pair is stored in `cert_dir` and served
+/// from `store` ([`detent_web::install_acme`]).
+///
+/// # Errors
+///
+/// Why the pair is refused. The acme process logs the text, so it never
+/// quotes the chain or the key.
+pub(crate) fn check_and_install(
+    chain_pem: &str,
+    key: &KeyPem,
+    domains: &[String],
+    now: i64,
+    cert_dir: &Path,
+    store: &CertStore,
+) -> Result<(), String> {
+    if domains.is_empty() {
+        return Err("no domains are configured".to_owned());
+    }
+    let pair =
+        CertifiedKeyPair::from_acme_pem(chain_pem, key.expose()).map_err(|err| err.to_string())?;
+    // Before `install_acme`, which stores the pair before it parses it.
+    pair.to_certified_key().map_err(|err| err.to_string())?;
+    let leaf_der = CertificateDer::from(pair.cert_der());
+    let leaf = webpki::EndEntityCert::try_from(&leaf_der)
+        .map_err(|_| "the certificate does not parse".to_owned())?;
+    for domain in domains {
+        let name = rustls_pki_types::ServerName::try_from(domain.as_str())
+            .map_err(|_| format!("the configured domain {domain} is not a valid name"))?;
+        leaf.verify_is_valid_for_subject_name(&name)
+            .map_err(|_| format!("the certificate does not cover {domain}"))?;
+    }
+    let (not_before, not_after) =
+        detent_acme::leaf_validity_der(std::slice::from_ref(&leaf_der))
+            .map_err(|_| "the certificate validity does not parse".to_owned())?;
+    if now < not_before {
+        return Err(format!("the certificate is not valid before {not_before}"));
+    }
+    if now > not_after {
+        return Err(format!("the certificate expired at {not_after}"));
+    }
+    detent_web::install_acme(cert_dir, &pair, store).map_err(|err| err.to_string())?;
+    tracing::info!(
+        fingerprint = %pair.fingerprint(),
+        not_after,
+        "the worker serves a new ACME certificate"
+    );
+    Ok(())
+}
+
+/// The worker's side of the acme channel: answer the acme process with
+/// [`check_and_install`] at the real clock until the channel closes. Run
+/// it on its own thread. When the channel fails, the worker keeps serving
+/// the last certificate (ADR-015).
+pub(crate) fn serve_installs(
+    mut channel: Channel,
+    domains: Vec<String>,
+    cert_dir: PathBuf,
+    store: Arc<CertStore>,
+) {
+    let served = detent_platform::privsep::acme::serve_acme(&mut channel, move |chain, key| {
+        let now = detent_web::auth::extract::unix_now();
+        check_and_install(chain, key, &domains, now, &cert_dir, &store).inspect_err(|reason| {
+            tracing::warn!(%reason, "the worker refused an ACME certificate");
+        })
+    });
+    match served {
+        Ok(()) => tracing::info!("the acme process closed its channel"),
+        Err(err) => tracing::warn!(
+            reason = %err,
+            "the acme channel failed; the worker keeps its certificate"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -366,14 +443,14 @@ mod tests {
 
     use detent_acme::{AcmeError, Issued, RetryPolicy};
     use detent_platform::privsep::acme::{
-        ACME_PROTO_VERSION, AcmeChannelError, AcmeMessage, KeyPem, WorkerMessage,
+        ACME_PROTO_VERSION, AcmeChannelError, AcmeClient, AcmeMessage, KeyPem, WorkerMessage,
     };
     use detent_platform::privsep::transport::{Channel, ChannelError};
     use detent_web::CertifiedKeyPair;
 
     use super::{
         AcmeIssuer, FIRST_RETRY, Installer, Issuer, MAX_RETRY, Outcome, RenewError, acme_main,
-        renew_once, run_loop,
+        check_and_install, renew_once, run_loop, serve_installs,
     };
 
     type R = Result<(), Box<dyn std::error::Error>>;
@@ -946,6 +1023,203 @@ mod tests {
             capture(|| main_against(ACME_PROTO_VERSION.wrapping_add(1), FakeIssuer::default()));
         assert_eq!(status?, 1);
         assert!(logs.contains("ERROR"), "{logs}");
+        Ok(())
+    }
+
+    fn domains() -> Vec<String> {
+        vec!["a.example".to_owned(), "b.example".to_owned()]
+    }
+
+    /// A store that serves a bootstrap certificate, and its leaf.
+    fn bootstrap_store() -> Result<(detent_web::CertStore, Vec<u8>), Box<dyn std::error::Error>> {
+        let pair = detent_web::bootstrap_self_signed(&[])?;
+        Ok((detent_web::CertStore::new(&pair)?, pair.cert_der().to_vec()))
+    }
+
+    fn served_leaf(store: &detent_web::CertStore) -> Vec<u8> {
+        store
+            .current()
+            .cert
+            .first()
+            .map(|der| der.as_ref().to_vec())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_pair_for_every_domain_is_stored_and_served() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let (store, bootstrap) = bootstrap_store()?;
+        let cert = Cert::new(&["a.example", "b.example"])?;
+        let key = KeyPem::new(cert.key_pem.clone());
+        check_and_install(
+            &cert.chain_pem,
+            &key,
+            &domains(),
+            cert.at(50),
+            dir.path(),
+            &store,
+        )?;
+        let leaf = cert.pair()?.cert_der().to_vec();
+        assert_ne!(served_leaf(&store), bootstrap);
+        assert_eq!(served_leaf(&store), leaf);
+        let stored = detent_web::load_acme(dir.path())?.ok_or("no stored pair")?;
+        assert_eq!(stored.cert_der(), leaf.as_slice());
+        Ok(())
+    }
+
+    #[test]
+    fn a_pair_the_worker_must_not_serve_is_refused_without_quoting_it() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let (store, bootstrap) = bootstrap_store()?;
+        let both = Cert::new(&["a.example", "b.example"])?;
+        let only_a = Cert::new(&["a.example"])?;
+        let other = Cert::new(&["a.example", "b.example"])?;
+        let garbage = "-----BEGIN CERTIFICATE-----\nnot base64\n-----END CERTIFICATE-----\n";
+        let cases: [(&str, &str, &str, Vec<String>, i64); 7] = [
+            (
+                "missing domain",
+                &only_a.chain_pem,
+                &only_a.key_pem,
+                domains(),
+                only_a.at(50),
+            ),
+            (
+                "expired",
+                &both.chain_pem,
+                &both.key_pem,
+                domains(),
+                both.not_after.saturating_add(1),
+            ),
+            (
+                "not yet valid",
+                &both.chain_pem,
+                &both.key_pem,
+                domains(),
+                both.not_before.saturating_sub(1),
+            ),
+            (
+                "mismatched key",
+                &both.chain_pem,
+                &other.key_pem,
+                domains(),
+                both.at(50),
+            ),
+            (
+                "garbage chain",
+                garbage,
+                &both.key_pem,
+                domains(),
+                both.at(50),
+            ),
+            (
+                "garbage key",
+                &both.chain_pem,
+                "garbage",
+                domains(),
+                both.at(50),
+            ),
+            (
+                "no domains",
+                &both.chain_pem,
+                &both.key_pem,
+                Vec::new(),
+                both.at(50),
+            ),
+        ];
+        for (case, chain, key_pem, names, now) in cases {
+            let refused = check_and_install(
+                chain,
+                &KeyPem::new(key_pem.to_owned()),
+                &names,
+                now,
+                dir.path(),
+                &store,
+            );
+            let Err(reason) = refused else {
+                return Err(format!("{case}: installed").into());
+            };
+            let expected = match case {
+                "missing domain" => "does not cover b.example",
+                "expired" => "expired",
+                "not yet valid" => "not valid before",
+                "mismatched key" => "rejected",
+                "no domains" => "no domains",
+                _ => "not PEM",
+            };
+            assert!(reason.contains(expected), "{case}: {reason}");
+            assert!(!reason.contains("BEGIN"), "{case}: {reason}");
+            for line in key_pem.lines().chain(chain.lines()).filter(|l| l.len() > 8) {
+                assert!(!reason.contains(line), "{case}: {reason}");
+            }
+            assert_eq!(served_leaf(&store), bootstrap, "{case}");
+            assert!(
+                !dir.path().join(detent_web::ACME_PAIR_FILE).exists(),
+                "{case}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn serve_installs_answers_the_acme_process_until_it_closes() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let (store, _) = bootstrap_store()?;
+        let store = Arc::new(store);
+        // Valid around any clock this test runs on.
+        let good = Cert::valid(&["a.example", "b.example"], (2020, 1, 1), (2099, 1, 1))?;
+        let bad = Cert::valid(&["a.example"], (2020, 1, 1), (2099, 1, 1))?;
+        let (acme_end, worker_end) = Channel::pair()?;
+        let (good_chain, good_key) = (good.chain_pem.clone(), good.key_pem.clone());
+        let (bad_chain, bad_key) = (bad.chain_pem.clone(), bad.key_pem.clone());
+        let acme = std::thread::spawn(move || {
+            let mut client = AcmeClient::new(acme_end);
+            let hello = client.hello();
+            let first = client.install(good_chain, KeyPem::new(good_key));
+            let second = client.install(bad_chain, KeyPem::new(bad_key));
+            (hello, first, second)
+        });
+        let ((), logs) = capture(|| {
+            serve_installs(
+                worker_end,
+                domains(),
+                dir.path().to_path_buf(),
+                Arc::clone(&store),
+            );
+        });
+        let (hello, first, second) = acme.join().map_err(|_| "acme thread panicked")?;
+        assert!(hello.is_ok(), "{hello:?}");
+        assert!(first.is_ok(), "{first:?}");
+        assert!(
+            matches!(second, Err(AcmeChannelError::Refused(ref reason)) if reason.contains("b.example")),
+            "{second:?}"
+        );
+        let pair = good.pair()?;
+        assert_eq!(served_leaf(&store), pair.cert_der());
+        assert!(dir.path().join(detent_web::ACME_PAIR_FILE).exists());
+        assert!(logs.contains(&pair.fingerprint()), "{logs}");
+        assert!(!logs.contains("BEGIN"), "{logs}");
+        Ok(())
+    }
+
+    #[test]
+    fn serve_installs_logs_a_channel_that_fails() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let (store, bootstrap) = bootstrap_store()?;
+        let store = Arc::new(store);
+        let (mut acme_end, worker_end) = Channel::pair()?;
+        // A `String` is not an `AcmeMessage`.
+        acme_end.send(&"not a message".to_owned())?;
+        let ((), logs) = capture(|| {
+            serve_installs(
+                worker_end,
+                domains(),
+                dir.path().to_path_buf(),
+                Arc::clone(&store),
+            );
+        });
+        assert!(logs.contains("WARN"), "{logs}");
+        assert!(logs.contains("acme channel"), "{logs}");
+        assert_eq!(served_leaf(&store), bootstrap);
         Ok(())
     }
 }

@@ -654,6 +654,7 @@ dependencies = [
  "rcgen",
  "rustix",
  "rustls-pki-types",
+ "rustls-webpki",
  "semver",
  "serde",
  "serde_json",
