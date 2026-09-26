@@ -19,10 +19,9 @@
 //! `ua` fields (PLAN §2.5) by wrapping or replacing [`FileAudit`], without the
 //! engine learning what an IP address is.
 
-use std::collections::VecDeque;
 use std::fs::{DirBuilder, OpenOptions};
 use std::io::Write as _;
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+use std::os::unix::fs::{DirBuilderExt as _, FileExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -45,6 +44,11 @@ const AUDIT_DIR_MODE: u32 = 0o700;
 pub const DEFAULT_AUDIT_QUERY_LIMIT: usize = 100;
 /// Largest number of records one query may return.
 pub const MAX_AUDIT_QUERY_LIMIT: usize = 1000;
+/// Size above which the next append moves the log to `<name>.1` and starts
+/// a new file that continues the chain.
+pub const AUDIT_ROTATE_BYTES: u64 = 16 * 1024 * 1024;
+/// Bytes read per step when a query reads the log from its end.
+const TAIL_CHUNK: u64 = 64 * 1024;
 
 /// How an operation ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -269,9 +273,14 @@ fn newest_first(mut records: Vec<AuditRecord>, limit: Option<usize>) -> Vec<Audi
 }
 
 /// The real sink: one JSON object per line, appended, `0600`.
+///
+/// Above [`AUDIT_ROTATE_BYTES`] the log moves to `<name>.1`, replacing the
+/// one before, and the next record starts a new file. Its first record
+/// continues the chain of the last record in `<name>.1`.
 #[derive(Debug, Clone)]
 pub struct FileAudit {
     path: PathBuf,
+    rotate_bytes: u64,
 }
 
 impl FileAudit {
@@ -279,7 +288,18 @@ impl FileAudit {
     /// write, not here, so constructing a sink never touches the filesystem.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            rotate_bytes: AUDIT_ROTATE_BYTES,
+        }
+    }
+
+    /// The same sink, rotating above `bytes` instead of
+    /// [`AUDIT_ROTATE_BYTES`].
+    #[must_use]
+    pub const fn with_rotation_limit(mut self, bytes: u64) -> Self {
+        self.rotate_bytes = bytes;
+        self
     }
 
     /// The conventional location under a state root (PLAN §2.10).
@@ -308,12 +328,38 @@ impl FileAudit {
     ///
     /// [`AuditError`] when the log cannot be read or its chain is invalid.
     pub fn verify(&self) -> Result<AuditChain, AuditError> {
+        let start = self.rotated_anchor()?;
         let Some(raw) = self.read_log()? else {
             return Err(AuditError::Chain("log does not exist".to_owned()));
         };
-        scan_records(&raw, |_| {})?
+        scan_records(&raw, start, |_| {})?
             .anchor
             .ok_or_else(|| AuditError::Chain("log is empty".to_owned()))
+    }
+
+    /// Where a full log is moved: the same name with `.1` appended.
+    fn rotated_path(&self) -> PathBuf {
+        let mut name = self.path.as_os_str().to_owned();
+        name.push(".1");
+        PathBuf::from(name)
+    }
+
+    /// The chain of the last record in the rotated log, which the first
+    /// record of the current log continues. `None` when there is no rotated
+    /// log or it holds no record.
+    fn rotated_anchor(&self) -> Result<Option<AuditChain>, AuditError> {
+        let Some(mut lines) = TailLines::open(&self.rotated_path())? else {
+            return Ok(None);
+        };
+        while let Some(line) = lines.next_line()? {
+            if let Ok(AuditRecord {
+                chain: Some(chain), ..
+            }) = serde_json::from_slice::<AuditRecord>(&line)
+            {
+                return Ok(Some(chain));
+            }
+        }
+        Ok(None)
     }
 
     /// Read the whole log, or nothing when it does not exist yet.
@@ -368,13 +414,22 @@ impl AuditSink for FileAudit {
         let _guard = APPEND_LOCK
             .lock()
             .map_err(|_| AuditError::Chain("audit append lock was poisoned".to_owned()))?;
+        let start = self.rotated_anchor()?;
         let raw = self.read_log()?;
         let scan = match raw {
-            Some(ref raw) => scan_records(raw, |_| {})?,
-            None => Scan::default(),
+            Some(ref raw) => scan_records(raw, start, |_| {})?,
+            None => Scan {
+                anchor: start,
+                gap: Vec::new(),
+            },
         };
+        let rotate = raw
+            .as_ref()
+            .is_some_and(|raw| u64::try_from(raw.len()).unwrap_or(u64::MAX) > self.rotate_bytes);
         let mut chain = make_chain(record, scan.anchor.as_ref())?;
-        if !scan.gap.is_empty() {
+        // A torn line that stays behind in the rotated log is its tail, not
+        // a gap in the new file.
+        if !scan.gap.is_empty() && !rotate {
             tracing::warn!(
                 bytes = scan.gap.len(),
                 "the audit log ends in a torn line; the next record notes its digest"
@@ -385,42 +440,153 @@ impl AuditSink for FileAudit {
         stored.chain = Some(chain);
         let mut line = Vec::new();
         // Close a torn final line, so the new record starts on its own line.
-        if raw
-            .as_ref()
-            .and_then(|raw| raw.last())
-            .is_some_and(|last| *last != b'\n')
+        if !rotate
+            && raw
+                .as_ref()
+                .and_then(|raw| raw.last())
+                .is_some_and(|last| *last != b'\n')
         {
             line.push(b'\n');
         }
         serde_json::to_writer(&mut line, &stored)
             .map_err(|err| AuditError::Encode(err.to_string()))?;
         line.push(b'\n');
-        let mut file = self.open_for_append(raw.is_none())?;
+        if rotate {
+            std::fs::rename(&self.path, self.rotated_path())?;
+        }
+        let mut file = self.open_for_append(raw.is_none() || rotate)?;
         file.write_all(&line)?;
         file.sync_data().map_err(AuditError::Io)
     }
 
+    /// Read the log backwards from its end until `limit` records match,
+    /// and verify the chain over every record read: each one must be the
+    /// predecessor its newer neighbour names. A query that reaches the start
+    /// of the file also checks that the first record starts the chain, or
+    /// continues the rotated log. Records older than the ones read are not
+    /// checked here; [`FileAudit::verify`] checks the whole file.
     fn query(&self, query: &AuditQuery) -> Result<Vec<AuditRecord>, AuditError> {
-        let Some(raw) = self.read_log()? else {
+        let limit = query.effective_limit();
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(mut lines) = TailLines::open(&self.path)? else {
             return Ok(Vec::new());
         };
-        let limit = query.effective_limit();
-        let mut out = VecDeque::with_capacity(limit);
-        let scan = scan_records(&raw, |record| {
-            if limit == 0 || !query.matches(&record) {
-                return;
+        let mut out = Vec::new();
+        // The newest record read so far, and the unreadable lines read since
+        // it, newest first.
+        let mut newer: Option<AuditRecord> = None;
+        let mut gap: Vec<Vec<u8>> = Vec::new();
+        while let Some(line) = lines.next_line()? {
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
             }
-            if out.len() == limit {
-                out.pop_front();
+            let Ok(record) = serde_json::from_slice::<AuditRecord>(&line) else {
+                gap.push(line);
+                continue;
+            };
+            let chain = record
+                .chain
+                .clone()
+                .ok_or_else(|| AuditError::Chain("a record has no chain metadata".to_owned()))?;
+            // Every record returned matches its hash, the oldest one too.
+            if make_chain(&record, None)?.hash != chain.hash {
+                return Err(AuditError::Chain(format!(
+                    "record {} hash does not match its contents",
+                    chain.sequence
+                )));
             }
-            out.push_back(record);
-        })?;
-        if !scan.gap.is_empty() {
-            // A torn final line (a crash mid-append) must not make the whole
-            // log unreadable. It is not a record.
-            tracing::warn!(bytes = scan.gap.len(), "skipping a torn audit line");
+            match newer.take() {
+                Some(newer) => check_link(&newer, Some(&chain), &gap_bytes(&gap), None)?,
+                // A torn final line (a crash mid-append) must not make the
+                // whole log unreadable. It is not a record.
+                None if !gap.is_empty() => {
+                    tracing::warn!(lines = gap.len(), "skipping a torn audit line");
+                }
+                None => {}
+            }
+            gap.clear();
+            if query.matches(&record) {
+                out.push(record.clone());
+                if out.len() == limit {
+                    return Ok(out);
+                }
+            }
+            newer = Some(record);
         }
-        Ok(out.into_iter().rev().collect())
+        if let Some(oldest) = newer {
+            check_link(
+                &oldest,
+                self.rotated_anchor()?.as_ref(),
+                &gap_bytes(&gap),
+                None,
+            )?;
+        }
+        Ok(out)
+    }
+}
+
+/// Unreadable lines collected newest first, as the bytes they were in the
+/// file: oldest first, each with its newline.
+fn gap_bytes(newest_first: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for line in newest_first.iter().rev() {
+        out.extend_from_slice(line);
+        out.push(b'\n');
+    }
+    out
+}
+
+/// The lines of a file from the last to the first, read in
+/// [`TAIL_CHUNK`]-sized steps from the end, so a query for the newest
+/// records does not read the whole log.
+struct TailLines {
+    file: std::fs::File,
+    /// Bytes before this offset are not read yet.
+    pos: u64,
+    /// The start of the earliest line read so far, which may continue into
+    /// the bytes before `pos`.
+    carry: Vec<u8>,
+    /// Whole lines read, oldest first; `next_line` pops from the end.
+    ready: Vec<Vec<u8>>,
+}
+
+impl TailLines {
+    /// Open `path`, or `None` when it does not exist.
+    fn open(path: &Path) -> Result<Option<Self>, AuditError> {
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(AuditError::Io(err)),
+        };
+        let pos = file.metadata()?.len();
+        Ok(Some(Self {
+            file,
+            pos,
+            carry: Vec::new(),
+            ready: Vec::new(),
+        }))
+    }
+
+    /// The line before the last one returned, without its newline.
+    fn next_line(&mut self) -> Result<Option<Vec<u8>>, AuditError> {
+        loop {
+            if let Some(line) = self.ready.pop() {
+                return Ok(Some(line));
+            }
+            if self.pos == 0 {
+                return Ok((!self.carry.is_empty()).then(|| std::mem::take(&mut self.carry)));
+            }
+            let step = self.pos.min(TAIL_CHUNK);
+            self.pos = self.pos.saturating_sub(step);
+            let mut chunk = vec![0; usize::try_from(step).unwrap_or(0)];
+            self.file.read_exact_at(&mut chunk, self.pos)?;
+            chunk.append(&mut self.carry);
+            let mut parts = chunk.split(|byte| *byte == b'\n');
+            self.carry = parts.next().map(<[u8]>::to_vec).unwrap_or_default();
+            self.ready = parts.map(<[u8]>::to_vec).collect();
+        }
     }
 }
 
@@ -441,7 +607,7 @@ fn make_chain(
 }
 
 /// What a verified pass over the log found.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Scan {
     /// The chain of the last record.
     anchor: Option<AuditChain>,
@@ -450,13 +616,21 @@ struct Scan {
 }
 
 /// Parse and verify a whole JSON-lines log, passing each record to `each`,
-/// oldest first.
+/// oldest first. The first record must follow `start`: the last record of
+/// the rotated log, or nothing.
 ///
 /// A line that is not a record is accepted only when the next record's
 /// `torn` digest names it, or when no record follows it (a torn append that
 /// the next append will note).
-fn scan_records(raw: &[u8], mut each: impl FnMut(AuditRecord)) -> Result<Scan, AuditError> {
-    let mut scan = Scan::default();
+fn scan_records(
+    raw: &[u8],
+    start: Option<AuditChain>,
+    mut each: impl FnMut(AuditRecord),
+) -> Result<Scan, AuditError> {
+    let mut scan = Scan {
+        anchor: start,
+        gap: Vec::new(),
+    };
     let mut first_bad: Option<String> = None;
     for (index, line) in raw
         .split(|byte| *byte == b'\n')
@@ -474,39 +648,56 @@ fn scan_records(raw: &[u8], mut each: impl FnMut(AuditRecord)) -> Result<Scan, A
                 continue;
             }
         };
-        let previous = scan.anchor.as_ref();
-        let actual = record
-            .chain
-            .as_ref()
-            .ok_or_else(|| AuditError::Chain(format!("record {number} has no chain metadata")))?;
-        let expected_sequence = previous.map_or(1, |chain| chain.sequence.saturating_add(1));
-        let expected_prev = previous.map(|chain| chain.hash.clone());
-        if actual.sequence != expected_sequence || actual.prev != expected_prev {
+        if record.chain.is_none() {
             return Err(AuditError::Chain(format!(
-                "record {number} is not linked to its predecessor"
+                "record {number} has no chain metadata"
             )));
         }
-        let expected_torn = (!scan.gap.is_empty()).then(|| Sha256Digest::of(&scan.gap).to_string());
-        if actual.torn != expected_torn {
-            return Err(AuditError::Chain(
-                match (actual.torn.is_none(), first_bad) {
-                    (true, Some(bad)) => bad,
-                    _ => format!("record {number} does not match the skipped lines before it"),
-                },
-            ));
-        }
-        let expected = make_chain(&record, previous)?;
-        if actual.hash != expected.hash {
-            return Err(AuditError::Chain(format!(
-                "record {number} hash does not match its contents"
-            )));
-        }
-        scan.anchor = Some(actual.clone());
+        check_link(&record, scan.anchor.as_ref(), &scan.gap, first_bad.take())?;
+        scan.anchor.clone_from(&record.chain);
         scan.gap.clear();
-        first_bad = None;
         each(record);
     }
     Ok(scan)
+}
+
+/// Check that `record` directly follows `previous` (or starts the chain),
+/// that its `torn` digest names exactly the unreadable `gap` between them,
+/// and that its hash matches its contents. `bad` is the parse error of the
+/// first line in `gap`, reported when the record does not note the gap.
+fn check_link(
+    record: &AuditRecord,
+    previous: Option<&AuditChain>,
+    gap: &[u8],
+    bad: Option<String>,
+) -> Result<(), AuditError> {
+    let Some(actual) = record.chain.as_ref() else {
+        return Err(AuditError::Chain(
+            "a record has no chain metadata".to_owned(),
+        ));
+    };
+    let sequence = actual.sequence;
+    let expected_sequence = previous.map_or(1, |chain| chain.sequence.saturating_add(1));
+    let expected_prev = previous.map(|chain| chain.hash.clone());
+    if actual.sequence != expected_sequence || actual.prev != expected_prev {
+        return Err(AuditError::Chain(format!(
+            "record {sequence} is not linked to its predecessor"
+        )));
+    }
+    let expected_torn = (!gap.is_empty()).then(|| Sha256Digest::of(gap).to_string());
+    if actual.torn != expected_torn {
+        return Err(AuditError::Chain(match (actual.torn.is_none(), bad) {
+            (true, Some(bad)) => bad,
+            (true, None) => format!("a line before record {sequence} is not valid JSON"),
+            _ => format!("record {sequence} does not match the skipped lines before it"),
+        }));
+    }
+    if make_chain(record, previous)?.hash != actual.hash {
+        return Err(AuditError::Chain(format!(
+            "record {sequence} hash does not match its contents"
+        )));
+    }
+    Ok(())
 }
 
 /// A sink that discards everything, for `--dryrun` and for tests that are not
@@ -761,6 +952,104 @@ mod tests {
             sink.record(&record("root", Some("hosts"), AuditResult::Ok)),
             Err(AuditError::Chain(_))
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_tail_query_reads_backwards_and_verifies_only_what_it_reads() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let sink = FileAudit::new(dir.path().join("audit.jsonl"));
+        sink.record(&record("root", Some("hosts"), AuditResult::Ok))?;
+        sink.record(&record("alice", Some("hosts"), AuditResult::Ok))?;
+        sink.record(&record("root", Some("chrony"), AuditResult::Ok))?;
+
+        // Change the oldest record: its hash no longer matches.
+        let raw = std::fs::read_to_string(sink.path())?;
+        let edited = raw.replacen("\"who\":\"root\"", "\"who\":\"mallory\"", 1);
+        assert_ne!(edited, raw);
+        std::fs::write(sink.path(), edited)?;
+        assert!(matches!(sink.verify(), Err(AuditError::Chain(_))));
+
+        // The newest two records are read from the end and are sound.
+        let newest = sink.query(&AuditQuery {
+            limit: Some(2),
+            ..AuditQuery::default()
+        })?;
+        let who: Vec<&str> = newest.iter().map(|r| r.who.as_str()).collect();
+        assert_eq!(who, ["root", "alice"]);
+
+        // A query that reaches the changed record refuses the log.
+        assert!(matches!(
+            sink.query(&AuditQuery::default()),
+            Err(AuditError::Chain(_))
+        ));
+
+        // The oldest record a query returns is checked against its hash too.
+        let edited = raw.replacen("\"who\":\"alice\"", "\"who\":\"mallory\"", 1);
+        std::fs::write(sink.path(), edited)?;
+        assert!(matches!(
+            sink.query(&AuditQuery {
+                limit: Some(2),
+                ..AuditQuery::default()
+            }),
+            Err(AuditError::Chain(msg)) if msg.contains("hash does not match")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_full_log_rotates_and_the_chain_continues() -> R {
+        let dir = tempfile::TempDir::new()?;
+        // Every append after the first finds the log over the limit.
+        let sink = FileAudit::new(dir.path().join("audit.jsonl")).with_rotation_limit(1);
+        sink.record(&record("root", Some("hosts"), AuditResult::Ok))?;
+        sink.record(&record("alice", Some("hosts"), AuditResult::Ok))?;
+        sink.record(&record("root", Some("chrony"), AuditResult::Ok))?;
+
+        let rotated = dir.path().join("audit.jsonl.1");
+        assert_eq!(std::fs::read_to_string(&rotated)?.lines().count(), 1);
+        assert_eq!(std::fs::read_to_string(sink.path())?.lines().count(), 1);
+
+        // The current log continues the chain of the rotated one.
+        let anchor = sink.verify()?;
+        assert_eq!(anchor.sequence, 3);
+        let older: AuditRecord =
+            serde_json::from_str(std::fs::read_to_string(&rotated)?.trim_end())?;
+        let older = older.chain.ok_or("the rotated record is chained")?;
+        assert_eq!(older.sequence, 2);
+        assert_eq!(anchor.prev, Some(older.hash));
+
+        let all = sink.query(&AuditQuery::default())?;
+        assert_eq!(all.len(), 1);
+        assert_eq!(all.first().map(|r| r.who.as_str()), Some("root"));
+
+        // A current log that does not continue the rotated one is refused.
+        std::fs::write(&rotated, "")?;
+        assert!(matches!(sink.verify(), Err(AuditError::Chain(_))));
+        assert!(matches!(
+            sink.query(&AuditQuery::default()),
+            Err(AuditError::Chain(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn tail_lines_returns_every_line_last_first_across_chunks() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let path = dir.path().join("lines");
+        // One line longer than two chunks, short lines on both sides, a
+        // blank line, and no newline at the end.
+        let long = "x".repeat(usize::try_from(super::TAIL_CHUNK)?.saturating_mul(2) + 7);
+        let raw = format!("first\n{long}\n\nsecond\nlast");
+        std::fs::write(&path, &raw)?;
+        let mut lines = super::TailLines::open(&path)?.ok_or("the file exists")?;
+        let mut read = Vec::new();
+        while let Some(line) = lines.next_line()? {
+            read.push(String::from_utf8(line)?);
+        }
+        read.reverse();
+        assert_eq!(read, raw.split('\n').collect::<Vec<_>>());
+        assert!(super::TailLines::open(&dir.path().join("absent"))?.is_none());
         Ok(())
     }
 
