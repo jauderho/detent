@@ -413,7 +413,8 @@ fn report_recovery(
 
 /// Loads and validates `detent.toml`, and rejects a listen port this build
 /// cannot bind (see [`PRIVILEGED_PORT_CEILING`]) or an ACME bootstrap this
-/// build does not implement.
+/// build does not implement. When `[acme.provider]` is set, it also checks
+/// the provider and its secret ([`preflight_dns_provider`]).
 ///
 /// The outer `Result` is an I/O failure while reporting; the inner one is
 /// either the loaded configuration or the exit code already reported for it.
@@ -446,7 +447,132 @@ fn preflight_web_config(
         )?;
         return Ok(Err(Exit::Failed));
     }
+    if let Some(provider) = &config.acme.provider
+        && let Err(exit) = preflight_dns_provider(provider, settings, renderer, streams)?
+    {
+        return Ok(Err(exit));
+    }
     Ok(Ok(config))
+}
+
+/// Checks `[acme.provider]` before the fork, while this process can still
+/// read the `0600` `secrets.toml`: the file passes
+/// [`detent_web::secrets::load`], it holds `[acme] dns_provider`, and the
+/// provider builds from both. The built provider is dropped at once.
+///
+/// Same outer/inner `Result` split as [`preflight_web_config`].
+#[cfg(feature = "web")]
+fn preflight_dns_provider(
+    provider: &detent_web::DnsProviderConfig,
+    settings: &Settings,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Result<(), Exit>> {
+    let path = settings.secrets_path();
+    let secrets = match detent_web::secrets::load(&path) {
+        Ok(secrets) => secrets,
+        Err(err) => {
+            renderer.line(
+                streams.notes,
+                MessageId::new("cli-serve-secrets-failed"),
+                &[
+                    ("path", &path.display().to_string()),
+                    ("reason", &err.to_string()),
+                ],
+            )?;
+            return Ok(Err(Exit::Failed));
+        }
+    };
+    let Some(secret) = secrets.dns_provider() else {
+        renderer.line(
+            streams.notes,
+            MessageId::new("cli-serve-acme-secret-missing"),
+            &[("path", &path.display().to_string())],
+        )?;
+        return Ok(Err(Exit::Failed));
+    };
+    check_dns_provider(provider, secret, settings, renderer, streams)
+}
+
+/// Builds the provider to prove it can be built, then drops it.
+#[cfg(all(feature = "web", feature = "acme-dns-providers"))]
+fn check_dns_provider(
+    provider: &detent_web::DnsProviderConfig,
+    secret: &detent_web::secrets::Secret,
+    _settings: &Settings,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Result<(), Exit>> {
+    match build_dns_provider(provider, secret) {
+        Ok(_provider) => Ok(Ok(())),
+        Err(err) => {
+            renderer.line(
+                streams.notes,
+                MessageId::new("cli-serve-acme-provider-invalid"),
+                &[("reason", &err.to_string())],
+            )?;
+            Ok(Err(Exit::Failed))
+        }
+    }
+}
+
+/// This build has no dns-01 providers, so a configured one is refused.
+#[cfg(all(feature = "web", not(feature = "acme-dns-providers")))]
+fn check_dns_provider(
+    _provider: &detent_web::DnsProviderConfig,
+    _secret: &detent_web::secrets::Secret,
+    settings: &Settings,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Result<(), Exit>> {
+    renderer.line(
+        streams.notes,
+        MessageId::new("cli-serve-acme-providers-not-built"),
+        &[("path", &settings.config_path.display().to_string())],
+    )?;
+    Ok(Err(Exit::Failed))
+}
+
+/// The dns-01 provider `[acme.provider]` names, with its secret from
+/// `secrets.toml`.
+///
+/// # Errors
+///
+/// The constructor's [`detent_acme::AcmeError`]. Its text never quotes the
+/// secret: each constructor reports a bad secret with a fixed sentence.
+#[cfg(all(feature = "web", feature = "acme-dns-providers"))]
+fn build_dns_provider(
+    provider: &detent_web::DnsProviderConfig,
+    secret: &detent_web::secrets::Secret,
+) -> Result<Box<dyn detent_acme::DnsProvider>, detent_acme::AcmeError> {
+    use detent_web::DnsProviderConfig as Kind;
+    let secret = secret.expose();
+    Ok(match provider {
+        Kind::Cloudflare { zone_id } => Box::new(detent_acme::CloudflareProvider::new(
+            secret,
+            zone_id.as_str(),
+        )?),
+        Kind::AcmeDns { server, username } => Box::new(detent_acme::AcmeDnsProvider::new(
+            server.as_str(),
+            username.as_str(),
+            secret,
+        )?),
+        Kind::Desec { domain } => {
+            Box::new(detent_acme::DeSecProvider::new(secret, domain.as_str())?)
+        }
+        Kind::Rfc2136 {
+            server,
+            zone,
+            key_name,
+            algorithm,
+        } => Box::new(detent_acme::Rfc2136Provider::new(
+            server.as_str(),
+            zone.as_str(),
+            key_name.as_str(),
+            secret,
+            algorithm.as_str(),
+        )?),
+    })
 }
 
 /// Runs the real `detent-web` server: the operations engine on its own
@@ -1223,6 +1349,173 @@ mod web_tests {
             assert_eq!(outcome, Err(Exit::Failed), "{path:?}");
             assert!(!notes.is_empty(), "{path:?}");
         }
+        Ok(())
+    }
+
+    /// A Cloudflare zone id that the constructor accepts.
+    const ZONE_ID: &str = "0123456789abcdef0123456789abcdef";
+
+    /// Writes `detent.toml` with `provider` as `[acme.provider]`, and, when
+    /// `secrets` is set, `secrets.toml` next to it with `mode`. Then runs
+    /// `preflight_web_config` and returns its outcome and the notes.
+    fn preflight_with(
+        provider: &str,
+        secrets: Option<(&str, u32)>,
+    ) -> Result<(Result<(), Exit>, String), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::TempDir::new()?;
+        let config_path = dir.path().join("detent.toml");
+        std::fs::write(&config_path, format!("[acme.provider]\n{provider}"))?;
+        if let Some((text, mode)) = secrets {
+            let path = dir.path().join("secrets.toml");
+            std::fs::write(&path, text)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))?;
+        }
+        let messages = Messages::new(Some("en-US"));
+        let renderer = renderer(&messages);
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let mut input = std::io::empty();
+        let outcome = preflight_web_config(
+            &settings(dir.path(), config_path),
+            &renderer,
+            &mut crate::run::Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        Ok((outcome.map(drop), String::from_utf8(notes)?))
+    }
+
+    fn cloudflare() -> String {
+        format!("kind = \"cloudflare\"\nzone_id = \"{ZONE_ID}\"\n")
+    }
+
+    fn secret_file(value: &str) -> String {
+        format!("[acme]\ndns_provider = \"{value}\"\n")
+    }
+
+    #[test]
+    fn preflight_refuses_a_secrets_file_it_cannot_trust() -> R {
+        let (outcome, notes) = preflight_with(
+            &cloudflare(),
+            Some((&secret_file("not-a-real-token"), 0o644)),
+        )?;
+        assert_eq!(outcome, Err(Exit::Failed));
+        assert!(notes.contains("secrets.toml"), "{notes}");
+        assert!(notes.contains("was refused"), "{notes}");
+        assert!(!notes.contains("not-a-real-token"), "{notes}");
+        Ok(())
+    }
+
+    #[test]
+    fn preflight_refuses_a_provider_without_its_secret() -> R {
+        for secrets in [None, Some(("[acme]\n", 0o600))] {
+            let (outcome, notes) = preflight_with(&cloudflare(), secrets)?;
+            assert_eq!(outcome, Err(Exit::Failed), "{secrets:?}");
+            assert!(notes.contains("dns_provider"), "{notes}");
+            assert!(notes.contains("secrets.toml"), "{notes}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn preflight_does_not_read_secrets_when_no_provider_is_set() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let config_path = dir.path().join("detent.toml");
+        std::fs::write(&config_path, "[acme]\ndomains = [\"box.example\"]\n")?;
+        // A secrets path that `load` would refuse: it is not read at all.
+        std::fs::create_dir(dir.path().join("secrets.toml"))?;
+        let messages = Messages::new(Some("en-US"));
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let mut input = std::io::empty();
+        let outcome = preflight_web_config(
+            &settings(dir.path(), config_path),
+            &renderer(&messages),
+            &mut crate::run::Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(notes.is_empty(), "{}", String::from_utf8_lossy(&notes));
+        Ok(())
+    }
+
+    #[cfg(feature = "acme-dns-providers")]
+    #[test]
+    fn preflight_builds_each_configured_provider() -> R {
+        let tsig = "czNjcjN0LWtleQ==";
+        for (provider, value) in [
+            (cloudflare(), "not-a-real-token"),
+            (
+                "kind = \"acme-dns\"\nserver = \"https://auth.example\"\nusername = \"sub\"\n"
+                    .to_owned(),
+                "not-a-real-password",
+            ),
+            (
+                "kind = \"desec\"\ndomain = \"example.com\"\n".to_owned(),
+                "not-a-real-token",
+            ),
+            (
+                "kind = \"rfc2136\"\nserver = \"ns1.example.com:53\"\nzone = \"example.com\"\n\
+                 key_name = \"k.example.com\"\nalgorithm = \"hmac-sha256\"\n"
+                    .to_owned(),
+                tsig,
+            ),
+        ] {
+            let (outcome, notes) = preflight_with(&provider, Some((&secret_file(value), 0o600)))?;
+            assert_eq!(outcome, Ok(()), "{provider}: {notes}");
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "acme-dns-providers")]
+    #[test]
+    fn preflight_refuses_a_provider_that_does_not_build_and_quotes_no_secret() -> R {
+        let bad = "not a real token";
+        for (provider, value) in [
+            (cloudflare(), bad),
+            (
+                "kind = \"cloudflare\"\nzone_id = \"short\"\n".to_owned(),
+                "not-a-real-token",
+            ),
+            (
+                "kind = \"acme-dns\"\nserver = \"https://auth.example\"\nusername = \"sub\"\n"
+                    .to_owned(),
+                bad,
+            ),
+            (
+                "kind = \"desec\"\ndomain = \"example.com\"\n".to_owned(),
+                bad,
+            ),
+            (
+                "kind = \"rfc2136\"\nserver = \"ns1.example.com:53\"\nzone = \"example.com\"\n\
+                 key_name = \"k.example.com\"\nalgorithm = \"hmac-sha256\"\n"
+                    .to_owned(),
+                bad,
+            ),
+        ] {
+            let (outcome, notes) = preflight_with(&provider, Some((&secret_file(value), 0o600)))?;
+            assert_eq!(outcome, Err(Exit::Failed), "{provider}");
+            assert!(notes.contains("cannot be used"), "{notes}");
+            assert!(!notes.contains(value), "{notes}");
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "acme-dns-providers"))]
+    #[test]
+    fn preflight_refuses_a_provider_this_build_cannot_use() -> R {
+        let (outcome, notes) = preflight_with(
+            &cloudflare(),
+            Some((&secret_file("not-a-real-token"), 0o600)),
+        )?;
+        assert_eq!(outcome, Err(Exit::Failed));
+        assert!(notes.contains("acme-dns-providers"), "{notes}");
         Ok(())
     }
 

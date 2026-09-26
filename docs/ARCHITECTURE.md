@@ -79,6 +79,16 @@ privilege.
   (`sandbox.confine_monitor()`, then the start byte).
 - The worker binds the listener, so the port must be ≥ 1024
   (`PRIVILEGED_PORT_CEILING`, `serve.rs`).
+- The dns-01 provider secret lives in `secrets.toml`, next to `detent.toml`
+  (`/etc/detent/secrets.toml`, `Settings::secrets_path` in `run.rs`), `0600`
+  and owned by root. The privileged parent reads it before the fork
+  (`preflight_dns_provider`, `serve.rs`), through
+  `crates/detent-web/src/secrets.rs` (`load`: `O_NOFOLLOW`, regular file,
+  ≤ 64 KiB, no group/other bits, owner = euid). A secret that reaches the
+  worker gets there only as memory inherited across the fork: the worker
+  runs as uid `detent` and cannot reread the `0600` file. Today `serve`
+  only proves that `[acme.provider]` and the secret build a provider, then
+  drops both; the renewal loop that keeps them is not built yet.
 
 ### 3.2 One-shot CLI commands and `detent mcp`
 
