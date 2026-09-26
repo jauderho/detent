@@ -255,7 +255,7 @@ typed password. Keep it in `Zeroizing<String>` (or avoid the copy).
   seam: done with STAGE4 §4.3 item 4.
 - **M17** — the ACME credential write ignores the directory fsync error
   (`let _ = dir.sync_all()` in `crates/detent-acme/src/lib.rs` and
-  `order.rs`): done with STAGE4 §4.3 (Phase 6 works in that crate).
+  `order.rs`): **DONE** in STAGE4 §4.3 (`sync_dir` in `lib.rs`).
 
 ---
 

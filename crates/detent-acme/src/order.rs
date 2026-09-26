@@ -578,12 +578,10 @@ fn write_json_atomically(path: &Path, json: &str) -> Result<(), AcmeError> {
         f.write_all(json.as_bytes())?;
         f.sync_all()?;
         std::fs::rename(&tmp, path)?;
-        if let Some(parent) = path.parent()
-            && let Ok(dir) = std::fs::File::open(parent)
-        {
-            let _ = dir.sync_all();
+        match path.parent() {
+            Some(parent) => crate::sync_dir(parent),
+            None => Ok(()),
         }
-        Ok(())
     };
     if let Err(e) = write() {
         let _ = std::fs::remove_file(&tmp);
