@@ -51,6 +51,8 @@
 ))]
 compile_error!("the `web` feature needs one of crypto-aws-lc or crypto-ring");
 
+#[cfg(all(feature = "web", feature = "acme-dns-providers"))]
+mod acme;
 mod cli;
 mod completions;
 mod doctor;

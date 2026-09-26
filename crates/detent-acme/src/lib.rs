@@ -31,6 +31,7 @@ pub mod schedule;
 mod tsig;
 
 pub use attest::Attestor;
+pub use instant_acme::{Account, RetryPolicy};
 #[cfg(feature = "fuzzing")]
 pub use order::fuzz_acme_json;
 pub use order::{
