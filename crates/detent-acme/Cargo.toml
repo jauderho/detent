@@ -9,11 +9,9 @@ publish = false
 
 [features]
 # The four networked dns-01 providers (RFC 2136, Cloudflare, acme-dns, deSEC).
-# Off by default: detent-acme links no TLS client and no HMAC crate, so every
-# one of them refuses at the send step. Their request building and response
-# parsing are implemented and unit-tested against recorded fixtures, so this
-# turns on for that -- but compiling ~1200 lines that cannot reach a server
-# into the shipped binary is weight for nothing. Turn on with the transport.
+# Cloudflare, acme-dns and deSEC send over the crate's TLS 1.3 client
+# (src/https.rs). RFC 2136 still refuses to send unsigned: TSIG is not yet
+# wired. Off by default until serve selects a provider from `[acme]`.
 dns-providers = []
 # ponytail: one feature, not per-parser cfgs; the wrappers below are the whole seam.
 fuzzing = []
@@ -33,17 +31,20 @@ instant-acme = { version = "=0.8.5", default-features = false, features = ["aws-
 base64 = { workspace = true }
 rustls-pki-types = { workspace = true }
 time = { workspace = true }
+http-body-util = { workspace = true }
 hyper = { workspace = true }
 hyper-rustls = { workspace = true }
 hyper-util = { workspace = true }
 rustls = { workspace = true }
 webpki-roots = { workspace = true }
 x509-parser = { workspace = true }
+# The provider transport runs each request on a private current-thread
+# runtime (src/https.rs). Already in the tree through hyper and instant-acme.
+tokio = { workspace = true }
 
 [dev-dependencies]
-# Only for unit fixtures (an AKI-bearing chain for `ari_identifier`) and the
-# #[ignore]d Pebble live test: a runtime to block on the async order flow.
-# detent-acme itself stays tokio-free and rcgen-free.
+# Only for unit fixtures (an AKI-bearing chain for `ari_identifier`, the
+# provider transport's test TLS server) and the #[ignore]d Pebble live test.
+# detent-acme itself stays rcgen-free.
 rcgen = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["rt"] }

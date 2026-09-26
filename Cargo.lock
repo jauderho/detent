@@ -669,6 +669,7 @@ name = "detent-acme"
 version = "0.0.1"
 dependencies = [
  "base64 0.22.1",
+ "http-body-util",
  "hyper",
  "hyper-rustls",
  "hyper-util",
