@@ -153,7 +153,9 @@ pub struct AppState {
     pub state_root: Arc<PathBuf>,
     /// Serializes the rare uncached update lookup so concurrent GETs cause at
     /// most one GitHub request; the resulting on-disk stamp serves the rest.
-    pub(crate) update_check: Arc<Mutex<()>>,
+    /// Holds when the last live check failed, so a failure keeps the next
+    /// one off the network for a while (L-WEB13).
+    pub(crate) update_check: Arc<Mutex<Option<std::time::Instant>>>,
 }
 
 impl AppState {
@@ -174,7 +176,7 @@ impl AppState {
             origin: Arc::new(origin),
             cert_store,
             state_root: Arc::new(state_root),
-            update_check: Arc::new(Mutex::new(())),
+            update_check: Arc::new(Mutex::new(None)),
         }
     }
 
