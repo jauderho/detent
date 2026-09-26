@@ -77,8 +77,8 @@ impl SpawnConfig {
 
 /// Confinement applied to each role once its privileges are final.
 ///
-/// Both methods are called after the fork and after the worker has dropped its
-/// uid, which is the only moment at which a Landlock ruleset or a seccomp
+/// Each method is called after its fork and after the worker or the acme
+/// process has dropped its uid, which is the only moment at which a Landlock ruleset or a seccomp
 /// filter can be installed with the right scope.
 pub trait SandboxHooks {
     /// Confine the privileged monitor.
@@ -96,6 +96,15 @@ pub trait SandboxHooks {
     ///
     /// Any confinement failure the implementor considers fatal.
     fn confine_worker(&self) -> Result<(), SandboxError> {
+        Ok(())
+    }
+
+    /// Confine the acme process ([`spawn_acme`], ADR-015).
+    ///
+    /// # Errors
+    ///
+    /// Any confinement failure the implementor considers fatal.
+    fn confine_acme(&self) -> Result<(), SandboxError> {
         Ok(())
     }
 }
@@ -166,13 +175,19 @@ impl MonitorHandle {
     ///
     /// [`std::io::Error`] when `waitpid(2)` fails.
     pub fn wait(&self) -> std::io::Result<Option<i32>> {
-        let Some(pid) = rustix::process::Pid::from_raw(self.child_pid) else {
-            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
-        };
-        let status = rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::empty())
-            .map_err(std::io::Error::from)?;
-        Ok(status.and_then(|(_, status)| status.exit_status()))
+        wait_for(self.child_pid)
     }
+}
+
+/// `waitpid(2)` on `child_pid`: its exit status, or `None` when a signal
+/// killed it.
+fn wait_for(child_pid: i32) -> std::io::Result<Option<i32>> {
+    let Some(pid) = rustix::process::Pid::from_raw(child_pid) else {
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+    };
+    let status = rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::empty())
+        .map_err(std::io::Error::from)?;
+    Ok(status.and_then(|(_, status)| status.exit_status()))
 }
 
 /// Which half of the pair the caller became.
@@ -260,7 +275,7 @@ pub fn spawn_pair(config: &SpawnConfig, sandbox: &dyn SandboxHooks) -> Result<Sp
     }
 }
 
-/// `fork(2)`, for [`spawn_pair`] and [`spawn_runner`].
+/// `fork(2)`, for [`spawn_pair`], [`spawn_runner`] and [`spawn_acme`].
 ///
 /// SAFETY of the fork itself is documented on `sys::fork_process`. The
 /// obligation it places on the caller — do nothing in the child that could
@@ -324,6 +339,79 @@ pub fn spawn_runner(
     }
 }
 
+/// The parent's handle on the acme process (ADR-015).
+#[derive(Debug)]
+pub struct AcmeHandle {
+    /// Pid of the acme process. The monitor keeps it and reaps it at
+    /// shutdown.
+    pub child_pid: i32,
+    /// The worker's end of the acme channel. The monitor/worker pair forked
+    /// after [`spawn_acme`] inherits it: the monitor drops it, the worker
+    /// answers on it with [`serve_acme`](super::acme::serve_acme).
+    pub channel: Channel,
+}
+
+impl AcmeHandle {
+    /// Reap the acme process, blocking until it exits.
+    ///
+    /// Returns its exit status, or `None` when it was killed by a signal.
+    ///
+    /// # Errors
+    ///
+    /// [`std::io::Error`] when `waitpid(2)` fails.
+    pub fn wait(&self) -> std::io::Result<Option<i32>> {
+        wait_for(self.child_pid)
+    }
+}
+
+/// Fork the acme process (ADR-015). Call it after [`spawn_runner`] and before
+/// [`spawn_pair`], before any thread or runtime starts.
+///
+/// The child hardens itself (`no_new_privs`, not dumpable), drops to
+/// `config.worker_user` as the worker does, runs
+/// [`SandboxHooks::confine_acme`], and then runs `body` on its end of the
+/// channel. It exits with `body`'s return value and never returns to the
+/// caller. A child that cannot drop or confine itself exits `1` without
+/// running `body`. The child inherits every other descriptor of the parent;
+/// `body` drops what it must not keep.
+///
+/// The channel's timeouts are [`ACME_TIMEOUT`](super::acme::ACME_TIMEOUT),
+/// not `config`'s.
+///
+/// # Errors
+///
+/// [`SpawnError::Account`] (checked before the fork), [`SpawnError::Channel`]
+/// and [`SpawnError::Fork`].
+pub fn spawn_acme<F>(
+    config: &SpawnConfig,
+    sandbox: &dyn SandboxHooks,
+    body: F,
+) -> Result<AcmeHandle, SpawnError>
+where
+    F: FnOnce(Channel) -> i32,
+{
+    let credentials = resolve_worker_account(config)?;
+    let (worker_end, acme_end) =
+        Channel::pair_with(super::acme::ACME_TIMEOUT, super::acme::ACME_TIMEOUT)
+            .map_err(SpawnError::Channel)?;
+    match fork()? {
+        Side::Parent(child_pid) => {
+            drop(acme_end);
+            Ok(AcmeHandle {
+                child_pid,
+                channel: worker_end,
+            })
+        }
+        Side::Child => {
+            drop(worker_end);
+            if drop_and_confine(credentials, || sandbox.confine_acme()).is_err() {
+                abort_child(1);
+            }
+            abort_confined_child(body(acme_end));
+        }
+    }
+}
+
 /// Reap a forked child, blocking until it exits.
 pub fn reap_child(child_pid: i32) {
     if let Some(pid) = rustix::process::Pid::from_raw(child_pid) {
@@ -364,6 +452,15 @@ fn become_worker(
     credentials: Option<(u32, u32)>,
     sandbox: &dyn SandboxHooks,
 ) -> Result<bool, SpawnError> {
+    drop_and_confine(credentials, || sandbox.confine_worker())
+}
+
+/// Harden, drop to `credentials` when given, then `confine`. True when the
+/// uid changed.
+fn drop_and_confine(
+    credentials: Option<(u32, u32)>,
+    confine: impl FnOnce() -> Result<(), SandboxError>,
+) -> Result<bool, SpawnError> {
     harden()?;
     let dropped = match credentials {
         Some((uid, gid)) => {
@@ -372,7 +469,7 @@ fn become_worker(
         }
         None => false,
     };
-    sandbox.confine_worker().map_err(SpawnError::Sandbox)?;
+    confine().map_err(SpawnError::Sandbox)?;
     Ok(dropped)
 }
 
@@ -406,11 +503,12 @@ mod tests {
     use super::{
         DEFAULT_WORKER_USER, MonitorHandle, NoSandbox, Role, SandboxError, SandboxHooks,
         SpawnConfig, SpawnError, become_worker, harden, is_root, resolve_worker_account,
-        spawn_pair,
+        spawn_acme, spawn_pair,
     };
+    use crate::privsep::acme::{ACME_PROTO_VERSION, ACME_TIMEOUT, AcmeMessage};
     use crate::privsep::allowlist::{Allowlist, Config};
     use crate::privsep::monitor::{ExitReason, Hooks, Monitor};
-    use crate::privsep::transport::{Channel, DEFAULT_TIMEOUT};
+    use crate::privsep::transport::{Channel, ChannelError, DEFAULT_TIMEOUT};
     use std::time::Duration;
 
     #[test]
@@ -514,6 +612,53 @@ mod tests {
             return Err("failed child unexpectedly returned to its caller".into());
         };
         assert_eq!(handle.wait()?, Some(1));
+        Ok(())
+    }
+
+    struct RefusesAcme;
+
+    impl SandboxHooks for RefusesAcme {
+        fn confine_acme(&self) -> Result<(), SandboxError> {
+            Err(SandboxError("acme refused".to_owned()))
+        }
+    }
+
+    /// ADR-015: the acme child runs the caller's body, and the parent gets
+    /// the body's return value as the child's exit status. Unprivileged, as
+    /// the worker tests: no account drop, no real sandbox.
+    #[test]
+    fn spawn_acme_runs_the_body_in_a_child_and_reports_its_status()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let parent = rustix::process::getpid();
+        let mut handle = spawn_acme(&SpawnConfig::unprivileged(), &NoSandbox, |mut channel| {
+            let in_child = rustix::process::getppid() == Some(parent);
+            let sent = channel
+                .send(&AcmeMessage::Hello {
+                    version: ACME_PROTO_VERSION,
+                })
+                .is_ok();
+            if in_child && sent { 7 } else { 1 }
+        })?;
+        assert_eq!(handle.channel.read_timeout(), ACME_TIMEOUT);
+        assert_eq!(
+            handle.channel.recv::<AcmeMessage>()?,
+            AcmeMessage::Hello {
+                version: ACME_PROTO_VERSION
+            }
+        );
+        assert_eq!(handle.wait()?, Some(7));
+        assert!(NoSandbox.confine_acme().is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_acme_setup_exits_before_the_body_runs() -> Result<(), Box<dyn std::error::Error>> {
+        let mut handle = spawn_acme(&SpawnConfig::unprivileged(), &RefusesAcme, |_| 0)?;
+        assert_eq!(handle.wait()?, Some(1));
+        assert!(matches!(
+            handle.channel.recv::<AcmeMessage>(),
+            Err(ChannelError::Closed)
+        ));
         Ok(())
     }
 

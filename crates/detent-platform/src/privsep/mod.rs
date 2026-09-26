@@ -7,6 +7,7 @@
 //! from the compiled-in module descriptors — no path, unit name, or program
 //! name ever crosses the socket from worker to monitor.
 
+pub mod acme;
 pub mod allowlist;
 pub(crate) mod exec_deny;
 pub mod monitor;
