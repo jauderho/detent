@@ -112,6 +112,39 @@ test.describe('the apply flow', () => {
     expect(apply?.body).toMatchObject({ expected_hash: 'b'.repeat(64) })
   })
 
+  /**
+   * H21: the commit-confirm window lives on the host, not in the tab. A reload
+   * drops every piece of React state, so the banner that comes back after one
+   * can only have come from `GET /commits/pending` — and its Confirm must still
+   * reach the host, or the change rolls itself back whatever the operator
+   * wanted.
+   */
+  test('an armed window survives a reload and is confirmed', async ({ page }) => {
+    const calls = await stubApi(page)
+    await signIn(page)
+    await page.getByRole('link', { name: 'modules' }).click()
+    await page.getByRole('link', { name: 'hosts' }).click()
+    await page.getByRole('button', { name: 'plan', exact: true }).click()
+    await page.getByRole('button', { name: 'apply this change' }).click()
+    await page.getByRole('dialog').getByRole('button', { name: 'apply', exact: true }).click()
+
+    const banner = page.getByRole('alert').filter({ hasText: 'waiting to be confirmed' })
+    await expect(banner).toBeVisible()
+
+    const pendingReadsBefore = calls.filter((call) => call.url.endsWith('/commits/pending')).length
+    await page.reload()
+    await expect(banner).toBeVisible()
+    expect(calls.filter((call) => call.url.endsWith('/commits/pending')).length).toBeGreaterThan(
+      pendingReadsBefore,
+    )
+
+    await banner.getByRole('button', { name: 'confirm change' }).click()
+    await expect(banner).toHaveCount(0)
+    expect(
+      calls.some((call) => call.method === 'POST' && call.url.endsWith('/commits/1/confirm')),
+    ).toBe(true)
+  })
+
   test('a read-only session cannot apply, and is told why', async ({ page }) => {
     await stubApi(page, { readOnly: true })
     await signIn(page)
