@@ -509,15 +509,8 @@ impl fmt::Debug for DeSecProvider {
 // RFC 2136
 // ---------------------------------------------------------------------------
 
-/// TSIG algorithms (RFC 8945 §6) this provider accepts.
-const TSIG_ALGORITHMS: [&str; 6] = [
-    "hmac-md5",
-    "hmac-sha1",
-    "hmac-sha224",
-    "hmac-sha256",
-    "hmac-sha384",
-    "hmac-sha512",
-];
+/// Sends one DNS message to a server and returns its answer.
+type DnsExchange = dyn Fn(&str, &[u8]) -> Result<Vec<u8>, AcmeError> + Send + Sync;
 
 /// Publishes dns-01 records with RFC 2136 dynamic updates to a zone's primary
 /// server.
@@ -527,20 +520,15 @@ const TSIG_ALGORITHMS: [&str; 6] = [
 /// sends just the delete-all. Both are idempotent by construction: re-adding
 /// an existing record overwrites it, and deleting a missing name succeeds.
 ///
-/// Updates are TSIG-signed (RFC 8945): the signature is an HMAC over the
-/// message plus TSIG variables, appended as an additional record. That needs
-/// the `hmac` crate, which detent-acme does not depend on, so sending is
-/// refused with a clear error until that dependency decision lands (ADR-011).
-/// The primary server is authoritative the moment it answers, so
+/// Every UPDATE is TSIG-signed (RFC 8945) and sent over TCP; the server's
+/// answer must carry a valid TSIG from the same key and RCODE NOERROR (see
+/// `tsig.rs`). The primary server is authoritative the moment it answers, so
 /// `wait_propagated` keeps the instant default.
 pub struct Rfc2136Provider {
     server: String,
     zone: String,
-    key_name: String,
-    // Held for the future TSIG signer; never sent, and never logged.
-    #[allow(dead_code)]
-    key_value: String,
-    tsig_algorithm: String,
+    key: crate::tsig::Key,
+    exchange: Box<DnsExchange>,
 }
 
 impl Rfc2136Provider {
@@ -557,8 +545,9 @@ impl Rfc2136Provider {
     /// # Errors
     ///
     /// [`AcmeError::Config`] when the server is empty, the zone or key name is
-    /// not a valid DNS name, the key value is empty or non-printable, or the
-    /// algorithm is not a known TSIG HMAC.
+    /// not a valid DNS name, the key value is not non-empty base64, or the
+    /// algorithm is not one of `hmac-sha224`, `hmac-sha256`, `hmac-sha384`,
+    /// `hmac-sha512`.
     pub fn new(
         server: impl Into<String>,
         zone: impl Into<String>,
@@ -586,23 +575,26 @@ impl Rfc2136Provider {
                 "rfc2136: key name must be a valid DNS name, got {key_name:?}"
             ))
         })?;
-        validate_value(&key_value).map_err(|_| {
-            AcmeError::Config("rfc2136: key value must be non-empty printable ASCII".into())
+        let algorithm = crate::tsig::Algorithm::parse(&tsig_algorithm).ok_or_else(|| {
+            AcmeError::Config(format!(
+                "rfc2136: unsupported TSIG algorithm {tsig_algorithm:?}; expected one of \
+                 {} (hmac-md5 and hmac-sha1 are refused)",
+                crate::tsig::Algorithm::NAMES.join(", ")
+            ))
         })?;
-        if !TSIG_ALGORITHMS.contains(&tsig_algorithm.as_str()) {
-            return Err(AcmeError::Config(format!(
-                "rfc2136: unknown TSIG algorithm {tsig_algorithm:?}; expected one of \
-                 {}",
-                TSIG_ALGORITHMS.join(", ")
-            )));
-        }
+        let key = crate::tsig::Key::new(&key_name, algorithm, &key_value)?;
         Ok(Self {
             server,
             zone,
-            key_name,
-            key_value,
-            tsig_algorithm,
+            key,
+            exchange: Box::new(crate::tsig::exchange_tcp),
         })
+    }
+
+    #[cfg(test)]
+    fn with_exchange(mut self, exchange: Box<DnsExchange>) -> Self {
+        self.exchange = exchange;
+        self
     }
 
     /// Builds the UPDATE for `record`, adding `add` as the new TXT when set.
@@ -611,29 +603,18 @@ impl Rfc2136Provider {
         update_message(zone, record.fqdn(), add)
     }
 
-    /// Signs `message` with the configured TSIG key and sends it.
-    ///
-    /// Always refuses today. TSIG (RFC 8945 §10.2) is an HMAC over the
-    /// message plus the TSIG variables, appended as an additional record;
-    /// the `hmac` crate is not a detent-acme dependency, and every sane
-    /// server refuses an unauthenticated update, so refusing here is the
-    /// honest answer rather than putting an unsigned message on the wire.
-    ///
-    /// Kept separate from [`Self::update`] so that the message building —
-    /// which *is* implemented and unit-tested — has a return type that means
-    /// what it says.
+    /// Gives `message` a random id, signs it, sends it, and checks the
+    /// server's signed answer.
     fn send_signed(&self, message: &[u8]) -> Result<(), AcmeError> {
-        debug_assert!(!message.is_empty(), "an UPDATE was built before sending");
-        Err(AcmeError::Config(format!(
-            "rfc2136: cannot sign the {} byte UPDATE for {} with key {:?} ({}): TSIG \
-             signing needs the `hmac` crate, which detent-acme does not depend on \
-             (new dependency awaits ADR-011). UPDATE message building is implemented \
-             and unit-tested; sending unauthenticated is refused",
-            message.len(),
-            self.server,
-            self.key_name,
-            self.tsig_algorithm,
-        )))
+        let id = crate::tsig::random_id()?;
+        let mut message = message.to_vec();
+        if let Some(header_id) = message.get_mut(..2) {
+            header_id.copy_from_slice(&id.to_be_bytes());
+        }
+        let (signed, mac) = self.key.sign(&message, crate::tsig::now())?;
+        let answer = (self.exchange)(&self.server, &signed)?;
+        self.key
+            .verify_response(&answer, id, &mac, crate::tsig::now())
     }
 }
 
@@ -666,17 +647,7 @@ impl Rfc2136Provider {
     }
 }
 
-/// Appends `name` in wire format: length-prefixed labels, zero terminator.
-fn encode_name(name: &str, out: &mut Vec<u8>) -> Result<(), AcmeError> {
-    for label in name.split('.') {
-        let len = u8::try_from(label.len())
-            .map_err(|_| AcmeError::Config(format!("rfc2136: DNS label too long in {name:?}")))?;
-        out.push(len);
-        out.extend_from_slice(label.as_bytes());
-    }
-    out.push(0);
-    Ok(())
-}
+use crate::tsig::encode_name;
 
 /// TXT rdata: one or more ≤255-byte length-prefixed character-strings.
 // Capacity math on bounded small ints; `saturating_*` unnecessary here.
@@ -695,7 +666,7 @@ fn txt_rdata(value: &str) -> Vec<u8> {
 /// Builds an RFC 2136 UPDATE message: the SOA-named `zone` in the zone
 /// section, a class-ANY delete of every TXT for `name`, and — when `add` is
 /// set — the new TXT with a 60s TTL. The TSIG additional record would be
-/// appended by the signer, not here.
+/// appended by the signer (`tsig.rs`), not here.
 fn update_message(zone: &str, name: &str, add: Option<&str>) -> Result<Vec<u8>, AcmeError> {
     const HEADER: [u8; 4] = [0, 0, 0x28, 0x00]; // id 0, opcode 5 (UPDATE)
     const TYPE_SOA: [u8; 2] = [0, 6];
@@ -743,10 +714,10 @@ impl fmt::Debug for Rfc2136Provider {
         f.debug_struct("Rfc2136Provider")
             .field("server", &self.server)
             .field("zone", &self.zone)
-            .field("key_name", &self.key_name)
+            .field("key_name", &self.key.name())
             .field("key_value", &"[redacted]")
-            .field("tsig_algorithm", &self.tsig_algorithm)
-            .finish()
+            .field("tsig_algorithm", &self.key.algorithm().name())
+            .finish_non_exhaustive()
     }
 }
 
@@ -754,8 +725,8 @@ impl fmt::Debug for Rfc2136Provider {
 // Fuzz entry points
 // ---------------------------------------------------------------------------
 
-/// Feeds arbitrary strings through the DNS provider response parsers and the
-/// RFC 2136 message builder.
+/// Feeds arbitrary strings through the DNS provider response parsers, the
+/// RFC 2136 message builder and the TSIG answer parser.
 ///
 /// List/RRset bodies arrive from provider APIs over the network, so malformed
 /// JSON must map to `Err`, never to a panic; the message builder must likewise
@@ -767,6 +738,11 @@ pub fn fuzz_provider_response(body: &str, value: &str) {
     let _ = rrset_contains(body, value);
     let _ = update_message(body, value, Some(value));
     let _ = update_message(body, value, None);
+    // The RFC 2136 server answer is parsed before its MAC is checked.
+    if let Ok(key) = crate::tsig::Key::new("k.example.com", crate::tsig::Algorithm::Sha256, "a2V5")
+    {
+        let _ = key.verify_response(body.as_bytes(), 0, value.as_bytes(), 0);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -781,6 +757,9 @@ mod tests {
     use super::*;
 
     type R = Result<(), Box<dyn std::error::Error>>;
+
+    /// A TSIG secret: base64 of `s3cr3t-key`.
+    const TSIG_B64: &str = "czNjcjN0LWtleQ==";
 
     fn record() -> Result<DnsRecord, AcmeError> {
         DnsRecord::new("_acme-challenge.example.com", "digest-value-42")
@@ -856,7 +835,7 @@ mod tests {
                 "ns1.example.com:53",
                 "example.com",
                 "k.example.com",
-                "s3cr3t-key",
+                TSIG_B64,
                 "hmac-sha256",
             )?),
         );
@@ -1087,15 +1066,12 @@ mod tests {
 
     #[test]
     fn rfc2136_update_returns_the_built_message() -> R {
-        // `update` used to build the message, discard it, and return `Err`
-        // unconditionally — a `Result<Vec<u8>, _>` that could never be `Ok`.
-        // Message building and the refusal to send are now separate, so this
-        // return type means what it says.
+        // Message building is separate from signing and sending.
         let r2 = Rfc2136Provider::new(
             "ns1.example.com:53",
             "example.com",
             "k.example.com",
-            "s3cr3t-key",
+            TSIG_B64,
             "hmac-sha256",
         )?;
         let record = record()?;
@@ -1106,41 +1082,94 @@ mod tests {
         );
         let withdraw = r2.update(&record, None)?;
         assert!(withdraw.len() < add.len(), "a delete carries no rdata");
-        // Sending is still refused, and that is now the only refusing step.
-        assert!(matches!(
-            r2.send_signed(&add),
-            Err(AcmeError::Config(m)) if m.contains("does not depend on")
-        ));
         Ok(())
     }
 
+    /// One UPDATE the fake primary received: the server and the bytes.
+    type Sent = (String, Vec<u8>);
+
+    /// An exchange that plays the primary server: it checks the signed
+    /// UPDATE, then answers with `rcode`, signed with the same key.
+    fn tsig_server(rcode: u8, seen: Arc<Mutex<Vec<Sent>>>) -> Box<DnsExchange> {
+        Box::new(move |server: &str, signed: &[u8]| {
+            seen.lock()
+                .map_err(|p| AcmeError::Io(io::Error::other(p.to_string())))?
+                .push((server.to_owned(), signed.to_vec()));
+            let key =
+                crate::tsig::Key::new("k.example.com", crate::tsig::Algorithm::Sha256, TSIG_B64)?;
+            // hmac-sha256: the MAC is the 32 bytes before id, error, other len.
+            let end = signed.len().saturating_sub(6);
+            let mac = signed.get(end.saturating_sub(32)..end).unwrap_or_default();
+            let mut answer = signed.get(..2).unwrap_or_default().to_vec();
+            answer.extend_from_slice(&[0xa8, rcode, 0, 1, 0, 0, 0, 0, 0, 0]);
+            answer.extend_from_slice(signed.get(12..12 + 17).unwrap_or_default());
+            key.sign_answer(&answer, crate::tsig::now(), mac)
+        })
+    }
+
     #[test]
-    fn rfc2136_refuses_to_send_without_tsig() -> R {
+    fn rfc2136_signs_sends_and_checks_the_answer() -> R {
+        let seen = Arc::new(Mutex::new(Vec::new()));
         let r2 = Rfc2136Provider::new(
             "ns1.example.com:53",
             "example.com",
             "k.example.com",
-            "s3cr3t-key",
+            TSIG_B64,
             "hmac-sha256",
-        )?;
+        )?
+        .with_exchange(tsig_server(0, Arc::clone(&seen)));
+        let record = record()?;
+        r2.present(&record)?;
+        r2.delete(&record)?;
+        let seen = seen
+            .lock()
+            .map_err(|p| AcmeError::Io(io::Error::other(p.to_string())))?;
+        assert_eq!(seen.len(), 2);
+        for (server, signed) in seen.iter() {
+            assert_eq!(server, "ns1.example.com:53");
+            // ARCOUNT 1: the TSIG record, owned by the key name.
+            assert_eq!(signed.get(10..12), Some(&[0, 1][..]));
+            let mut owner = Vec::new();
+            encode_name("k.example.com", &mut owner)?;
+            assert!(has(signed, &owner), "the TSIG owner is the key name");
+            assert!(!has(signed, b"s3cr3t"), "the secret is never sent");
+        }
+        let add = seen.first().map(|(_, m)| m.clone()).unwrap_or_default();
+        assert!(has(&add, b"digest-value-42"), "present carries the value");
+        Ok(())
+    }
+
+    #[test]
+    fn rfc2136_reports_a_refused_or_failed_update() -> R {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let r2 = Rfc2136Provider::new(
+            "ns1.example.com:53",
+            "example.com",
+            "k.example.com",
+            TSIG_B64,
+            "hmac-sha256",
+        )?
+        .with_exchange(tsig_server(9, seen));
         assert!(matches!(
             r2.present(&record()?),
-            Err(AcmeError::Config(ref m)) if m.contains("does not depend on")
+            Err(AcmeError::Config(m)) if m.ends_with("RCODE NOTAUTH (9)")
         ));
+        let down = Rfc2136Provider::new(
+            "ns1.example.com:53",
+            "example.com",
+            "k.example.com",
+            TSIG_B64,
+            "hmac-sha256",
+        )?
+        .with_exchange(Box::new(|_: &str, _: &[u8]| {
+            Err(AcmeError::Config(
+                "rfc2136: ns1.example.com:53: cannot connect".into(),
+            ))
+        }));
         assert!(matches!(
-            r2.delete(&record()?),
-            Err(AcmeError::Config(ref m)) if m.contains("does not depend on")
+            down.delete(&record()?),
+            Err(AcmeError::Config(m)) if m.ends_with("cannot connect")
         ));
-        // The refusal names the key it would have signed with, never the key.
-        let refusal = match r2.present(&record()?) {
-            Err(AcmeError::Config(m)) => m,
-            other => return Err(format!("expected a config error, got {other:?}").into()),
-        };
-        assert!(refusal.contains("k.example.com"), "{refusal}");
-        assert!(
-            !refusal.contains("s3cr3t"),
-            "the TSIG key leaked: {refusal}"
-        );
         Ok(())
     }
 
@@ -1156,7 +1185,7 @@ mod tests {
             "ns1.example.com:53",
             "example.com",
             "k.example.com",
-            "s3cr3t-key",
+            TSIG_B64,
             "hmac-sha256",
         )?;
         assert_eq!(r2.zone_for(&deep)?, "example.com");
@@ -1197,12 +1226,11 @@ mod tests {
             "ns1.example.com:53",
             "example.com",
             "k.example.com",
-            "s3cr3t-key",
+            TSIG_B64,
             "hmac-sha256",
         )?;
         let outside = DnsRecord::new("_acme-challenge.other.org", "digest-value-42")?;
-        // The zone check runs before the TSIG refusal, so the error names the
-        // zone rather than the missing `hmac` crate.
+        // The zone check runs before anything is signed or sent.
         for result in [r2.present(&outside), r2.delete(&outside)] {
             assert!(
                 matches!(result, Err(AcmeError::Config(ref m)) if m.contains("outside zone")),
@@ -1220,7 +1248,7 @@ mod tests {
             "ns1.example.com:53",
             "example.com",
             "k.example.com",
-            "s3cr3t-key",
+            TSIG_B64,
             "hmac-sha256",
         )?;
         r2.wait_propagated(&record()?)?;
@@ -1373,6 +1401,16 @@ mod tests {
             ),
             Err(AcmeError::Config(_))
         ));
+        for weak in ["hmac-md5", "hmac-sha1"] {
+            assert!(matches!(
+                Rfc2136Provider::new("ns1.example.com:53", "example.com", "k.example.com", TSIG_B64, weak),
+                Err(AcmeError::Config(m)) if m.contains("hmac-md5 and hmac-sha1 are refused")
+            ));
+        }
+        assert!(matches!(
+            Rfc2136Provider::new("ns1.example.com:53", "example.com", "k.example.com", "not base64!", "hmac-sha256"),
+            Err(AcmeError::Config(m)) if m.ends_with("TSIG key value is not base64")
+        ));
     }
 
     #[test]
@@ -1396,15 +1434,16 @@ mod tests {
                     "ns1.example.com:53",
                     "example.com",
                     "tsig-key",
-                    "s3cr3t-key",
+                    TSIG_B64,
                     "hmac-sha256"
                 )
                 .ok()
             ),
         ];
         for dump in &dumps {
+            assert!(dump.starts_with("Some("), "the provider was built: {dump}");
             assert!(
-                !dump.contains("s3cr3t"),
+                !dump.contains("s3cr3t") && !dump.contains(TSIG_B64),
                 "secret material leaked in debug output: {dump}"
             );
         }

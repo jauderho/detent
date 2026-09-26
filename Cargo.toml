@@ -91,6 +91,8 @@ axum = "0.8.9"
 # 0.10 (`digest` 0.10); the duplication is deliberate and tolerated by
 # `multiple_crate_versions = "allow"`.
 hmac = "0.13.0"
+# Already in the lock through rustls; detent-acme signs TSIG with its HMAC.
+aws-lc-rs = "1.18.1"
 getrandom = "0.4.3"
 hyper = { version = "1.11.1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1.20", features = [
