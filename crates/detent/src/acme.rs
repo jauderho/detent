@@ -23,6 +23,8 @@
 //! the secret. Only the ACME server's own error text is logged in full.
 
 use std::future::Future;
+use std::ops::ControlFlow;
+use std::os::fd::{AsFd as _, BorrowedFd};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,6 +36,8 @@ use detent_platform::privsep::acme::{AcmeChannelError, AcmeClient, KeyPem};
 use detent_platform::privsep::transport::{Channel, ChannelError};
 use detent_web::{AcmeConfig, CertStore, CertifiedKeyPair, TlsError};
 use rustls_pki_types::CertificateDer;
+use tokio::io::Interest;
+use tokio::io::unix::AsyncFd;
 
 /// Time between two checks of the served certificate.
 const CHECK_INTERVAL: Duration = Duration::from_hours(1);
@@ -335,7 +339,7 @@ async fn round(
 /// expires; only then is a new certificate ordered. `now`
 /// reads the clock in Unix seconds and `sleep` waits, so a test drives the
 /// rounds without real time. The loop returns when the worker closes the
-/// channel.
+/// channel: an install sees it closed, or `sleep` breaks.
 pub(crate) async fn run_loop<F>(
     issuer: &mut impl Issuer,
     installer: &mut impl Installer,
@@ -343,7 +347,7 @@ pub(crate) async fn run_loop<F>(
     mut now: impl FnMut() -> i64,
     mut sleep: impl FnMut(Duration) -> F,
 ) where
-    F: Future<Output = ()>,
+    F: Future<Output = ControlFlow<()>>,
 {
     let mut retry = FIRST_RETRY;
     let mut held = None;
@@ -371,7 +375,30 @@ pub(crate) async fn run_loop<F>(
                 delay
             }
         };
-        sleep(delay).await;
+        if sleep(delay).await.is_break() {
+            tracing::info!("the worker closed the acme channel");
+            return;
+        }
+    }
+}
+
+/// Waits `delay`, or less when `channel` becomes readable: the worker
+/// closed its end, or sent a message out of turn. Either way the loop must
+/// stop, so the acme process ends when the worker does.
+///
+/// `channel` is registered with the runtime for this wait only, so a
+/// readiness left from an earlier answer cannot end it. Nothing is read,
+/// and the blocking mode of the channel does not change. When the
+/// descriptor cannot be watched, it waits the full `delay`.
+pub(crate) async fn wait_or_peer(channel: BorrowedFd<'_>, delay: Duration) -> ControlFlow<()> {
+    let Ok(watched) = AsyncFd::with_interest(channel, Interest::READABLE) else {
+        tracing::warn!("the acme channel cannot be watched; the wait runs to its end");
+        tokio::time::sleep(delay).await;
+        return ControlFlow::Continue(());
+    };
+    tokio::select! {
+        () = tokio::time::sleep(delay) => ControlFlow::Continue(()),
+        _ = watched.readable() => ControlFlow::Break(()),
     }
 }
 
@@ -391,6 +418,14 @@ pub(crate) fn acme_main(channel: Channel, mut issuer: impl Issuer, cert_dir: &Pa
             return 1;
         }
     };
+    // The client owns the channel; the waits watch this duplicate of it.
+    let peer = match channel.as_fd().try_clone_to_owned() {
+        Ok(peer) => peer,
+        Err(err) => {
+            tracing::error!(reason = %err, "the acme process cannot watch its channel");
+            return 1;
+        }
+    };
     let mut client = AcmeClient::new(channel);
     if let Err(err) = client.hello() {
         tracing::error!(reason = %err, "the worker did not accept the acme process");
@@ -401,7 +436,7 @@ pub(crate) fn acme_main(channel: Channel, mut issuer: impl Issuer, cert_dir: &Pa
         &mut client,
         cert_dir,
         detent_web::auth::extract::unix_now,
-        tokio::time::sleep,
+        |delay| wait_or_peer(peer.as_fd(), delay),
     ));
     0
 }
@@ -488,6 +523,7 @@ pub(crate) fn serve_installs(
 mod tests {
     use std::collections::VecDeque;
     use std::future::Future;
+    use std::ops::ControlFlow;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -500,7 +536,7 @@ mod tests {
 
     use super::{
         AcmeIssuer, FIRST_RETRY, Installer, Issuer, MAX_RETRY, Outcome, RenewError, acme_main,
-        check_and_install, renew_once, run_loop, serve_installs,
+        check_and_install, renew_once, run_loop, serve_installs, wait_or_peer,
     };
 
     type R = Result<(), Box<dyn std::error::Error>>;
@@ -894,7 +930,7 @@ mod tests {
             || 0,
             |delay| {
                 delays.push(delay);
-                std::future::ready(())
+                std::future::ready(ControlFlow::Continue(()))
             },
         ))?;
         let minutes: Vec<u64> = delays.iter().map(|d| d.as_secs() / 60).collect();
@@ -929,11 +965,15 @@ mod tests {
                         delays.push(delay);
                         // A loop that should have stopped by now waits for
                         // the timeout instead of spinning.
-                        tokio::time::sleep(if delays.len() > 10 {
+                        let wait = tokio::time::sleep(if delays.len() > 10 {
                             Duration::from_secs(60)
                         } else {
                             Duration::ZERO
-                        })
+                        });
+                        async move {
+                            wait.await;
+                            ControlFlow::Continue(())
+                        }
                     },
                 ),
             )
@@ -1019,7 +1059,7 @@ mod tests {
                         let _ = std::fs::remove_dir(dir.path().join(detent_web::ACME_PAIR_FILE));
                     }
                     delays.push(delay);
-                    std::future::ready(())
+                    std::future::ready(ControlFlow::Continue(()))
                 },
             ))
         });
@@ -1055,7 +1095,7 @@ mod tests {
                 &mut installer,
                 dir.path(),
                 || 0,
-                |_| std::future::ready(()),
+                |_| std::future::ready(ControlFlow::Continue(())),
             ))
         });
         done?;
@@ -1140,7 +1180,7 @@ mod tests {
                         |_| {
                             rounds = rounds.saturating_add(1);
                             // Stop after the first round: wait forever.
-                            std::future::pending::<()>()
+                            std::future::pending::<ControlFlow<()>>()
                         },
                     ),
                 )
@@ -1192,6 +1232,72 @@ mod tests {
             capture(|| main_against(ACME_PROTO_VERSION.wrapping_add(1), FakeIssuer::default()));
         assert_eq!(status?, 1);
         assert!(logs.contains("ERROR"), "{logs}");
+        Ok(())
+    }
+
+    /// The worker ends while the loop waits one minute after a failed round:
+    /// the wait ends at once, and `acme_main` returns `0`.
+    #[test]
+    fn acme_main_ends_when_the_worker_closes_during_a_wait() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let cert_dir = dir.path().to_path_buf();
+        let (acme_end, mut worker_end) = Channel::pair()?;
+        let worker = std::thread::spawn(move || -> Result<(), ChannelError> {
+            worker_end.recv::<AcmeMessage>()?;
+            worker_end.send(&WorkerMessage::Hello {
+                version: ACME_PROTO_VERSION,
+            })?;
+            // The first round fails (the issuer has no script): the loop is
+            // in its one-minute wait when the worker goes.
+            std::thread::sleep(Duration::from_millis(200));
+            drop(worker_end);
+            Ok(())
+        });
+        let started = std::time::Instant::now();
+        let (done, status) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(logged(|| {
+                acme_main(acme_end, FakeIssuer::default(), &cert_dir)
+            }));
+        });
+        let status = status
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| "acme_main did not end during its wait")?;
+        assert_eq!(status, 0);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+        worker.join().map_err(|_| "worker thread panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn a_wait_runs_to_its_end_on_a_quiet_channel_and_ends_on_a_message() -> R {
+        use std::os::fd::AsFd as _;
+        let (acme_end, mut worker_end) = Channel::pair()?;
+        let quiet = block_on(wait_or_peer(acme_end.as_fd(), Duration::from_millis(20)))?;
+        assert_eq!(quiet, ControlFlow::Continue(()));
+        // A message out of turn ends the wait as a close does.
+        worker_end.send(&WorkerMessage::Installed)?;
+        let stirred = block_on(wait_or_peer(acme_end.as_fd(), Duration::from_secs(60)))?;
+        assert_eq!(stirred, ControlFlow::Break(()));
+        Ok(())
+    }
+
+    /// The runtime cannot watch a regular file: the wait still runs, to its
+    /// end, and says so in the log.
+    #[test]
+    fn a_descriptor_that_cannot_be_watched_waits_the_full_delay() -> R {
+        use std::os::fd::AsFd as _;
+        let file = tempfile::tempfile()?;
+        let started = std::time::Instant::now();
+        let (waited, logs) =
+            capture(|| block_on(wait_or_peer(file.as_fd(), Duration::from_millis(50))));
+        assert_eq!(waited?, ControlFlow::Continue(()));
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        assert!(logs.contains("cannot be watched"), "{logs}");
         Ok(())
     }
 
