@@ -19,9 +19,10 @@
 //! `ua` fields (PLAN §2.5) by wrapping or replacing [`FileAudit`], without the
 //! engine learning what an IP address is.
 
-use std::fs::OpenOptions;
-use std::io::{BufRead as _, BufReader, Write as _};
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::collections::VecDeque;
+use std::fs::{DirBuilder, OpenOptions};
+use std::io::Write as _;
+use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -37,6 +38,8 @@ use crate::op::OpKind;
 /// Mode of the audit file: readable only by the account that owns the state
 /// directory.
 const AUDIT_FILE_MODE: u32 = 0o600;
+/// Mode of the directory that holds the audit logs.
+const AUDIT_DIR_MODE: u32 = 0o700;
 
 /// Number of records returned when a query omits `limit`.
 pub const DEFAULT_AUDIT_QUERY_LIMIT: usize = 100;
@@ -79,6 +82,10 @@ pub struct AuditChain {
     pub prev: Option<String>,
     /// Hash of this record and its link to the preceding one.
     pub hash: String,
+    /// SHA-256 of the unreadable lines between the preceding record and this
+    /// one, each with its newline. Set only after a crash tore an append.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub torn: Option<String>,
 }
 
 /// One line of the audit log.
@@ -293,21 +300,67 @@ impl FileAudit {
     ///
     /// This detects modified, removed, reordered, and inserted records. The
     /// caller must retain the returned count/hash as an external anchor to
-    /// detect truncation of the final records.
+    /// detect truncation of the final records. Unreadable lines after the last
+    /// record (a torn append) are not part of the chain and are ignored here;
+    /// the next append records their digest.
     ///
     /// # Errors
     ///
     /// [`AuditError`] when the log cannot be read or its chain is invalid.
     pub fn verify(&self) -> Result<AuditChain, AuditError> {
-        let raw = match std::fs::read_to_string(&self.path) {
-            Ok(raw) => raw,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return Err(AuditError::Chain("log does not exist".to_owned()));
-            }
-            Err(err) => return Err(AuditError::Io(err)),
+        let Some(raw) = self.read_log()? else {
+            return Err(AuditError::Chain("log does not exist".to_owned()));
         };
-        verify_records(&raw)
+        scan_records(&raw, |_| {})?
+            .anchor
+            .ok_or_else(|| AuditError::Chain("log is empty".to_owned()))
     }
+
+    /// Read the whole log, or nothing when it does not exist yet.
+    fn read_log(&self) -> Result<Option<Vec<u8>>, AuditError> {
+        match std::fs::read(&self.path) {
+            Ok(raw) => Ok(Some(raw)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(AuditError::Io(err)),
+        }
+    }
+
+    /// Create the log's directory `0700` and open the log for appending.
+    ///
+    /// When the log is new, the directories that now hold it are fsynced so
+    /// the new entries survive a crash.
+    fn open_for_append(&self, is_new: bool) -> Result<std::fs::File, AuditError> {
+        let parent = self.path.parent();
+        if let Some(parent) = parent {
+            DirBuilder::new()
+                .recursive(true)
+                .mode(AUDIT_DIR_MODE)
+                .create(parent)?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(AUDIT_FILE_MODE)
+            .open(&self.path)?;
+        if is_new && let Some(parent) = parent {
+            sync_directory(parent)?;
+            if let Some(grandparent) = parent.parent() {
+                sync_directory(grandparent)?;
+            }
+        }
+        Ok(file)
+    }
+}
+
+/// Fsync a directory so the entries created in it are durable. An empty path
+/// means the current directory.
+fn sync_directory(dir: &Path) -> Result<(), AuditError> {
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    std::fs::File::open(dir)?.sync_all().map_err(AuditError::Io)
 }
 
 impl AuditSink for FileAudit {
@@ -315,60 +368,59 @@ impl AuditSink for FileAudit {
         let _guard = APPEND_LOCK
             .lock()
             .map_err(|_| AuditError::Chain("audit append lock was poisoned".to_owned()))?;
-        let previous = match std::fs::read_to_string(&self.path) {
-            Ok(raw) if !raw.trim().is_empty() => Some(verify_records(&raw)?),
-            Ok(_) => None,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-            Err(err) => return Err(AuditError::Io(err)),
+        let raw = self.read_log()?;
+        let scan = match raw {
+            Some(ref raw) => scan_records(raw, |_| {})?,
+            None => Scan::default(),
         };
-        let mut stored = record.clone();
-        stored.chain = Some(make_chain(&stored, previous.as_ref())?);
-        let mut line =
-            serde_json::to_vec(&stored).map_err(|err| AuditError::Encode(err.to_string()))?;
-        line.push(b'\n');
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
+        let mut chain = make_chain(record, scan.anchor.as_ref())?;
+        if !scan.gap.is_empty() {
+            tracing::warn!(
+                bytes = scan.gap.len(),
+                "the audit log ends in a torn line; the next record notes its digest"
+            );
+            chain.torn = Some(Sha256Digest::of(&scan.gap).to_string());
         }
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(AUDIT_FILE_MODE)
-            .open(&self.path)?;
+        let mut stored = record.clone();
+        stored.chain = Some(chain);
+        let mut line = Vec::new();
+        // Close a torn final line, so the new record starts on its own line.
+        if raw
+            .as_ref()
+            .and_then(|raw| raw.last())
+            .is_some_and(|last| *last != b'\n')
+        {
+            line.push(b'\n');
+        }
+        serde_json::to_writer(&mut line, &stored)
+            .map_err(|err| AuditError::Encode(err.to_string()))?;
+        line.push(b'\n');
+        let mut file = self.open_for_append(raw.is_none())?;
         file.write_all(&line)?;
         file.sync_data().map_err(AuditError::Io)
     }
 
     fn query(&self, query: &AuditQuery) -> Result<Vec<AuditRecord>, AuditError> {
-        let file = match std::fs::File::open(&self.path) {
-            Ok(file) => file,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(err) => return Err(AuditError::Io(err)),
+        let Some(raw) = self.read_log()? else {
+            return Ok(Vec::new());
         };
         let limit = query.effective_limit();
-        let mut out = Vec::with_capacity(limit);
-        for line in BufReader::new(file).lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
+        let mut out = VecDeque::with_capacity(limit);
+        let scan = scan_records(&raw, |record| {
+            if limit == 0 || !query.matches(&record) {
+                return;
             }
-            match serde_json::from_str::<AuditRecord>(&line) {
-                Ok(record) if query.matches(&record) => {
-                    if limit == 0 {
-                        continue;
-                    }
-                    if out.len() == limit {
-                        out.remove(0);
-                    }
-                    out.push(record);
-                }
-                Ok(_) => {}
-                // A truncated final line (a crash mid-append) must not make
-                // the whole log unreadable.
-                Err(err) => tracing::warn!(error = %err, "skipping unparseable audit line"),
+            if out.len() == limit {
+                out.pop_front();
             }
+            out.push_back(record);
+        })?;
+        if !scan.gap.is_empty() {
+            // A torn final line (a crash mid-append) must not make the whole
+            // log unreadable. It is not a record.
+            tracing::warn!(bytes = scan.gap.len(), "skipping a torn audit line");
         }
-        out.reverse();
-        Ok(out)
+        Ok(out.into_iter().rev().collect())
     }
 }
 
@@ -384,49 +436,77 @@ fn make_chain(
         sequence: previous.map_or(1, |chain| chain.sequence.saturating_add(1)),
         prev: previous.map(|chain| chain.hash.clone()),
         hash: Sha256Digest::of(&bytes).to_string(),
+        torn: None,
     })
 }
 
-/// Parse and verify a whole JSON-lines log, returning its terminal anchor.
-fn verify_records(raw: &str) -> Result<AuditChain, AuditError> {
-    let mut previous: Option<AuditChain> = None;
+/// What a verified pass over the log found.
+#[derive(Debug, Default)]
+struct Scan {
+    /// The chain of the last record.
+    anchor: Option<AuditChain>,
+    /// Unreadable lines after the last record, each with its newline.
+    gap: Vec<u8>,
+}
+
+/// Parse and verify a whole JSON-lines log, passing each record to `each`,
+/// oldest first.
+///
+/// A line that is not a record is accepted only when the next record's
+/// `torn` digest names it, or when no record follows it (a torn append that
+/// the next append will note).
+fn scan_records(raw: &[u8], mut each: impl FnMut(AuditRecord)) -> Result<Scan, AuditError> {
+    let mut scan = Scan::default();
+    let mut first_bad: Option<String> = None;
     for (index, line) in raw
-        .lines()
-        .filter(|line| !line.trim().is_empty())
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
         .enumerate()
     {
-        let record: AuditRecord = serde_json::from_str(line).map_err(|err| {
-            AuditError::Chain(format!(
-                "record {} is not valid JSON: {err}",
-                index.saturating_add(1)
-            ))
-        })?;
-        let actual = record.chain.as_ref().ok_or_else(|| {
-            AuditError::Chain(format!(
-                "record {} has no chain metadata",
-                index.saturating_add(1)
-            ))
-        })?;
-        let expected_sequence = previous
+        let number = index.saturating_add(1);
+        let record: AuditRecord = match serde_json::from_slice(line) {
+            Ok(record) => record,
+            Err(err) => {
+                first_bad
+                    .get_or_insert_with(|| format!("record {number} is not valid JSON: {err}"));
+                scan.gap.extend_from_slice(line);
+                scan.gap.push(b'\n');
+                continue;
+            }
+        };
+        let previous = scan.anchor.as_ref();
+        let actual = record
+            .chain
             .as_ref()
-            .map_or(1, |chain| chain.sequence.saturating_add(1));
-        let expected_prev = previous.as_ref().map(|chain| chain.hash.clone());
+            .ok_or_else(|| AuditError::Chain(format!("record {number} has no chain metadata")))?;
+        let expected_sequence = previous.map_or(1, |chain| chain.sequence.saturating_add(1));
+        let expected_prev = previous.map(|chain| chain.hash.clone());
         if actual.sequence != expected_sequence || actual.prev != expected_prev {
             return Err(AuditError::Chain(format!(
-                "record {} is not linked to its predecessor",
-                index.saturating_add(1)
+                "record {number} is not linked to its predecessor"
             )));
         }
-        let expected = make_chain(&record, previous.as_ref())?;
+        let expected_torn = (!scan.gap.is_empty()).then(|| Sha256Digest::of(&scan.gap).to_string());
+        if actual.torn != expected_torn {
+            return Err(AuditError::Chain(
+                match (actual.torn.is_none(), first_bad) {
+                    (true, Some(bad)) => bad,
+                    _ => format!("record {number} does not match the skipped lines before it"),
+                },
+            ));
+        }
+        let expected = make_chain(&record, previous)?;
         if actual.hash != expected.hash {
             return Err(AuditError::Chain(format!(
-                "record {} hash does not match its contents",
-                index.saturating_add(1)
+                "record {number} hash does not match its contents"
             )));
         }
-        previous = Some(actual.clone());
+        scan.anchor = Some(actual.clone());
+        scan.gap.clear();
+        first_bad = None;
+        each(record);
     }
-    previous.ok_or_else(|| AuditError::Chain("log is empty".to_owned()))
+    Ok(scan)
 }
 
 /// A sink that discards everything, for `--dryrun` and for tests that are not
@@ -656,11 +736,155 @@ mod tests {
     }
 
     #[test]
+    fn a_deleted_middle_record_breaks_the_chain() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let sink = FileAudit::new(dir.path().join("audit.jsonl"));
+        sink.record(&record("root", Some("hosts"), AuditResult::Ok))?;
+        sink.record(&record("alice", Some("hosts"), AuditResult::Ok))?;
+        sink.record(&record("root", Some("chrony"), AuditResult::Ok))?;
+
+        let raw = std::fs::read_to_string(sink.path())?;
+        let kept: Vec<&str> = raw
+            .lines()
+            .enumerate()
+            .filter(|(index, _)| *index != 1)
+            .map(|(_, line)| line)
+            .collect();
+        std::fs::write(sink.path(), kept.join("\n") + "\n")?;
+
+        assert!(matches!(sink.verify(), Err(AuditError::Chain(_))));
+        assert!(matches!(
+            sink.query(&AuditQuery::default()),
+            Err(AuditError::Chain(_))
+        ));
+        assert!(matches!(
+            sink.record(&record("root", Some("hosts"), AuditResult::Ok)),
+            Err(AuditError::Chain(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_torn_final_line_does_not_block_later_records() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let sink = FileAudit::new(dir.path().join("audit.jsonl"));
+        sink.record(&record("root", Some("hosts"), AuditResult::Ok))?;
+        sink.record(&record("alice", Some("hosts"), AuditResult::Ok))?;
+
+        // A crash in the middle of an append leaves a line with no newline.
+        // The cut can fall inside a multi-byte character.
+        let whole = serde_json::to_vec(&record("bøb", Some("hosts"), AuditResult::Ok))?;
+        let cut = whole
+            .iter()
+            .position(|byte| *byte == 0xC3)
+            .ok_or("the record holds a two-byte character")?;
+        let torn = whole.get(..=cut).ok_or("cut inside the record")?;
+        let mut file = std::fs::OpenOptions::new().append(true).open(sink.path())?;
+        std::io::Write::write_all(&mut file, torn)?;
+        drop(file);
+
+        // The torn line is not a record: reads and verification still work.
+        assert_eq!(sink.verify()?.sequence, 2);
+        assert_eq!(sink.query(&AuditQuery::default())?.len(), 2);
+
+        // The next append succeeds, links to the last whole record, and
+        // records the digest of the torn bytes.
+        sink.record(&record("root", Some("chrony"), AuditResult::Ok))?;
+        let anchor = sink.verify()?;
+        assert_eq!(anchor.sequence, 3);
+        let mut expected = torn.to_vec();
+        expected.push(b'\n');
+        assert_eq!(
+            anchor.torn.as_deref(),
+            Some(Sha256Digest::of(&expected).to_string().as_str())
+        );
+        let all = sink.query(&AuditQuery::default())?;
+        assert_eq!(all.len(), 3);
+        assert_eq!(all.first().map(|r| r.who.as_str()), Some("root"));
+        assert_eq!(
+            all.first().and_then(|r| r.module.as_deref()),
+            Some("chrony")
+        );
+
+        // Later records carry no note.
+        sink.record(&record("root", Some("hosts"), AuditResult::Ok))?;
+        assert_eq!(sink.verify()?.torn, None);
+        Ok(())
+    }
+
+    #[test]
+    fn a_second_crash_before_the_note_is_still_recovered() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let sink = FileAudit::new(dir.path().join("audit.jsonl"));
+        sink.record(&record("root", Some("hosts"), AuditResult::Ok))?;
+        // The first recovery wrote the newline and part of its record, then
+        // the process stopped again.
+        let mut raw = std::fs::read(sink.path())?;
+        raw.extend_from_slice(b"{\"ts\":\"20\n{\"ts\":\"2026-");
+        std::fs::write(sink.path(), &raw)?;
+
+        sink.record(&record("root", Some("chrony"), AuditResult::Ok))?;
+        let anchor = sink.verify()?;
+        assert_eq!(anchor.sequence, 2);
+        assert_eq!(
+            anchor.torn.as_deref(),
+            Some(
+                Sha256Digest::of(b"{\"ts\":\"20\n{\"ts\":\"2026-\n")
+                    .to_string()
+                    .as_str()
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_unnoted_bad_line_in_the_middle_breaks_the_chain() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let sink = FileAudit::new(dir.path().join("audit.jsonl"));
+        sink.record(&record("root", Some("hosts"), AuditResult::Ok))?;
+        let first = std::fs::read_to_string(sink.path())?;
+        sink.record(&record("alice", Some("hosts"), AuditResult::Ok))?;
+        let raw = std::fs::read_to_string(sink.path())?;
+        let second = raw.strip_prefix(&first).ok_or("appended after the first")?;
+        std::fs::write(sink.path(), format!("{first}{{ junk\n{second}"))?;
+        assert!(matches!(
+            sink.verify(),
+            Err(AuditError::Chain(msg)) if msg.contains("not valid JSON")
+        ));
+
+        // A note that names other bytes is refused as well.
+        let mut forged: AuditRecord = serde_json::from_str(second.trim_end())?;
+        if let Some(chain) = forged.chain.as_mut() {
+            chain.torn = Some(Sha256Digest::of(b"other\n").to_string());
+        }
+        let forged = serde_json::to_string(&forged)?;
+        std::fs::write(sink.path(), format!("{first}{{ junk\n{forged}\n"))?;
+        assert!(matches!(
+            sink.verify(),
+            Err(AuditError::Chain(msg)) if msg.contains("skipped lines")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn the_audit_directory_is_private() -> R {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::TempDir::new()?;
+        let sink = FileAudit::under_state_root(&dir.path().join("state"));
+        sink.record(&record("root", None, AuditResult::Ok))?;
+        let parent = sink.path().parent().ok_or("the log has a parent")?;
+        let mode = std::fs::metadata(parent)?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "audit directory mode is {mode:o}");
+        Ok(())
+    }
+
+    #[test]
     fn the_file_sink_skips_blank_and_unparseable_lines() -> R {
         let dir = tempfile::TempDir::new()?;
         let sink = FileAudit::new(dir.path().join("audit.jsonl"));
-        let mut raw = serde_json::to_string(&record("root", Some("hosts"), AuditResult::Ok))?;
-        raw.push_str("\n\n{ truncated\n");
+        sink.record(&record("root", Some("hosts"), AuditResult::Ok))?;
+        let mut raw = std::fs::read_to_string(sink.path())?;
+        raw.push_str("\n{ truncated\n");
         std::fs::write(sink.path(), raw)?;
         assert_eq!(sink.query(&AuditQuery::default())?.len(), 1);
         Ok(())
@@ -670,9 +894,15 @@ mod tests {
     fn verify_reports_invalid_json_missing_chain_and_a_broken_link() -> R {
         let dir = tempfile::TempDir::new()?;
 
-        // Invariant 1: a line that is not valid JSON at all.
+        // Invariant 1: a line that is not valid JSON at all, followed by a
+        // record that does not note it.
         let not_json = FileAudit::new(dir.path().join("not-json.jsonl"));
-        std::fs::write(not_json.path(), "{ this is not json\n")?;
+        let mut first = record("root", Some("hosts"), AuditResult::Ok);
+        first.chain = Some(super::make_chain(&first, None)?);
+        std::fs::write(
+            not_json.path(),
+            format!("{{ this is not json\n{}\n", serde_json::to_string(&first)?),
+        )?;
         assert!(
             matches!(not_json.verify(), Err(AuditError::Chain(msg)) if msg.contains("not valid JSON"))
         );
@@ -755,12 +985,13 @@ mod tests {
         let dir = tempfile::TempDir::new()?;
         let sink = FileAudit::new(dir.path().join("audit.jsonl"));
         let mut raw = String::new();
+        let mut previous = None;
         for _ in 0..1001 {
-            raw.push_str(&serde_json::to_string(&record(
-                "root",
-                Some("hosts"),
-                AuditResult::Ok,
-            ))?);
+            let mut entry = record("root", Some("hosts"), AuditResult::Ok);
+            let chain = super::make_chain(&entry, previous.as_ref())?;
+            entry.chain = Some(chain.clone());
+            previous = Some(chain);
+            raw.push_str(&serde_json::to_string(&entry)?);
             raw.push('\n');
         }
         std::fs::write(sink.path(), raw)?;
