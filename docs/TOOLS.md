@@ -90,6 +90,51 @@ Playwright specs are named `*.e2e.ts`, not `*.spec.ts`: `bun test` claims
 `*.spec.*`, and a Playwright spec picked up by the unit runner fails in a way
 that reads like a broken test rather than a misrouted one.
 
+## Faster local builds (per machine, not in the repo)
+
+The owner's build settings live in the **user-level** `~/.cargo/config.toml`,
+not in the repository's `.cargo/config.toml`. They name absolute tool paths
+(`/usr/bin/sccache`, `/usr/bin/mold`) and `target-cpu=x86-64-v3`. In the repo
+they would break every CI job (runners have no sccache or mold), make
+release binaries crash on pre-Haswell x86_64 CPUs, and override the
+size-tuned `[profile.release]` in `Cargo.toml` (`opt-level = "z"`, fat LTO)
+that the Size check measures.
+
+Set up (Ubuntu 24.04):
+
+```sh
+apt-get install -y mold sccache clang
+rustup component add rustc-codegen-cranelift-preview --toolchain nightly
+```
+
+`~/.cargo/config.toml` then holds: `build.rustc-wrapper = "/usr/bin/sccache"`;
+a `dev` profile with `codegen-units = 256`, incremental and
+`split-debuginfo = "unpacked"`; a `server-dev` profile that inherits `dev`
+with `codegen-backend = "cranelift"`; clang + mold with
+`target-cpu=x86-64-v3` for `x86_64-unknown-linux-gnu`. Add this, or the
+`server-dev` link fails:
+
+```toml
+# Cranelift for this workspace's crates only; dependencies use LLVM.
+# Cranelift-compiled aws-lc-rs code in dependencies does not link
+# (undefined aws_lc_* symbols, with both mold and ld).
+[profile.server-dev.package."*"]
+codegen-backend = "llvm"
+```
+
+Use:
+
+| Command | What |
+|---|---|
+| `cargo +nightly build --profile server-dev -p detent` | fastest edit-compile loop; binary in `target/server-dev/` |
+| `cargo build`, `cargo test` (stable, pinned 1.98.1) | the gates; what CI runs |
+| `sccache --show-stats` | cache hits; the cache is capped at 5 GiB in `~/.config/sccache/config` |
+
+Cranelift needs nightly, so the gates stay on the pinned stable toolchain.
+sccache does not cache incremental crates (this workspace's own crates), only
+dependencies. A change of `rustflags` rebuilds everything: after you first
+add this config, delete `target/debug` once (`make clean` does not).
+
 ## Where the disk goes
 
 Measured on a working checkout; yours will differ.
