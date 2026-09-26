@@ -50,7 +50,7 @@ use super::proto::{
 use super::transport::{Channel, ChannelError};
 use crate::fs::atomic::{
     AtomicError, BackupEntry, WriteRequest, list_backups, read_with_digest, restore_backup,
-    write_atomic,
+    restore_backup_expecting, write_atomic,
 };
 
 /// Name of the crash-recovery marker inside the state root.
@@ -245,6 +245,12 @@ pub struct RollbackEntry {
     pub path: PathBuf,
     /// Absolute path of the backup to restore from.
     pub backup: PathBuf,
+    /// Digest of the contents this write left on disk. A rollback restores
+    /// only while the target still has it, so an edit made during the
+    /// confirm window is kept. `None` (a marker from an older monitor)
+    /// restores without the guard.
+    #[serde(default)]
+    pub new_digest: Option<crate::fs::atomic::Sha256Digest>,
 }
 
 /// The on-disk crash-recovery marker.
@@ -710,6 +716,7 @@ impl<'a> Monitor<'a> {
                     target: id.get(),
                     path: entry.path.clone(),
                     backup,
+                    new_digest: Some(outcome.new_digest),
                 });
             }
         }
@@ -1179,7 +1186,7 @@ impl<'a> Monitor<'a> {
         let mut failures = Vec::new();
         let mut restored = 0_usize;
         for entry in marker.entries.iter().rev() {
-            match restore_backup(&entry.backup, &entry.path) {
+            match restore_backup_expecting(&entry.backup, &entry.path, entry.new_digest) {
                 Ok(_) => restored = restored.saturating_add(1),
                 Err(err) => failures.push(err.to_string()),
             }
@@ -1261,12 +1268,19 @@ fn lock_state(state_dir: &Path) -> Result<std::fs::File, MonitorError> {
 }
 
 /// Restore the recorded backups, newest write first. Failures are logged and
-/// counted; one unreadable backup must not abandon the rest.
+/// counted; one unreadable backup must not abandon the rest. A target that no
+/// longer holds the contents detent wrote was edited during the confirm
+/// window: it is skipped, logged, and not counted as restored.
 fn roll_back(entries: &[RollbackEntry]) -> usize {
     let mut restored = 0_usize;
     for entry in entries.iter().rev() {
-        match restore_backup(&entry.backup, &entry.path) {
+        match restore_backup_expecting(&entry.backup, &entry.path, entry.new_digest) {
             Ok(_) => restored = restored.saturating_add(1),
+            Err(err @ AtomicError::Conflict { .. }) => tracing::warn!(
+                error = %err,
+                path = %entry.path.display(),
+                "rollback skipped a target edited during the confirm window"
+            ),
             Err(err) => tracing::error!(error = %err, "rollback of one target failed"),
         }
     }
@@ -4124,6 +4138,83 @@ mod tests {
             .ok_or("expected a recovered commit")?;
         assert!(recovered.failures.is_empty(), "{:?}", recovered.failures);
         services.assert_replayed_after_restore();
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_does_not_overwrite_an_edit_made_during_the_window()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        arm_commit(&mut monitor, None)?;
+        std::fs::write(&fx.target, b"operator edit")?;
+        let response = monitor.dispatch(Request::RollbackCommit {
+            commit: CommitId(1),
+        })?;
+        assert!(matches!(
+            response,
+            Response::RolledBack {
+                commit: CommitId(1),
+                restored: 0
+            }
+        ));
+        assert_eq!(std::fs::read(&fx.target)?, b"operator edit");
+        assert!(!monitor.has_pending_commit());
+        Ok(())
+    }
+
+    #[test]
+    fn recover_pending_does_not_overwrite_an_edit_made_during_the_window()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        {
+            let mut monitor = greeted(fx.allow()?, Hooks::default());
+            arm_commit(&mut monitor, None)?;
+        }
+        std::fs::write(&fx.target, b"operator edit")?;
+        let monitor = Monitor::new(fx.allow()?, Hooks::default());
+        let recovered = monitor
+            .recover_pending()?
+            .ok_or("expected a recovered commit")?;
+        assert_eq!(recovered.restored, 0);
+        assert!(
+            recovered.failures.len() == 1
+                && recovered
+                    .failures
+                    .iter()
+                    .all(|failure| failure.starts_with("contents changed on disk")),
+            "unexpected failures {:?}",
+            recovered.failures
+        );
+        assert_eq!(std::fs::read(&fx.target)?, b"operator edit");
+        Ok(())
+    }
+
+    #[test]
+    fn a_marker_without_new_digests_still_parses_and_restores()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        {
+            let mut monitor = greeted(fx.allow()?, Hooks::default());
+            arm_commit(&mut monitor, None)?;
+        }
+        // A marker written before `new_digest` existed has no guard.
+        let marker = fx.state_root.join(PENDING_COMMIT_MARKER);
+        let mut json: Value = serde_json::from_slice(&std::fs::read(&marker)?)?;
+        for entry in json
+            .get_mut("entries")
+            .and_then(Value::as_array_mut)
+            .ok_or("entries")?
+        {
+            entry.as_object_mut().ok_or("entry")?.remove("new_digest");
+        }
+        std::fs::write(&marker, serde_json::to_vec(&json)?)?;
+        let monitor = Monitor::new(fx.allow()?, Hooks::default());
+        let recovered = monitor
+            .recover_pending()?
+            .ok_or("expected a recovered commit")?;
+        assert_eq!(recovered.restored, 1);
+        assert_eq!(std::fs::read(&fx.target)?, b"v1");
         Ok(())
     }
 
