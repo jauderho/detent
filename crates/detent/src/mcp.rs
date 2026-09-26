@@ -107,8 +107,7 @@ pub fn run(
 
     let store = Arc::new(StoreVerifier::new(settings.state_root.clone()));
     let authz: Arc<dyn detent_mcp::Authz> = Arc::new(EngineDecides);
-    let executor: Arc<dyn EngineExecutor> =
-        Arc::new(SessionExecutor::new(session, dryrun, who, scopes));
+    let executor: Arc<dyn EngineExecutor> = Arc::new(SessionExecutor::new(session, who, scopes));
     let server = McpServer::new(
         executor.clone(),
         authz,
@@ -269,22 +268,15 @@ impl detent_mcp::Authz for EngineDecides {
 /// one-shot commands, so MCP tools take the same engine path.
 struct SessionExecutor {
     session: std::sync::Mutex<Session>,
-    dryrun: bool,
     who: Identity,
     /// The token's scopes, which the engine checks for every operation.
     authz: ScopedAuthz,
 }
 
 impl SessionExecutor {
-    fn new(
-        session: Session,
-        dryrun: bool,
-        who: Identity,
-        scopes: detent_web::authz::Scopes,
-    ) -> Self {
+    fn new(session: Session, who: Identity, scopes: detent_web::authz::Scopes) -> Self {
         Self {
             session: std::sync::Mutex::new(session),
-            dryrun,
             who,
             authz: ScopedAuthz::new(scopes),
         }
@@ -296,13 +288,6 @@ impl EngineExecutor for SessionExecutor {
         let mut guard = self.session.lock().map_err(|_| OpsError::Unsupported {
             what: "engine_locked",
         })?;
-        // MCP has no plan-preview rendering; a dry run refuses the mutation
-        // the way `Session::execute` would, without the diff wrapper.
-        if self.dryrun && op.is_mutating() {
-            return Err(OpsError::Unsupported {
-                what: "dryrun_mutation",
-            });
-        }
         // The engine checks the token's scopes and audits under this
         // identity, a refusal included.
         match guard.execute_as(op, false, &self.who, &self.authz) {
@@ -668,7 +653,6 @@ mod tests {
         } = harness;
         let executor = SessionExecutor::new(
             session,
-            false,
             token_identity(),
             detent_web::authz::Scopes::of(Scope::Write),
         );
@@ -700,45 +684,6 @@ mod tests {
         Ok(())
     }
 
-    /// Under `--dryrun` a mutating tool is refused outright — MCP has no
-    /// plan preview to show instead — while a read still answers, and the
-    /// target is left untouched.
-    #[test]
-    fn a_dry_run_executor_refuses_mutations_and_still_answers_reads()
-    -> Result<(), Box<dyn std::error::Error>> {
-        // Bound first so the rest of the harness (its temp dir) outlives
-        // the session moved out of it.
-        let harness = crate::tests_support::Harness::start(b"v1\n", true)?;
-        let crate::tests_support::Harness {
-            session, target, ..
-        } = harness;
-        let executor = SessionExecutor::new(
-            session,
-            true,
-            token_identity(),
-            detent_web::authz::Scopes::of(Scope::Write),
-        );
-
-        let refused = executor.execute(apply("v2\n"));
-        assert!(
-            matches!(
-                refused,
-                Err(OpsError::Unsupported {
-                    what: "dryrun_mutation"
-                })
-            ),
-            "{refused:?}"
-        );
-        assert_eq!(std::fs::read(&target)?, b"v1\n");
-
-        let listed = executor.execute(Operation::ListModules)?;
-        assert!(
-            matches!(listed, OpOutcome::Modules(ref modules) if modules.len() == 1),
-            "{listed:?}"
-        );
-        Ok(())
-    }
-
     /// A read-scoped token may read. The engine refuses every mutation,
     /// writes nothing, and audits the refusal under the token (STAGE3 M4).
     #[test]
@@ -750,7 +695,6 @@ mod tests {
         } = harness;
         let executor = SessionExecutor::new(
             session,
-            false,
             token_identity(),
             detent_web::authz::Scopes::of(Scope::Read),
         );
