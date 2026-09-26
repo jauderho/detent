@@ -747,13 +747,24 @@ mod tests {
     }
 
     /// Writes an executable `#!/bin/sh` script the probe can run.
+    ///
+    /// A child `sh` writes the file, so this process never holds a write fd
+    /// to it: a parallel test that forks would copy that fd into its child
+    /// until exec, and exec of the script would then fail with `ETXTBSY`.
     #[cfg(unix)]
     fn probe_script(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt as _;
         let path = dir.join("candidate.sh");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write probe script");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod probe script");
+        let status = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                "printf '#!/bin/sh\\n%s\\n' \"$2\" > \"$1\" && chmod 755 \"$1\"",
+            ])
+            .arg("sh")
+            .arg(&path)
+            .arg(body)
+            .status()
+            .expect("run sh to write the probe script");
+        assert!(status.success(), "write probe script: {status}");
         path
     }
 
