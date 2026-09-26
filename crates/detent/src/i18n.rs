@@ -157,6 +157,25 @@ mod tests {
         assert!(messages.has(MessageId::new("ops-unknown-module")));
     }
 
+    /// Every CLI message with arguments goes through `format`: C0, C1 and
+    /// bidi controls in an argument never reach the terminal (L-OPS19).
+    #[test]
+    fn cli_arguments_lose_control_and_bidi_characters() {
+        let messages = Messages::new(Some("en-US"));
+        let text = messages.format(
+            MessageId::new("cli-applied"),
+            &[
+                ("module", "ho\u{1B}]0;pwned\u{07}sts"),
+                ("path", "/etc/\u{9B}\u{202E}stsoh\u{2066}\n"),
+            ],
+        );
+        for ch in ['\u{1B}', '\u{07}', '\u{9B}', '\u{202E}', '\u{2066}', '\n'] {
+            assert!(!text.contains(ch), "{ch:?} reached the output: {text:?}");
+        }
+        assert!(text.contains("ho]0;pwnedsts"), "{text}");
+        assert!(text.contains("/etc/stsoh"), "{text}");
+    }
+
     #[test]
     fn an_unknown_id_degrades_to_the_id_itself() {
         let messages = Messages::new(None);

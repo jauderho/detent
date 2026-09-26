@@ -42,7 +42,7 @@
 //! them unconditionally, so callers always get plain text back.
 
 use detent_core::diag::{Diagnostic, Diagnostics, MessageId};
-use fluent_bundle::{FluentArgs, FluentBundle, FluentResource};
+use fluent_bundle::{FluentArgs, FluentBundle, FluentResource, FluentValue};
 use std::collections::BTreeMap;
 use unic_langid::LanguageIdentifier;
 
@@ -313,10 +313,18 @@ impl Localizer {
     }
 
     /// Renders `id` substituting `args`, falling back to `en-US` and then to the
-    /// bare id text (see the type docs).
+    /// bare id text (see the type docs). String arguments lose their control
+    /// and bidi characters first, as in [`Localizer::render`].
     #[must_use]
     pub fn get_args(&self, id: &MessageId, args: &FluentArgs<'_>) -> String {
-        self.resolve(id.as_str(), Some(args))
+        let mut clean = FluentArgs::with_capacity(args.iter().count());
+        for (key, value) in args.iter() {
+            match value {
+                FluentValue::String(text) => clean.set(key, sanitize_arg_value(text)),
+                other => clean.set(key, other.clone()),
+            }
+        }
+        self.resolve(id.as_str(), Some(&clean))
     }
 
     /// Whether `id` resolves to a real message (in the active locale or the `en-US`
@@ -828,6 +836,37 @@ mod tests {
         // Must not panic; whatever it manages to salvage is fine.
         let _bundle = build_bundle("en-US", &files);
     }
+
+    #[test]
+    fn get_args_neutralises_control_and_bidi_chars_in_args() {
+        let localizer = Localizer::en_us();
+        let mut args = FluentArgs::new();
+        args.set("name", EVIL_ARG);
+        let text = localizer.get_args(&MessageId::new("hosts-invalid-hostname"), &args);
+        for ch in EVIL_CHARS {
+            assert!(
+                !text.contains(ch),
+                "get_args output still contains control/bidi char {ch:?}: {text:?}"
+            );
+        }
+        assert_eq!(text, "`bad.host` is not a valid hostname.");
+
+        // A number argument is passed through as a number.
+        let mut numbers = FluentArgs::new();
+        numbers.set("name", 42);
+        assert_eq!(
+            localizer.get_args(&MessageId::new("hosts-invalid-hostname"), &numbers),
+            "`42` is not a valid hostname."
+        );
+    }
+
+    /// C0, DEL, C1 and every Unicode bidi control, then a payload.
+    const EVIL_ARG: &str = "\u{00}\u{01}\u{1B}\u{1F}\u{7F}\u{80}\u{9B}\u{9F}\u{061C}\u{200E}\u{200F}\u{202A}\u{202B}\u{202C}\u{202D}\u{202E}\u{2066}\u{2067}\u{2068}\u{2069}bad.host";
+    const EVIL_CHARS: [char; 20] = [
+        '\u{00}', '\u{01}', '\u{1B}', '\u{1F}', '\u{7F}', '\u{80}', '\u{9B}', '\u{9F}', '\u{061C}',
+        '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}',
+        '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+    ];
 
     #[test]
     fn render_neutralises_control_and_bidi_chars_in_args() {
