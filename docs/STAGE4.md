@@ -54,7 +54,7 @@ M17 and M18 move into Phase 6 below (they live in `detent-acme`).
 ### 4.3 PLAN Phase 6 (ACME) — in-repo items (next)
 
 Also in this phase: **M17** (propagate the directory fsync error in the ACME
-credential write, `detent-acme` `lib.rs` and `order.rs`) and **M18** (a
+credential write, `detent-acme` `lib.rs` and `order.rs`; **DONE**, `sync_dir`) and **M18** (a
 real test of `present_challenges`, which item 4's seam makes possible).
 
 The gap analysis was done at `c50200e`. In short: the pieces exist, but nothing wires them into `serve`.

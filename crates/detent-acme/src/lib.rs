@@ -272,10 +272,7 @@ impl DnsProvider for HookProvider {
             f.write_all(record.value().as_bytes())?;
             f.sync_all()?;
             fs::rename(&tmp, &path)?;
-            if let Ok(dir) = fs::File::open(&self.state_dir) {
-                let _ = dir.sync_all();
-            }
-            Ok(())
+            sync_dir(&self.state_dir)
         };
         if let Err(e) = write_tmp() {
             let _ = fs::remove_file(&tmp);
@@ -315,6 +312,13 @@ fn validate_fqdn(fqdn: &str) -> Result<(), AcmeError> {
     } else {
         Err(AcmeError::InvalidFqdn(fqdn.to_owned()))
     }
+}
+
+/// Makes a rename in `dir` durable. A failure is returned, not dropped: a
+/// rename that is not on disk can vanish in a crash.
+pub(crate) fn sync_dir(dir: &std::path::Path) -> Result<(), AcmeError> {
+    fs::File::open(dir)?.sync_all()?;
+    Ok(())
 }
 
 /// Checks that `value` is a printable ASCII token (a base64url digest or a
@@ -525,5 +529,12 @@ mod tests {
         std::fs::create_dir(hook.challenge_path(&record()?))?;
         assert!(matches!(hook.present(&record()?), Err(AcmeError::Io(_))));
         Ok(())
+    }
+
+    #[test]
+    fn sync_dir_reports_a_directory_it_cannot_open() {
+        let missing = std::path::Path::new("/nonexistent-detent-acme-dir");
+        assert!(matches!(sync_dir(missing), Err(AcmeError::Io(_))));
+        assert!(sync_dir(&std::env::temp_dir()).is_ok());
     }
 }
