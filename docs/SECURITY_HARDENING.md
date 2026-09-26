@@ -44,7 +44,7 @@ release (compromised token).
 | Bootstrap self-signed cert, fingerprint logged for TOFU | MITM during first boot before ACME succeeds | `crates/detent-web/src/tls.rs` | `a_bootstrap_certificate_loads_into_the_provider`, `the_fingerprint_is_uppercase_colon_separated_sha256` (`tls.rs`) |
 | Cert store hot reload, `0600` under `0700` dir | local unprivileged user reading key material; stale-cert outage | `crates/detent-web/src/tls.rs` | `the_store_is_written_0600_under_a_0700_directory`, `a_pre_existing_store_directory_is_narrowed_to_0700`, `the_store_swaps_what_it_resolves`, `a_poisoned_store_still_serves_and_still_reloads` (`tls.rs`) |
 | Private key never in debug output / logs | key exfiltration via logs | `crates/detent-web/src/tls.rs` | `the_debug_output_never_carries_the_private_key` (`tls.rs`) |
-| Short-lived certs (ACME `shortlived` profile, dns-01, device-attest-01) | stolen-cert reuse window | `detent-acme` (Phase 6) | **implemented.** `instant-acme` order/account flow, dns-01 providers, renewal scheduling, ARI helpers, and device-attest-01 seam are present; live issuance is exercised by the Pebble test. |
+| Short-lived certs (ACME `shortlived` profile, dns-01, device-attest-01) | stolen-cert reuse window | `detent-acme` (Phase 6) | **library only, no production caller.** The `instant-acme` order/account flow, dns-01 provider request building (no HTTPS transport linked), renewal scheduling, ARI helpers and the device-attest-01 seam exist; live issuance runs only in the CI `acme-pebble` job. `detent serve` refuses `bootstrap = "acme"` (`cli-serve-acme-unsupported`, `preflight_refuses_a_malformed_file_a_privileged_port_and_acme` in `serve.rs`). See [Gaps](#gaps). |
 | HSTS `max-age=63072000; includeSubDomains` | protocol downgrade via a stripped first request | `crates/detent-web/src/headers.rs` | `every_header_is_present_with_its_exact_value` (asserts the exact `Strict-Transport-Security` value; `headers.rs`) |
 
 ## Web (Argon2id + rate limits + sessions/CSRF/CSP)
@@ -226,10 +226,13 @@ quietly into the tables above.
 10. **`Server` header removal, no directory listing, `/metrics` absent** are
    true by construction (nothing registers them) but have no dedicated
    negative test asserting their absence.
-11. **Reproducible builds, SBOM, provenance, immutable releases, Sigstore
-   verification** — all Phase 9 (`detent-update`) work; none of it exists
-   yet. `detent-acme` (short-lived certs, dns-01, device-attest-01) is
-   likewise Phase 6 and does not exist yet beyond an empty crate.
+11. **Reproducible builds, SBOM, provenance and immutable releases** are
+   Phase 9 work with no evidence in this document. Sigstore verification of
+   a release bundle exists in `detent-update` (see its row above); it is not
+   yet proven against a real release bundle. `detent-acme` is a library with
+   no production caller: issuance is exercised only by the CI Pebble job, and
+   `serve` refuses `bootstrap = "acme"` until the renewal loop is wired
+   (STAGE4 §4.3).
 12. **`testssl.sh` is not invoked anywhere in this repository.** PLAN Phase 4
     task 1 names it explicitly ("CI job, allow network"); no such job exists.
     `scripts/tls-check.sh` (added by this change) covers the
