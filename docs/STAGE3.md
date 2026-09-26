@@ -1118,6 +1118,8 @@ Open decisions carried from the review (owner answers pending):
 
 ### 11.7 Session report 2026-09-25 at `0f69392` — D6 landed (C1-e, H3, H10-MCP), H19 committed earlier
 - Items done: H19-health `8bd105b`; H19 `7332e50`; C1-e `35fdd42`; H3 `5d651be`; H10-MCP `0f69392`. (H16 `2febdc8`, H18 `7f1df06`, H20-fuzz `b21461e`, H20 `3a9d1cc` also on this stack, outside D6.)
+- 2026-09-26 H5: apply refuses when a declared validator cannot run (`!ran`), not only when it runs and fails. Fail closed was kept; the item had proposed "allow". — proposed: keep fail-closed (a missing validator binary then blocks apply for that module until it is installed) — owner/orchestrator answer:
+- 2026-09-26 M5: `plan` runs root validators but needs only read scope. — proposed: keep read scope (plan writes nothing; validators get a staged copy) — owner/orchestrator answer:
 - Items opened in §12: none this session.
 - Gates at HEAD: `cargo fmt --all --check` 0; `cargo clippy --workspace --all-targets --all-features -- -D warnings` 0 errors; `cargo test --workspace --all-features` 0 failures (full run, no FAILED lines).
 - Latest CI: run 36074875296 (push of H19-health `8bd105b`): Rust/Web/macOS/FFI/ACME green; Coverage and Size check fail. Fuzz run 36074883068: cargo-fuzz failure. D6 commits unpushed, CI not yet watched.
@@ -1307,3 +1309,54 @@ Method: reviewer per group; each item is checked against its Fix/Test/Acceptance
 | L-MODB8 | VERIFIED | Placeholders gone; bridge refusals. A no-op `let _ = profile;` remains (`network lib.rs:2575`); `a_bridge_is_refused…` also passes without the refusal (the round-trip guard catches it) |
 
 **Pass summary (groups A–E):** REOPEN — H6, H9, H23, L-WEB16, M8, M23, M25, L-OPS17, L-OPS18 (all fixed 2026-09-25: L-OPS18 `c1c3e03`, M23 `977f942`, M8 `0a11fb6`, M25 `f044538`, L-OPS17 `7587e2e`, L-WEB16 `6c59a65`, H9 `dcfdb0d`, H23 `9737985`, H6 `73e7c88`; L-OPS17 by decision "refuse clearly", H6 by decision "runner process"). Vacuous tests to replace — M5, M18, L-SUP12, H16's named test, C1-d (likely). All PARTIAL items are listed above with the missing piece.
+
+### 11.10 Closure of the §11.9 PARTIAL items (2026-09-26)
+
+Each fix below was written test first by an implementor (in its own worktree),
+then reviewed as a diff by the orchestrator, cherry-picked signed, and gated
+again in the main tree: fmt, workspace clippy `--all-features -D warnings`,
+workspace tests (only the root-only `webadmin` test fails), web `bun test`,
+`tsc -b`, `api:check`. Allow count: 113 → 111.
+
+| Item | Commit(s) | Test that failed first |
+|---|---|---|
+| C1-d | `e9d209c` | `write_temp_and_swap_never_writes_through_a_file_at_the_temp_name`, `…reports_a_directory_it_cannot_open_for_fsync` |
+| C1-b (read-only findings) | `95f6b01` | `materialize_staged_refuses_a_fifo_without_blocking`, `…refuses_a_symlinked_staged_directory` |
+| H4 | `8738f95` | replay on deadline, monitor exit and `recover_pending` (records the call and the restored bytes) |
+| M7 | `0b24cf4` | `rollback_does_not_overwrite_an_edit_made_during_the_window`, `recover_pending_does_not_…` |
+| M2 | `667c7bc`, `30e1b22` | per-role records, no-follow writes, `doctor` reads them; `a_confined_worker_records_its_confinement_on_a_first_start` (the first version failed under the real worker filter) |
+| M3 | `542d265` | `a_torn_final_line_does_not_block_later_records`, `a_deleted_middle_record_breaks_the_chain`, `the_audit_directory_is_private` |
+| H5 | `fd2954a` | `apply_refuses_when_an_external_check_fails` (no write, no backup), `apply_reports_the_checks_that_passed` |
+| M5 | `37ad461` | `plan_does_not_run_checks_for_a_model_with_errors` (replaces the vacuous test) |
+| M4 | `96bc74d` | `a_scope_denial_is_audited`; MCP `a_read_scope_permits_reads_and_the_engine_denies_and_audits_mutations` |
+| L-OPS11 | `5e41801` | `update_apply_is_swapped_through_the_monitor_and_audited_once` asserts the hashes |
+| L-OPS15 | `5eea52c` | `a_tail_query_reads_backwards_and_verifies_only_what_it_reads`; ops log rotates at 16 MiB |
+| L-OPS19 | `bb1d6ea` | `get_args_neutralises_control_and_bidi_chars_in_args` |
+| H17 (leaf + SET) | `3e432dd`, `949e5f1`, `71d0dec`, `2c81764` | `a_bad_set_is_refused`, `the_leaf_hash_covers_the_body_only`; real Rekor data: `a_real_public_good_set_verifies`, `a_real_rekor_proof_reaches_its_root_from_the_body_leaf` |
+| M21 + §12 aligned edits | `276bcef`, `085b69a`, `cbf6afd` | `deleting_the_first_entry_rewrites_no_other_line`, `apply_is_linear_in_file_size` (chrony/dhcp/network) |
+| §12 network gaps | `7e9ea9b`, `bb8e72d`, `3f4329c`, `260369c` | name charset, `/+24`, netplan bridge/VLAN routes, networkd restore on refusal |
+| M22 | `9accdf3` | `validate_flags_relative_mountpoint`, `validate_warns_when_root_entry_absent` |
+| L-MODA10 | `46655b4` | `validate_warns_root_exec_parameters`, `validate_warns_exposure_parameters` |
+| L-MODA11 | `ed3cf57` | samba/nfs strategies and fuzz generators reach the refused syntax |
+| H16 (named test) | `0481e8e` | `edit_keeps_unknown_keys_under_their_section` now fails without the fix; a new-section placement bug was fixed with it |
+| H10 (web) | `4851840` | `a_stale_store_write_does_not_bring_back_a_removed_user` / `…revoked_token` |
+| M10 | `03b6878` | rotation at 16 MiB; `the_sink_creates_the_audit_directory_0700` |
+| L-WEB12 | `e35cd67` | `logins_beyond_the_hashing_cap_are_refused_not_queued` (cap 2, 503 `web-auth-busy`) |
+| L-WEB13 | `28c1acc` | `a_second_uncached_check_does_not_reach_the_network` |
+| L-WEB14 | `1813234` | router ↔ tables compared in both directions, auth routes included |
+| L-WEB15 | `9d7ca13` | CI step: `cargo tree -e normal,features -p detent -i rustls` must not show `tls12` |
+| H21 | `3aedff0` | Playwright: an armed window survives a reload and is confirmed (stubbed API) |
+| L-SUP12 | `8c71512` | `a_later_published_backport_does_not_hide_a_newer_release` |
+| L-BIN19 | `d8419e0` | dead `from_digests` and the always-false `SessionExecutor.dryrun` removed |
+| L-BIN17 | `8a27c2b` | the English scan caught a planted line after a `#[cfg(test)]` helper; rollback test pins the refusal |
+| L-SUP10 | `8117bda` | docs: ACME issuance has no production caller |
+
+**Still open after 11.10** (none is a quick fix; each needs the owner, a
+host, or Phase 6):
+- **M18**: a real test of `present_challenges` needs the ACME order-flow seam (STAGE4 §4.3 item 4).
+- **H17**: step 1 (`release.yml` ships a cosign messageSignature bundle), step 5 (the checkpoint is not parsed as a signed note), unknown entry kinds, step 7 (trust files are placeholders, no Fulcio intermediate), step 8 (a captured real release bundle needs a tag).
+- **C1-b**: chunked `StageUpdate` (owner); the bundle is still read with a symlink-following open; a failed verify leaves the materialized file.
+- **H6**: strace of a confined `serve` on a010, then drop `clone`/`execve` from the monitor table; a full confined `serve` run end to end.
+- **Decisions to record in §12**: H5 fail-closed when a validator cannot run; M5 plan needs only read scope.
+- Small: `openapi.json` lists no 503 for login; an existing `audit/` directory is not re-moded to 0700.
+- Group A negative checks (never run, §11.9) are still VERIFIED-NO-NEG.

@@ -10,6 +10,17 @@ The Merkle leaf is now `SHA-256(0x00 ‖ canonicalizedBody)`, and step 6 verifie
 
 Still open in H17: step 1 (`release.yml` ships a cosign messageSignature bundle), step 5 (the checkpoint is not parsed as Rekor's signed note), step 6 (unknown kinds fall through to hashedrekord), step 7 (placeholder trust files, no Fulcio intermediate), step 8 (a captured real release bundle needs a release tag). Rekor v2 entries carry no SET and would be refused.
 
+## 2026-09-26 - STAGE3 PARTIAL items closed
+
+40 commits (`e9d209c`…`8117bda`) close the §11.9 PARTIAL items, the vacuous
+tests and the §12 follow-ups: STAGE3 §11.10 has the table and the short
+"Still open" list (owner, a010 or Phase 6). Highlights: Rekor SET and
+RFC 6962 leaf verified against real Rekor data (H17); chrony, dnsmasq and
+network apply are linear (M21); the engine checks web/MCP scopes and audits
+denials (M4); a torn audit line no longer blocks mutations (M3); rollback
+keeps edits made in the confirm window (M7). Allow count 111. The build
+setup (sccache, mold, Cranelift) is per machine: `docs/TOOLS.md`.
+
 ## 2026-09-25 - STAGE3 REOPEN items closed; ARCHITECTURE.md
 
 All nine REOPEN items from the §11.9 verification pass are fixed, each test
