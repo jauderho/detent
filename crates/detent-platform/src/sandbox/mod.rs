@@ -54,7 +54,7 @@ pub mod seccomp;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub use seccomp::{Arch, SeccompError, SeccompMode};
 
@@ -76,7 +76,7 @@ pub enum Role {
 /// to report. `Applied` carries no data on purpose — the step either did
 /// what it says or it did not; [`LandlockOutcome`] is the one step that
 /// needs more than that.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum Outcome {
     /// The step ran and took effect.
@@ -96,7 +96,7 @@ pub enum Outcome {
 
 /// Landlock's enforcement level, mirroring `landlock::RulesetStatus` without
 /// depending on the crate outside `cfg(target_os = "linux")`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LandlockStatus {
     /// Every requested access right is enforced.
@@ -110,7 +110,7 @@ pub enum LandlockStatus {
 /// Landlock's own outcome. Unlike [`Outcome`], `Applied` needs to carry the
 /// negotiated ABI and enforcement level — that is the whole point of
 /// reporting it to `detent doctor` and the web health panel.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum LandlockOutcome {
     /// A ruleset was installed.
@@ -152,8 +152,9 @@ pub fn caps_verdict(required: bool, outcome: &Outcome) -> Result<(), SandboxErro
 }
 
 /// What was actually applied to a confined process (PLAN §2.4). `Serialize`
-/// so `detent doctor` and the web health panel can render it verbatim.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// so `detent doctor` and the web health panel can render it verbatim, and
+/// `Deserialize` so `detent doctor` can read the record `serve` wrote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Confinement {
     /// `PR_SET_NO_NEW_PRIVS`.
     pub no_new_privs: Outcome,

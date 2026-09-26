@@ -91,6 +91,7 @@ impl Check {
             "privsep" => MessageId::new("cli-doctor-privsep"),
             "landlock" => MessageId::new("cli-doctor-landlock"),
             "seccomp" => MessageId::new("cli-doctor-seccomp"),
+            "serve-confinement" => MessageId::new("cli-doctor-serve-confinement"),
             _ => MessageId::new("cli-doctor-confinement"),
         }
     }
@@ -133,6 +134,7 @@ pub fn report(
         privsep_check(&settings.state_root),
     ];
     checks.extend(confinement_checks(&descriptors, &settings.state_root));
+    checks.extend(serve_confinement_checks(&settings.state_root));
     let ok = !checks.iter().any(|check| check.status == Status::Fail);
 
     if renderer.json {
@@ -276,6 +278,67 @@ fn privsep_check(state_root: &Path) -> Check {
     }
 }
 
+/// Largest confinement record `doctor` reads; a real one is well under 1 KiB.
+const MAX_CONFINEMENT_RECORD: u64 = 64 * 1024;
+
+/// What each role of the last `serve` start recorded about its own
+/// confinement (STAGE3 M2): ok when every step applied, a warning that names
+/// each degraded step otherwise, or when nothing was recorded.
+fn serve_confinement_checks(state_root: &Path) -> Vec<Check> {
+    crate::serve::CONFINEMENT_ROLES
+        .iter()
+        .map(|role| {
+            let (status, detail) = match read_confinement_record(state_root, role) {
+                Ok(None) => (Status::Warn, "not recorded".to_owned()),
+                Ok(Some(confinement)) => {
+                    let notes = crate::serve::degradation_notes(&confinement);
+                    if notes.is_empty() {
+                        (Status::Ok, "fully applied".to_owned())
+                    } else {
+                        (Status::Warn, notes.join("; "))
+                    }
+                }
+                Err(err) => (Status::Warn, err.to_string()),
+            };
+            Check::new("serve-confinement", status, format!("{role}: {detail}"))
+        })
+        .collect()
+}
+
+/// Read `role`'s record. The state root belongs to the worker, so the record
+/// is opened `O_NOFOLLOW | O_NONBLOCK`, must be a regular file, and is read
+/// up to [`MAX_CONFINEMENT_RECORD`]. `Ok(None)` means no record exists.
+fn read_confinement_record(
+    state_root: &Path,
+    role: &str,
+) -> std::io::Result<Option<detent_platform::sandbox::Confinement>> {
+    use rustix::fs::{FileType, Mode, OFlags, fstat};
+    use std::io::Read as _;
+
+    let path = state_root
+        .join(crate::serve::CONFINEMENT_DIR)
+        .join(crate::serve::confinement_record_name(role));
+    let fd = match rustix::fs::open(
+        &path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    if FileType::from_raw_mode(fstat(&fd)?.st_mode) != FileType::RegularFile {
+        return Err(std::io::Error::other("record is not a regular file"));
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::from(fd)
+        .take(MAX_CONFINEMENT_RECORD)
+        .read_to_end(&mut bytes)?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(std::io::Error::other)
+}
+
 /// What the kernel advertises about Landlock and seccomp.
 #[cfg(target_os = "linux")]
 fn confinement_checks(
@@ -362,11 +425,12 @@ mod linux_confinement_tests {
 mod tests {
     use super::{
         Check, ExitReason, MonitorError, Report, Status, config_check, directory_check,
-        mode_status, modules_check, privsep_verdict, report,
+        mode_status, modules_check, privsep_verdict, report, serve_confinement_checks,
     };
     use crate::i18n::Messages;
     use crate::output::{Exit, Renderer};
     use crate::run::{Settings, Streams};
+    use detent_platform::sandbox::{Confinement, LandlockOutcome, LandlockStatus, Outcome};
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::PathBuf;
 
@@ -516,6 +580,96 @@ mod tests {
         assert_eq!(empty.detail, "none");
     }
 
+    fn full_confinement() -> Confinement {
+        Confinement {
+            no_new_privs: Outcome::Applied,
+            dumpable_cleared: Outcome::Applied,
+            caps: Outcome::Applied,
+            landlock: LandlockOutcome::Applied {
+                abi: 1,
+                status: LandlockStatus::FullyEnforced,
+            },
+            seccomp: Outcome::Applied,
+        }
+    }
+
+    fn record(root: &std::path::Path, role: &str, confinement: &Confinement) -> R {
+        let dir = root.join("state");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join(format!("confinement-{role}.json")),
+            serde_json::to_vec(confinement)?,
+        )?;
+        Ok(())
+    }
+
+    fn summary(checks: &[Check]) -> Vec<(Status, String)> {
+        checks
+            .iter()
+            .map(|check| {
+                assert_eq!(check.name, "serve-confinement");
+                (check.status, check.detail.clone())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn doctor_reports_the_confinement_each_role_recorded() -> R {
+        let dir = tempfile::TempDir::new()?;
+        record(dir.path(), "monitor", &full_confinement())?;
+        let degraded = Confinement {
+            landlock: LandlockOutcome::Unavailable {
+                reason: "old kernel".to_owned(),
+            },
+            ..full_confinement()
+        };
+        record(dir.path(), "worker", &degraded)?;
+        assert_eq!(
+            summary(&serve_confinement_checks(dir.path())),
+            vec![
+                (Status::Ok, "monitor: fully applied".to_owned()),
+                (Status::Warn, "worker: landlock: old kernel".to_owned()),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_warns_when_serve_recorded_no_confinement() -> R {
+        let dir = tempfile::TempDir::new()?;
+        assert_eq!(
+            summary(&serve_confinement_checks(dir.path())),
+            vec![
+                (Status::Warn, "monitor: not recorded".to_owned()),
+                (Status::Warn, "worker: not recorded".to_owned()),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_does_not_follow_a_symlinked_confinement_record() -> R {
+        let dir = tempfile::TempDir::new()?;
+        record(dir.path(), "monitor", &full_confinement())?;
+        let elsewhere = dir.path().join("elsewhere.json");
+        std::fs::write(&elsewhere, serde_json::to_vec(&full_confinement())?)?;
+        std::os::unix::fs::symlink(&elsewhere, dir.path().join("state/confinement-worker.json"))?;
+        let checks = summary(&serve_confinement_checks(dir.path()));
+        assert_eq!(
+            checks.first(),
+            Some(&(Status::Ok, "monitor: fully applied".to_owned()))
+        );
+        assert!(
+            checks
+                .get(1)
+                .is_some_and(|(status, detail)| *status == Status::Warn
+                    && detail.starts_with("worker: ")
+                    && detail != "worker: fully applied"),
+            "{checks:?}"
+        );
+        Ok(())
+    }
+
     #[test]
     fn every_check_name_has_a_message_and_a_status_word() {
         let messages = Messages::new(None);
@@ -527,6 +681,7 @@ mod tests {
             "landlock",
             "seccomp",
             "confinement",
+            "serve-confinement",
         ] {
             let check = Check::new(name, Status::Ok, "detail");
             assert!(messages.has(check.message()), "{name} has no message");

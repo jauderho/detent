@@ -137,7 +137,7 @@ pub fn run(
             // ends up with two copies of the CLI.
             #[cfg(feature = "web")]
             {
-                report_confinement(&hooks, &settings.state_root, renderer, streams);
+                report_confinement(&hooks, &settings.state_root, "worker", renderer, streams);
                 let status =
                     run_worker(*client, host, registry, config, settings, renderer, streams);
                 let _ = streams.out.flush();
@@ -160,7 +160,7 @@ pub fn run(
             }
         }
         Role::Monitor(handle) => {
-            report_confinement(&hooks, &settings.state_root, renderer, streams);
+            report_confinement(&hooks, &settings.state_root, "monitor", renderer, streams);
             run_monitor(
                 &host,
                 allow,
@@ -195,10 +195,12 @@ fn start_runner(
 }
 
 /// Read this process's confinement (just installed by `spawn_pair`), note
-/// every degraded step, and persist it for doctor/UI (STAGE3 M2).
+/// every degraded step, and persist it for doctor/UI (STAGE3 M2). `role` is
+/// `monitor` or `worker`: each role writes its own record.
 fn report_confinement(
     hooks: &SandboxHooks,
     state_root: &std::path::Path,
+    role: &'static str,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) {
@@ -213,19 +215,102 @@ fn report_confinement(
         );
         tracing::warn!(detail = %note, "confinement degraded");
     }
-    let path = state_root.join("state/confinement.json");
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    if let Err(err) = record_confinement(confinement, state_root, role) {
+        tracing::warn!(error = %err, role, "confinement record not written");
     }
-    if let Ok(json) = serde_json::to_string_pretty(confinement) {
-        let _ = std::fs::write(path, json);
+}
+
+/// Directory under the state root that holds each role's confinement record.
+pub(crate) const CONFINEMENT_DIR: &str = "state";
+/// The roles that record their confinement, one file each.
+pub(crate) const CONFINEMENT_ROLES: [&str; 2] = ["monitor", "worker"];
+
+/// File name of `role`'s record inside [`CONFINEMENT_DIR`].
+pub(crate) fn confinement_record_name(role: &str) -> String {
+    format!("confinement-{role}.json")
+}
+
+/// Write `role`'s confinement to `<state_root>/state/confinement-<role>.json`.
+///
+/// The state root belongs to the worker, and the monitor writing here is
+/// root, so no step follows a symlink: the directories are opened with
+/// `O_NOFOLLOW | O_DIRECTORY`, an existing record that is not a regular file
+/// is refused, and the bytes go to an `O_EXCL | O_NOFOLLOW` temp file that is
+/// renamed over the record.
+fn record_confinement(
+    confinement: &Confinement,
+    state_root: &std::path::Path,
+    role: &str,
+) -> std::io::Result<()> {
+    use rustix::fs::{
+        AtFlags, FileType, Gid, Mode, OFlags, Uid, fchown, fstat, mkdirat, openat, renameat,
+        statat, unlinkat,
+    };
+    use rustix::io::Errno;
+    use std::io::Write as _;
+
+    let json = serde_json::to_vec_pretty(confinement).map_err(std::io::Error::other)?;
+    let dir_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let root = rustix::fs::open(state_root, dir_flags, Mode::empty())?;
+    let created = match mkdirat(&root, CONFINEMENT_DIR, Mode::from_bits_truncate(0o700)) {
+        Ok(()) => true,
+        Err(Errno::EXIST) => false,
+        Err(err) => return Err(err.into()),
+    };
+    let dir = openat(&root, CONFINEMENT_DIR, dir_flags, Mode::empty())?;
+    // The worker keeps its own state here too (`detent_web::auth`): a
+    // directory the root monitor created must belong to the state root's
+    // owner. `EPERM` means this process is not root, so it is that owner.
+    if created {
+        let owner = fstat(&root)?;
+        match fchown(
+            &dir,
+            Some(Uid::from_raw(owner.st_uid)),
+            Some(Gid::from_raw(owner.st_gid)),
+        ) {
+            Ok(()) | Err(Errno::PERM) => {}
+            Err(err) => return Err(err.into()),
+        }
     }
+    let name = confinement_record_name(role);
+    match statat(&dir, name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile => {
+            return Err(std::io::Error::other(format!(
+                "{name} is not a regular file"
+            )));
+        }
+        Ok(_) | Err(Errno::NOENT) => {}
+        Err(err) => return Err(err.into()),
+    }
+    let tmp = format!(".{name}.tmp.{}", std::process::id());
+    match unlinkat(&dir, tmp.as_str(), AtFlags::empty()) {
+        Ok(()) | Err(Errno::NOENT) => {}
+        Err(err) => return Err(err.into()),
+    }
+    let fd = openat(
+        &dir,
+        tmp.as_str(),
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_bits_truncate(0o600),
+    )?;
+    let mut file = std::fs::File::from(fd);
+    let written = file
+        .write_all(&json)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| {
+            renameat(&dir, tmp.as_str(), &dir, name.as_str()).map_err(std::io::Error::from)
+        });
+    if let Err(err) = written {
+        let _ = unlinkat(&dir, tmp.as_str(), AtFlags::empty());
+        return Err(err);
+    }
+    Ok(())
 }
 
 /// Which confinement steps did not fully apply, as human-readable lines
 /// (STAGE3 M2). Pure so the spec test pins it without a fork: every
 /// non-`Applied` field names itself and its detail.
-fn degradation_notes(confinement: &Confinement) -> Vec<String> {
+pub(crate) fn degradation_notes(confinement: &Confinement) -> Vec<String> {
     let mut notes = Vec::new();
     for (name, outcome) in [
         ("no_new_privs", &confinement.no_new_privs),
@@ -662,7 +747,10 @@ fn exit_for_spawn(error: &SpawnError) -> Exit {
 
 #[cfg(test)]
 mod tests {
-    use super::{Exit, degradation_notes, exit_for_spawn, report_recovery, run};
+    use super::{
+        Confinement, Exit, LandlockOutcome, LandlockStatus, Outcome, degradation_notes,
+        exit_for_spawn, record_confinement, report_recovery, run,
+    };
     use crate::i18n::Messages;
     use crate::output::Renderer;
     use crate::run::{Settings, Streams};
@@ -806,6 +894,78 @@ mod tests {
                 "note: {notes:?}",
             );
         }
+    }
+
+    fn full_confinement() -> Confinement {
+        Confinement {
+            no_new_privs: Outcome::Applied,
+            dumpable_cleared: Outcome::Applied,
+            caps: Outcome::Applied,
+            landlock: LandlockOutcome::Applied {
+                abi: 1,
+                status: LandlockStatus::FullyEnforced,
+            },
+            seccomp: Outcome::Applied,
+        }
+    }
+
+    fn no_landlock() -> Confinement {
+        Confinement {
+            landlock: LandlockOutcome::Unavailable {
+                reason: "old kernel".to_owned(),
+            },
+            ..full_confinement()
+        }
+    }
+
+    #[test]
+    fn each_role_writes_its_own_confinement_record() -> R {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = tempfile::TempDir::new()?;
+        record_confinement(&full_confinement(), dir.path(), "monitor")?;
+        record_confinement(&no_landlock(), dir.path(), "worker")?;
+        let outcome = |role: &str| -> Result<String, Box<dyn std::error::Error>> {
+            let path = dir.path().join(format!("state/confinement-{role}.json"));
+            let json: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
+            Ok(json
+                .pointer("/landlock/outcome")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned())
+        };
+        assert_eq!(outcome("monitor")?, "applied");
+        assert_eq!(outcome("worker")?, "unavailable");
+        let (root, state) = (
+            std::fs::metadata(dir.path())?,
+            std::fs::metadata(dir.path().join("state"))?,
+        );
+        assert_eq!((state.uid(), state.gid()), (root.uid(), root.gid()));
+        Ok(())
+    }
+
+    #[test]
+    fn the_confinement_record_is_never_written_through_a_symlink() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"victim")?;
+        std::fs::create_dir(dir.path().join("state"))?;
+        std::os::unix::fs::symlink(&victim, dir.path().join("state/confinement-monitor.json"))?;
+        assert!(record_confinement(&full_confinement(), dir.path(), "monitor").is_err());
+        assert_eq!(std::fs::read(&victim)?, b"victim");
+        Ok(())
+    }
+
+    #[test]
+    fn the_confinement_record_refuses_a_symlinked_state_directory() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let root = dir.path().join("root");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir(&root)?;
+        std::fs::create_dir(&elsewhere)?;
+        std::os::unix::fs::symlink(&elsewhere, root.join("state"))?;
+        assert!(record_confinement(&full_confinement(), &root, "monitor").is_err());
+        assert_eq!(std::fs::read_dir(&elsewhere)?.count(), 0);
+        Ok(())
     }
 
     #[test]
