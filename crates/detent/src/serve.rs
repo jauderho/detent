@@ -960,7 +960,9 @@ mod tests {
     /// its path must be in that role's seccomp table.
     fn record_in_a_confined_child(role: detent_platform::sandbox::Role, name: &str) -> R {
         use detent_platform::privsep::allowlist::Allowlist;
-        use detent_platform::privsep::spawn::{Role, SpawnConfig, abort_child, spawn_pair};
+        use detent_platform::privsep::spawn::{
+            Role, SpawnConfig, abort_confined_child, spawn_pair,
+        };
         use detent_platform::sandbox::Policy;
 
         let dir = tempfile::TempDir::new()?;
@@ -968,14 +970,21 @@ mod tests {
         std::fs::create_dir(&state_root)?;
         let allow = Allowlist::from_modules(&[], &AllowConfig::with_state_root(&state_root))?;
         let policy = match role {
-            detent_platform::sandbox::Role::Monitor => Policy::monitor(&allow),
+            // What is under test is the syscall set of the record path, so
+            // the capability cut stays optional here: an unprivileged run (CI)
+            // cannot shrink its bounding set, and `require_caps` would stop
+            // the child before it records anything.
+            detent_platform::sandbox::Role::Monitor => Policy {
+                require_caps: false,
+                ..Policy::monitor(&allow)
+            },
             detent_platform::sandbox::Role::Worker => Policy::worker(&allow),
         };
         let spawned = spawn_pair(&SpawnConfig::unprivileged(), &ConfineChildAs(role, policy))?;
         match spawned.role {
             Role::Worker(_client) => {
                 let ok = record_confinement(&full_confinement(), &state_root, name).is_ok();
-                abort_child(i32::from(!ok));
+                abort_confined_child(i32::from(!ok));
             }
             Role::Monitor(handle) => {
                 assert_eq!(

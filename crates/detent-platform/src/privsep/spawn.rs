@@ -338,6 +338,13 @@ pub fn abort_child(status: i32) -> ! {
     sys::exit_immediately(status)
 }
 
+/// [`abort_child`] for a child that already installed its sandbox: it writes
+/// nothing on the way out (not even a coverage profile, whose file writes the
+/// seccomp filter would refuse or punish).
+pub fn abort_confined_child(status: i32) -> ! {
+    sys::exit_immediately_unflushed(status)
+}
+
 /// Resolve the account to drop to, or `None` when no drop will happen.
 fn resolve_worker_account(config: &SpawnConfig) -> Result<Option<(u32, u32)>, SpawnError> {
     let Some(name) = config.worker_user.as_deref() else {
