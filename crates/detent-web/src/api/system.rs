@@ -16,6 +16,7 @@ use detent_update::fetch::Transport;
 use detent_update::policy::Policy;
 use detent_update::update::CheckReport;
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 
 use crate::auth::extract::{Caller, WriteCaller};
@@ -39,6 +40,11 @@ pub const MAX_FILTER_LEN: usize = 128;
 
 /// Most records `?limit=` may ask for in one answer.
 pub const MAX_AUDIT_LIMIT: usize = 1000;
+
+/// How long a failed live update check keeps the next one off the network
+/// (L-WEB13). A failed check writes no stamp, so without this every `GET`
+/// would reach the release feed again.
+pub const FAILED_CHECK_BACKOFF: Duration = Duration::from_mins(10);
 
 /// This module's routes.
 #[must_use]
@@ -173,7 +179,7 @@ pub(super) async fn update(
     // refusal must still be this endpoint's. No engine call happens, and a
     // read-only operation writes no audit record on success (PLAN §2.5).
     authorize(&state, &caller, &Operation::UpdateStatus)?;
-    let _update_lookup = state.update_check.lock().await;
+    let mut last_failure = state.update_check.lock().await;
     let now = OffsetDateTime::now_utc();
     let stamp = state.update_stamp();
     let rejected = state.bad_stamp();
@@ -201,19 +207,48 @@ pub(super) async fn update(
         min_age_days: u64::from(state.config.update.min_age_days),
         allow_downgrade: false,
     };
-    // No stamp yet: one live check. Off the async workers — synchronous
-    // network I/O with a 30 s cap per GET.
-    let report = tokio::task::spawn_blocking(move || {
+    // No stamp yet: one live check, unless one failed recently.
+    let report = guarded_live_check(&mut last_failure, Instant::now(), move || {
         let transport =
             detent_update::fetch::RealTransport::new().map_err(|_| update_check_failed())?;
         let report = update_report(&transport, &policy, &bad)?;
         detent_update::update::write_cached(&live_stamp, &report, now, true)
             .map_err(|_| update_check_failed())?;
-        Ok::<_, ApiError>(report)
+        Ok(report)
     })
-    .await
-    .map_err(|_| update_check_failed())?;
-    Ok(Json(report?.into()))
+    .await?;
+    Ok(Json(report.into()))
+}
+
+/// Run one live update check off the async workers (synchronous network I/O
+/// with a 30 s cap per GET), unless a live check failed less than
+/// [`FAILED_CHECK_BACKOFF`] before `now`. Then answer
+/// `web-update-check-failed` at once, without the network.
+///
+/// `last_failure` is the time of the last failed live check. The caller holds
+/// it under the lock that serializes live checks.
+///
+/// # Errors
+///
+/// [`update_check_failed`] when `check` fails, when it cannot be run, or
+/// while the backoff holds.
+async fn guarded_live_check<F>(
+    last_failure: &mut Option<Instant>,
+    now: Instant,
+    check: F,
+) -> Result<CheckReport, ApiError>
+where
+    F: FnOnce() -> Result<CheckReport, ApiError> + Send + 'static,
+{
+    if last_failure.is_some_and(|at| now.saturating_duration_since(at) < FAILED_CHECK_BACKOFF) {
+        return Err(update_check_failed());
+    }
+    let result = tokio::task::spawn_blocking(check)
+        .await
+        .map_err(|_| update_check_failed())
+        .and_then(|report| report);
+    *last_failure = result.is_err().then_some(now);
+    result
 }
 /// `POST /api/v1/system/update`.
 ///
@@ -442,8 +477,9 @@ fn render_audit(outcome: OpOutcome) -> Result<Json<Vec<AuditRecord>>, ApiError> 
 #[cfg(test)]
 mod tests {
     use super::{
-        AuditQueryParams, MAX_AUDIT_LIMIT, MAX_FILTER_LEN, UpdateAppliedView, UpdateReport,
-        render_applied, render_audit, render_host, update_check_failed, update_report,
+        AuditQueryParams, FAILED_CHECK_BACKOFF, MAX_AUDIT_LIMIT, MAX_FILTER_LEN, UpdateAppliedView,
+        UpdateReport, guarded_live_check, render_applied, render_audit, render_host,
+        update_check_failed, update_report,
     };
     use detent_core::descriptor::HostProfile;
     use detent_ops::OpOutcome;
@@ -641,6 +677,55 @@ mod tests {
             error.message_id().as_str(),
             update_check_failed().message_id().as_str()
         );
+        Ok(())
+    }
+
+    /// L-WEB13: a failed live check writes no stamp, so the next `GET` is
+    /// uncached too. Within the backoff it must answer the failure without
+    /// the network; after the backoff it may try again.
+    #[tokio::test]
+    async fn a_second_uncached_check_does_not_reach_the_network() -> R {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
+
+        let reached = Arc::new(AtomicUsize::new(0));
+        let dead_feed = |reached: &Arc<AtomicUsize>| {
+            let reached = Arc::clone(reached);
+            move || {
+                reached.fetch_add(1, Ordering::SeqCst);
+                update_report(&Dead, &Policy::default(), &[])
+            }
+        };
+        let mut last_failure = None;
+        let start = Instant::now();
+
+        let first = guarded_live_check(&mut last_failure, start, dead_feed(&reached)).await;
+        assert!(first.is_err());
+        assert_eq!(reached.load(Ordering::SeqCst), 1);
+
+        let soon = start
+            .checked_add(Duration::from_secs(1))
+            .ok_or("clock overflow")?;
+        match guarded_live_check(&mut last_failure, soon, dead_feed(&reached)).await {
+            Err(error) => assert_eq!(
+                error.message_id().as_str(),
+                update_check_failed().message_id().as_str()
+            ),
+            Ok(report) => return Err(format!("a dead feed answered {report:?}").into()),
+        }
+        assert_eq!(
+            reached.load(Ordering::SeqCst),
+            1,
+            "the second check reached the network"
+        );
+
+        let later = start
+            .checked_add(FAILED_CHECK_BACKOFF)
+            .ok_or("clock overflow")?;
+        let third = guarded_live_check(&mut last_failure, later, dead_feed(&reached)).await;
+        assert!(third.is_err());
+        assert_eq!(reached.load(Ordering::SeqCst), 2);
         Ok(())
     }
 
