@@ -750,6 +750,43 @@ mod tests {
         Ok(response.into_body().collect().await?.to_bytes().to_vec())
     }
 
+    /// `write_json_atomically` in `crates/detent-acme/src/order.rs` (the
+    /// account credentials store), call for call: `create_dir_all` of the
+    /// parent, a stale pid-suffixed temp file removed, the temp file created
+    /// `create_new` with mode `0600`, written, synced, renamed over `path`,
+    /// then the parent directory synced (`detent_acme::sync_dir`); the temp
+    /// file is removed on failure.
+    fn write_credentials(path: &Path, json: &str) -> std::io::Result<()> {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+        let write = || -> std::io::Result<()> {
+            if tmp.exists() {
+                std::fs::remove_file(&tmp)?;
+            }
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+            std::fs::rename(&tmp, path)?;
+            match path.parent() {
+                Some(parent) => std::fs::File::open(parent)?.sync_all(),
+                None => Ok(()),
+            }
+        };
+        if let Err(err) = write() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(err);
+        }
+        Ok(())
+    }
+
     /// The acme child's work under its enforced filter. Returns `0`, or the
     /// number of the first step that failed.
     fn acme_probe(
@@ -774,12 +811,15 @@ mod tests {
         if !refused(std::net::TcpListener::bind("127.0.0.1:0")) {
             return 11;
         }
-        // The credentials store: write, sync and rename inside its directory.
-        let staged = credentials.join("account.json.tmp");
-        let written = std::fs::write(&staged, b"{}")
-            .and_then(|()| std::fs::File::open(&staged)?.sync_all())
-            .and_then(|()| std::fs::rename(&staged, credentials.join("account.json")));
-        if written.is_err() {
+        // The credentials store, as `detent-acme` writes it: first into a
+        // parent directory that does not exist yet, then again over a stale
+        // temp file, which it removes.
+        let account = credentials.join("account").join("account.json");
+        let stale = account.with_extension(format!("{}.tmp", std::process::id()));
+        if write_credentials(&account, "{}").is_err()
+            || std::fs::write(&stale, b"stale").is_err()
+            || write_credentials(&account, "{\"a\":1}").is_err()
+        {
             return 12;
         }
         let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
@@ -852,7 +892,19 @@ mod tests {
         let (served, _listener) = server_thread.join().map_err(|_| "server thread panicked")?;
         assert_eq!(status, Some(0), "the acme probe failed; server: {served:?}");
         assert!(served.is_ok(), "{served:?}");
-        assert!(dir.path().join("acme/account.json").is_file());
+        let account = dir.path().join("acme/account/account.json");
+        assert_eq!(std::fs::read_to_string(&account)?, "{\"a\":1}");
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&account)?.permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("acme/account"))?.count(),
+            1
+        );
         Ok(())
     }
 

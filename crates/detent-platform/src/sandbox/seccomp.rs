@@ -406,7 +406,11 @@ const WORKER: &[&str] = &[
 /// with the real hooks, `/etc/hosts` lookup, TLS 1.3 fetch through
 /// hyper-rustls, a credentials write), and a small probe that resolves a
 /// public name through `/etc/resolv.conf` under this filter, built once for
-/// glibc and once for musl. Calls the traces showed refused and tolerated
+/// glibc and once for musl. The credentials store calls were traced the same
+/// way (slice C3b): the test's `write_credentials`, which repeats
+/// `detent-acme`'s `write_json_atomically` call for call, and a probe that
+/// does the same writes under this filter, built for glibc and for musl.
+/// Calls the traces showed refused and tolerated
 /// are left out on purpose: `uname` (glibc resolver setup), `ioctl(FIONREAD)`
 /// (glibc resolver) and `prctl(PR_SET_NAME)` (thread names).
 const ACME: &[&str] = &[
@@ -493,14 +497,28 @@ const ACME: &[&str] = &[
     "ppoll",
     "sendmmsg",
     "recvmsg",
-    // Writes under the credentials directory, seen in the test's write +
-    // sync + rename. glibc and musl on x86_64 issue `rename`; aarch64 has no
-    // `rename`, and its libcs issue `renameat`. The rest of the credentials
-    // store (create, chmod, remove) is added with its own trace in the
-    // renewal-loop slice.
+    // The credentials store (`write_json_atomically` in `detent-acme`), all
+    // seen: `create_dir_all` of the parent (`mkdir`, then a stat when it
+    // exists), `getpid` for the temp file name (`std::process::id`), a stat
+    // for a stale temp file and `unlink` to remove it, `openat`/`open` with
+    // `O_CREAT|O_EXCL` and mode `0600` (no separate chmod), `fsync` of the
+    // file and of the directory, and `rename` over the old file. The stat is
+    // `statx` from Rust's std on glibc and `stat` from musl on x86_64; std
+    // does not fall back when `statx` answers `EPERM`, so `Path::exists`
+    // says "no" and `create_dir_all` fails on an existing directory. x86_64
+    // libcs issue `mkdir`, `unlink`, `rename` and (musl) `stat`; aarch64 has
+    // none of them, and its libcs issue `mkdirat`, `unlinkat`, `renameat`
+    // and `newfstatat` (above) instead (not traced on aarch64).
     "fsync",
     "rename",
     "renameat",
+    "getpid",
+    "mkdir",
+    "mkdirat",
+    "unlink",
+    "unlinkat",
+    "statx",
+    "stat",
 ];
 
 /// The syscall names allowed for `role`, by name (see the module docs for
@@ -520,8 +538,9 @@ pub const fn syscalls_for(role: Role) -> &'static [&'static str] {
 /// the `ACME` table added were read from the `x86_64` `<asm/unistd_64.h>` and
 /// the aarch64 `<asm-generic/unistd.h>` of the build container). Every row is
 /// used by [`MONITOR`], [`WORKER`] or [`ACME`]. `aarch64` never had `poll`,
-/// `open`, `rename` or `epoll_wait`, only their `ppoll`/`openat`/`renameat`/
-/// `epoll_pwait` forms.
+/// `open`, `rename`, `epoll_wait`, `mkdir`, `unlink` or `stat`, only their
+/// `ppoll`/`openat`/`renameat`/`epoll_pwait`/`mkdirat`/`unlinkat`/
+/// `newfstatat` forms.
 const SYSCALL_NUMBERS: &[(&str, i64, i64)] = &[
     ("read", 0, 63),
     ("write", 1, 64),
@@ -615,6 +634,9 @@ const SYSCALL_NUMBERS: &[(&str, i64, i64)] = &[
     ("sendmmsg", 307, 269),
     ("rename", 82, -1),
     ("epoll_wait", 232, -1),
+    ("mkdir", 83, -1),
+    ("unlink", 87, -1),
+    ("stat", 4, -1),
 ];
 
 /// `name`'s raw syscall number on `arch`, or `None` if it is not in
@@ -803,6 +825,31 @@ mod tests {
                 !syscalls_for(role).contains(&"connect"),
                 "{role:?} can connect"
             );
+        }
+    }
+
+    /// The credentials store calls (slice C3b): each `x86_64` form has no
+    /// `aarch64` number, and the table also lists the `aarch64` form.
+    #[test]
+    fn the_acme_table_writes_credentials_on_both_arches() {
+        let acme = syscalls_for(Role::Acme);
+        for (x86_64_only, both) in [
+            ("mkdir", "mkdirat"),
+            ("unlink", "unlinkat"),
+            ("rename", "renameat"),
+            ("stat", "newfstatat"),
+        ] {
+            assert!(
+                acme.contains(&x86_64_only),
+                "acme table lacks {x86_64_only}"
+            );
+            assert!(acme.contains(&both), "acme table lacks {both}");
+            assert!(super::number(x86_64_only, Arch::X86_64).is_some());
+            assert!(super::number(x86_64_only, Arch::Aarch64).is_none());
+            assert!(super::number(both, Arch::Aarch64).is_some());
+        }
+        for needed in ["getpid", "statx", "fsync", "openat"] {
+            assert!(acme.contains(&needed), "acme table lacks {needed}");
         }
     }
 
