@@ -145,6 +145,28 @@ jobs:
           fi
           echo "rustls present, ring absent, as required"
 
+      # L-WEB15: the binary must not compile rustls `tls12` (TLS 1.3 only,
+      # SECURITY_HARDENING.md). instant-acme's default features once pulled
+      # it in through hyper-rustls. `-e normal,features` is the graph the
+      # binary links; dev-dependencies are left out on purpose, because
+      # detent-web's TLS tests use a `tls12` client to prove the server
+      # refuses it. As above, the verdict comes from the output.
+      - name: cargo tree -e features -i rustls (the binary must not enable tls12)
+        run: |
+          set -euo pipefail
+          check() {
+            local tree
+            tree="$(cargo tree -e normal,features -p detent "$@" -i rustls)"
+            if grep -q 'feature "tls12"' <<<"$tree"; then
+              echo "::error::rustls feature tls12 is enabled (-p detent $*)"
+              grep -n 'feature "tls12"' <<<"$tree"
+              exit 1
+            fi
+          }
+          check
+          check --all-features
+          echo "rustls tls12 is not enabled in the binary's graph"
+
   ffi-soundness:
     name: FFI soundness (Miri on detent-ffi)
     runs-on: ubuntu-26.04
