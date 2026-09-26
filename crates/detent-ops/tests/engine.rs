@@ -17,6 +17,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -248,18 +249,44 @@ fn build_descriptor(id: &'static str, target: &Path, shape: Shape) -> &'static M
 // Collaborators
 // ---------------------------------------------------------------------------
 
-struct OkChecks;
-impl CheckRunner for OkChecks {
+/// How the fake validator answers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum CheckMode {
+    /// It runs and accepts the candidate.
+    #[default]
+    Pass,
+    /// It runs and rejects the candidate.
+    Fail,
+    /// It cannot run, and says so at length.
+    Broken,
+}
+
+/// A validator that answers as `mode` says and counts its runs.
+struct FakeChecks {
+    mode: CheckMode,
+    runs: AtomicUsize,
+}
+
+/// A failure message longer than any check detail may be.
+const LONG_CHECK_ERROR: usize = 4096;
+
+impl CheckRunner for FakeChecks {
     fn run_check(
         &self,
         _check: &ExternalCheck,
         _candidate: &Path,
     ) -> Result<CheckOutcome, HookError> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        let (passed, exit_code, detail) = match self.mode {
+            CheckMode::Pass => (true, 0, "ok"),
+            CheckMode::Fail => (false, 1, "line 1: bad directive"),
+            CheckMode::Broken => return Err(HookError::Failed("x".repeat(LONG_CHECK_ERROR))),
+        };
         Ok(CheckOutcome {
             check: CheckId(0),
-            passed: true,
-            exit_code: Some(0),
-            detail: "ok".to_owned(),
+            passed,
+            exit_code: Some(exit_code),
+            detail: detail.to_owned(),
         })
     }
 }
@@ -279,25 +306,6 @@ impl ServiceControl for OkServices {
     }
 }
 
-/// A validator that runs and rejects every candidate.
-struct FailChecks;
-impl CheckRunner for FailChecks {
-    fn run_check(
-        &self,
-        _check: &ExternalCheck,
-        _candidate: &Path,
-    ) -> Result<CheckOutcome, HookError> {
-        Ok(CheckOutcome {
-            check: CheckId(0),
-            passed: false,
-            exit_code: Some(1),
-            detail: "line 1: bad directive".to_owned(),
-        })
-    }
-}
-
-static OK_CHECKS: OkChecks = OkChecks;
-static FAIL_CHECKS: FailChecks = FailChecks;
 static OK_SERVICES: OkServices = OkServices;
 
 /// A [`ServiceManager`] that reports a fixed status and refuses mutation, so
@@ -397,8 +405,8 @@ struct Setup {
     shape: Shape,
     /// Give the monitor working check/service collaborators.
     hooks: bool,
-    /// With `hooks`, give the monitor a check runner that rejects everything.
-    fail_checks: bool,
+    /// With `hooks`, how the monitor's check runner answers.
+    checks: CheckMode,
     /// Refuse every operation.
     deny: bool,
     /// Register the module under a name the allow-list does not know.
@@ -424,6 +432,8 @@ struct Harness {
     audit: Arc<CaptureAudit>,
     handle: Option<thread::JoinHandle<ServeResult>>,
     target: PathBuf,
+    /// The monitor's check runner, when `Setup::hooks` wired it up.
+    checks: &'static FakeChecks,
     _dir: TempDir,
 }
 
@@ -447,6 +457,11 @@ impl Harness {
 
     fn records(&self) -> Vec<AuditRecord> {
         self.audit.records()
+    }
+
+    /// How often the monitor ran a check.
+    fn check_runs(&self) -> usize {
+        self.checks.runs.load(Ordering::SeqCst)
     }
 
     /// Shut the monitor down and confirm it exited cleanly.
@@ -481,15 +496,17 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
     // at once. A per-monitor field keeps each swap inside its own tempdir.
     let binary_target = target.clone();
     let trust = update_trust()?;
+    // Leaked so the monitor thread can borrow it for `'static`, one per
+    // harness so parallel tests do not share a run count.
+    let checks: &'static FakeChecks = leak(FakeChecks {
+        mode: setup.checks,
+        runs: AtomicUsize::new(0),
+    });
     let handle = thread::spawn(move || {
         let mut channel = monitor_end;
         let hooks = if setup.hooks {
             Hooks {
-                checks: if setup.fail_checks {
-                    &FAIL_CHECKS
-                } else {
-                    &OK_CHECKS
-                },
+                checks,
                 services: &OK_SERVICES,
             }
         } else {
@@ -544,6 +561,7 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
         audit,
         handle: Some(handle),
         target,
+        checks,
         _dir: dir,
     })
 }
@@ -897,9 +915,9 @@ fn plan_refuses_a_model_the_module_cannot_render() -> TestResult {
     fx.finish()
 }
 
-#[test]
-fn plan_rejects_invalid_model_before_reporting_checks() -> TestResult {
-    let mut fx = harness(
+/// A harness whose module declares one check that the monitor can run.
+fn checked_harness(mode: CheckMode) -> Result<Harness, Box<dyn std::error::Error>> {
+    harness(
         b"a\n",
         Setup {
             shape: Shape {
@@ -907,19 +925,76 @@ fn plan_rejects_invalid_model_before_reporting_checks() -> TestResult {
                 ..Shape::default()
             },
             hooks: true,
+            checks: mode,
             ..Setup::default()
         },
-    )?;
-    // `BAD` triggers a validation Error diagnostic (`Invalid`), not a missing-field `Module`
-    // error. The wrong shape `{\"wrong\": \"shape\"}` would fail in `apply_json` as `Module`,
-    // which is a different rejection reason. Using `BAD` isolates the plan's validate-before-checks gate.
-    assert!(matches!(
-        fx.run(Operation::Plan {
-            id: MODULE.to_owned(),
-            model: json!({"text": "BAD"}),
-        }),
-        Err(OpsError::Invalid { .. })
-    ));
+    )
+}
+
+fn plan(text: &str) -> Operation {
+    Operation::Plan {
+        id: MODULE.to_owned(),
+        model: json!({ "text": text }),
+    }
+}
+
+#[test]
+fn plan_does_not_run_checks_for_a_model_with_errors() -> TestResult {
+    let mut fx = checked_harness(CheckMode::Pass)?;
+    // `BAD` triggers a validation Error diagnostic (`Invalid`), not a
+    // missing-field `Module` error, so this isolates the plan's
+    // validate-before-checks gate.
+    assert!(matches!(fx.run(plan("BAD")), Err(OpsError::Invalid { .. })));
+    assert_eq!(fx.check_runs(), 0, "a root validator ran on invalid input");
+    assert!(fx.records().is_empty());
+
+    // The same harness does run the check for a valid model.
+    fx.run(plan("b\n"))?;
+    assert_eq!(fx.check_runs(), 1);
+    fx.finish()
+}
+
+#[test]
+fn a_plan_that_ran_checks_is_audited() -> TestResult {
+    let mut fx = checked_harness(CheckMode::Fail)?;
+    let before = fx.digest()?;
+    let OpOutcome::Planned(report) = fx.run(plan("b\n"))? else {
+        return Err("Plan must answer with a plan report".into());
+    };
+    assert!(report.checks.iter().all(|check| check.ran && !check.passed));
+    let records = fx.records();
+    assert_eq!(records.len(), 1, "{records:?}");
+    let record = records.first().ok_or("one audit record")?;
+    assert_eq!(record.op, OpKind::Plan);
+    assert_eq!(record.result, AuditResult::Ok);
+    assert_eq!(record.module.as_deref(), Some(MODULE));
+    assert_eq!(record.prev_hash, Some(before.to_string()));
+    assert_eq!(record.new_hash, None);
+    fx.finish()
+}
+
+#[test]
+fn a_plan_without_checks_is_not_audited() -> TestResult {
+    let mut fx = harness(b"a\n", Setup::default())?;
+    fx.run(plan("b\n"))?;
+    assert!(fx.records().is_empty());
+    fx.finish()
+}
+
+#[test]
+fn a_plan_truncates_the_error_of_a_check_that_could_not_run() -> TestResult {
+    let mut fx = checked_harness(CheckMode::Broken)?;
+    let OpOutcome::Planned(report) = fx.run(plan("b\n"))? else {
+        return Err("Plan must answer with a plan report".into());
+    };
+    let check = report.checks.first().ok_or("one check report")?;
+    assert!(!check.ran);
+    assert!(check.detail.contains("xxxx"), "{}", check.detail);
+    assert!(
+        check.detail.len() <= 512,
+        "check detail is {} bytes",
+        check.detail.len()
+    );
     fx.finish()
 }
 
@@ -1142,7 +1217,7 @@ fn apply_refuses_when_an_external_check_fails() -> TestResult {
                 ..Shape::default()
             },
             hooks: true,
-            fail_checks: true,
+            checks: CheckMode::Fail,
             ..Setup::default()
         },
     )?;

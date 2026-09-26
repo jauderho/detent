@@ -212,6 +212,15 @@ impl OpsEngine {
         let mut hashes = Hashes::default();
         let result = self.dispatch(op, &mut hashes);
         if !mutating || no_op {
+            // A plan is read-only, but when it ran root validators on the
+            // caller's input it leaves a best-effort record of that.
+            if let Ok(OpOutcome::Planned(plan)) = &result
+                && plan.checks.iter().any(|check| check.ran)
+            {
+                let record = AuditRecord::new(who, kind, module, AuditResult::Ok)
+                    .with_hashes(Some(plan.current_hash), None);
+                let _ = self.emit(&record);
+            }
             return result;
         }
 
@@ -451,14 +460,14 @@ impl OpsEngine {
                     ran: true,
                     passed: outcome.passed,
                     exit_code: outcome.exit_code,
-                    detail: outcome.detail,
+                    detail: truncate_detail(&outcome.detail),
                 },
                 Err(err) => CheckReport {
                     program: program.clone(),
                     ran: false,
                     passed: false,
                     exit_code: None,
-                    detail: err.to_string(),
+                    detail: truncate_detail(&err.to_string()),
                 },
             };
             out.push(report);
@@ -849,6 +858,19 @@ const fn command(action: WireServiceAction) -> Option<ServiceCommand> {
         WireServiceAction::Stop => Some(ServiceCommand::Stop),
         WireServiceAction::Status => None,
     }
+}
+
+/// Longest check detail, in bytes, a report carries. The same limit as the
+/// monitor's, so validator output reaches a read-scope caller only in part.
+const CHECK_DETAIL_LIMIT: usize = 512;
+
+/// `detail` cut to at most [`CHECK_DETAIL_LIMIT`] bytes on a character
+/// boundary.
+fn truncate_detail(detail: &str) -> String {
+    detail
+        .get(..detail.floor_char_boundary(CHECK_DETAIL_LIMIT))
+        .unwrap_or_default()
+        .to_owned()
 }
 
 /// The report of an apply whose rendered file equals the current one: nothing
