@@ -118,6 +118,48 @@ pub struct AcmeConfig {
     /// CA profile to request (e.g. `"shortlived"`); `None` where the server
     /// advertises no profiles extension (Pebble).
     pub profile: Option<String>,
+    /// `[acme.provider]`: the dns-01 provider that publishes the challenge
+    /// record. `None` means no provider is configured. Its one secret is in
+    /// `secrets.toml` (`crate::secrets`), never in this table.
+    pub provider: Option<DnsProviderConfig>,
+}
+
+/// `[acme.provider]`: which dns-01 provider to use, selected by `kind`.
+///
+/// Each variant holds only the non-secret settings. The secret (API token,
+/// acme-dns password or TSIG key) is `[acme] dns_provider` in
+/// `secrets.toml`. An unknown `kind` or an unknown field is refused.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum DnsProviderConfig {
+    /// `kind = "cloudflare"`: the Cloudflare v4 API.
+    Cloudflare {
+        /// The zone id, 32 hex characters.
+        zone_id: String,
+    },
+    /// `kind = "acme-dns"`: an acme-dns server.
+    AcmeDns {
+        /// The `https://` URL of the server.
+        server: String,
+        /// The subdomain the server gave at registration.
+        username: String,
+    },
+    /// `kind = "desec"`: the deSEC.io API.
+    Desec {
+        /// The zone, e.g. `example.com`.
+        domain: String,
+    },
+    /// `kind = "rfc2136"`: TSIG-signed dynamic updates to the primary server.
+    Rfc2136 {
+        /// The primary server, `host:port`.
+        server: String,
+        /// The zone that holds the SOA.
+        zone: String,
+        /// The TSIG key name.
+        key_name: String,
+        /// The TSIG algorithm, e.g. `hmac-sha256`.
+        algorithm: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -476,7 +518,7 @@ pub struct UiConfig {
 mod tests {
     use super::{
         AcmeConfig, Argon2Params, Bootstrap, Config, ConfigError, DEFAULT_CERT_DIR, DEFAULT_PORT,
-        MIN_ARGON2_M_KIB,
+        DnsProviderConfig, MIN_ARGON2_M_KIB,
     };
     use std::path::{Path, PathBuf};
 
@@ -510,6 +552,7 @@ mod tests {
         assert!(config.acme.credentials_path.is_none());
         assert!(config.acme.ca_root.is_none());
         assert!(config.acme.profile.is_none());
+        assert!(config.acme.provider.is_none());
         assert_eq!(config.auth.argon2, Argon2Params::default());
         assert_eq!(config.auth.argon2.m_kib, None);
         assert_eq!(config.auth.argon2.t, 3);
@@ -623,6 +666,93 @@ mod tests {
             "[ui]\nlocale = \"en\"\n",
         ] {
             let err = Config::parse(text).err().map(|e| e.message_id());
+            assert_eq!(
+                err.map(|id| id.as_str().to_owned()),
+                Some("web-config-malformed".to_owned()),
+                "{text:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn an_acme_provider_table_selects_each_kind() -> R {
+        let zone_id = "0123456789abcdef0123456789abcdef";
+        let cases = [
+            (
+                format!("[acme.provider]\nkind = \"cloudflare\"\nzone_id = \"{zone_id}\"\n"),
+                DnsProviderConfig::Cloudflare {
+                    zone_id: zone_id.to_owned(),
+                },
+            ),
+            (
+                "[acme.provider]\nkind = \"acme-dns\"\nserver = \"https://auth.example\"\n\
+                 username = \"sub-user\"\n"
+                    .to_owned(),
+                DnsProviderConfig::AcmeDns {
+                    server: "https://auth.example".to_owned(),
+                    username: "sub-user".to_owned(),
+                },
+            ),
+            (
+                "[acme.provider]\nkind = \"desec\"\ndomain = \"example.com\"\n".to_owned(),
+                DnsProviderConfig::Desec {
+                    domain: "example.com".to_owned(),
+                },
+            ),
+            (
+                "[acme.provider]\nkind = \"rfc2136\"\nserver = \"ns1.example.com:53\"\n\
+                 zone = \"example.com\"\nkey_name = \"k.example.com\"\n\
+                 algorithm = \"hmac-sha256\"\n"
+                    .to_owned(),
+                DnsProviderConfig::Rfc2136 {
+                    server: "ns1.example.com:53".to_owned(),
+                    zone: "example.com".to_owned(),
+                    key_name: "k.example.com".to_owned(),
+                    algorithm: "hmac-sha256".to_owned(),
+                },
+            ),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(
+                Config::parse(&text)?.acme.provider,
+                Some(expected),
+                "{text}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_bad_acme_provider_table_is_refused() {
+        let zone_id = "0123456789abcdef0123456789abcdef";
+        for text in [
+            // An unknown kind, a kind in the wrong case, and no kind at all.
+            "[acme.provider]\nkind = \"route53\"\n".to_owned(),
+            format!("[acme.provider]\nkind = \"Cloudflare\"\nzone_id = \"{zone_id}\"\n"),
+            format!("[acme.provider]\nzone_id = \"{zone_id}\"\n"),
+            // No secret field exists here: the secret lives in secrets.toml.
+            format!(
+                "[acme.provider]\nkind = \"cloudflare\"\nzone_id = \"{zone_id}\"\n\
+                 token = \"not-a-real-token\"\n"
+            ),
+            "[acme.provider]\nkind = \"acme-dns\"\nserver = \"https://auth.example\"\n\
+             username = \"u\"\npassword = \"not-a-real-password\"\n"
+                .to_owned(),
+            "[acme.provider]\nkind = \"rfc2136\"\nserver = \"ns1.example.com:53\"\n\
+             zone = \"example.com\"\nkey_name = \"k.example.com\"\n\
+             algorithm = \"hmac-sha256\"\nkey_value = \"czNjcjN0LWtleQ==\"\n"
+                .to_owned(),
+            // A field that belongs to another kind.
+            "[acme.provider]\nkind = \"desec\"\ndomain = \"example.com\"\n\
+             zone_id = \"x\"\n"
+                .to_owned(),
+            // A required field left out.
+            "[acme.provider]\nkind = \"cloudflare\"\n".to_owned(),
+            "[acme.provider]\nkind = \"rfc2136\"\nserver = \"ns1.example.com:53\"\n\
+             zone = \"example.com\"\nkey_name = \"k.example.com\"\n"
+                .to_owned(),
+        ] {
+            let err = Config::parse(&text).err().map(|e| e.message_id());
             assert_eq!(
                 err.map(|id| id.as_str().to_owned()),
                 Some("web-config-malformed".to_owned()),
