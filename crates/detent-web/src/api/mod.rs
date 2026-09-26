@@ -463,11 +463,32 @@ mod tests {
         use tower::ServiceExt as _;
 
         let fixture = crate::state::test_state()?;
-        let app = super::routes().with_state(fixture.state.clone());
+        // The whole `/api/v1` surface, auth routes included, as `router`
+        // assembles it.
+        let router = crate::auth::routes::routes().merge(super::routes());
+        let entries: Vec<&crate::auth::routes::Route> =
+            crate::auth::routes::table().iter().chain(table()).collect();
+
+        // Router to table: every path the router registers is in a table.
+        // axum lists its registered paths only in its `Debug` output, as
+        // quoted strings. Table to router is the probe loop below.
+        let rendered = format!("{router:?}");
+        let registered: BTreeSet<&str> = rendered
+            .split('"')
+            .filter(|piece| piece.starts_with("/api/"))
+            .collect();
+        let tabled: BTreeSet<&str> = entries.iter().map(|route| route.path).collect();
+        assert!(!registered.is_empty(), "no paths found in {rendered}");
+        assert_eq!(
+            registered, tabled,
+            "the router and the tables list other paths"
+        );
+
+        let app = router.with_state(fixture.state.clone());
 
         // Concrete path for every table entry (placeholders become "x").
         let mut allowed: BTreeMap<String, BTreeSet<Method>> = BTreeMap::new();
-        for route in table() {
+        for route in entries {
             let concrete = route
                 .path
                 .split('/')
