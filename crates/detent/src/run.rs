@@ -59,6 +59,10 @@ use crate::output::{ErrorContext, Exit, Renderer};
 /// The default configuration file (PLAN §2.10).
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/detent/detent.toml";
 
+/// The secrets file's name, next to the configuration file (PLAN §2.10).
+#[cfg(feature = "web")]
+const SECRETS_FILE_NAME: &str = "secrets.toml";
+
 /// The streams a run reads from and writes to, injected so every path is
 /// testable without a subprocess.
 pub struct Streams<'a> {
@@ -128,6 +132,20 @@ impl Settings {
     #[cfg(feature = "web")]
     pub fn load_web_config(&self) -> Result<detent_web::Config, detent_web::ConfigError> {
         detent_web::Config::load(&self.config_path)
+    }
+
+    /// `secrets.toml` in the same directory as
+    /// [`config_path`](Self::config_path): `/etc/detent/secrets.toml` by
+    /// default (PLAN §2.10). There is no flag of its own: `--config` moves
+    /// both files. It holds the dns-01 provider secret
+    /// ([`detent_web::secrets`]), which `serve` reads before the fork.
+    #[cfg(feature = "web")]
+    #[must_use]
+    pub fn secrets_path(&self) -> PathBuf {
+        self.config_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(""))
+            .join(SECRETS_FILE_NAME)
     }
 }
 
@@ -1335,6 +1353,21 @@ mod tests {
         Ok(operation_for(&cli, &mut input)
             .map_err(|usage| usage.id.as_str())?
             .kind())
+    }
+
+    #[cfg(feature = "web")]
+    #[test]
+    fn the_secrets_file_sits_next_to_the_configuration() -> R {
+        let settings = Settings::from_cli(&parse(&["detent", "serve"])?);
+        assert_eq!(
+            settings.secrets_path(),
+            PathBuf::from("/etc/detent/secrets.toml")
+        );
+        let settings = Settings::from_cli(&parse(&["detent", "serve", "--config", "/tmp/c.toml"])?);
+        assert_eq!(settings.secrets_path(), PathBuf::from("/tmp/secrets.toml"));
+        let settings = Settings::from_cli(&parse(&["detent", "serve", "--config", "c.toml"])?);
+        assert_eq!(settings.secrets_path(), PathBuf::from("secrets.toml"));
+        Ok(())
     }
 
     #[test]
