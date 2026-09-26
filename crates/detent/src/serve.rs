@@ -1106,6 +1106,7 @@ mod tests {
                 ..Policy::monitor(&allow)
             },
             detent_platform::sandbox::Role::Worker => Policy::worker(&allow),
+            detent_platform::sandbox::Role::Acme => Policy::acme(&state_root),
         };
         let spawned = spawn_pair(&SpawnConfig::unprivileged(), &ConfineChildAs(role, policy))?;
         match spawned.role {
