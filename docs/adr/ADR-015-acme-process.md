@@ -35,9 +35,15 @@ when `[tls] bootstrap = "acme"`:
   root file, `/etc/resolv.conf`, the served certificate in `cert_dir`). A new
   seccomp role `Acme` allows what an outbound HTTPS/TCP client needs
   (`socket`, `connect`, `getsockopt`, `getpeername`, `poll`/`ppoll`, DNS
-  lookup calls) and nothing that accepts connections (`bind`, `listen`,
-  `accept4`). Every entry is proven by a live `strace -f` run, as the table
-  requires. Default action `Errno(EPERM)`, like the worker.
+  lookup calls) and nothing that accepts connections (`listen`, `accept4`).
+  Every entry is proven by a live `strace -f` run, as the table requires.
+  Default action `Errno(EPERM)`, like the worker.
+- **Amendment (2026-09-26, owner decision):** `bind` is allowed. musl's
+  resolver binds its UDP socket to port 0 before each DNS query, and the
+  shipped binary is built on musl; with `bind` refused, only names in
+  `/etc/hosts` resolve. Without `listen` and `accept4`, the process still
+  cannot accept a TCP connection. It can receive UDP datagrams on a port it
+  binds.
 - **Secrets:** the provider (with its secret from `secrets.toml`) is built in
   the privileged parent before the fork and lives only in the acme process
   after it. The worker and the monitor drop it.

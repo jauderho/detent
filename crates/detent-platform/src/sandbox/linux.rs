@@ -766,7 +766,11 @@ mod tests {
         {
             return 10;
         }
-        // No new listening socket: `bind` is refused.
+        // musl's resolver binds a UDP socket to port 0 before each query.
+        if std::net::UdpSocket::bind("0.0.0.0:0").is_err() {
+            return 17;
+        }
+        // No new listening socket: `listen` is refused.
         if !refused(std::net::TcpListener::bind("127.0.0.1:0")) {
             return 11;
         }
@@ -801,8 +805,8 @@ mod tests {
     /// [`Hooks`] confines the child as `Role::Acme`. Under that enforced
     /// filter the child resolves `localhost`, writes its credentials
     /// directory, and fetches `https://localhost:<port>/` from the parent over
-    /// TLS 1.3 on a current-thread tokio runtime; `bind` and `listen` answer
-    /// `EPERM`.
+    /// TLS 1.3 on a current-thread tokio runtime; a UDP socket binds to port
+    /// 0 (musl's resolver), and `listen` answers `EPERM`.
     #[test]
     fn enforce_mode_acme_reaches_out_but_cannot_listen() -> Result<(), Box<dyn std::error::Error>> {
         use crate::privsep::spawn::{SpawnConfig, spawn_acme};

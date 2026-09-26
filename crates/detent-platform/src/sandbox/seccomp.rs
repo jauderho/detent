@@ -62,9 +62,10 @@
 //! `epoll_pwait`, which holds for the shipped musl binary and for aarch64 but
 //! not for a glibc `x86_64` build. And **musl's resolver `bind`s its UDP socket
 //! to port 0 before each DNS query** (`res_msend`); with `bind` refused, a
-//! musl build resolves only names in `/etc/hosts`. `ACME` still refuses
-//! `bind`, as ADR-015 states; the choice between allowing `bind` (still no
-//! `listen`/`accept4`) and another resolver is open.
+//! musl build resolves only names in `/etc/hosts`. The project owner chose
+//! to allow `bind` in `ACME` (ADR-015 amended 2026-09-26); `listen` and
+//! `accept4` stay refused, so the process still cannot accept a TCP
+//! connection.
 //!
 //! Only `x86_64` and `aarch64` are covered (PLAN §1.6 defers armv7 and riscv64);
 //! [`Arch::parse`] and [`Arch::host`] report anything else as
@@ -398,8 +399,8 @@ const WORKER: &[&str] = &[
 
 /// Syscalls the acme process needs (ADR-015): an outbound HTTPS/TCP client
 /// on a current-thread `tokio` runtime with hyper-rustls, plus glibc/musl
-/// name lookup. Derived from [`WORKER`] minus everything that serves
-/// (`bind`, `listen`, `accept4`) and the worker's own state-file calls, then
+/// name lookup. Derived from [`WORKER`] minus what accepts connections
+/// (`listen`, `accept4`) and the worker's own state-file calls, then
 /// traced live with `strace -f` in three runs (`x86_64`): the
 /// `enforce_mode_acme_reaches_out_but_cannot_listen` test (glibc; `spawn_acme`
 /// with the real hooks, `/etc/hosts` lookup, TLS 1.3 fetch through
@@ -407,8 +408,7 @@ const WORKER: &[&str] = &[
 /// public name through `/etc/resolv.conf` under this filter, built once for
 /// glibc and once for musl. Calls the traces showed refused and tolerated
 /// are left out on purpose: `uname` (glibc resolver setup), `ioctl(FIONREAD)`
-/// (glibc resolver), `prctl(PR_SET_NAME)` (thread names), and `bind` on the
-/// `AF_NETLINK` socket glibc opens to sort addresses.
+/// (glibc resolver) and `prctl(PR_SET_NAME)` (thread names).
 const ACME: &[&str] = &[
     // IPC with the worker (`Channel` over a `UnixStream`), file reads and
     // allocator/runtime housekeeping: all seen live.
@@ -480,9 +480,13 @@ const ACME: &[&str] = &[
     // Name lookup: `/etc/hosts`, `/etc/resolv.conf`, `/etc/nsswitch.conf`
     // (`openat`; musl on x86_64 uses `open`), then the DNS query. glibc:
     // UDP `connect`, `poll` for `POLLOUT`, `sendmmsg` (A and AAAA at once),
-    // `recvfrom`. musl: `sendto`, `poll`, `recvmsg` — seen only in a probe
-    // run that also allowed `bind`, see the note in the module docs.
-    // aarch64 has no `poll` or `open`: its libcs issue `ppoll`/`openat`.
+    // `recvfrom`. musl: `bind` of its UDP socket to port 0 before each
+    // query (`res_msend`), then `sendto`, `poll`, `recvmsg` (see the module
+    // docs); glibc also `bind`s the `AF_NETLINK` socket it opens to sort
+    // addresses. `bind` without `listen` or `accept4` accepts no TCP
+    // connection. aarch64 has no `poll` or `open`: its libcs issue
+    // `ppoll`/`openat`.
+    "bind",
     "openat",
     "open",
     "poll",
@@ -780,8 +784,9 @@ mod tests {
     }
 
     /// ADR-015: the acme process is an outbound client only. It can open a
-    /// connection and has nothing that accepts one; the worker and the
-    /// monitor still cannot connect out.
+    /// connection and has nothing that accepts one (`bind` is allowed for
+    /// musl's resolver, see the module docs); the worker and the monitor
+    /// still cannot connect out.
     #[test]
     fn the_acme_table_connects_out_and_never_accepts() {
         let acme = syscalls_for(Role::Acme);
@@ -790,7 +795,7 @@ mod tests {
             assert!(super::number(needed, Arch::X86_64).is_some());
             assert!(super::number(needed, Arch::Aarch64).is_some());
         }
-        for server_only in ["bind", "listen", "accept4"] {
+        for server_only in ["listen", "accept4"] {
             assert!(!acme.contains(&server_only), "acme table has {server_only}");
         }
         for role in [Role::Worker, Role::Monitor] {

@@ -276,7 +276,7 @@ H17, `docs/stage4-wip/h17-set-partial.patch`).
 | Capabilities | all | bounding set cut to `DAC_OVERRIDE`, `CHOWN`, `FOWNER`; start fails if the cut fails (`require_caps`) | none | none |
 | `no_new_privs` / not dumpable | no / no | yes / yes | yes / yes | yes / yes |
 | Landlock (writes) | none | target parent dirs, backup dirs, state root, `/run/detent/staging`, the binary's dir; degrades with a warning if absent (`require_landlock` off by default) | state root only | ACME credentials dir only |
-| seccomp | none | `MONITOR` table, kill on violation; start fails if it does not install (`require_seccomp`) | `WORKER` table, `EPERM` on violation, same rule | `ACME` table (outbound client: `connect`, no `bind`/`listen`/`accept4`), `EPERM`, same rule |
+| seccomp | none | `MONITOR` table, kill on violation; start fails if it does not install (`require_seccomp`) | `WORKER` table, `EPERM` on violation, same rule | `ACME` table (outbound client: `connect`, `bind` for musl's resolver, no `listen`/`accept4`), `EPERM`, same rule |
 | Reachable by | monitor only (socket pair) | worker only (socket pair) | network | worker only (socket pair); no listening socket |
 
 Sources: `crates/detent-platform/src/sandbox/mod.rs` (`Policy::monitor`,
