@@ -279,6 +279,7 @@ web-auth-user-unknown = there is no user named `{$name}`.
 web-auth-invalid-credentials = the user name, password or code was not correct.
 web-auth-rate-limited = too many attempts; wait {$seconds} seconds and try again.
 web-auth-session-limit = too many sessions are open; wait for one to expire and sign in again.
+web-auth-busy = too many sign-ins are in progress; wait a moment and try again.
 web-auth-unauthenticated = sign in to do that.
 web-auth-ambiguous-credentials = send either a session cookie or a bearer token, not both.
 web-auth-csrf-rejected = this request did not pass its cross-site checks.

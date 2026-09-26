@@ -39,7 +39,7 @@ use crate::tls::CertStore;
 use tokio::sync::{Mutex, Semaphore};
 
 /// Maximum password hashes allowed to run on blocking threads at once.
-pub const MAX_CONCURRENT_ARGON2: usize = 4;
+pub const MAX_CONCURRENT_ARGON2: usize = 2;
 
 /// Everything authentication needs, assembled once at startup.
 #[derive(Debug)]

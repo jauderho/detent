@@ -51,6 +51,7 @@ export const API_MESSAGE_IDS = [
   'web-api-unexpected-outcome',
   'web-auth-ambiguous-credentials',
   'web-auth-argon2-params',
+  'web-auth-busy',
   'web-auth-csrf-rejected',
   'web-auth-entropy-unavailable',
   'web-auth-hash-failed',

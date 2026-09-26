@@ -56,6 +56,7 @@ ops-target-missing = the managed file does not exist; create it (install its pac
 web-api-unexpected-outcome = the operation completed but its result could not be rendered.
 web-auth-ambiguous-credentials = send either a session cookie or a bearer token, not both.
 web-auth-argon2-params = the configured argon2 parameters are not usable.
+web-auth-busy = too many sign-ins are in progress; wait a moment and try again.
 web-auth-csrf-rejected = this request did not pass its cross-site checks; reload the page and try again.
 web-auth-entropy-unavailable = the system random number generator failed, so no credential could be issued.
 web-auth-hash-failed = the password could not be hashed.
