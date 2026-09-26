@@ -180,22 +180,9 @@ fn bundle_for(material: &Material, digest_hex: &str, mutate: &str) -> Value {
         material.rekor_key.clone()
     };
     let set: p256::ecdsa::Signature = set_signer.sign(set_payload.as_bytes());
-    let entry = json!({
-        "canonicalizedBody": BASE64.encode(body.to_string().as_bytes()),
-        "integratedTime": INTEGRATED_TIME,
-        "kindVersion": { "kind": "hashedrekord", "version": "0.0.1" },
-        "logId": { "keyId": log_key_id },
-        "logIndex": 0,
-    });
-    let neighbor = json!({
-        "canonicalizedBody": "QUJD",
-        "integratedTime": 1,
-        "kindVersion": { "kind": "hashedrekord", "version": "0.0.1" },
-        "logId": { "keyId": "QUJD" },
-        "logIndex": 1,
-    });
-    let entry_leaf = leaf_hash(entry.to_string().as_bytes());
-    let sibling = leaf_hash(neighbor.to_string().as_bytes());
+    // Rekor's Merkle leaf is the canonicalized body alone (RFC 6962).
+    let entry_leaf = leaf_hash(body.to_string().as_bytes());
+    let sibling = leaf_hash(b"ABC");
     let root = merged(entry_leaf, sibling);
     let mut path_hashes = vec![sibling.to_vec()];
     let proof_log_index = 0_i64;
