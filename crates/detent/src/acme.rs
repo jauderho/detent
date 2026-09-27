@@ -432,11 +432,13 @@ async fn round(
 /// `RenewNow` recorded during `hello` or an install
 /// ([`Installer::take_pending_renew`]) forces the next round too, which then
 /// starts without a wait. During a backoff wait (after a failure), a
-/// `RenewNow` from either source does not shorten it: it is logged and the
-/// same, full wait resumes; only the round after the backoff is forced
-/// (subject to [`MIN_FORCED_INTERVAL`], via [`renew_once`]). The loop returns
-/// when the worker closes the channel (an install or the read sees it
-/// closed), and when the read fails in any other way; that is logged.
+/// `RenewNow` from either source does not push the wait's end back: it is
+/// logged with the deadline set when the backoff began, and only the
+/// remaining time to that deadline is waited out again; only the round after
+/// the backoff is forced (subject to [`MIN_FORCED_INTERVAL`], via
+/// [`renew_once`]). The loop returns when the worker closes the channel (an
+/// install or the read sees it closed), and when the read fails in any other
+/// way; that is logged.
 pub(crate) async fn run_loop<F>(
     issuer: &mut impl Issuer,
     installer: &mut impl Installer,
@@ -490,18 +492,23 @@ pub(crate) async fn run_loop<F>(
             }
         };
         if in_backoff {
+            let delay_secs = i64::try_from(delay.as_secs()).unwrap_or(i64::MAX);
+            let deadline = started_at.saturating_add(delay_secs);
             let mut renew_seen = false;
             if force {
-                log_renew_during_backoff(started_at, delay);
+                log_renew_during_backoff(deadline);
                 renew_seen = true;
             }
+            let mut wait = delay;
             loop {
-                match sleep(delay).await {
+                match sleep(wait).await {
                     ControlFlow::Continue(()) => break,
                     ControlFlow::Break(()) => match installer.next_request() {
                         Ok(()) => {
-                            log_renew_during_backoff(started_at, delay);
+                            log_renew_during_backoff(deadline);
                             renew_seen = true;
+                            let remaining = deadline.saturating_sub(now()).max(0);
+                            wait = Duration::from_secs(u64::try_from(remaining).unwrap_or(0));
                         }
                         Err(AcmeChannelError::Channel(ChannelError::Closed)) => {
                             tracing::info!("the worker closed the acme channel");
@@ -538,11 +545,9 @@ pub(crate) async fn run_loop<F>(
 }
 
 /// Logs that a renewal was requested while the loop was in a backoff wait
-/// that started at `started_at` for `delay`: the wait is not shortened, so
-/// the next attempt stays at `started_at + delay`.
-fn log_renew_during_backoff(started_at: i64, delay: Duration) {
-    let next_attempt =
-        started_at.saturating_add(i64::try_from(delay.as_secs()).unwrap_or(i64::MAX));
+/// whose deadline is `next_attempt`: the wait is not shortened, so the next
+/// attempt stays at that same deadline.
+fn log_renew_during_backoff(next_attempt: i64) {
     tracing::info!("renewal requested during backoff; the next attempt is at {next_attempt}");
 }
 
@@ -1851,6 +1856,58 @@ mod tests {
         assert_eq!(issuer.calls, 2);
         assert!(logs.contains("renewal requested during backoff"), "{logs}");
         assert!(logs.contains("the next attempt is at"), "{logs}");
+        Ok(())
+    }
+
+    /// Three `RenewNow` messages during one 60 s backoff, arriving (by the
+    /// clock seam) at +10 s, +20 s and +50 s: each re-wait is only the time
+    /// left to the deadline set when the backoff began, not the full delay
+    /// again, so the wait never grows past that deadline. The round after
+    /// the backoff is then forced.
+    #[test]
+    fn repeated_renew_now_during_backoff_only_wait_out_the_remaining_time() -> R {
+        let cert = Cert::new(&["a.example"])?;
+        let dir = tempfile::TempDir::new()?;
+        let mut issuer =
+            FakeIssuer::answering([Err(AcmeError::NoDns01Challenge), Ok(cert.issued())]);
+        let mut installer = FakeInstaller {
+            requests: VecDeque::from([Ok(()), Ok(()), Ok(())]),
+            results: VecDeque::from([Err(closed())]),
+            ..FakeInstaller::default()
+        };
+        // The round starts at 0; the three requests arrive at 10, 20 and 50.
+        let mut clock = VecDeque::from([0, 10, 20, 50]);
+        let mut delays = Vec::new();
+        let (ended, logs) = capture(|| {
+            block_on(run_loop(
+                &mut issuer,
+                &mut installer,
+                dir.path(),
+                || clock.pop_front().unwrap_or(50),
+                |delay| {
+                    delays.push(delay);
+                    let ready = delays.len() == 4;
+                    std::future::ready(if ready {
+                        ControlFlow::Continue(())
+                    } else {
+                        ControlFlow::Break(())
+                    })
+                },
+            ))
+        });
+        ended?;
+        assert_eq!(
+            delays,
+            vec![
+                FIRST_RETRY,
+                Duration::from_secs(50),
+                Duration::from_secs(40),
+                Duration::from_secs(10),
+            ]
+        );
+        assert_eq!(issuer.calls, 2);
+        assert_eq!(installer.installed, vec![cert.issued().chain_pem]);
+        assert!(logs.contains("renewal requested during backoff"), "{logs}");
         Ok(())
     }
 
