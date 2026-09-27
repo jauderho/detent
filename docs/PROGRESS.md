@@ -12,6 +12,10 @@ phase or a self-contained piece of work finishes.
 
 After a round the loop no longer always sleeps `CHECK_INTERVAL` (1 h): `next_check` (`detent/src/acme.rs`) takes the earlier of `CHECK_INTERVAL` and the time until `detent_acme::due_at` (new, `schedule.rs`) says the served or new certificate is due — the start of the ARI window when one is known, else two thirds of its lifetime — floored at a new `MIN_CHECK_INTERVAL` (1 min, matches `FIRST_RETRY`) so a due certificate whose install keeps failing is not polled without bound. `Outcome::Renewed` and `Outcome::NotDue` now carry the `not_before`/`not_after` (and, for `NotDue`, the ARI window) the loop needs; `Held` gained `not_before` for the same reason. Backoff after a failure is unchanged. Logged at `tracing::debug!` (fires every round). Closes the trap that blocked slice S2's short-lived-CA CI test: a 5-minute certificate is now rechecked near its own due time (about 198 s), not after a full hour.
 
+## 2026-09-27 - OFFLOAD T3: renew-now button on the Certificates page
+
+`useRequestCertRenew` (`web/src/api/system.ts`) posts to `POST /api/v1/system/cert/renew` and invalidates the cert query on `202`. The Certificates page shows a "Renew now" panel gated on write scope (`useWriteGate`, disabled with reason otherwise, disabled while pending): success shows `cert-renew-requested`, errors show the localized server message (`web-cert-renew-not-acme`, `web-cert-renew-unavailable`) via `useApiErrorMessage`. Audit page needs no change: `audit-op-cert-renew` for the `cert_renew` op already exists and is tested. Tests cover read-only gating, 202 + refetch, 409, 503, and pending-disabled.
+
 ## 2026-09-27 - OFFLOAD T2: root-proof webadmin write-failure test
 
 `setup_with_force_reports_a_write_failure_as_a_credential_failure` swaps `users.json` for a symlink to a saved copy: `load` reads through the link, `create` reports `UserExists`, and `set_password`'s atomic write refuses the link (`AtomicError::Symlink`, never follows symlinks for any user including root). Keeps name, `Exit::Failed`, and the credential-failure note. Removed the §1.4 known-state sentence in the same commit.
