@@ -52,11 +52,11 @@ when `[tls] bootstrap = "acme"`:
   (ARI window, else two thirds of the lifetime), with bounded backoff after
   a failure. Expiry warnings at 50 % and 25 % go to the log.
 - **Hand-over:** it sends each issued chain and key to the worker over a
-  `socketpair` with a small versioned message set (`Install`, and in a later
-  slice `RenewNow` and `Status` from the worker). The worker parses the pair,
-  checks that it covers the configured domains, stores it with
-  `install_acme` (hot swap) and answers. The acme process never writes
-  `cert_dir`.
+  `socketpair` with a small versioned message set (`Install`; `RenewNow`
+  from the worker, since protocol version 2; `Status` in a later slice).
+  The worker parses the pair, checks that it covers the configured
+  domains, stores it with `install_acme` (hot swap) and answers. The acme
+  process never writes `cert_dir`.
 - **Lifetime:** the monitor keeps its pid and reaps it at shutdown. It is not
   restarted if it dies; the worker logs the closed channel and keeps serving
   the last certificate.

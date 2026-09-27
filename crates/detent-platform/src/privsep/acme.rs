@@ -3,7 +3,8 @@
 //! ```text
 //!   serve ──fork──▶ acme (uid `detent`, confined, outbound only)
 //!     │                │ AcmeMessage { Hello | Install { chain, key } }
-//!     └──fork──▶ worker◀┘ WorkerMessage { Hello | Installed | Refused }
+//!     └──fork──▶ worker◀┘ WorkerMessage { Hello | Installed | Refused
+//!                                          | RenewNow }
 //! ```
 //!
 //! [`spawn_acme`](super::spawn::spawn_acme) creates the socket pair. The
@@ -11,14 +12,17 @@
 //! [`AcmeMessage::Install`] for each issued certificate. The worker checks the
 //! pair, stores it and answers [`WorkerMessage::Installed`] or
 //! [`WorkerMessage::Refused`]. The acme process never writes the served
-//! certificate itself.
+//! certificate itself. The worker may also send [`WorkerMessage::RenewNow`]
+//! on its own at any time; the acme process reads it with
+//! [`AcmeClient::next_request`], or records it when it arrives before an
+//! answer.
 //!
 //! # Versions
 //!
 //! Both sides ship in the same binary, so there is no negotiation: the
 //! versions in the two `Hello`s must be equal, or the worker refuses and
 //! stops. The enums are `#[non_exhaustive]` for Rust callers, so a later
-//! slice can add `RenewNow` and `Status`; on the wire they stay closed, as in
+//! slice can add `Status`; on the wire they stay closed, as in
 //! [`proto`](super::proto): `postcard` does not decode an unknown
 //! discriminant, and the receiver stops.
 //!
@@ -37,7 +41,10 @@ use super::transport::{Channel, ChannelError};
 
 /// Version of this protocol. Both sides must send the same value in
 /// `Hello`.
-pub const ACME_PROTO_VERSION: u16 = 1;
+///
+/// Version 2 added [`WorkerMessage::RenewNow`]. A version 1 acme process
+/// would not decode it, so the version changed with the message.
+pub const ACME_PROTO_VERSION: u16 = 2;
 
 /// Read and write timeout on both ends of the acme channel.
 ///
@@ -109,6 +116,10 @@ pub enum WorkerMessage {
         /// Why.
         reason: String,
     },
+    /// Not an answer: the worker asks the acme process to renew now. It can
+    /// arrive at any time, also while the acme process waits for an answer
+    /// ([`AcmeClient::take_pending_renew`]).
+    RenewNow,
 }
 
 /// A failure on the acme channel, seen from either side.
@@ -144,13 +155,40 @@ impl From<ChannelError> for AcmeChannelError {
 #[derive(Debug)]
 pub struct AcmeClient {
     channel: Channel,
+    /// A `RenewNow` arrived during [`AcmeClient::call`].
+    pending_renew: bool,
 }
 
 impl AcmeClient {
     /// A client on `channel`.
     #[must_use]
     pub const fn new(channel: Channel) -> Self {
-        Self { channel }
+        Self {
+            channel,
+            pending_renew: false,
+        }
+    }
+
+    /// True once when a `RenewNow` arrived while [`AcmeClient::hello`] or
+    /// [`AcmeClient::install`] waited for an answer; the flag is then
+    /// cleared.
+    pub const fn take_pending_renew(&mut self) -> bool {
+        std::mem::replace(&mut self.pending_renew, false)
+    }
+
+    /// Read one message the worker sent on its own, after the channel was
+    /// seen readable. Only [`WorkerMessage::RenewNow`] is valid.
+    ///
+    /// # Errors
+    ///
+    /// [`AcmeChannelError::Protocol`] for any other message, and
+    /// [`AcmeChannelError::Channel`] when the channel fails: `Closed` when
+    /// the worker closed it, `Timeout` when nothing arrived.
+    pub fn next_request(&mut self) -> Result<WorkerMessage, AcmeChannelError> {
+        match self.channel.recv::<WorkerMessage>()? {
+            WorkerMessage::RenewNow => Ok(WorkerMessage::RenewNow),
+            _ => Err(AcmeChannelError::Protocol("expected RenewNow")),
+        }
     }
 
     /// Send `Hello` and check the worker's answer.
@@ -189,11 +227,17 @@ impl AcmeClient {
     }
 
     /// Send `message` and read one answer; a `Refused` answer is an error.
+    /// A `RenewNow` read before the answer is recorded, not returned.
     fn call(&mut self, message: &AcmeMessage) -> Result<WorkerMessage, AcmeChannelError> {
         self.channel.send(message)?;
-        match self.channel.recv::<WorkerMessage>()? {
-            WorkerMessage::Refused { reason } => Err(AcmeChannelError::Refused(reason)),
-            answer => Ok(answer),
+        loop {
+            match self.channel.recv::<WorkerMessage>()? {
+                WorkerMessage::RenewNow => self.pending_renew = true,
+                WorkerMessage::Refused { reason } => {
+                    return Err(AcmeChannelError::Refused(reason));
+                }
+                answer => return Ok(answer),
+            }
         }
     }
 }
@@ -314,6 +358,7 @@ mod tests {
             WorkerMessage::Refused {
                 reason: "wrong domains".to_owned(),
             },
+            WorkerMessage::RenewNow,
         ] {
             worker.send(&message)?;
             assert_eq!(acme.recv::<WorkerMessage>()?, message);
@@ -480,6 +525,84 @@ mod tests {
             ),
             "{served:?}"
         );
+        Ok(())
+    }
+
+    /// Version 2 added `RenewNow`; both `Hello`s carry it.
+    #[test]
+    fn both_hellos_carry_version_2() -> R {
+        assert_eq!(ACME_PROTO_VERSION, 2);
+        let (acme, mut worker) = Channel::pair()?;
+        let peer = std::thread::spawn(move || -> Result<AcmeMessage, ChannelError> {
+            let hello = worker.recv::<AcmeMessage>()?;
+            worker.send(&WorkerMessage::Hello { version: 2 })?;
+            Ok(hello)
+        });
+        let mut client = AcmeClient::new(acme);
+        client.hello()?;
+        let sent = peer.join().map_err(|_| "peer thread panicked")??;
+        assert_eq!(sent, AcmeMessage::Hello { version: 2 });
+
+        let (mut acme, mut worker) = Channel::pair()?;
+        let thread = std::thread::spawn(move || serve_acme(&mut worker, |_, _| Ok(())));
+        acme.send(&AcmeMessage::Hello { version: 2 })?;
+        assert_eq!(
+            acme.recv::<WorkerMessage>()?,
+            WorkerMessage::Hello { version: 2 }
+        );
+        drop(acme);
+        let served = thread.join().map_err(|_| "worker thread panicked")?;
+        assert!(served.is_ok(), "{served:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn next_request_returns_renew_now_refuses_an_answer_and_reports_eof() -> R {
+        let (acme, mut worker) = Channel::pair()?;
+        let mut client = AcmeClient::new(acme);
+        worker.send(&WorkerMessage::RenewNow)?;
+        assert_eq!(client.next_request()?, WorkerMessage::RenewNow);
+        // A message sent out of turn is not a request.
+        worker.send(&WorkerMessage::Installed)?;
+        let answer = client.next_request();
+        assert!(
+            matches!(answer, Err(AcmeChannelError::Protocol(_))),
+            "{answer:?}"
+        );
+        drop(worker);
+        let closed = client.next_request();
+        assert!(
+            matches!(closed, Err(AcmeChannelError::Channel(ChannelError::Closed))),
+            "{closed:?}"
+        );
+        Ok(())
+    }
+
+    /// A `RenewNow` that arrives while the client waits for an answer is
+    /// recorded, and the exchange goes on.
+    #[test]
+    fn a_renew_now_before_an_answer_is_recorded_and_the_exchange_goes_on() -> R {
+        let (acme, mut worker) = Channel::pair()?;
+        let peer = std::thread::spawn(move || -> Result<(), ChannelError> {
+            let _hello = worker.recv::<AcmeMessage>()?;
+            worker.send(&WorkerMessage::RenewNow)?;
+            worker.send(&WorkerMessage::Hello {
+                version: ACME_PROTO_VERSION,
+            })?;
+            let _install = worker.recv::<AcmeMessage>()?;
+            worker.send(&WorkerMessage::RenewNow)?;
+            worker.send(&WorkerMessage::RenewNow)?;
+            worker.send(&WorkerMessage::Installed)
+        });
+        let mut client = AcmeClient::new(acme);
+        assert!(!client.take_pending_renew());
+        client.hello()?;
+        assert!(client.take_pending_renew());
+        assert!(!client.take_pending_renew());
+        client.install(CHAIN.to_owned(), KeyPem::new(KEY.to_owned()))?;
+        assert!(client.take_pending_renew());
+        assert!(!client.take_pending_renew());
+        peer.join().map_err(|_| "peer thread panicked")??;
         Ok(())
     }
 
