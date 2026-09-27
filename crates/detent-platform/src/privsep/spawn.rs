@@ -347,7 +347,7 @@ pub struct AcmeHandle {
     pub child_pid: i32,
     /// The worker's end of the acme channel. The monitor/worker pair forked
     /// after [`spawn_acme`] inherits it: the monitor drops it, the worker
-    /// answers on it with [`serve_acme`](super::acme::serve_acme).
+    /// answers on it with [`acme_link`](super::acme::acme_link).
     pub channel: Channel,
 }
 

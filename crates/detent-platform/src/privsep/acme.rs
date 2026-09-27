@@ -33,6 +33,7 @@
 //! buffers in [`transport`](super::transport) hold the same bytes and are not
 //! wiped either, and this crate links no `zeroize`.
 
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -53,7 +54,8 @@ pub const ACME_PROTO_VERSION: u16 = 2;
 /// second, so 60 s is ample, and a worker that does not answer in that time
 /// is reported within the same renewal attempt instead of blocking the
 /// loop. The worker treats a read timeout as idle time and keeps waiting
-/// ([`serve_acme`]), so the timeout does not limit the hour between checks.
+/// ([`AcmeServer::serve`]), so the timeout does not limit the hour between
+/// checks.
 pub const ACME_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A PEM private key. `Debug` prints `[redacted]`.
@@ -242,26 +244,106 @@ impl AcmeClient {
     }
 }
 
-/// The worker's side: answer the acme process on `channel` until it closes.
-///
-/// `install` receives each chain and key after a matching `Hello`, and
-/// returns `Err(reason)` to refuse the pair. A read timeout is idle time, not
-/// an end: the acme process is quiet for an hour between checks.
+/// Split the worker's end of the acme channel into the [`AcmeServer`], which
+/// reads and answers, and an [`AcmeRenewer`], which another thread uses to
+/// send [`WorkerMessage::RenewNow`].
 ///
 /// # Errors
 ///
-/// `Ok(())` when the acme process closed the channel. Otherwise
-/// [`AcmeChannelError::Protocol`] after the worker refused a `Hello` with
-/// another version or an `Install` before `Hello`, and
-/// [`AcmeChannelError::Channel`] when the channel fails or a frame does not
-/// decode. The worker then keeps serving its last certificate (ADR-015).
-pub fn serve_acme(
-    channel: &mut Channel,
+/// [`AcmeChannelError::Channel`] when the socket cannot be duplicated
+/// ([`Channel::try_clone`]).
+pub fn acme_link(channel: Channel) -> Result<(AcmeServer, AcmeRenewer), AcmeChannelError> {
+    let writer = Arc::new(Mutex::new(channel.try_clone()?));
+    Ok((
+        AcmeServer {
+            reader: channel,
+            writer: Arc::clone(&writer),
+        },
+        AcmeRenewer { writer },
+    ))
+}
+
+/// The worker's side of the acme channel: it reads every message and
+/// answers through the writer it shares with the [`AcmeRenewer`]s.
+#[derive(Debug)]
+pub struct AcmeServer {
+    /// The only handle that reads.
+    reader: Channel,
+    /// Every write goes through this lock, so frames never interleave.
+    writer: Arc<Mutex<Channel>>,
+}
+
+/// Sends [`WorkerMessage::RenewNow`] from any thread. Clones share one
+/// writer with the [`AcmeServer`].
+#[derive(Debug, Clone)]
+pub struct AcmeRenewer {
+    writer: Arc<Mutex<Channel>>,
+}
+
+impl AcmeRenewer {
+    /// Ask the acme process to renew now. The acme process may be in the
+    /// middle of an exchange; it records the request then.
+    ///
+    /// # Errors
+    ///
+    /// [`AcmeChannelError::Channel`] when the channel fails: `Closed` once
+    /// the acme process or the [`AcmeServer`] has stopped.
+    pub fn renew_now(&self) -> Result<(), AcmeChannelError> {
+        Ok(send(&self.writer, &WorkerMessage::RenewNow)?)
+    }
+}
+
+/// Write `message` under the lock. A poisoned lock is still used: no code
+/// that can panic runs while it is held, so the stream is not torn.
+fn send(writer: &Mutex<Channel>, message: &WorkerMessage) -> Result<(), ChannelError> {
+    writer
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .send(message)
+}
+
+impl AcmeServer {
+    /// Answer the acme process until it closes the channel.
+    ///
+    /// `install` receives each chain and key after a matching `Hello`, and
+    /// returns `Err(reason)` to refuse the pair. A read timeout is idle
+    /// time, not an end: the acme process is quiet for an hour between
+    /// checks. When this returns, the write side of the socket is shut
+    /// down, so the acme process sees the channel close even while an
+    /// [`AcmeRenewer`] is alive, and later `renew_now` calls fail.
+    ///
+    /// # Errors
+    ///
+    /// `Ok(())` when the acme process closed the channel. Otherwise
+    /// [`AcmeChannelError::Protocol`] after the worker refused a `Hello`
+    /// with another version or an `Install` before `Hello`, and
+    /// [`AcmeChannelError::Channel`] when the channel fails or a frame does
+    /// not decode. The worker then keeps serving its last certificate
+    /// (ADR-015).
+    pub fn serve(
+        mut self,
+        install: impl FnMut(&str, &KeyPem) -> Result<(), String>,
+    ) -> Result<(), AcmeChannelError> {
+        let served = serve_on(&mut self.reader, &self.writer, install);
+        // The peer may be gone already; the session's outcome is `served`.
+        let _shut = self
+            .writer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .shutdown_write();
+        served
+    }
+}
+
+/// The body of [`AcmeServer::serve`].
+fn serve_on(
+    reader: &mut Channel,
+    writer: &Mutex<Channel>,
     mut install: impl FnMut(&str, &KeyPem) -> Result<(), String>,
 ) -> Result<(), AcmeChannelError> {
     let mut greeted = false;
     loop {
-        let message = match channel.recv::<AcmeMessage>() {
+        let message = match reader.recv::<AcmeMessage>() {
             Ok(message) => message,
             Err(ChannelError::Timeout) => continue,
             Err(ChannelError::Closed) => return Ok(()),
@@ -299,7 +381,7 @@ pub fn serve_acme(
                 (answer, None)
             }
         };
-        channel.send(&answer)?;
+        send(writer, &answer)?;
         if let Some(violation) = stop {
             return Err(AcmeChannelError::Protocol(violation));
         }
@@ -310,7 +392,7 @@ pub fn serve_acme(
 mod tests {
     use super::{
         ACME_PROTO_VERSION, AcmeChannelError, AcmeClient, AcmeMessage, KeyPem, WorkerMessage,
-        serve_acme,
+        acme_link,
     };
     use crate::privsep::proto::MAX_FRAME;
     use crate::privsep::transport::{Channel, ChannelError};
@@ -320,6 +402,15 @@ mod tests {
     /// Stand-in PEM text: low entropy on purpose (CI runs gitleaks).
     const CHAIN: &str = "chain line one\nchain line two\n";
     const KEY: &str = "not a real pem";
+
+    /// Serves `channel` with `install` and no renewer.
+    fn serve_without_renewer(
+        channel: Channel,
+        install: impl FnMut(&str, &KeyPem) -> Result<(), String>,
+    ) -> Result<(), AcmeChannelError> {
+        let (server, _renewer) = acme_link(channel)?;
+        server.serve(install)
+    }
 
     #[test]
     fn debug_never_prints_the_key() {
@@ -391,14 +482,15 @@ mod tests {
         Ok(())
     }
 
-    /// Runs `serve_acme` on a thread with an installer that accepts a chain
-    /// equal to [`CHAIN`] and refuses anything else.
+    /// Runs [`AcmeServer::serve`](super::AcmeServer::serve) on a thread
+    /// with an installer that accepts a chain equal to [`CHAIN`] and refuses
+    /// anything else.
     fn with_worker(
         test: impl FnOnce(&mut AcmeClient) -> R,
     ) -> Result<Result<(), AcmeChannelError>, Box<dyn std::error::Error>> {
-        let (acme_end, mut worker_end) = Channel::pair()?;
+        let (acme_end, worker_end) = Channel::pair()?;
         let worker = std::thread::spawn(move || {
-            serve_acme(&mut worker_end, |chain, key| {
+            serve_without_renewer(worker_end, |chain, key| {
                 if chain == CHAIN && key.expose() == KEY {
                     Ok(())
                 } else {
@@ -451,8 +543,8 @@ mod tests {
     #[test]
     fn a_version_mismatch_is_refused_on_both_sides() -> R {
         // The worker refuses a Hello with another version and stops.
-        let (mut acme, mut worker) = Channel::pair()?;
-        let thread = std::thread::spawn(move || serve_acme(&mut worker, |_, _| Ok(())));
+        let (mut acme, worker) = Channel::pair()?;
+        let thread = std::thread::spawn(move || serve_without_renewer(worker, |_, _| Ok(())));
         acme.send(&AcmeMessage::Hello {
             version: ACME_PROTO_VERSION.wrapping_add(1),
         })?;
@@ -511,8 +603,7 @@ mod tests {
             std::time::Duration::from_millis(20),
             std::time::Duration::from_secs(5),
         )?;
-        let mut worker = worker;
-        let thread = std::thread::spawn(move || serve_acme(&mut worker, |_, _| Ok(())));
+        let thread = std::thread::spawn(move || serve_without_renewer(worker, |_, _| Ok(())));
         // Longer than the worker's read timeout: an idle channel is not an end.
         std::thread::sleep(std::time::Duration::from_millis(60));
         // A `String` is not an `AcmeMessage`.
@@ -543,8 +634,8 @@ mod tests {
         let sent = peer.join().map_err(|_| "peer thread panicked")??;
         assert_eq!(sent, AcmeMessage::Hello { version: 2 });
 
-        let (mut acme, mut worker) = Channel::pair()?;
-        let thread = std::thread::spawn(move || serve_acme(&mut worker, |_, _| Ok(())));
+        let (mut acme, worker) = Channel::pair()?;
+        let thread = std::thread::spawn(move || serve_without_renewer(worker, |_, _| Ok(())));
         acme.send(&AcmeMessage::Hello { version: 2 })?;
         assert_eq!(
             acme.recv::<WorkerMessage>()?,
@@ -603,6 +694,115 @@ mod tests {
         assert!(client.take_pending_renew());
         assert!(!client.take_pending_renew());
         peer.join().map_err(|_| "peer thread panicked")??;
+        Ok(())
+    }
+
+    /// A `RenewNow` sent before the acme process greets the worker is
+    /// recorded by the client, and the greeting goes on.
+    #[test]
+    fn a_renew_now_before_hello_is_recorded_by_the_client() -> R {
+        let (acme, worker) = Channel::pair()?;
+        let (worker_side, renewer) = acme_link(worker)?;
+        renewer.renew_now()?;
+        let thread = std::thread::spawn(move || worker_side.serve(|_, _| Ok(())));
+        let mut client = AcmeClient::new(acme);
+        client.hello()?;
+        assert!(client.take_pending_renew());
+        drop(client);
+        let served = thread.join().map_err(|_| "worker thread panicked")?;
+        assert!(served.is_ok(), "{served:?}");
+        Ok(())
+    }
+
+    /// Reads from `acme` until `answer`, and counts the `RenewNow`s read
+    /// before it.
+    fn read_until(acme: &mut Channel, answer: &WorkerMessage) -> Result<usize, ChannelError> {
+        let mut renews = 0_usize;
+        loop {
+            let message = acme.recv::<WorkerMessage>()?;
+            if message == *answer {
+                return Ok(renews);
+            }
+            assert_eq!(message, WorkerMessage::RenewNow);
+            renews = renews.saturating_add(1);
+        }
+    }
+
+    /// `renew_now` on another thread while the server answers `Install`s:
+    /// every frame on the channel stays whole, and every request arrives.
+    #[test]
+    fn renew_now_from_another_thread_does_not_tear_the_answers() -> R {
+        const ROUNDS: usize = 300;
+        let (mut acme, worker) = Channel::pair()?;
+        let (worker_side, renewer) = acme_link(worker)?;
+        let serving = std::thread::spawn(move || worker_side.serve(|_, _| Ok(())));
+        let asking = renewer.clone();
+        let renewing = std::thread::spawn(move || -> Result<(), AcmeChannelError> {
+            for _ in 0..ROUNDS {
+                asking.renew_now()?;
+            }
+            Ok(())
+        });
+        acme.send(&AcmeMessage::Hello {
+            version: ACME_PROTO_VERSION,
+        })?;
+        let mut renews = read_until(
+            &mut acme,
+            &WorkerMessage::Hello {
+                version: ACME_PROTO_VERSION,
+            },
+        )?;
+        for _ in 0..ROUNDS {
+            acme.send(&AcmeMessage::Install {
+                chain_pem: CHAIN.to_owned(),
+                key_pem: KeyPem::new(KEY.to_owned()),
+            })?;
+            renews = renews.saturating_add(read_until(&mut acme, &WorkerMessage::Installed)?);
+        }
+        renewing.join().map_err(|_| "renewer thread panicked")??;
+        // Every `RenewNow` is written now, so all of them come before the
+        // answer to one more `Install`.
+        acme.send(&AcmeMessage::Install {
+            chain_pem: CHAIN.to_owned(),
+            key_pem: KeyPem::new(KEY.to_owned()),
+        })?;
+        renews = renews.saturating_add(read_until(&mut acme, &WorkerMessage::Installed)?);
+        assert_eq!(renews, ROUNDS);
+        drop(acme);
+        let served = serving.join().map_err(|_| "worker thread panicked")?;
+        assert!(served.is_ok(), "{served:?}");
+        drop(renewer);
+        Ok(())
+    }
+
+    /// When the server stops, the acme process sees the channel close even
+    /// while a renewer is still alive, and the renewer then fails.
+    #[test]
+    fn the_channel_closes_when_the_server_stops_while_a_renewer_lives() -> R {
+        let (mut acme, worker) = Channel::pair()?;
+        let (worker_side, renewer) = acme_link(worker)?;
+        let thread = std::thread::spawn(move || worker_side.serve(|_, _| Ok(())));
+        acme.send(&AcmeMessage::Hello {
+            version: ACME_PROTO_VERSION.wrapping_add(1),
+        })?;
+        assert!(matches!(
+            acme.recv::<WorkerMessage>()?,
+            WorkerMessage::Refused { .. }
+        ));
+        let served = thread.join().map_err(|_| "worker thread panicked")?;
+        assert!(
+            matches!(served, Err(AcmeChannelError::Protocol(_))),
+            "{served:?}"
+        );
+        assert!(matches!(
+            acme.recv::<WorkerMessage>(),
+            Err(ChannelError::Closed)
+        ));
+        let late = renewer.renew_now();
+        assert!(
+            matches!(late, Err(AcmeChannelError::Channel(ChannelError::Closed))),
+            "{late:?}"
+        );
         Ok(())
     }
 

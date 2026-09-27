@@ -538,17 +538,22 @@ pub(crate) fn check_and_install(
 /// it on its own thread. When the channel fails, the worker keeps serving
 /// the last certificate (ADR-015).
 pub(crate) fn serve_installs(
-    mut channel: Channel,
+    channel: Channel,
     domains: Vec<String>,
     cert_dir: PathBuf,
     store: Arc<CertStore>,
 ) {
-    let served = detent_platform::privsep::acme::serve_acme(&mut channel, move |chain, key| {
-        let now = detent_web::auth::extract::unix_now();
-        check_and_install(chain, key, &domains, now, &cert_dir, &store).inspect_err(|reason| {
-            tracing::warn!(%reason, "the worker refused an ACME certificate");
-        })
-    });
+    let served =
+        detent_platform::privsep::acme::acme_link(channel).and_then(|(server, _renewer)| {
+            server.serve(move |chain, key| {
+                let now = detent_web::auth::extract::unix_now();
+                check_and_install(chain, key, &domains, now, &cert_dir, &store).inspect_err(
+                    |reason| {
+                        tracing::warn!(%reason, "the worker refused an ACME certificate");
+                    },
+                )
+            })
+        });
     match served {
         Ok(()) => tracing::info!("the acme process closed its channel"),
         Err(err) => tracing::warn!(

@@ -91,10 +91,13 @@ privilege.
   first, so the acme process can never send the runner a request (the
   parent gets the handle back). The pair forked after it inherits
   the worker's end of its socket pair: the monitor drops it, the worker
-  answers on it (`serve_acme`: `Hello`, then `Install { chain, key }` →
-  `Installed` or `Refused`). `serve` starts it (`start_acme` in
-  `serve.rs`, `fork_acme` in `crates/detent/src/acme.rs`) only when
-  preflight built a provider, that is with `tls.bootstrap = "acme"`.
+  answers on it (`acme_link`, then `AcmeServer::serve`: `Hello`, then
+  `Install { chain, key }` → `Installed` or `Refused`; since protocol
+  version 2 another worker thread can send `RenewNow` through the
+  `AcmeRenewer`, which shares the locked writer). `serve` starts it
+  (`start_acme` in `serve.rs`, `fork_acme` in `crates/detent/src/acme.rs`)
+  only when preflight built a provider, that is with
+  `tls.bootstrap = "acme"`.
   Preflight (`preflight_acme`) refuses a missing `acme.directory_url`,
   `acme.domains`, `acme.credentials_path` or `acme.provider`, and a
   credentials directory or `tls.cert_dir` that is not under the state root
