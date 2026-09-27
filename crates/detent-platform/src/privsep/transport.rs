@@ -153,6 +153,26 @@ impl Channel {
         &self.stream
     }
 
+    /// A second handle on the same socket, with the same timeouts.
+    ///
+    /// It exists so one thread can write while another blocks in a read.
+    /// Only one handle may read: two readers would split frames between
+    /// them. Writes from several handles must be serialized by the caller,
+    /// for example with a `Mutex`, or their frames can interleave. The
+    /// timeouts are options of the shared socket, so
+    /// [`Channel::set_read_timeout`] on one handle changes the socket for
+    /// both, though only that handle reports the new value.
+    ///
+    /// # Errors
+    ///
+    /// [`ChannelError::Io`] when the descriptor cannot be duplicated.
+    pub fn try_clone(&self) -> Result<Self, ChannelError> {
+        Ok(Self {
+            stream: self.stream.try_clone().map_err(ChannelError::Io)?,
+            read_timeout: self.read_timeout,
+        })
+    }
+
     /// Replace the read timeout used for subsequent receives.
     ///
     /// # Errors
@@ -615,6 +635,32 @@ mod tests {
         ));
         assert!(!ChannelError::Closed.to_string().is_empty());
         assert!(!ChannelError::Timeout.to_string().is_empty());
+    }
+
+    /// A clone is a second handle on the same socket: a frame sent through
+    /// either handle reaches the peer, a frame from the peer is read through
+    /// either, and the clone keeps both timeouts.
+    #[test]
+    fn a_clone_shares_the_socket_and_keeps_the_timeouts() -> Result<(), Box<dyn std::error::Error>>
+    {
+        // Multiples of the kernel tick, which rounds socket timeouts.
+        let read = Duration::from_millis(40);
+        let write = Duration::from_millis(60);
+        let (mut a, mut b) = Channel::pair_with(read, write)?;
+        let mut clone = a.try_clone()?;
+        assert_eq!(clone.read_timeout(), read);
+        assert_eq!(clone.socket().read_timeout()?, Some(read));
+        assert_eq!(clone.socket().write_timeout()?, Some(write));
+        clone.send(&Response::ShuttingDown)?;
+        a.send(&Request::Shutdown)?;
+        assert_eq!(b.recv::<Response>()?, Response::ShuttingDown);
+        assert_eq!(b.recv::<Request>()?, Request::Shutdown);
+        b.send(&Response::ShuttingDown)?;
+        assert_eq!(clone.recv::<Response>()?, Response::ShuttingDown);
+        // Both handles now see an idle socket after the read timeout.
+        assert!(matches!(a.poll_recv::<Response>(), Ok(None)));
+        assert!(matches!(clone.poll_recv::<Response>(), Ok(None)));
+        Ok(())
     }
 
     /// True when `channel`'s descriptor polls readable now (zero timeout).
