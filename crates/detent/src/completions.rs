@@ -204,6 +204,8 @@ mod tests {
             "detent host",
             "detent audit",
         ];
+        #[cfg(feature = "web")]
+        expected.push("detent cert status");
         #[cfg(feature = "update")]
         expected.push("detent update");
         for expected in expected {
@@ -225,6 +227,8 @@ mod tests {
         for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
             let text = script(shell)?;
             let mut commands = vec!["serve", "config", "doctor", "completions", "host", "audit"];
+            #[cfg(feature = "web")]
+            commands.push("cert");
             #[cfg(feature = "update")]
             commands.push("update");
             for command in commands {

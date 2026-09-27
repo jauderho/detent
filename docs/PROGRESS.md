@@ -4,7 +4,9 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
-## 2026-09-27 - Phase 6 R2b: rate-limit "renew now" (STAGE4 4.3 item 2)
+## 2026-09-27 - OFFLOAD T4: `detent cert status` (read-only)
+
+`detent cert status` (web feature, `--json` flag) reads the served pair with `detent_web::serving_pair(&config.tls.cert_dir)`: source is `acme` when a stored ACME pair matches the served fingerprint else `bootstrap`; fingerprint, RFC 3339 `not_after`, lifetime-used percent and warning come from shared `detent_web::api::system::{cert_report_for_der, not_after_rfc3339}` (same fns as `GET /api/v1/system/cert`). Missing store or unreadable dir exits Failed with a localized note; key bytes never print. Tests cover ACME/bootstrap text+JSON, missing dir, unreadable path, bad config, garbage DER unknowns, 55 %/80 % warnings.
 
 Closes the first R2 trap below. `MIN_FORCED_INTERVAL` (one hour) gates a forced order: `renew_once` skips a `RenewNow`'s order and falls back to the ordinary due check when one was already ordered inside the interval, logging the last order time and the next allowed one; a due renewal is never gated by this. `run_loop` tracks `last_order` (set on every successful `issue()`, install or not) across rounds. Separately, a `RenewNow` that arrives while the loop is in a backoff wait after a failure no longer cuts that wait short: it is logged and the same full delay is waited out again; only the round after the backoff is forced (and still subject to the interval). A held pair is retried regardless of either rule, since a retry is not a new order.
 

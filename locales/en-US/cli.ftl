@@ -126,6 +126,16 @@ cli-token-no-tokens = no tokens have been issued.
 cli-token-line = {$id}  {$label}  {$scopes}  {$created}  {$expires}
 cli-credential-failed = the request could not be completed: {$reason}
 
+## cert status
+cli-cert-source = source: {$source}
+cli-cert-fingerprint = fingerprint (sha-256): {$fingerprint}
+cli-cert-not-after = expires: {$not_after}
+cli-cert-not-after-unknown = expiry: unknown (the certificate did not parse).
+cli-cert-lifetime = lifetime used: {$percent} (warning: {$warning}).
+cli-cert-lifetime-unknown = lifetime used: unknown (the certificate did not parse).
+cli-cert-missing = no certificate is stored in {$path}; start the server once so it writes one.
+cli-cert-unreadable = the certificate in {$path} could not be read: {$reason}
+
 ## password entry (setup, user add, user passwd)
 cli-password-prompt = password:
 cli-password-confirm = confirm password:
