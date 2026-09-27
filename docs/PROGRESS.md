@@ -4,6 +4,10 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-27 - OFFLOAD T2: root-proof webadmin write-failure test
+
+`setup_with_force_reports_a_write_failure_as_a_credential_failure` swaps `users.json` for a symlink to a saved copy: `load` reads through the link, `create` reports `UserExists`, and `set_password`'s atomic write refuses the link (`AtomicError::Symlink`, never follows symlinks for any user including root). Keeps name, `Exit::Failed`, and the credential-failure note. Removed the §1.4 known-state sentence in the same commit.
+
 ## 2026-09-27 - OFFLOAD T1: CLI-only build clippy errors
 
 T1 reproduce gate passes: `cargo clippy -p detent --all-targets --no-default-features --features module-hosts,init-systemd -- -D warnings` reports no issues. `failed()` test gated on `update`; the two `mut` bindings restructured so `#[cfg(feature = "update")]` selects elements, not statements. Two more tests needed the same gate for this feature set (found by running the gate, not named in the task): `update_operation_maps_without_side_effects` (no `update` subcommand) and `a_cli_apply_on_a_commit_confirm_module_never_leaves_an_unenforced_commit` (no `network` module). Feature tests pass: 105 + 7. Traps: `git stash` in this repo risks 79 unrelated stashes; verified via an isolated worktree instead.
