@@ -524,6 +524,34 @@ mod tests {
         })
     }
 
+    /// Slice W1 (STAGE4 4.3 item 5): under the real worker confinement, the
+    /// audit writers' `File::sync_data()` call (`fdatasync`) on a file under
+    /// the state root must succeed, not `EPERM` — the gap slice S2 hit live
+    /// (`fdatasync(14) = -1 EPERM` after `POST /api/v1/system/cert/renew`).
+    #[test]
+    fn enforce_mode_worker_can_fdatasync_a_state_root_file()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::Write as _;
+        in_forked_child(|| {
+            let dir = std::env::temp_dir()
+                .join(format!("detent-sandbox-fdatasync-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            let Ok(allow) = fixture_allowlist(&dir) else {
+                return false;
+            };
+            if confine(Role::Worker, &Policy::worker(&allow)).is_err() {
+                return false;
+            }
+            let Ok(mut file) = std::fs::File::create(dir.join("audit.jsonl")) else {
+                return false;
+            };
+            if file.write_all(b"record\n").is_err() {
+                return false;
+            }
+            file.sync_data().is_ok()
+        })
+    }
+
     #[allow(unsafe_code)]
     unsafe fn libc_ptrace_traceme() -> i64 {
         unsafe extern "C" {
