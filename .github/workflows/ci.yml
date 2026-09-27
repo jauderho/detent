@@ -325,7 +325,9 @@ jobs:
   # process must run confined (uid detent, seccomp `Acme`, Landlock), and no
   # syscall of it may return EPERM under `strace -f`. Slice S2: Pebble's
   # certificates live 180 s, and the running server must replace one with a
-  # later-expiring one before it expires, with no restart. See
+  # later-expiring one before it expires, with no restart. Slice W1: an
+  # operator can force a renewal over the API (POST cert/renew), which
+  # exercises the worker's audit-log fdatasync call. See
   # scripts/acme-serve-check.sh for every check.
   acme-serve:
     name: ACME serve end to end (Pebble + BIND 9, confined)
@@ -413,7 +415,7 @@ jobs:
         run: |
           sudo scripts/acme-serve-check.sh --verbose \
             --tsig-key-file "$RUNNER_TEMP/tsig.key" --dns-server 127.0.0.1:5300 \
-            --expect-renewal 240 \
+            --expect-renewal 240 --forced-renew \
             target/debug/detent "$RUNNER_TEMP/pebble/pebble.minica.pem" \
             https://127.0.0.1:14000/dir
 

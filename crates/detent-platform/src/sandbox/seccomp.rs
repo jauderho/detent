@@ -297,6 +297,15 @@ const MONITOR: &[&str] = &[
 /// (thread names; std ignores the error), `prctl(PR_SET_VMA)` (mimalloc names
 /// its mappings) and `access("/sys/devices/system/node/node1")` (mimalloc's
 /// NUMA probe; it then assumes one node).
+///
+/// **Slice W1 (STAGE4 4.3 item 5):** `fdatasync` added. The C4/S2 traces
+/// only ever exercised the ACME install path, so a genuine gap went unseen
+/// until slice S2 sent a real `POST /api/v1/system/cert/renew`: both audit
+/// writers the confined worker runs (`FileAuthAudit::append` in
+/// `detent-web`, `FileAudit` in `detent-ops`) call `File::sync_data()`
+/// after each record, which `WORKER` did not allow. Confirmed live:
+/// `fdatasync(14) = -1 EPERM`, which made the ops engine fail the operation
+/// because its intent record could not be persisted.
 const WORKER: &[&str] = &[
     "read",
     "write",
@@ -404,6 +413,14 @@ const WORKER: &[&str] = &[
     "pwrite64",
     "renameat",
     "fsync",
+    // The data-only form of `fsync` above: `File::sync_data()`, called by
+    // both audit writers the confined worker runs
+    // (`detent-web::auth::audit::FileAuthAudit::append` and
+    // `detent-ops::audit::FileAudit`) after each record. Seen live in the
+    // acme-serve trace: `fdatasync(14) = -1 EPERM` after
+    // `POST /api/v1/system/cert/renew`, which made the ops engine fail the
+    // operation because its intent record could not be persisted.
+    "fdatasync",
     "unlinkat",
     "mkdirat",
     "fchmod",
@@ -588,7 +605,9 @@ pub const fn syscalls_for(role: Role) -> &'static [&'static str] {
 /// only their `ppoll`/`openat`/`renameat`/`epoll_pwait`/`mkdirat`/
 /// `unlinkat`/`newfstatat`/`fchmodat` forms. The C4 rows (`flock` and
 /// `chmod`) were read from the `x86_64` `<asm/unistd_64.h>` and
-/// `<asm-generic/unistd.h>` of the build container (Ubuntu 24.04).
+/// `<asm-generic/unistd.h>` of the build container (Ubuntu 24.04). The W1
+/// row (`fdatasync`) was read the same way, from the same container: 75
+/// and 83.
 const SYSCALL_NUMBERS: &[(&str, i64, i64)] = &[
     ("read", 0, 63),
     ("write", 1, 64),
@@ -608,6 +627,7 @@ const SYSCALL_NUMBERS: &[(&str, i64, i64)] = &[
     ("mremap", 25, 216),
     ("fcntl", 72, 25),
     ("fsync", 74, 82),
+    ("fdatasync", 75, 83),
     ("fchmod", 91, 52),
     ("fchown", 93, 55),
     ("getpid", 39, 172),
@@ -905,6 +925,15 @@ mod tests {
         assert_eq!(super::number("chmod", Arch::X86_64), Some(90));
         // Refused in the worker and tolerated, never allowed.
         assert!(!worker.contains(&"prctl") && !worker.contains(&"access"));
+    }
+
+    /// W1: `fdatasync` (the audit writers' `File::sync_data()`) resolves on
+    /// both tier-one arches, unlike the legacy forms above.
+    #[test]
+    fn the_worker_table_allows_fdatasync_on_both_arches() {
+        assert!(syscalls_for(Role::Worker).contains(&"fdatasync"));
+        assert_eq!(super::number("fdatasync", Arch::X86_64), Some(75));
+        assert_eq!(super::number("fdatasync", Arch::Aarch64), Some(83));
     }
 
     /// The credentials store calls (slice C3b): each `x86_64` form has no
