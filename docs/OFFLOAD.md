@@ -191,8 +191,10 @@ same commit.
    a short success message ("Renewal requested. The new certificate is
    installed when the CA issues it."). On an error, show the localized
    server message with the existing error helper (`useApiErrorMessage`).
-3. On `web/src/routes/AuditPage.tsx`, add a label for the auth-log event
-   `cert_renew_requested` (see how other auth events are labeled there).
+3. ~~On `web/src/routes/AuditPage.tsx`, add a label for the auth-log event
+   `cert_renew_requested`.~~ Not applicable (owner decision, 2026-09-27):
+   `cert_renew_requested` is written to the auth log, and `AuditPage.tsx`
+   shows only the ops audit log. The event stays readable through the API.
 4. Put every new string in `locales/en-US/web.ftl` and
    `locales/qps-ploc/web.ftl` (the pseudo-locale; see how `bun run test`
    generates or checks it, and `bun run i18n:check`). Follow
