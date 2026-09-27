@@ -33,7 +33,9 @@ use std::time::Duration;
 use detent_acme::{
     Account, AcmeError, DnsProvider, DnsRecord, IssueRequest, Issued, RetryPolicy, Warning,
 };
-use detent_platform::privsep::acme::{AcmeChannelError, AcmeClient, KeyPem};
+use detent_platform::privsep::acme::{
+    AcmeChannelError, AcmeClient, AcmeRenewer, AcmeServer, KeyPem, acme_link,
+};
 use detent_platform::privsep::spawn::{
     AcmeHandle, SandboxHooks, SpawnConfig, SpawnError, spawn_acme,
 };
@@ -595,23 +597,18 @@ pub(crate) fn check_and_install(
 /// it on its own thread. When the channel fails, the worker keeps serving
 /// the last certificate (ADR-015).
 pub(crate) fn serve_installs(
-    channel: Channel,
+    server: AcmeServer,
     domains: Vec<String>,
     cert_dir: PathBuf,
     store: Arc<CertStore>,
 ) {
-    let served =
-        detent_platform::privsep::acme::acme_link(channel).and_then(|(server, _renewer)| {
-            server.serve(move |chain, key| {
-                let now = detent_web::auth::extract::unix_now();
-                check_and_install(chain, key, &domains, now, &cert_dir, &store).inspect_err(
-                    |reason| {
-                        tracing::warn!(%reason, "the worker refused an ACME certificate");
-                    },
-                )
-            })
-        });
-    match served {
+    let outcome = server.serve(move |chain, key| {
+        let now = detent_web::auth::extract::unix_now();
+        check_and_install(chain, key, &domains, now, &cert_dir, &store).inspect_err(|reason| {
+            tracing::warn!(%reason, "the worker refused an ACME certificate");
+        })
+    });
+    match outcome {
         Ok(()) => tracing::info!("the acme process closed its channel"),
         Err(err) => tracing::warn!(
             reason = %err,
@@ -620,22 +617,36 @@ pub(crate) fn serve_installs(
     }
 }
 
-/// Starts [`serve_installs`] on its own thread, as the worker does once its
-/// certificate store exists. Nothing joins the thread: when it ends, the
-/// worker keeps serving the last certificate.
+/// Splits the worker's end of the acme channel ([`acme_link`]) and starts
+/// [`serve_installs`] with its reading half on its own thread, as the worker
+/// does once its certificate store exists. The other half is the renewer
+/// the web state gets. Nothing joins the thread: when it ends, the worker
+/// keeps serving the last certificate, and the renewer fails.
 ///
 /// # Errors
 ///
-/// The thread could not be started.
+/// The channel could not be split, or the thread could not be started.
 pub(crate) fn spawn_installs(
     channel: Channel,
     domains: Vec<String>,
     cert_dir: PathBuf,
     store: Arc<CertStore>,
-) -> std::io::Result<std::thread::JoinHandle<()>> {
-    std::thread::Builder::new()
+) -> std::io::Result<(std::thread::JoinHandle<()>, WorkerRenewer)> {
+    let (server, renewer) = acme_link(channel).map_err(std::io::Error::other)?;
+    let thread = std::thread::Builder::new()
         .name("acme-installs".to_owned())
-        .spawn(move || serve_installs(channel, domains, cert_dir, store))
+        .spawn(move || serve_installs(server, domains, cert_dir, store))?;
+    Ok((thread, WorkerRenewer(renewer)))
+}
+
+/// The worker's [`AcmeRenewer`], behind `POST /api/v1/system/cert/renew`.
+#[derive(Debug)]
+pub(crate) struct WorkerRenewer(AcmeRenewer);
+
+impl detent_web::CertRenewer for WorkerRenewer {
+    fn renew_now(&self) -> Result<(), String> {
+        self.0.renew_now().map_err(|err| err.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -649,6 +660,7 @@ mod tests {
     use detent_acme::{AcmeError, Issued, RetryPolicy};
     use detent_platform::privsep::acme::{
         ACME_PROTO_VERSION, AcmeChannelError, AcmeClient, AcmeMessage, KeyPem, WorkerMessage,
+        acme_link,
     };
     use detent_platform::privsep::transport::{Channel, ChannelError};
     use detent_web::CertifiedKeyPair;
@@ -1871,9 +1883,10 @@ mod tests {
             let second = client.install(bad_chain, KeyPem::new(bad_key));
             (hello, first, second)
         });
+        let (server, _renewer) = acme_link(worker_end)?;
         let ((), logs) = capture(|| {
             serve_installs(
-                worker_end,
+                server,
                 domains(),
                 dir.path().to_path_buf(),
                 Arc::clone(&store),
@@ -1894,10 +1907,13 @@ mod tests {
         Ok(())
     }
 
-    /// The thread the worker starts: the acme process installs a good pair
-    /// over the channel, and the store then serves it.
+    /// The thread the worker starts and the renewer it gets share one link:
+    /// a renewal request reaches the acme end, the acme process installs a
+    /// good pair over the channel, and the store then serves it. Once the
+    /// thread ends, the renewer fails.
     #[test]
-    fn the_worker_thread_installs_a_pair_and_the_store_serves_it() -> R {
+    fn the_install_thread_and_the_renewer_share_one_link() -> R {
+        use detent_web::CertRenewer as _;
         let dir = tempfile::TempDir::new()?;
         let (store, bootstrap) = bootstrap_store()?;
         let store = Arc::new(store);
@@ -1911,15 +1927,25 @@ mod tests {
                 Arc::clone(&store),
             )
         });
-        let thread = thread?;
+        let (thread, renewer) = thread?;
         assert_eq!(thread.thread().name(), Some("acme-installs"), "{logs}");
+        renewer.renew_now()?;
         let mut client = AcmeClient::new(acme_end);
         client.hello()?;
+        assert!(client.take_pending_renew());
         client.install(good.chain_pem.clone(), KeyPem::new(good.key_pem.clone()))?;
+        renewer.renew_now()?;
+        assert_eq!(client.next_request()?, WorkerMessage::RenewNow);
         drop(client);
         thread.join().map_err(|_| "install thread panicked")?;
         assert_ne!(served_leaf(&store), bootstrap);
         assert_eq!(served_leaf(&store), good.pair()?.cert_der());
+        let late = renewer
+            .renew_now()
+            .err()
+            .ok_or("the renewer outlived the link")?;
+        assert!(!late.is_empty());
+        assert!(format!("{renewer:?}").contains("Renewer"));
         Ok(())
     }
 
@@ -1980,9 +2006,10 @@ mod tests {
         let (mut acme_end, worker_end) = Channel::pair()?;
         // A `String` is not an `AcmeMessage`.
         acme_end.send(&"not a message".to_owned())?;
+        let (server, _renewer) = acme_link(worker_end)?;
         let ((), logs) = capture(|| {
             serve_installs(
-                worker_end,
+                server,
                 domains(),
                 dir.path().to_path_buf(),
                 Arc::clone(&store),
