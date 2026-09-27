@@ -75,14 +75,14 @@ fn cert_status(
     let report = detent_web::api::system::cert_report_for_der(pair.cert_der());
     // The certificate is bad (owner decision, 2026-09-27) when it cannot be
     // parsed (`not_after_unix` is `None`) or has already reached `not_after`.
-    // "Now" is read the same way `cert_report_for_der` reads it, so the two
-    // never disagree about whether the deadline has passed.
-    let exit = match report.not_after_unix {
-        Some(not_after_unix)
-            if time::OffsetDateTime::now_utc().unix_timestamp() < not_after_unix =>
-        {
-            Exit::Ok
-        }
+    // "Now" is the system wall clock, as in `cert_report_for_der`. It comes
+    // from `std`, because this crate enables `time` only with `update`.
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_secs()).ok());
+    let exit = match (report.not_after_unix, now_unix) {
+        (Some(not_after_unix), Some(now_unix)) if now_unix < not_after_unix => Exit::Ok,
         _ => Exit::Failed,
     };
     let not_after = detent_web::api::system::not_after_rfc3339(report.not_after_unix);
