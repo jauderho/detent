@@ -685,6 +685,34 @@ mod tests {
         }
     }
 
+    /// C4 trace: the confined monitor of a real `detent serve` takes the
+    /// state lock (`Monitor::lock`: `create_dir_all` of the state root, then
+    /// `flock`). On `x86_64` `create_dir_all` issues `mkdir`, not `mkdirat`.
+    /// Before `mkdir` and `flock` were in `MONITOR`, the filter killed the
+    /// monitor here with `SIGSYS`.
+    #[test]
+    fn enforce_mode_monitor_takes_the_state_lock_and_creates_directories()
+    -> Result<(), Box<dyn std::error::Error>> {
+        in_forked_child(|| {
+            let dir =
+                std::env::temp_dir().join(format!("detent-sandbox-lock-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            if std::fs::create_dir_all(&dir).is_err() {
+                return false;
+            }
+            let Ok(allow) = fixture_allowlist(&dir) else {
+                return false;
+            };
+            if confine(Role::Monitor, &Policy::monitor(&allow)).is_err() {
+                return false;
+            }
+            let locked = crate::privsep::monitor::Monitor::lock(&dir).is_ok();
+            let created = std::fs::create_dir_all(dir.join("made/below")).is_ok()
+                && dir.join("made/below").is_dir();
+            locked && created
+        })
+    }
+
     /// `EPERM` from the `Acme` filter's default action.
     fn refused<T>(result: std::io::Result<T>) -> bool {
         result.err().and_then(|err| err.raw_os_error()) == Some(1)

@@ -226,6 +226,15 @@ const MONITOR: &[&str] = &[
     "lgetxattr",
     "lsetxattr",
     "statfs",
+    // The state lock (`Monitor::lock`, called after confinement in `serve`):
+    // `create_dir_all` of the state root, then `flock`. On x86_64 glibc and
+    // musl issue `mkdir` (the legacy form of `mkdirat`, above); aarch64 has
+    // only `mkdirat`. Seen live in the C4 trace (`scripts/acme-serve-check.sh`,
+    // x86_64 glibc): `mkdir("/var/lib/detent", 0777) = -1 EEXIST` and
+    // `flock(4, LOCK_EX|LOCK_NB) = 0`; without them the filter killed the
+    // monitor with `SIGSYS` on every start.
+    "mkdir",
+    "flock",
     // Reap the worker (`MonitorHandle::wait`, called from the same process
     // that ran `confine_monitor`).
     "wait4",
@@ -281,7 +290,13 @@ const MONITOR: &[&str] = &[
 /// the worker with `EPERM` on `clone` the moment `detent_web::spawn_engine`
 /// tried to start its background thread; each further syscall below was
 /// added and re-traced until a real client request completed and the worker
-/// shut down cleanly on `SIGTERM`.
+/// shut down cleanly on `SIGTERM`. The C4 trace (`scripts/acme-serve-check.sh`,
+/// CI job `acme-serve`: `x86_64` glibc, a real `serve` through ACME issuance,
+/// install and `SIGTERM`) added the `x86_64` legacy forms at the end. Calls it
+/// showed refused and tolerated are left out on purpose: `prctl(PR_SET_NAME)`
+/// (thread names; std ignores the error), `prctl(PR_SET_VMA)` (mimalloc names
+/// its mappings) and `access("/sys/devices/system/node/node1")` (mimalloc's
+/// NUMA probe; it then assumes one node).
 const WORKER: &[&str] = &[
     "read",
     "write",
@@ -395,6 +410,21 @@ const WORKER: &[&str] = &[
     "fchmodat",
     "faccessat",
     "getdents64",
+    // The x86_64 legacy forms of calls allowed above as `*at`/`epoll_pwait`
+    // forms (aarch64 has none of them). Seen live in the C4 trace
+    // (`scripts/acme-serve-check.sh`, x86_64 glibc): `tls.cert_dir` is made
+    // with `mkdir("/var/lib/detent/certs", 0777)` and `chmod(…, 0700)`, a
+    // pair is written with `chmod(…/bootstrap.pair, 0600)` and
+    // `unlink(…/bootstrap.cert.der)` of the old file, the directory is opened
+    // with `open(…/certs, O_RDONLY|O_DIRECTORY)` (the acme install thread too),
+    // and glibc's tokio reactor waits in `epoll_wait` (as in `ACME`).
+    // `numbers_for` skips a known name that an arch lacks, so these rows
+    // leave the aarch64 filter as it was.
+    "mkdir",
+    "chmod",
+    "unlink",
+    "open",
+    "epoll_wait",
 ];
 
 /// Syscalls the acme process needs (ADR-015): an outbound HTTPS/TCP client
@@ -410,9 +440,25 @@ const WORKER: &[&str] = &[
 /// way (slice C3b): the test's `write_credentials`, which repeats
 /// `detent-acme`'s `write_json_atomically` call for call, and a probe that
 /// does the same writes under this filter, built for glibc and for musl.
+/// Slice C4 proved the table in a real run: the CI job `acme-serve`
+/// (`scripts/acme-serve-check.sh`: `detent serve` as root under `strace
+/// -ff`, `x86_64` glibc, Pebble and BIND 9, RFC 2136 with TSIG) orders,
+/// installs and serves a certificate with no `EPERM` in the acme process
+/// outside the tolerated calls. Observed set after confinement: `brk`,
+/// `clone3`, `close`, `connect`, `epoll_create1`, `epoll_ctl`,
+/// `epoll_wait`, `eventfd2`, `exit`, `fcntl`, `fsync`, `futex`,
+/// `getpeername`, `getpid`, `getrandom`, `getsockname`, `getsockopt`,
+/// `gettid`, `madvise`, `mkdir`, `mmap`, `mprotect`, `munmap`,
+/// `newfstatat`, `openat`, `read`, `recvfrom`, `rename`, `rseq`,
+/// `rt_sigaction`, `rt_sigprocmask`, `sched_getaffinity`, `sendto`,
+/// `set_robust_list`, `setsockopt`, `sigaltstack`, `socket`, `socketpair`,
+/// `statx`, `write`, `writev`, and `access` (refused, tolerated). That run found `ioctl(FIONBIO)` from
+/// `TcpStream::connect_timeout` in the RFC 2136 exchange; `detent-acme`
+/// now bounds a blocking `connect` on a thread instead (`tsig::within`).
 /// Calls the traces showed refused and tolerated
 /// are left out on purpose: `uname` (glibc resolver setup), `ioctl(FIONREAD)`
-/// (glibc resolver) and `prctl(PR_SET_NAME)` (thread names).
+/// (glibc resolver), `prctl(PR_SET_NAME)` (thread names) and
+/// `access("/sys/devices/system/node/node1")` (mimalloc's NUMA probe).
 const ACME: &[&str] = &[
     // IPC with the worker (`Channel` over a `UnixStream`), file reads and
     // allocator/runtime housekeeping: all seen live.
@@ -538,9 +584,11 @@ pub const fn syscalls_for(role: Role) -> &'static [&'static str] {
 /// the `ACME` table added were read from the `x86_64` `<asm/unistd_64.h>` and
 /// the aarch64 `<asm-generic/unistd.h>` of the build container). Every row is
 /// used by [`MONITOR`], [`WORKER`] or [`ACME`]. `aarch64` never had `poll`,
-/// `open`, `rename`, `epoll_wait`, `mkdir`, `unlink` or `stat`, only their
-/// `ppoll`/`openat`/`renameat`/`epoll_pwait`/`mkdirat`/`unlinkat`/
-/// `newfstatat` forms.
+/// `open`, `rename`, `epoll_wait`, `mkdir`, `unlink`, `stat` or `chmod`,
+/// only their `ppoll`/`openat`/`renameat`/`epoll_pwait`/`mkdirat`/
+/// `unlinkat`/`newfstatat`/`fchmodat` forms. The C4 rows (`flock` and
+/// `chmod`) were read from the `x86_64` `<asm/unistd_64.h>` and
+/// `<asm-generic/unistd.h>` of the build container (Ubuntu 24.04).
 const SYSCALL_NUMBERS: &[(&str, i64, i64)] = &[
     ("read", 0, 63),
     ("write", 1, 64),
@@ -637,6 +685,8 @@ const SYSCALL_NUMBERS: &[(&str, i64, i64)] = &[
     ("mkdir", 83, -1),
     ("unlink", 87, -1),
     ("stat", 4, -1),
+    ("flock", 73, 32),
+    ("chmod", 90, -1),
 ];
 
 /// `name`'s raw syscall number on `arch`, or `None` if it is not in
@@ -826,6 +876,35 @@ mod tests {
                 "{role:?} can connect"
             );
         }
+    }
+
+    /// C4: the `x86_64` legacy forms the live `serve` trace showed resolve on
+    /// `x86_64` only, next to their `*at` forms on both arches; `flock`
+    /// resolves on both.
+    #[test]
+    fn the_monitor_and_worker_tables_carry_the_traced_legacy_forms() {
+        let monitor = syscalls_for(Role::Monitor);
+        let worker = syscalls_for(Role::Worker);
+        for (table, x86_64_only, both) in [
+            (monitor, "mkdir", "mkdirat"),
+            (worker, "mkdir", "mkdirat"),
+            (worker, "chmod", "fchmodat"),
+            (worker, "unlink", "unlinkat"),
+            (worker, "open", "openat"),
+            (worker, "epoll_wait", "epoll_pwait"),
+        ] {
+            assert!(table.contains(&x86_64_only), "lacks {x86_64_only}");
+            assert!(table.contains(&both), "lacks {both}");
+            assert!(super::number(x86_64_only, Arch::X86_64).is_some());
+            assert!(super::number(x86_64_only, Arch::Aarch64).is_none());
+            assert!(super::number(both, Arch::Aarch64).is_some());
+        }
+        assert!(monitor.contains(&"flock"));
+        assert_eq!(super::number("flock", Arch::X86_64), Some(73));
+        assert_eq!(super::number("flock", Arch::Aarch64), Some(32));
+        assert_eq!(super::number("chmod", Arch::X86_64), Some(90));
+        // Refused in the worker and tolerated, never allowed.
+        assert!(!worker.contains(&"prctl") && !worker.contains(&"access"));
     }
 
     /// The credentials store calls (slice C3b): each `x86_64` form has no
