@@ -53,12 +53,15 @@
 #   3. Finds the four processes in the trace (monitor, runner, acme, worker),
 #      and checks the acme process: uid `detent`, NoNewPrivs 1, Seccomp 2,
 #      Landlock applied, and the TSIG update sent from it.
-#   4. Sends SIGTERM to `serve` (the monitor, the process strace started)
-#      and requires all four to end within the stop timeout and `serve` to
-#      exit 0.
-#   5. Fails when a syscall of the acme process returned EPERM, except the
-#      calls the `ACME` seccomp table documents as refused and tolerated.
-#      Prints the acme process's distinct syscall names.
+#   4. Sends SIGTERM to the whole process group of `serve`, as systemd's
+#      default KillMode=control-group does, and requires all four processes
+#      to end within the stop timeout. The monitor has no SIGTERM handler:
+#      it may end by SIGTERM or exit 0, never by another signal (SIGSYS is a
+#      seccomp kill).
+#   5. Fails when a syscall of the acme or the worker process returned
+#      EPERM, except the calls their seccomp tables document as refused and
+#      tolerated. Prints the distinct syscall names of the acme process, the
+#      monitor and the worker.
 #   Exits 0 only when every check passes.
 #
 # Requires: root, a `detent` system account, strace, openssl, timeout.
@@ -88,8 +91,12 @@ WORKER_USER="detent"
 
 # Syscalls the `ACME` table leaves out on purpose: the traces showed them
 # refused and the callers go on (see the table's doc comment in
-# crates/detent-platform/src/sandbox/seccomp.rs).
-TOLERATED_EPERM=(uname ioctl prctl)
+# crates/detent-platform/src/sandbox/seccomp.rs). mimalloc probes NUMA
+# nodes with access(/sys/devices/system/node/node1).
+TOLERATED_EPERM=(uname ioctl prctl access)
+# The same for the worker (`WORKER` doc comment): thread names and
+# mimalloc's mapping names (prctl), and mimalloc's NUMA probe (access).
+TOLERATED_WORKER_EPERM=(prctl access)
 
 if [[ -n "${NO_COLOR:-}" ]]; then
   RED=""
@@ -125,7 +132,7 @@ die() {
 }
 
 show_usage() {
-  sed -n '2,64p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,67p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 need_value() {
@@ -311,7 +318,10 @@ algorithm = "hmac-sha256"
 EOF
 }
 
-SERVE_CMD=(strace -ff -o "${TRACE}" "${DETENT_BIN}" --config "${CONFIG}"
+# `setsid` makes serve the leader of its own process group (strace's child
+# is not a group leader, so setsid execs without a fork): SIGTERM to that
+# group reaches the four processes and not strace or this script.
+SERVE_CMD=(strace -ff -o "${TRACE}" setsid "${DETENT_BIN}" --config "${CONFIG}"
   --state-root "${STATE_ROOT}" serve)
 
 if [[ "${DRYRUN}" == true ]]; then
@@ -321,8 +331,9 @@ if [[ "${DRYRUN}" == true ]]; then
   log "would copy ${PEBBLE_CA} to ${CA_COPY}"
   log "would run: ${SERVE_CMD[*]}"
   log "would poll: openssl s_client -connect 127.0.0.1:${PORT} -servername ${DOMAIN}"
-  log "would send SIGTERM to serve and wait ${STOP_TIMEOUT}s for all four processes"
+  log "would send SIGTERM to the process group of serve and wait ${STOP_TIMEOUT}s"
   log "would fail on EPERM in the acme process, except: ${TOLERATED_EPERM[*]}"
+  log "would fail on EPERM in the worker, except: ${TOLERATED_WORKER_EPERM[*]}"
   log "${YELLOW}dryrun requested; nothing was run${NC}"
   exit 0
 fi
@@ -357,8 +368,12 @@ SERVE_PID=""
 # On any exit, stop what is still running, so a failed check does not leave
 # a server behind.
 cleanup() {
+  local leader
   if [[ -n "${SERVE_PID}" ]] && kill -0 "${SERVE_PID}" 2>/dev/null; then
-    pkill -KILL -P "${SERVE_PID}" 2>/dev/null || true
+    # serve leads its own process group (setsid): end the whole group.
+    for leader in $(pgrep -P "${SERVE_PID}" || true); do
+      kill -KILL -- "-${leader}" 2>/dev/null || true
+    done
     kill -KILL "${SERVE_PID}" 2>/dev/null || true
   fi
 }
@@ -436,6 +451,12 @@ list_clones() {
   done
 }
 
+# True while process $1 runs. A zombie has ended: when the monitor ends
+# first, its children are reparented and may wait to be reaped.
+running() {
+  [[ -r "/proc/$1/status" ]] && ! grep -qE '^State:[[:space:]]+Z' "/proc/$1/status"
+}
+
 # The pid that `strace` started: the one no clone created.
 main_pid() {
   local file pid
@@ -484,7 +505,7 @@ mapfile -t children < <(awk -v p="${MAIN}" '$1 == p && $3 == "process" { print $
 log_verbose "serve (monitor) pid ${MAIN}; forked: ${children[*]:-none}"
 
 # The acme process is the one that sent the TSIG update to the DNS server.
-mapfile -t senders < <(grep -lE "^connect\(.*htons\(${DNS_PORT}\).*\) = 0$" "${TRACE}".* 2>/dev/null |
+mapfile -t senders < <(grep -lE "^connect\(.*htons\(${DNS_PORT}\).*\) += 0$" "${TRACE}".* 2>/dev/null |
   while read -r file; do group_leader "${file##*.}"; done | sort -u)
 [[ "${#senders[@]}" -eq 1 ]] || die "expected one process to reach ${DNS_SERVER}, found: ${senders[*]:-none}"
 ACME="${senders[0]}"
@@ -495,7 +516,7 @@ RUNNER=""
 for child in "${children[@]}"; do
   if [[ "${child}" == "${ACME}" ]] || grep -q '^execve(' "${TRACE}.${child}"; then
     continue
-  elif [[ -n "$(tree_matches "${child}" '^listen\(.*\) = 0$')" ]]; then
+  elif [[ -n "$(tree_matches "${child}" '^listen\(.*\) += 0$')" ]]; then
     WORKER="${child}"
   elif [[ -z "${RUNNER}" ]]; then
     RUNNER="${child}"
@@ -505,7 +526,7 @@ done
 [[ -n "${WORKER}" ]] || die "no child of serve listens"
 [[ -n "${RUNNER}" ]] || die "no runner among the children of serve: ${children[*]}"
 for pid in "${MAIN}" "${RUNNER}" "${ACME}" "${WORKER}"; do
-  [[ -d "/proc/${pid}" ]] || die "process ${pid} is not running"
+  running "${pid}" || die "process ${pid} is not running"
 done
 pass "four processes run: monitor ${MAIN}, runner ${RUNNER}, acme ${ACME}, worker ${WORKER}"
 
@@ -516,16 +537,16 @@ status_field() {
   die "the acme process runs as uid $(status_field Uid), not ${WORKER_USER} (${WORKER_UID})"
 [[ "$(status_field NoNewPrivs)" == "1" ]] || die "the acme process has no no_new_privs"
 [[ "$(status_field Seccomp)" == "2" ]] || die "the acme process has no seccomp filter"
-grep -qE '^seccomp\(SECCOMP_SET_MODE_FILTER, .*\) = 0$' "${TRACE}.${ACME}" ||
+grep -qE '^seccomp\(SECCOMP_SET_MODE_FILTER, .*\) += 0$' "${TRACE}.${ACME}" ||
   die "the trace shows no seccomp filter installed by the acme process"
-grep -qE '^landlock_restrict_self\(.*\) = 0$' "${TRACE}.${ACME}" ||
+grep -qE '^landlock_restrict_self\(.*\) += 0$' "${TRACE}.${ACME}" ||
   die "the trace shows no Landlock ruleset applied by the acme process"
 pass "the acme process runs as ${WORKER_USER} with no_new_privs, seccomp (filter) and Landlock"
 
-# --- 3. SIGTERM ends all four; serve exits 0 ------------------------------
+# --- 3. SIGTERM to the process group ends all four ------------------------
 
-log "sending SIGTERM to serve (${MAIN})"
-kill -TERM "${MAIN}"
+log "sending SIGTERM to the process group of serve (${MAIN})"
+kill -TERM -- "-${MAIN}"
 deadline=$((SECONDS + STOP_TIMEOUT))
 while kill -0 "${SERVE_PID}" 2>/dev/null && ((SECONDS < deadline)); do
   sleep 1
@@ -540,40 +561,67 @@ serve_status=$?
 set -e
 SERVE_PID=""
 for pid in "${MAIN}" "${RUNNER}" "${ACME}" "${WORKER}"; do
-  [[ ! -d "/proc/${pid}" ]] || die "process ${pid} still runs after serve ended"
+  ! running "${pid}" || die "process ${pid} still runs after serve ended"
 done
-if [[ "${serve_status}" -ne 0 ]]; then
-  show_serve_log
-  die "serve exited ${serve_status} after SIGTERM, not 0"
-fi
-pass "all four processes ended after SIGTERM; serve exited 0"
+# strace exits with serve's status, or 128 + the signal that ended it.
+ending="$(tail -n 1 "${TRACE}.${MAIN}")"
+case "${ending}" in
+  "+++ exited with 0 +++" | "+++ killed by SIGTERM +++") ;;
+  *)
+    show_serve_log
+    die "the monitor ended with '${ending}' (serve status ${serve_status})"
+    ;;
+esac
+pass "all four processes ended after SIGTERM; the monitor: ${ending}"
 
-# --- 4. No EPERM in the acme process -------------------------------------
+# --- 4. No EPERM outside the tolerated calls ------------------------------
 
-mapfile -t acme_pids < <(descendants "${ACME}")
-acme_files=()
-for pid in "${acme_pids[@]}"; do
-  [[ -f "${TRACE}.${pid}" ]] && acme_files+=("${TRACE}.${pid}")
-done
-tolerated_re="^($(
-  IFS='|'
-  echo "${TOLERATED_EPERM[*]}"
-))\("
-refused="$(grep -hE '= -1 EPERM ' "${acme_files[@]}" || true)"
-tolerated="$(grep -E "${tolerated_re}" <<<"${refused}" || true)"
-refused="$(grep -vE "${tolerated_re}" <<<"${refused}" || true)"
-if [[ -n "${tolerated}" ]]; then
-  log "${YELLOW}tolerated EPERM in the acme process:${NC}"
-  sed -E 's/\(.*//' <<<"${tolerated}" | sort | uniq -c
-fi
-log "syscalls of the acme process (${#acme_files[@]} threads):"
-grep -hoE '^[a-z_0-9]+\(' "${acme_files[@]}" | tr -d '(' | sort -u | tr '\n' ' '
+# Trace files of $1 and every thread or process it created.
+tree_files() {
+  local pid
+  descendants "$1" | while read -r pid; do
+    if [[ -f "${TRACE}.${pid}" ]]; then
+      echo "${TRACE}.${pid}"
+    fi
+  done
+}
+
+# Prints the syscall set of process $2 (named $1) and fails on an EPERM
+# outside the calls named in $3...
+check_eperm() {
+  local name="$1" pid="$2"
+  shift 2
+  local files refused tolerated tolerated_re
+  mapfile -t files < <(tree_files "${pid}")
+  tolerated_re="^($(
+    IFS='|'
+    echo "$*"
+  ))\("
+  refused="$(grep -hE '= -1 EPERM ' "${files[@]}" || true)"
+  tolerated="$(grep -E "${tolerated_re}" <<<"${refused}" || true)"
+  refused="$(grep -vE "${tolerated_re}" <<<"${refused}" || true)"
+  log "syscalls of the ${name} (${#files[@]} threads):"
+  grep -hoE '^[a-z_0-9]+\(' "${files[@]}" | tr -d '(' | sort -u | tr '\n' ' '
+  echo
+  if [[ -n "${tolerated}" ]]; then
+    log "${YELLOW}tolerated EPERM in the ${name}:${NC}"
+    sed -E 's/ += -1 EPERM.*//' <<<"${tolerated}" | sort | uniq -c
+  fi
+  if [[ -n "${refused}" ]]; then
+    echo "${refused}" >&2
+    die "the ${name} was refused the syscalls above (EPERM)"
+  fi
+  pass "no syscall of the ${name} returned EPERM outside: $*"
+}
+
+check_eperm "acme process" "${ACME}" "${TOLERATED_EPERM[@]}"
+check_eperm "worker" "${WORKER}" "${TOLERATED_WORKER_EPERM[@]}"
+# The monitor's default action kills it: a refused call shows as SIGSYS
+# (checked above), never as EPERM.
+log "syscalls of the monitor (after its fork of the worker):"
+awk -v w="${WORKER}" 'f { print } $0 ~ "= " w "$" { f = 1 }' "${TRACE}.${MAIN}" |
+  grep -oE '^[a-z_0-9]+\(' | tr -d '(' | sort -u | tr '\n' ' '
 echo
-if [[ -n "${refused}" ]]; then
-  echo "${refused}" >&2
-  die "the acme process was refused the syscalls above (EPERM)"
-fi
-pass "no syscall of the acme process returned EPERM outside: ${TOLERATED_EPERM[*]}"
 
 if [[ "${VERBOSE}" == true ]]; then
   show_serve_log
