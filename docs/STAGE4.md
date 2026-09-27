@@ -69,7 +69,7 @@ The gap analysis was done at `c50200e`. In short: the pieces exist, but nothing 
    - Apply the `shortlived` profile by default on LE.
 3. **`detent cert status|renew` CLI**, journal/CLI warnings at 50 %/25 % lifetime, and a renew button on `CertificatesPage.tsx`.
 4. **Order-flow seam**, so fixtures can drive `order.rs` and raise the detent-acme floor from 87 toward 100.
-5. **Pebble test with a short-lifetime profile that really renews** (`ci.yml` job `acme-pebble`).
+5. **Pebble test with a short-lifetime profile that really renews.** **DONE** (slice S2): `ci.yml` job `acme-serve` configures Pebble with one `default` profile, `validityPeriod` 180 s (deterministic: an order with no `profile` field otherwise gets a random pick among the configured ones), and calls `scripts/acme-serve-check.sh --expect-renewal 240`. The script records the first served leaf's fingerprint and `notAfter`, then waits for the listener to serve a different Pebble-issued leaf for the same domain with a later `notAfter`, with no restart of `serve`; it fails if the old leaf expires first or the wait runs out. The operator-request half of this slice (`POST /api/v1/system/cert/renew` with a token minted while `serve` runs, expecting the `MIN_FORCED_INTERVAL` "too soon" line) was tried and dropped: it makes the worker call `fdatasync` (the auth-log write's `File::sync_data`), which is not in the `WORKER` seccomp table (`crates/detent-platform/src/sandbox/seccomp.rs`) — confirmed live, `fdatasync(14) = -1 EPERM`. Adding it is a Rust change outside this slice; open for a follow-up.
 
 Phase 6 items **blocked on the owner or external infrastructure**:
 - `hickory-client` propagation checks (new dependency, ADR-011 7-day cooldown);

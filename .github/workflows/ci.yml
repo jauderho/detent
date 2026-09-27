@@ -323,7 +323,9 @@ jobs:
   # root, gets a certificate from Pebble by dns-01 through the RFC 2136
   # provider (TSIG) against a real BIND 9 primary, and serves it. The acme
   # process must run confined (uid detent, seccomp `Acme`, Landlock), and no
-  # syscall of it may return EPERM under `strace -f`. See
+  # syscall of it may return EPERM under `strace -f`. Slice S2: Pebble's
+  # certificates live 180 s, and the running server must replace one with a
+  # later-expiring one before it expires, with no restart. See
   # scripts/acme-serve-check.sh for every check.
   acme-serve:
     name: ACME serve end to end (Pebble + BIND 9, confined)
@@ -374,12 +376,16 @@ jobs:
             internetsystemsconsortium/bind9@sha256:f8506cfcbc8fcb44e40b922fa74b481ba23b50f00482bf6693ff8f120709a778 \
             -g -c /etc/bind/named.conf
           mkdir -p "$RUNNER_TEMP/pebble"
+          # One profile only: an order with no "profile" field gets a
+          # random pick among the configured ones (Pebble chaos), so a
+          # single "default" here keeps the 180 s lifetime deterministic.
           cat > "$RUNNER_TEMP/pebble/pebble-config.json" <<'EOF'
           { "pebble": { "listenAddress": "0.0.0.0:14000",
                         "managementListenAddress": "0.0.0.0:15000",
                         "certificate": "/test/certs/localhost/cert.pem",
                         "privateKey": "/test/certs/localhost/key.pem",
-                        "httpPort": 5002, "tlsPort": 5001 } }
+                        "httpPort": 5002, "tlsPort": 5001,
+                        "profiles": { "default": { "description": "short-lived (S2)", "validityPeriod": 180 } } } }
           EOF
           docker run -d --name pebble-serve --network detent-acme -p 127.0.0.1:14000:14000 \
             -e PEBBLE_VA_NOSLEEP=1 \
@@ -403,10 +409,11 @@ jobs:
           sudo useradd --system --no-create-home --shell /usr/sbin/nologin detent
           sudo install -d -m 0700 -o detent -g detent /var/lib/detent
 
-      - name: detent serve obtains, serves and stops (acme-serve-check.sh)
+      - name: detent serve obtains, renews and stops (acme-serve-check.sh)
         run: |
           sudo scripts/acme-serve-check.sh --verbose \
             --tsig-key-file "$RUNNER_TEMP/tsig.key" --dns-server 127.0.0.1:5300 \
+            --expect-renewal 240 \
             target/debug/detent "$RUNNER_TEMP/pebble/pebble.minica.pem" \
             https://127.0.0.1:14000/dir
 

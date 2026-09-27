@@ -3,7 +3,10 @@
 # acme-serve-check.sh - Prove that `detent serve` with `tls.bootstrap =
 # "acme"` gets a certificate from Pebble by dns-01 through the RFC 2136
 # provider (TSIG), serves it, keeps the acme process confined, and stops
-# cleanly on SIGTERM (ADR-015, STAGE4 §4.3 item 2, slice C4).
+# cleanly on SIGTERM (ADR-015, STAGE4 §4.3 item 2, slice C4). With
+# --expect-renewal, also proves the running server replaces a short-lived
+# certificate with a later-expiring one before the first expires, with no
+# restart (STAGE4 §4.3 item 5, slice S2).
 #
 # Usage:
 #   scripts/acme-serve-check.sh [OPTIONS] --tsig-key-file <path> \
@@ -32,6 +35,13 @@
 #                             the `detent` account (default: /var/lib/detent).
 #   --issue-timeout <secs>   How long to wait until the listener serves a
 #                             certificate issued by Pebble (default: 180).
+#   --expect-renewal <secs>  After the first Pebble-issued leaf is served,
+#                             wait this long for the listener to serve a
+#                             different Pebble-issued leaf for the same SAN
+#                             with a later notAfter (a renewal), with no
+#                             restart of `serve`. Skipped when unset (the
+#                             default): use it with a short-lived Pebble
+#                             profile to prove renewal on schedule.
 #   --stop-timeout <secs>    How long `serve` may take to stop after SIGTERM
 #                             (default: 30).
 #   --trace <prefix>         `strace -ff -o` prefix: one file per thread,
@@ -50,15 +60,18 @@
 #      and copies the Pebble CA there (the acme process reads it as `detent`).
 #   2. Starts `detent serve` under `strace -ff` and waits until the leaf that
 #      `openssl s_client` sees is issued by Pebble and names the domain.
-#   3. Finds the four processes in the trace (monitor, runner, acme, worker),
+#   3. With --expect-renewal: waits for the listener to serve a different
+#      Pebble-issued leaf for the same domain with a later notAfter, with no
+#      restart of `serve`.
+#   4. Finds the four processes in the trace (monitor, runner, acme, worker),
 #      and checks the acme process: uid `detent`, NoNewPrivs 1, Seccomp 2,
 #      Landlock applied, and the TSIG update sent from it.
-#   4. Sends SIGTERM to the whole process group of `serve`, as systemd's
+#   5. Sends SIGTERM to the whole process group of `serve`, as systemd's
 #      default KillMode=control-group does, and requires all four processes
 #      to end within the stop timeout. The monitor has no SIGTERM handler:
 #      it may end by SIGTERM or exit 0, never by another signal (SIGSYS is a
 #      seccomp kill).
-#   5. Fails when a syscall of the acme or the worker process returned
+#   6. Fails when a syscall of the acme or the worker process returned
 #      EPERM, except the calls their seccomp tables document as refused and
 #      tolerated. Prints the distinct syscall names of the acme process, the
 #      monitor and the worker.
@@ -77,6 +90,7 @@ KEY_NAME="detent-acme"
 PORT=3443
 STATE_ROOT="/var/lib/detent"
 ISSUE_TIMEOUT=180
+EXPECT_RENEWAL=0
 STOP_TIMEOUT=30
 TRACE=""
 WORKDIR=""
@@ -96,7 +110,13 @@ WORKER_USER="detent"
 TOLERATED_EPERM=(uname ioctl prctl access)
 # The same for the worker (`WORKER` doc comment): thread names and
 # mimalloc's mapping names (prctl), and mimalloc's NUMA probe (access).
-TOLERATED_WORKER_EPERM=(prctl access)
+# Installing a second certificate (a renewal) makes `write_atomic`
+# (`crates/detent-platform/src/fs/atomic.rs`) replace an existing pair file
+# instead of creating a fresh one, so it tries to preserve the old file's
+# owner and xattrs: `fchown` and `flistxattr`/`fgetxattr`/`fsetxattr` on a
+# non-root worker. The code already treats `EPERM` there as "cannot, so
+# skip" (`owner_preserved = false`, `xattr_unsupported`), not a failure.
+TOLERATED_WORKER_EPERM=(prctl access fchown flistxattr fgetxattr fsetxattr)
 
 if [[ -n "${NO_COLOR:-}" ]]; then
   RED=""
@@ -132,7 +152,7 @@ die() {
 }
 
 show_usage() {
-  sed -n '2,67p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,80p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 need_value() {
@@ -145,8 +165,8 @@ need_value() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --tsig-key-file | --write-dns-config | --dns-server | --zone | --domain | \
-      --key-name | --port | --state-root | --issue-timeout | --stop-timeout | \
-      --trace | --workdir)
+      --key-name | --port | --state-root | --issue-timeout | --expect-renewal | \
+      --stop-timeout | --trace | --workdir)
       need_value "$@"
       case "$1" in
         --tsig-key-file) TSIG_KEY_FILE="$2" ;;
@@ -158,6 +178,7 @@ while [[ $# -gt 0 ]]; do
         --port) PORT="$2" ;;
         --state-root) STATE_ROOT="$2" ;;
         --issue-timeout) ISSUE_TIMEOUT="$2" ;;
+        --expect-renewal) EXPECT_RENEWAL="$2" ;;
         --stop-timeout) STOP_TIMEOUT="$2" ;;
         --trace) TRACE="$2" ;;
         --workdir) WORKDIR="$2" ;;
@@ -331,6 +352,9 @@ if [[ "${DRYRUN}" == true ]]; then
   log "would copy ${PEBBLE_CA} to ${CA_COPY}"
   log "would run: ${SERVE_CMD[*]}"
   log "would poll: openssl s_client -connect 127.0.0.1:${PORT} -servername ${DOMAIN}"
+  if [[ "${EXPECT_RENEWAL}" -gt 0 ]]; then
+    log "would wait up to ${EXPECT_RENEWAL}s for a renewed Pebble leaf, then send a forced renew"
+  fi
   log "would send SIGTERM to the process group of serve and wait ${STOP_TIMEOUT}s"
   log "would fail on EPERM in the acme process, except: ${TOLERATED_EPERM[*]}"
   log "would fail on EPERM in the worker, except: ${TOLERATED_WORKER_EPERM[*]}"
@@ -433,7 +457,51 @@ log_verbose "SAN: ${san//$'\n'/ }"
 grep -q "DNS:${DOMAIN}\b" <<<"${san}" || die "the leaf does not name ${DOMAIN}: ${san}"
 pass "the leaf names DNS:${DOMAIN}"
 
-# --- 2. The four processes, and the acme process's confinement -----------
+# --- 2. Optional: the served certificate is renewed before it expires -----
+
+if [[ "${EXPECT_RENEWAL}" -gt 0 ]]; then
+  leaf_fingerprint() {
+    openssl x509 -noout -fingerprint -sha256 <<<"$1"
+  }
+  leaf_not_after() {
+    date -u -d "$(openssl x509 -noout -enddate <<<"$1" | cut -d= -f2)" +%s
+  }
+
+  first_fingerprint="$(leaf_fingerprint "${leaf}")"
+  first_not_after="$(leaf_not_after "${leaf}")"
+  log_verbose "first leaf notAfter ${first_not_after}; waiting up to ${EXPECT_RENEWAL}s for a renewal"
+
+  deadline=$((SECONDS + EXPECT_RENEWAL))
+  renewed_leaf=""
+  while ((SECONDS < deadline)); do
+    if ! kill -0 "${SERVE_PID}" 2>/dev/null; then
+      show_serve_log
+      die "serve ended before it renewed the certificate"
+    fi
+    if (($(date -u +%s) >= first_not_after)); then
+      show_serve_log
+      die "the first leaf (notAfter ${first_not_after}) expired before a renewal was served"
+    fi
+    candidate="$(leaf_pem)"
+    if [[ -n "${candidate}" ]] && [[ "$(leaf_fingerprint "${candidate}")" != "${first_fingerprint}" ]] &&
+      grep -q "Pebble" <<<"$(openssl x509 -noout -issuer <<<"${candidate}")"; then
+      renewed_leaf="${candidate}"
+      break
+    fi
+    sleep 2
+  done
+  [[ -n "${renewed_leaf}" ]] ||
+    die "no renewed Pebble leaf served within ${EXPECT_RENEWAL}s of the first (notAfter ${first_not_after})"
+  renewed_san="$(openssl x509 -noout -ext subjectAltName <<<"${renewed_leaf}")"
+  grep -q "DNS:${DOMAIN}\b" <<<"${renewed_san}" || die "the renewed leaf does not name ${DOMAIN}: ${renewed_san}"
+  renewed_not_after="$(leaf_not_after "${renewed_leaf}")"
+  ((renewed_not_after > first_not_after)) ||
+    die "the renewed leaf's notAfter (${renewed_not_after}) is not later than the first's (${first_not_after})"
+  kill -0 "${SERVE_PID}" 2>/dev/null || die "serve restarted or ended during the renewal wait"
+  pass "the listener replaced the leaf with no restart (notAfter ${first_not_after} -> ${renewed_not_after})"
+fi
+
+# --- 3. The four processes, and the acme process's confinement -----------
 
 # One line per clone in the trace: "<parent> <child> <thread|process>".
 list_clones() {
@@ -543,7 +611,7 @@ grep -qE '^landlock_restrict_self\(.*\) += 0$' "${TRACE}.${ACME}" ||
   die "the trace shows no Landlock ruleset applied by the acme process"
 pass "the acme process runs as ${WORKER_USER} with no_new_privs, seccomp (filter) and Landlock"
 
-# --- 3. SIGTERM to the process group ends all four ------------------------
+# --- 4. SIGTERM to the process group ends all four ------------------------
 
 log "sending SIGTERM to the process group of serve (${MAIN})"
 kill -TERM -- "-${MAIN}"
@@ -574,7 +642,7 @@ case "${ending}" in
 esac
 pass "all four processes ended after SIGTERM; the monitor: ${ending}"
 
-# --- 4. No EPERM outside the tolerated calls ------------------------------
+# --- 5. No EPERM outside the tolerated calls ------------------------------
 
 # Trace files of $1 and every thread or process it created.
 tree_files() {
