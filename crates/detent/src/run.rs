@@ -2641,6 +2641,7 @@ mod tests {
         assert!(!notes.is_empty());
         Ok(())
     }
+    #[cfg(feature = "update")]
     #[test]
     fn failed_is_always_a_localized_failure_never_usage() -> R {
         let messages = crate::i18n::Messages::new(Some("en-US"));
@@ -2777,6 +2778,7 @@ mod tests {
         assert!(!notes.is_empty());
         Ok(())
     }
+    #[cfg(feature = "update")]
     #[test]
     fn update_operation_maps_without_side_effects() -> R {
         let cli = parse(&["detent", "update", "--check"])?;
@@ -3312,6 +3314,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "module-network")]
     #[test]
     fn a_cli_apply_on_a_commit_confirm_module_never_leaves_an_unenforced_commit() -> R {
         let dir = tempfile::TempDir::new()?;
