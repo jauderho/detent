@@ -4,6 +4,10 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-27 - OFFLOAD T3: renew-now button on the Certificates page
+
+`useRequestCertRenew` (`web/src/api/system.ts`) posts to `POST /api/v1/system/cert/renew` and invalidates the cert query on `202`. The Certificates page shows a "Renew now" panel gated on write scope (`useWriteGate`, disabled with reason otherwise, disabled while pending): success shows `cert-renew-requested`, errors show the localized server message (`web-cert-renew-not-acme`, `web-cert-renew-unavailable`) via `useApiErrorMessage`. Audit page needs no change: `audit-op-cert-renew` for the `cert_renew` op already exists and is tested. Tests cover read-only gating, 202 + refetch, 409, 503, and pending-disabled.
+
 ## 2026-09-27 - Phase 6 R2b: rate-limit "renew now" (STAGE4 4.3 item 2)
 
 Closes the first R2 trap below. `MIN_FORCED_INTERVAL` (one hour) gates a forced order: `renew_once` skips a `RenewNow`'s order and falls back to the ordinary due check when one was already ordered inside the interval, logging the last order time and the next allowed one; a due renewal is never gated by this. `run_loop` tracks `last_order` (set on every successful `issue()`, install or not) across rounds. Separately, a `RenewNow` that arrives while the loop is in a backoff wait after a failure no longer cuts that wait short: it is logged and the same full delay is waited out again; only the round after the backoff is forced (and still subject to the interval). A held pair is retried regardless of either rule, since a retry is not a new order.

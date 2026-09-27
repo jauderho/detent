@@ -6,10 +6,13 @@
  */
 
 import { Localized, useLocalization } from '@fluent/react'
+import { useState } from 'react'
 import { useApiErrorMessage } from '@/api/query'
 import type { CertReport } from '@/api/system'
-import { useCert } from '@/api/system'
-import { Banner } from '@/components/Banner'
+import { useCert, useRequestCertRenew } from '@/api/system'
+import { useWriteGate } from '@/auth/ScopeGate'
+import { Banner, type BannerTone } from '@/components/Banner'
+import { Button } from '@/components/Button'
 import { GridCell, HairlineGrid } from '@/components/HairlineGrid'
 import { Label } from '@/components/Label'
 import { Panel } from '@/components/Panel'
@@ -70,6 +73,47 @@ function CertGrid({ report }: { report: CertReport }) {
   )
 }
 
+type RenewBanner = { tone: BannerTone; id: string } | { tone: 'amber'; error: unknown }
+
+function RenewSection() {
+  const { l10n } = useLocalization()
+  const gate = useWriteGate()
+  const errorMessage = useApiErrorMessage()
+  const renew = useRequestCertRenew()
+  const [banner, setBanner] = useState<RenewBanner | null>(null)
+
+  function request(): void {
+    renew.mutate(undefined, {
+      onSuccess: () => {
+        setBanner({ tone: 'blue', id: 'cert-renew-requested' })
+      },
+      onError: (error) => {
+        setBanner({ tone: 'amber', error })
+      },
+    })
+  }
+
+  return (
+    <>
+      {banner === null ? null : (
+        <div style={{ marginBottom: 12 }}>
+          <Banner tone={banner.tone}>
+            {'error' in banner ? errorMessage(banner.error) : l10n.getString(banner.id)}
+          </Banner>
+        </div>
+      )}
+      <Button
+        variant="primary"
+        disabled={!gate.canWrite || renew.isPending}
+        title={gate.reason}
+        onClick={request}
+      >
+        {l10n.getString('cert-renew-now')}
+      </Button>
+    </>
+  )
+}
+
 export function CertificatesPage() {
   const { l10n } = useLocalization()
   const query = useCert()
@@ -92,6 +136,9 @@ export function CertificatesPage() {
         ) : (
           <CertGrid report={query.data} />
         )}
+      </Panel>
+      <Panel label={l10n.getString('cert-renew-panel')}>
+        <RenewSection />
       </Panel>
     </section>
   )
