@@ -440,9 +440,11 @@ pub fn parse_duration(raw: &str) -> Result<Duration, String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "web")]
+    use super::CertAction;
     use super::{
-        AFTER_HELP, CertAction, Cli, Command, CommitAction, ConfigAction, ServiceOption,
-        ServiceSubcommand, Shell, parse_duration,
+        AFTER_HELP, Cli, Command, CommitAction, ConfigAction, ServiceOption, ServiceSubcommand,
+        Shell, parse_duration,
     };
     use clap::{CommandFactory as _, Parser as _};
     use detent_ops::ServiceCommand;
