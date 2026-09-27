@@ -4,6 +4,10 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-27 - OFFLOAD T1: CLI-only build clippy errors
+
+T1 reproduce gate passes: `cargo clippy -p detent --all-targets --no-default-features --features module-hosts,init-systemd -- -D warnings` reports no issues. `failed()` test gated on `update`; the two `mut` bindings restructured so `#[cfg(feature = "update")]` selects elements, not statements. Two more tests needed the same gate for this feature set (found by running the gate, not named in the task): `update_operation_maps_without_side_effects` (no `update` subcommand) and `a_cli_apply_on_a_commit_confirm_module_never_leaves_an_unenforced_commit` (no `network` module). Feature tests pass: 105 + 7. Traps: `git stash` in this repo risks 79 unrelated stashes; verified via an isolated worktree instead.
+
 ## 2026-09-27 - Phase 6 R2b: rate-limit "renew now" (STAGE4 4.3 item 2)
 
 Closes the first R2 trap below. `MIN_FORCED_INTERVAL` (one hour) gates a forced order: `renew_once` skips a `RenewNow`'s order and falls back to the ordinary due check when one was already ordered inside the interval, logging the last order time and the next allowed one; a due renewal is never gated by this. `run_loop` tracks `last_order` (set on every successful `issue()`, install or not) across rounds. Separately, a `RenewNow` that arrives while the loop is in a backoff wait after a failure no longer cuts that wait short: it is logged and the same full delay is waited out again; only the round after the backoff is forced (and still subject to the interval). A held pair is retried regardless of either rule, since a retry is not a new order.
