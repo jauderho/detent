@@ -15,6 +15,7 @@ Commands:
   setup        First-run bootstrap: create the initial administrator account
   user         Manage web ui / api accounts
   token        Manage api tokens
+  cert         Show the served TLS certificate
   completions  Print a shell completion script
 
 Options:

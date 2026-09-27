@@ -4,6 +4,10 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-27 - OFFLOAD T4: `detent cert status` (read-only)
+
+`detent cert status` (web feature, `--json` flag) reads the served pair with `detent_web::serving_pair(&config.tls.cert_dir)`: source is `acme` when a stored ACME pair matches the served fingerprint else `bootstrap`; fingerprint, RFC 3339 `not_after`, lifetime-used percent and warning come from shared `detent_web::api::system::{cert_report_for_der, not_after_rfc3339}` (same fns as `GET /api/v1/system/cert`). Missing store or unreadable dir exits Failed with a localized note; key bytes never print. Tests cover ACME/bootstrap text+JSON, missing dir, unreadable path, bad config, garbage DER unknowns, 55 %/80 % warnings.
+
 ## 2026-09-27 - OFFLOAD T3: renew-now button on the Certificates page
 
 `useRequestCertRenew` (`web/src/api/system.ts`) posts to `POST /api/v1/system/cert/renew` and invalidates the cert query on `202`. The Certificates page shows a "Renew now" panel gated on write scope (`useWriteGate`, disabled with reason otherwise, disabled while pending): success shows `cert-renew-requested`, errors show the localized server message (`web-cert-renew-not-acme`, `web-cert-renew-unavailable`) via `useApiErrorMessage`. Audit page needs no change: `audit-op-cert-renew` for the `cert_renew` op already exists and is tested. Tests cover read-only gating, 202 + refetch, 409, 503, and pending-disabled.
