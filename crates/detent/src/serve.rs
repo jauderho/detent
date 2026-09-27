@@ -2768,8 +2768,15 @@ mod web_tests {
         let messages = Messages::new(Some("en-US"));
         let renderer = renderer(&messages);
         let mut fingerprints = Vec::new();
-        for _ in 0..2 {
-            let (handle, thread, monitor) = engine_fixture(dir.path())?;
+        for start in 0..2 {
+            // Each start gets its own monitor state root: the monitor's
+            // `flock` belongs to the open file, and a child that a parallel
+            // test forks at that moment keeps a copy of it, so a second
+            // monitor on the same root could see it still held (`Busy`).
+            // What is under test is the certificate in `dir`, not the lock.
+            let monitor_root = dir.path().join(format!("monitor-{start}"));
+            std::fs::create_dir(&monitor_root)?;
+            let (handle, thread, monitor) = engine_fixture(&monitor_root)?;
             let auth_state =
                 detent_web::AuthState::open(dir.path(), &detent_web::AuthConfig::default(), 4096)?;
             let mut out = Vec::new();
