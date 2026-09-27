@@ -55,6 +55,14 @@ const FIRST_RETRY: Duration = Duration::from_secs(60);
 /// The longest wait between two attempts after failures.
 const MAX_RETRY: Duration = CHECK_INTERVAL;
 
+/// The shortest time between two orders that a forced round (a `RenewNow`)
+/// starts. Let's Encrypt allows five duplicate certificates a week for the
+/// same names, and it limits failed validations per hour too; without a
+/// floor, a few clicks on "renew now" use up either limit and renewal is
+/// then blocked for days. A due renewal (not forced) is never held back by
+/// this.
+const MIN_FORCED_INTERVAL: Duration = Duration::from_hours(1);
+
 /// How one order polls the CA for a ready order and for the certificate:
 /// first after one second, then at doubling delays, for at most five
 /// minutes. A real CA validates dns-01 and issues in seconds to a minute;
@@ -280,14 +288,38 @@ fn warn_expiry(used_percent: u8, not_after: i64) {
     }
 }
 
+/// True when a forced order may go ahead: none has ever succeeded, or
+/// [`MIN_FORCED_INTERVAL`] has passed since `last_order`. Logs the last
+/// order and the next allowed time when it refuses.
+fn forced_order_allowed(now: i64, last_order: Option<i64>) -> bool {
+    let Some(last) = last_order else {
+        return true;
+    };
+    let min_forced = i64::try_from(MIN_FORCED_INTERVAL.as_secs()).unwrap_or(i64::MAX);
+    if now.saturating_sub(last) >= min_forced {
+        return true;
+    }
+    tracing::info!(
+        last_order = last,
+        next_forced_order = last.saturating_add(min_forced),
+        "a forced renewal was requested too soon after the last order; the order is skipped"
+    );
+    false
+}
+
 /// One renewal check at `now`.
 ///
 /// `served` is the stored ACME pair; `None` means the worker still serves
 /// the bootstrap certificate, so a certificate is issued at once. A served
 /// pair whose validity cannot be read is renewed too. With `force` (the
-/// worker asked for a renewal), a certificate is issued in all cases.
-/// Otherwise the certificate is renewed when the ARI window has started, or
-/// else at two thirds of its lifetime.
+/// worker asked for a renewal), a certificate is issued at once too, unless
+/// one was already ordered in the last [`MIN_FORCED_INTERVAL`]
+/// ([`forced_order_allowed`]); the certificate is then renewed only if it is
+/// otherwise due. Otherwise the certificate is renewed when the ARI window
+/// has started, or else at two thirds of its lifetime.
+///
+/// `last_order` is set to `now` after every successful order, whether or not
+/// the worker then installs it.
 ///
 /// # Errors
 ///
@@ -301,6 +333,7 @@ pub(crate) async fn renew_once(
     issuer: &mut impl Issuer,
     installer: &mut impl Installer,
     held: &mut Option<Held>,
+    last_order: &mut Option<i64>,
 ) -> Result<Outcome, RenewError> {
     if let Some(pair) = served {
         if let Ok((not_before, not_after)) =
@@ -308,7 +341,7 @@ pub(crate) async fn renew_once(
         {
             let used_percent = detent_acme::percent_used(not_before, not_after, now);
             warn_expiry(used_percent, not_after);
-            if !force {
+            if !(force && forced_order_allowed(now, *last_order)) {
                 let window = issuer.renewal_window(pair.cert_der()).await;
                 if !detent_acme::should_renew_in_window(not_before, not_after, now, window) {
                     return Ok(Outcome::NotDue { used_percent });
@@ -319,6 +352,7 @@ pub(crate) async fn renew_once(
         }
     }
     let Issued { chain_pem, key_pem } = issuer.issue().await.map_err(RenewError::Issue)?;
+    *last_order = Some(now);
     let (_, not_after) =
         detent_acme::leaf_validity_pem(&chain_pem).map_err(|_| RenewError::Chain)?;
     install(
@@ -359,6 +393,7 @@ async fn round(
     issuer: &mut impl Issuer,
     installer: &mut impl Installer,
     held: &mut Option<Held>,
+    last_order: &mut Option<i64>,
 ) -> Result<Outcome, RenewError> {
     if let Some(pair) = held.take() {
         if now <= pair.not_after {
@@ -370,7 +405,16 @@ async fn round(
         );
     }
     let served = detent_web::load_acme(cert_dir).map_err(RenewError::Load)?;
-    renew_once(now, served.as_ref(), force, issuer, installer, held).await
+    renew_once(
+        now,
+        served.as_ref(),
+        force,
+        issuer,
+        installer,
+        held,
+        last_order,
+    )
+    .await
 }
 
 /// The renewal loop: one round at once, then one every hour.
@@ -383,12 +427,16 @@ async fn round(
 /// rounds without real time.
 ///
 /// `sleep` breaks when the channel is readable; the loop then reads one
-/// message ([`Installer::next_request`]). A `RenewNow` ends the wait and
-/// starts a forced round ([`renew_once`]). A `RenewNow` recorded during
-/// `hello` or an install ([`Installer::take_pending_renew`]) forces the next
-/// round too, which then starts without a wait. The loop returns when the
-/// worker closes the channel (an install or the read sees it closed), and
-/// when the read fails in any other way; that is logged.
+/// message ([`Installer::next_request`]). Outside a backoff wait, a
+/// `RenewNow` ends the wait and starts a forced round ([`renew_once`]). A
+/// `RenewNow` recorded during `hello` or an install
+/// ([`Installer::take_pending_renew`]) forces the next round too, which then
+/// starts without a wait. During a backoff wait (after a failure), a
+/// `RenewNow` from either source does not shorten it: it is logged and the
+/// same, full wait resumes; only the round after the backoff is forced
+/// (subject to [`MIN_FORCED_INTERVAL`], via [`renew_once`]). The loop returns
+/// when the worker closes the channel (an install or the read sees it
+/// closed), and when the read fails in any other way; that is logged.
 pub(crate) async fn run_loop<F>(
     issuer: &mut impl Issuer,
     installer: &mut impl Installer,
@@ -400,11 +448,23 @@ pub(crate) async fn run_loop<F>(
 {
     let mut retry = FIRST_RETRY;
     let mut held = None;
+    let mut last_order = None;
     // A request that arrived during `hello`.
     let mut force = requested(installer.take_pending_renew());
     loop {
-        let result = round(now(), cert_dir, force, issuer, installer, &mut held).await;
+        let started_at = now();
+        let result = round(
+            started_at,
+            cert_dir,
+            force,
+            issuer,
+            installer,
+            &mut held,
+            &mut last_order,
+        )
+        .await;
         force = requested(installer.take_pending_renew());
+        let mut in_backoff = false;
         let delay = match result {
             Ok(outcome) => {
                 if let Outcome::Renewed { not_after } = outcome {
@@ -418,6 +478,7 @@ pub(crate) async fn run_loop<F>(
                 return;
             }
             Err(err) => {
+                in_backoff = true;
                 let delay = retry;
                 tracing::warn!(
                     reason = %err.reason(),
@@ -428,6 +489,37 @@ pub(crate) async fn run_loop<F>(
                 delay
             }
         };
+        if in_backoff {
+            let mut renew_seen = false;
+            if force {
+                log_renew_during_backoff(started_at, delay);
+                renew_seen = true;
+            }
+            loop {
+                match sleep(delay).await {
+                    ControlFlow::Continue(()) => break,
+                    ControlFlow::Break(()) => match installer.next_request() {
+                        Ok(()) => {
+                            log_renew_during_backoff(started_at, delay);
+                            renew_seen = true;
+                        }
+                        Err(AcmeChannelError::Channel(ChannelError::Closed)) => {
+                            tracing::info!("the worker closed the acme channel");
+                            return;
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                reason = %err,
+                                "the acme channel failed; renewals stop"
+                            );
+                            return;
+                        }
+                    },
+                }
+            }
+            force = renew_seen;
+            continue;
+        }
         if force || sleep(delay).await.is_continue() {
             continue;
         }
@@ -443,6 +535,15 @@ pub(crate) async fn run_loop<F>(
             }
         }
     }
+}
+
+/// Logs that a renewal was requested while the loop was in a backoff wait
+/// that started at `started_at` for `delay`: the wait is not shortened, so
+/// the next attempt stays at `started_at + delay`.
+fn log_renew_during_backoff(started_at: i64, delay: Duration) {
+    let next_attempt =
+        started_at.saturating_add(i64::try_from(delay.as_secs()).unwrap_or(i64::MAX));
+    tracing::info!("renewal requested during backoff; the next attempt is at {next_attempt}");
 }
 
 /// `pending`, logged when it is set.
@@ -666,9 +767,9 @@ mod tests {
     use detent_web::CertifiedKeyPair;
 
     use super::{
-        AcmeIssuer, CHECK_INTERVAL, FIRST_RETRY, Installer, Issuer, MAX_RETRY, Outcome, RenewError,
-        acme_main, check_and_install, renew_once, run_loop, serve_installs, spawn_installs,
-        wait_or_peer,
+        AcmeIssuer, CHECK_INTERVAL, FIRST_RETRY, Held, Installer, Issuer, MAX_RETRY,
+        MIN_FORCED_INTERVAL, Outcome, RenewError, acme_main, check_and_install, renew_once, round,
+        run_loop, serve_installs, spawn_installs, wait_or_peer,
     };
 
     type R = Result<(), Box<dyn std::error::Error>>;
@@ -865,6 +966,7 @@ mod tests {
             &mut issuer,
             &mut installer,
             &mut None,
+            &mut None,
         ))?;
         assert_eq!(
             outcome.ok(),
@@ -889,6 +991,7 @@ mod tests {
             &mut issuer,
             &mut installer,
             &mut None,
+            &mut None,
         ))?;
         assert_eq!(outcome.ok(), Some(Outcome::NotDue { used_percent: 1 }));
         assert_eq!(issuer.calls, 0);
@@ -909,6 +1012,7 @@ mod tests {
             false,
             &mut issuer,
             &mut installer,
+            &mut None,
             &mut None,
         ))?;
         assert_eq!(
@@ -937,6 +1041,7 @@ mod tests {
             &mut issuer,
             &mut installer,
             &mut None,
+            &mut None,
         ))?;
         assert!(
             matches!(outcome, Ok(Outcome::Renewed { .. })),
@@ -956,6 +1061,7 @@ mod tests {
             &mut issuer,
             &mut installer,
             &mut None,
+            &mut None,
         ))?;
         assert_eq!(outcome.ok(), Some(Outcome::NotDue { used_percent: 10 }));
         Ok(())
@@ -973,6 +1079,7 @@ mod tests {
             false,
             &mut issuer,
             &mut installer,
+            &mut None,
             &mut None,
         ))?;
         assert!(
@@ -993,6 +1100,7 @@ mod tests {
             &mut issuer,
             &mut installer,
             &mut None,
+            &mut None,
         ))?;
         assert!(
             matches!(outcome, Err(RenewError::Issue(AcmeError::NoDns01Challenge))),
@@ -1011,6 +1119,7 @@ mod tests {
             false,
             &mut issuer,
             &mut installer,
+            &mut None,
             &mut None,
         ))?;
         assert!(matches!(outcome, Err(RenewError::Chain)), "{outcome:?}");
@@ -1036,6 +1145,7 @@ mod tests {
             &mut issuer,
             &mut installer,
             &mut held,
+            &mut None,
         ))?;
         assert!(
             matches!(
@@ -1067,6 +1177,7 @@ mod tests {
                     false,
                     &mut issuer,
                     &mut installer,
+                    &mut None,
                     &mut None,
                 ))
             });
@@ -1495,6 +1606,7 @@ mod tests {
             &mut issuer,
             &mut installer,
             &mut None,
+            &mut None,
         ))?;
         assert_eq!(
             outcome.ok(),
@@ -1504,6 +1616,307 @@ mod tests {
         );
         assert_eq!(issuer.calls, 1);
         assert_eq!(installer.installed, vec![cert.chain_pem]);
+        Ok(())
+    }
+
+    /// A forced check within [`MIN_FORCED_INTERVAL`] of the last order does
+    /// not order again: it falls back to the ordinary due check, and the
+    /// certificate is not due, so nothing is issued.
+    #[test]
+    fn a_forced_check_within_the_min_interval_orders_nothing() -> R {
+        let cert = Cert::new(&["a.example"])?;
+        let pair = cert.pair()?;
+        let mut issuer = FakeIssuer::default();
+        let mut installer = FakeInstaller::default();
+        let now = cert.at(1);
+        let min_interval = i64::try_from(MIN_FORCED_INTERVAL.as_secs())?;
+        let mut last_order = Some(now.saturating_sub(min_interval).saturating_add(1));
+        let (outcome, logs) = capture(|| {
+            block_on(renew_once(
+                now,
+                Some(&pair),
+                true,
+                &mut issuer,
+                &mut installer,
+                &mut None,
+                &mut last_order,
+            ))
+        });
+        assert_eq!(outcome?.ok(), Some(Outcome::NotDue { used_percent: 1 }));
+        assert_eq!(issuer.calls, 0);
+        assert!(installer.installed.is_empty());
+        assert!(logs.contains("too soon after the last order"), "{logs}");
+        Ok(())
+    }
+
+    /// A forced check once [`MIN_FORCED_INTERVAL`] has passed since the last
+    /// order orders again.
+    #[test]
+    fn a_forced_check_after_the_min_interval_orders_again() -> R {
+        let cert = Cert::new(&["a.example"])?;
+        let pair = cert.pair()?;
+        let next = Cert::valid(&["a.example"], (2026, 1, 8), (2026, 1, 18))?;
+        let mut issuer = FakeIssuer::answering([Ok(next.issued())]);
+        let mut installer = FakeInstaller::default();
+        let now = cert.at(1);
+        let min_interval = i64::try_from(MIN_FORCED_INTERVAL.as_secs())?;
+        let mut last_order = Some(now.saturating_sub(min_interval));
+        let outcome = block_on(renew_once(
+            now,
+            Some(&pair),
+            true,
+            &mut issuer,
+            &mut installer,
+            &mut None,
+            &mut last_order,
+        ))?;
+        assert_eq!(
+            outcome.ok(),
+            Some(Outcome::Renewed {
+                not_after: next.not_after
+            })
+        );
+        assert_eq!(issuer.calls, 1);
+        assert_eq!(last_order, Some(now));
+        Ok(())
+    }
+
+    /// A due renewal (not forced) orders even inside
+    /// [`MIN_FORCED_INTERVAL`] of the last order: the interval only holds
+    /// back a forced order.
+    #[test]
+    fn a_due_renewal_is_never_held_back_by_the_forced_order_interval() -> R {
+        let cert = Cert::new(&["a.example"])?;
+        let pair = cert.pair()?;
+        let next = Cert::valid(&["a.example"], (2026, 1, 8), (2026, 1, 18))?;
+        let mut issuer = FakeIssuer::answering([Ok(next.issued())]);
+        let mut installer = FakeInstaller::default();
+        let now = cert.at(70);
+        let outcome = block_on(renew_once(
+            now,
+            Some(&pair),
+            false,
+            &mut issuer,
+            &mut installer,
+            &mut None,
+            &mut Some(now),
+        ))?;
+        assert_eq!(
+            outcome.ok(),
+            Some(Outcome::Renewed {
+                not_after: next.not_after
+            })
+        );
+        assert_eq!(issuer.calls, 1);
+        Ok(())
+    }
+
+    /// A held pair is retried, and nothing is ordered, even when the round
+    /// is forced and the forced order is itself refused by the interval:
+    /// the held pair is not a new order.
+    #[test]
+    fn a_held_pair_is_retried_when_a_forced_round_is_refused_an_order() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let cert = Cert::new(&["a.example"])?;
+        let mut issuer = FakeIssuer::default();
+        let mut installer = FakeInstaller::default();
+        let mut held = Some(Held {
+            chain_pem: cert.chain_pem.clone(),
+            key: KeyPem::new(cert.key_pem.clone()),
+            not_after: cert.not_after,
+        });
+        let now = cert.at(1);
+        let mut last_order = Some(now);
+        let outcome = block_on(round(
+            now,
+            dir.path(),
+            true,
+            &mut issuer,
+            &mut installer,
+            &mut held,
+            &mut last_order,
+        ))?;
+        assert_eq!(
+            outcome.ok(),
+            Some(Outcome::Renewed {
+                not_after: cert.not_after
+            })
+        );
+        assert_eq!(issuer.calls, 0);
+        assert_eq!(installer.installed, vec![cert.chain_pem]);
+        assert!(held.is_none());
+        Ok(())
+    }
+
+    /// Two `RenewNow` within `MIN_FORCED_INTERVAL` of each other, both
+    /// arriving while the served certificate is not due: the first orders,
+    /// the second is refused and logged as too soon, and the loop goes on.
+    #[test]
+    fn two_renew_now_within_the_interval_order_only_once() -> R {
+        let cert = Cert::new(&["a.example"])?;
+        let next = Cert::valid(&["a.example"], (2026, 1, 2), (2026, 1, 12))?;
+        let dir = served_dir(&cert)?;
+        let mut issuer = FakeIssuer::answering([Ok(next.issued())]);
+        let mut installer = FakeInstaller {
+            requests: VecDeque::from([Ok(()), Ok(())]),
+            ..FakeInstaller::default()
+        };
+        let (ended, logs) = capture(|| {
+            block_on(run_loop(
+                &mut issuer,
+                &mut installer,
+                dir.path(),
+                || cert.at(1),
+                |_delay| std::future::ready(ControlFlow::Break(())),
+            ))
+        });
+        ended?;
+        assert_eq!(issuer.calls, 1);
+        assert_eq!(installer.installed, vec![next.chain_pem]);
+        assert!(logs.contains("too soon after the last order"), "{logs}");
+        assert!(
+            logs.contains("the worker closed the acme channel"),
+            "{logs}"
+        );
+        Ok(())
+    }
+
+    /// A `RenewNow` that arrives after `MIN_FORCED_INTERVAL` has passed
+    /// since the last order starts a second order.
+    #[test]
+    fn a_renew_now_after_the_interval_orders_again() -> R {
+        let cert = Cert::new(&["a.example"])?;
+        let first = Cert::valid(&["a.example"], (2026, 1, 2), (2026, 1, 12))?;
+        let second = Cert::valid(&["a.example"], (2026, 1, 3), (2026, 1, 13))?;
+        let dir = served_dir(&cert)?;
+        let mut issuer = FakeIssuer::answering([Ok(first.issued()), Ok(second.issued())]);
+        let mut installer = FakeInstaller {
+            requests: VecDeque::from([Ok(()), Ok(())]),
+            ..FakeInstaller::default()
+        };
+        let min_interval = i64::try_from(MIN_FORCED_INTERVAL.as_secs())?;
+        // t0: the initial, unforced check. t1: the first forced round (no
+        // earlier order, so it goes ahead). t2: the second forced round,
+        // past the interval since t1, so it goes ahead too.
+        let t2 = cert.at(1).saturating_add(min_interval);
+        let mut times = VecDeque::from([cert.at(1), cert.at(1), t2]);
+        let ended = block_on(run_loop(
+            &mut issuer,
+            &mut installer,
+            dir.path(),
+            || times.pop_front().unwrap_or(t2),
+            |_delay| std::future::ready(ControlFlow::Break(())),
+        ));
+        ended?;
+        assert_eq!(issuer.calls, 2);
+        assert_eq!(installer.installed, vec![first.chain_pem, second.chain_pem]);
+        Ok(())
+    }
+
+    /// A `RenewNow` that arrives while the loop waits out a backoff after a
+    /// failure does not shorten that wait: the sleep seam still sees the
+    /// full backoff delay, and only the round after it is forced.
+    #[test]
+    fn a_renew_now_during_backoff_does_not_shorten_the_wait() -> R {
+        let cert = Cert::new(&["a.example"])?;
+        let dir = tempfile::TempDir::new()?;
+        let mut issuer =
+            FakeIssuer::answering([Err(AcmeError::NoDns01Challenge), Ok(cert.issued())]);
+        let mut installer = FakeInstaller {
+            // Readable once during the backoff wait, then quiet.
+            requests: VecDeque::from([Ok(())]),
+            results: VecDeque::from([Err(closed())]),
+            ..FakeInstaller::default()
+        };
+        let mut delays = Vec::new();
+        let (ended, logs) = capture(|| {
+            block_on(run_loop(
+                &mut issuer,
+                &mut installer,
+                dir.path(),
+                || cert.at(1),
+                |delay| {
+                    delays.push(delay);
+                    let ready = delays.len() != 1;
+                    std::future::ready(if ready {
+                        ControlFlow::Continue(())
+                    } else {
+                        ControlFlow::Break(())
+                    })
+                },
+            ))
+        });
+        ended?;
+        assert_eq!(delays, vec![FIRST_RETRY, FIRST_RETRY]);
+        assert_eq!(issuer.calls, 2);
+        assert!(logs.contains("renewal requested during backoff"), "{logs}");
+        assert!(logs.contains("the next attempt is at"), "{logs}");
+        Ok(())
+    }
+
+    /// A `RenewNow` recorded during the round that then fails is logged at
+    /// once (not only when it arrives later, mid-wait): the backoff that
+    /// follows is not shortened either.
+    #[test]
+    fn a_renew_now_recorded_before_a_failed_round_does_not_shorten_its_backoff() -> R {
+        let cert = Cert::new(&["a.example"])?;
+        let dir = tempfile::TempDir::new()?;
+        let mut issuer =
+            FakeIssuer::answering([Err(AcmeError::NoDns01Challenge), Ok(cert.issued())]);
+        let mut installer = FakeInstaller {
+            // None before the first round; one recorded during it.
+            pending: VecDeque::from([false, true]),
+            results: VecDeque::from([Err(closed())]),
+            ..FakeInstaller::default()
+        };
+        let mut delays = Vec::new();
+        let (ended, logs) = capture(|| {
+            block_on(run_loop(
+                &mut issuer,
+                &mut installer,
+                dir.path(),
+                || cert.at(1),
+                |delay| {
+                    delays.push(delay);
+                    std::future::ready(ControlFlow::Continue(()))
+                },
+            ))
+        });
+        ended?;
+        assert_eq!(delays, vec![FIRST_RETRY]);
+        assert_eq!(issuer.calls, 2);
+        assert!(logs.contains("renewal requested during backoff"), "{logs}");
+        Ok(())
+    }
+
+    /// A message other than `RenewNow` during a backoff wait ends the loop,
+    /// and the log says why, as it does outside a backoff.
+    #[test]
+    fn an_unexpected_message_during_a_backoff_wait_ends_the_loop_and_is_logged() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let mut issuer = FakeIssuer::answering([Err(AcmeError::NoDns01Challenge)]);
+        let mut installer = FakeInstaller {
+            requests: VecDeque::from([Err(AcmeChannelError::Protocol("expected RenewNow"))]),
+            ..FakeInstaller::default()
+        };
+        let mut delays = Vec::new();
+        let (ended, logs) = capture(|| {
+            block_on(run_loop(
+                &mut issuer,
+                &mut installer,
+                dir.path(),
+                || 0,
+                |delay| {
+                    delays.push(delay);
+                    std::future::ready(ControlFlow::Break(()))
+                },
+            ))
+        });
+        ended?;
+        assert_eq!(delays, vec![FIRST_RETRY]);
+        assert_eq!(issuer.calls, 1);
+        assert!(logs.contains("WARN"), "{logs}");
+        assert!(logs.contains("renewals stop"), "{logs}");
         Ok(())
     }
 
@@ -1547,6 +1960,8 @@ mod tests {
 
     /// A `RenewNow` recorded while `hello` or an install waited for its
     /// answer forces the next round, and that round starts without a wait.
+    /// The clock advances past `MIN_FORCED_INTERVAL` between the two, so the
+    /// second forced order is not itself throttled.
     #[test]
     fn a_renew_now_recorded_during_hello_or_an_install_forces_the_next_round() -> R {
         let cert = Cert::new(&["a.example"])?;
@@ -1561,12 +1976,13 @@ mod tests {
             ..FakeInstaller::default()
         };
         let mut delays = Vec::new();
+        let mut times = VecDeque::from([cert.at(1), cert.at(1).saturating_add(3601)]);
         let (ended, logs) = capture(|| {
             block_on(run_loop(
                 &mut issuer,
                 &mut installer,
                 dir.path(),
-                || cert.at(1),
+                || times.pop_front().unwrap_or_else(|| cert.at(1)),
                 |delay| {
                     delays.push(delay);
                     std::future::ready(ControlFlow::Continue(()))
