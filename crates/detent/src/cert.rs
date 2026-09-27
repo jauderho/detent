@@ -30,6 +30,11 @@ pub fn status(
 
 /// `detent cert status`: source, fingerprint, expiry, and lifetime used.
 ///
+/// Exits [`Exit::Failed`] when the served certificate is expired or cannot
+/// be parsed (owner decision, 2026-09-27), even though the report is still
+/// printed in full; a certificate merely inside its renewal window exits
+/// [`Exit::Ok`].
+///
 /// # Errors
 ///
 /// Whatever the streams report.
@@ -68,6 +73,18 @@ fn cert_status(
     };
 
     let report = detent_web::api::system::cert_report_for_der(pair.cert_der());
+    // The certificate is bad (owner decision, 2026-09-27) when it cannot be
+    // parsed (`not_after_unix` is `None`) or has already reached `not_after`.
+    // "Now" is read the same way `cert_report_for_der` reads it, so the two
+    // never disagree about whether the deadline has passed.
+    let exit = match report.not_after_unix {
+        Some(not_after_unix)
+            if time::OffsetDateTime::now_utc().unix_timestamp() < not_after_unix =>
+        {
+            Exit::Ok
+        }
+        _ => Exit::Failed,
+    };
     let not_after = detent_web::api::system::not_after_rfc3339(report.not_after_unix);
     // The warning's wire names (`half`, `quarter`) are interpolated verbatim,
     // like every other enum wire name this CLI prints. No warning has its own
@@ -89,7 +106,7 @@ fn cert_status(
         }))
         .map_err(std::io::Error::other)?;
         writeln!(streams.out, "{text}")?;
-        return Ok(Exit::Ok);
+        return Ok(exit);
     }
     renderer.line(
         streams.out,
@@ -135,7 +152,7 @@ fn cert_status(
             &[],
         )?,
     }
-    Ok(Exit::Ok)
+    Ok(exit)
 }
 
 /// The certificate directory cannot be read: say where, and why.
@@ -386,15 +403,36 @@ mod tests {
         detent_web::tls::store_bootstrap(&cert_dir, &garbage)?;
         let cfg = fixture_settings(&cert_dir)?;
         let messages = messages();
+        // Unparseable is a bad cert (owner decision, 2026-09-27): the report
+        // still prints, but the exit status must say so.
         let (exit, out, _) = run(&cfg, &renderer(&messages, false))?;
-        assert_eq!(exit, Exit::Ok, "{out}");
+        assert_eq!(exit, Exit::Failed, "{out}");
         assert!(out.contains("unknown"), "{out}");
 
         let (exit, out, _) = run(&cfg, &renderer(&messages, true))?;
-        assert_eq!(exit, Exit::Ok, "{out}");
+        assert_eq!(exit, Exit::Failed, "{out}");
         let parsed: serde_json::Value = serde_json::from_str(&out)?;
         assert!(parsed.pointer("/not_after_unix").is_some(), "{out}");
         assert!(!out.contains("PRIVATE KEY"), "{out}");
+        Ok(())
+    }
+
+    #[test]
+    fn an_expired_pair_still_prints_but_fails() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let cert_dir = dir.path().join("certs");
+        detent_web::tls::store_bootstrap(&cert_dir, &dated_pair((2000, 1, 1), (2000, 2, 1))?)?;
+        let cfg = fixture_settings(&cert_dir)?;
+        let messages = messages();
+        let (exit, out, _) = run(&cfg, &renderer(&messages, false))?;
+        assert_eq!(exit, Exit::Failed, "{out}");
+        assert!(out.contains("fingerprint"), "{out}");
+        assert!(out.contains("2000"), "{out}");
+
+        let (exit, out, _) = run(&cfg, &renderer(&messages, true))?;
+        assert_eq!(exit, Exit::Failed, "{out}");
+        let parsed: serde_json::Value = serde_json::from_str(&out)?;
+        assert!(parsed.pointer("/fingerprint").is_some(), "{out}");
         Ok(())
     }
 
