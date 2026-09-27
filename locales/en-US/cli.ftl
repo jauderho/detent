@@ -94,6 +94,7 @@ cli-serve-privileged-port = port {$port} needs cap_net_bind_service or a monitor
 cli-serve-acme-unsupported = this build has no dns-01 providers (feature acme-dns-providers), so it cannot obtain acme certificates; set tls.bootstrap to "self-signed" in {$path}.
 cli-serve-acme-setting-missing = tls.bootstrap is "acme", but {$setting} is not set in {$path}.
 cli-serve-acme-path-outside = {$setting} ({$value}) is not under the state root {$root}: the confined processes write only there.
+cli-serve-acme-credentials-dir = the acme credentials directory {$path} could not be prepared: {$reason}
 cli-serve-secrets-failed = the secrets file {$path} was refused: {$reason}
 cli-serve-acme-secret-missing = acme.provider is set, but {$path} has no dns_provider secret in its [acme] table.
 cli-serve-acme-provider-invalid = the dns-01 provider in acme.provider cannot be used: {$reason}
