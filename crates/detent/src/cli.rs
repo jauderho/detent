@@ -142,6 +142,13 @@ pub enum Command {
         #[command(subcommand)]
         action: TokenAction,
     },
+    /// Show the served TLS certificate.
+    #[cfg(feature = "web")]
+    Cert {
+        /// What to do with it.
+        #[command(subcommand)]
+        action: CertAction,
+    },
     /// Serve every `Operation` as an MCP tool, over stdio or streamable HTTP
     /// (PLAN §2.6, Phase 10). Auth is API-token only: `DETENT_MCP_TOKEN` must
     /// hold a token `token create` issued; rotation is a process restart.
@@ -232,6 +239,14 @@ pub enum TokenAction {
     },
     /// List every token, without its secret.
     List,
+}
+
+/// `detent cert …`.
+#[cfg(feature = "web")]
+#[derive(Debug, Subcommand)]
+pub enum CertAction {
+    /// Show the served certificate: source, fingerprint, expiry.
+    Status,
 }
 
 /// `detent config <module> …`.
@@ -426,8 +441,8 @@ pub fn parse_duration(raw: &str) -> Result<Duration, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AFTER_HELP, Cli, Command, CommitAction, ConfigAction, ServiceOption, ServiceSubcommand,
-        Shell, parse_duration,
+        AFTER_HELP, CertAction, Cli, Command, CommitAction, ConfigAction, ServiceOption,
+        ServiceSubcommand, Shell, parse_duration,
     };
     use clap::{CommandFactory as _, Parser as _};
     use detent_ops::ServiceCommand;
@@ -532,6 +547,13 @@ mod tests {
         assert!(matches!(
             Cli::try_parse_from(["detent", "host"])?.command,
             Some(Command::Host),
+        ));
+        #[cfg(feature = "web")]
+        assert!(matches!(
+            Cli::try_parse_from(["detent", "cert", "status"])?.command,
+            Some(Command::Cert {
+                action: CertAction::Status
+            }),
         ));
         assert!(matches!(
             Cli::try_parse_from(["detent", "completions", "zsh"])?.command,

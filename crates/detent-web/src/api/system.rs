@@ -203,11 +203,13 @@ pub struct RenewRequested {
     pub requested: bool,
 }
 
-/// The certificate answer, pulled out of [`cert`] so tests need no caller.
-pub(super) fn cert_report(state: &AppState) -> CertReport {
+/// The certificate report for one DER leaf, shared by the HTTP handler and
+/// the `detent cert status` shell view (which holds a pair, not an
+/// `AppState`). Everything the shell prints comes from here; nothing is
+/// copied.
+#[must_use]
+pub fn cert_report_for_der(der: &[u8]) -> CertReport {
     use time::OffsetDateTime;
-    let current = state.cert_store.current();
-    let der: &[u8] = current.cert.first().map_or(&[], |c| c.as_ref());
     let fingerprint = crate::tls::fingerprint(der);
     let (not_after_unix, lifetime_used_percent, renewal_due, expiry_warning) =
         match crate::tls::validity_unix(der) {
@@ -237,6 +239,21 @@ pub(super) fn cert_report(state: &AppState) -> CertReport {
         renewal_due,
         expiry_warning,
     }
+}
+
+/// `not_after_unix` as RFC 3339 UTC (`None` stays `None`). The shell view
+/// formats here because the CLI crate has no clock dependency of its own.
+#[must_use]
+pub fn not_after_rfc3339(not_after_unix: Option<i64>) -> Option<String> {
+    let at = time::OffsetDateTime::from_unix_timestamp(not_after_unix?).ok()?;
+    at.format(&time::format_description::well_known::Rfc3339)
+        .ok()
+}
+
+/// The certificate answer, pulled out of [`cert`] so tests need no caller.
+pub(super) fn cert_report(state: &AppState) -> CertReport {
+    let current = state.cert_store.current();
+    cert_report_for_der(current.cert.first().map_or(&[], |c| c.as_ref()))
 }
 /// `GET /api/v1/system/update`.
 ///
@@ -717,6 +734,25 @@ mod tests {
                 "{id} is missing from core.ftl"
             );
         }
+    }
+
+    #[test]
+    fn shared_report_matches_handler_state_and_formats_its_expiry() -> R {
+        let bootstrap = crate::tls::bootstrap_self_signed(&["box.example".to_owned()])?;
+        let from_pair = super::cert_report_for_der(bootstrap.cert_der());
+        assert_eq!(from_pair.fingerprint, bootstrap.fingerprint());
+        assert_eq!(from_pair.not_after_unix, bootstrap.not_after_unix());
+        let text = super::not_after_rfc3339(from_pair.not_after_unix)
+            .ok_or("a fresh bootstrap pair must format its expiry")?;
+        assert!(text.ends_with('Z') && text.contains('T'), "{text}");
+        assert_eq!(super::not_after_rfc3339(None), None);
+        assert!(super::not_after_rfc3339(Some(from_pair.not_after_unix.unwrap_or(0))).is_some());
+        assert_eq!(
+            super::cert_report_for_der(&[]).not_after_unix,
+            None,
+            "garbage DER is unknown, never a failure"
+        );
+        Ok(())
     }
 
     #[test]
