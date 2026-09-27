@@ -203,6 +203,8 @@ mod tests {
             "detent completions",
             "detent host",
             "detent audit",
+            #[cfg(feature = "web")]
+            "detent cert status",
             #[cfg(feature = "update")]
             "detent update",
         ];
@@ -231,6 +233,8 @@ mod tests {
                 "completions",
                 "host",
                 "audit",
+                #[cfg(feature = "web")]
+                "cert",
                 #[cfg(feature = "update")]
                 "update",
             ];
