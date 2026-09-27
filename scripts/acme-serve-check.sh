@@ -571,11 +571,17 @@ if [[ "${FORCED_RENEW}" == true ]]; then
   # is required, not a style choice (a proxied CONNECT to it resets the
   # connection). -k: this check exercises the API and the audit trail, not
   # the TLS chain (like leaf_pem() above, which does not verify it either).
+  # The header goes through a 0600 file, so the token never shows in argv.
+  AUTH_HEADER="${WORKDIR}/operator-auth.header"
+  (
+    umask 077
+    printf 'Authorization: Bearer %s\n' "${OPERATOR_TOKEN}" >"${AUTH_HEADER}"
+  )
+  unset OPERATOR_TOKEN
   status="$(curl -sS -o "${RESPONSE}" -w '%{http_code}' --noproxy '*' -k \
     --resolve "${DOMAIN}:${PORT}:127.0.0.1" \
-    -X POST -H "Authorization: Bearer ${OPERATOR_TOKEN}" \
+    -X POST -H "@${AUTH_HEADER}" \
     "https://${DOMAIN}:${PORT}/api/v1/system/cert/renew")"
-  unset OPERATOR_TOKEN
   [[ "${status}" == "202" ]] || die "cert/renew answered ${status}, not 202: $(cat "${RESPONSE}")"
   pass "POST /api/v1/system/cert/renew answered 202"
 
