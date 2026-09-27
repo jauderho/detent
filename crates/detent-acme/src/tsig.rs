@@ -329,6 +329,29 @@ pub(crate) fn now() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
+/// Runs `work` on its own thread and waits at most `timeout` for it.
+///
+/// This bounds a blocking `connect` without `TcpStream::connect_timeout`,
+/// which sets the socket non-blocking with `ioctl(FIONBIO)`: the acme
+/// process's seccomp table (`ACME` in `detent-platform`) allows no `ioctl`.
+/// A thread that times out is left to finish on its own; it holds nothing
+/// but its result.
+///
+/// # Errors
+///
+/// `work`'s error, `TimedOut` when `timeout` passes first, or the error of
+/// starting the thread.
+fn within<T: Send + 'static>(
+    timeout: Duration,
+    work: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+) -> std::io::Result<T> {
+    let (done, result) = std::sync::mpsc::channel();
+    std::thread::Builder::new().spawn(move || done.send(work()))?;
+    result
+        .recv_timeout(timeout)
+        .unwrap_or_else(|_| Err(std::io::ErrorKind::TimedOut.into()))
+}
+
 /// A random message id.
 pub(crate) fn random_id() -> Result<u16, AcmeError> {
     let mut id = [0_u8; 2];
@@ -352,7 +375,7 @@ pub(crate) fn exchange_tcp(server: &str, message: &[u8]) -> Result<Vec<u8>, Acme
     let mut last = String::from("no address");
     let mut stream = None;
     for addr in addrs {
-        match TcpStream::connect_timeout(&addr, IO_TIMEOUT) {
+        match within(IO_TIMEOUT, move || TcpStream::connect(addr)) {
             Ok(connected) => {
                 stream = Some(connected);
                 break;
@@ -793,6 +816,22 @@ mod tests {
             .map(|err| err.to_string())
             .unwrap_or_default();
         assert!(text.contains("cannot resolve"), "{text}");
+        Ok(())
+    }
+
+    /// `within` returns the work's result, or `TimedOut` when the work is
+    /// slower than the timeout.
+    #[test]
+    fn within_bounds_blocking_work() -> R {
+        assert_eq!(within(Duration::from_secs(5), || Ok(7))?, 7);
+        let late = within(Duration::from_millis(10), || {
+            std::thread::sleep(Duration::from_secs(2));
+            Ok(())
+        });
+        assert_eq!(
+            late.err().map(|err| err.kind()),
+            Some(std::io::ErrorKind::TimedOut)
+        );
         Ok(())
     }
 
