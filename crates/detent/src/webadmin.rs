@@ -1962,16 +1962,17 @@ mod tests {
 
     /// `setup --force` against an existing name reaches `store.create`'s
     /// `UserExists` arm purely from the in-memory record `UserStore::load`
-    /// already parsed, so a state directory that has since gone read-only
-    /// still lets that check pass — but the `store.set_password` call right
-    /// after it must still write the file, and that is where this fails: the
-    /// one `credential_failed` arm inside `setup`'s force branch that
+    /// already parsed — but the `store.set_password` call right after it must
+    /// still write the file, and that is where this fails. The `users.json`
+    /// the store loaded is swapped for a symlink to a saved copy, so `load`
+    /// still reads through the link and `create` still reports `UserExists`,
+    /// while the atomic write refuses the link (`AtomicError::Symlink`: no
+    /// symlink is ever followed, for every user including root): the one
+    /// `credential_failed` arm inside `setup`'s force branch that
     /// `setup_with_force_overwrites_the_same_name` never provokes, since the
     /// store is always writable there.
     #[test]
     fn setup_with_force_reports_a_write_failure_as_a_credential_failure() -> R {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let dir = tempfile::TempDir::new()?;
         let settings = settings(dir.path());
         let messages = messages();
@@ -1997,9 +1998,13 @@ mod tests {
         )?;
         assert_eq!(exit, Exit::Ok, "{}", String::from_utf8_lossy(&notes));
 
+        // Swap `users.json` for a symlink to a saved copy: the second `load`
+        // reads through the link, and `set_password`'s write refuses it.
         let state_dir = settings.state_root.join("state");
-        let original = std::fs::metadata(&state_dir)?.permissions();
-        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o500))?;
+        let users_file = state_dir.join("users.json");
+        let saved = state_dir.join("users.json.saved");
+        std::fs::rename(&users_file, &saved)?;
+        std::os::unix::fs::symlink(&saved, &users_file)?;
 
         let mut input = b"secondpass\nsecondpass\n".as_slice();
         let mut out = Vec::new();
@@ -2015,9 +2020,10 @@ mod tests {
                 notes: &mut notes,
             },
         )?;
-        std::fs::set_permissions(&state_dir, original)?;
+        std::fs::remove_file(&users_file)?;
+        std::fs::rename(&saved, &users_file)?;
         assert_eq!(exit, Exit::Failed);
-        assert!(!notes.is_empty());
+        assert!(String::from_utf8(notes)?.contains("could not be completed"));
         Ok(())
     }
 
