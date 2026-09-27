@@ -74,6 +74,8 @@ web-auth-unauthenticated = sign in to do that.
 web-auth-user-exists = a user by that name already exists.
 web-auth-user-name-invalid = that user name is not usable; use 1 to 32 of `a-z`, `0-9`, `.`, `_` or `-`, starting with a letter or a digit.
 web-auth-user-unknown = there is no user by that name.
+web-cert-renew-not-acme = renewal needs `tls.bootstrap = "acme"` in detent.toml.
+web-cert-renew-unavailable = the acme client did not get the renewal request; try again later.
 web-denied-scope = this credential does not carry the scope that action needs.
 web-engine-stopped = the operations engine is no longer running; retry once the service is back.
 web-update-check-failed = the update check could not reach the release server; try again later.

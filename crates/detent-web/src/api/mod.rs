@@ -394,8 +394,16 @@ mod tests {
         // (read-only, served from the live `CertStore`), the update check
         // (read-only, served from `detent-update`), the update install
         // (`POST`, refused as `Unsupported` without a staged binary), the
-        // pending commit read, and `/api/v1/openapi.json` itself.
-        assert_eq!(table().len(), 18, "{:?}", table());
+        // pending commit read, the renewal request (`POST`, answered by the
+        // acme process), and `/api/v1/openapi.json` itself.
+        assert_eq!(table().len(), 19, "{:?}", table());
+        assert!(
+            table().iter().any(|route| route.method == Method::POST
+                && route.path == "/api/v1/system/cert/renew"
+                && route.mutating),
+            "{:?}",
+            table()
+        );
         assert!(
             table()
                 .iter()

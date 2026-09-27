@@ -106,7 +106,7 @@ pub use csrf::{CSRF_HEADER, Origin, SAME_ORIGIN, SEC_FETCH_SITE, csrf_guard};
 pub use engine::{EngineError, EngineHandle, EngineThread, spawn as spawn_engine};
 pub use headers::{THEME_SCRIPT_SHA256, security_headers};
 pub use server::{Server, ServerError, harden, healthz};
-pub use state::{AppState, AuthState};
+pub use state::{AppState, AuthState, CertRenewer};
 pub use tls::{
     ACME_PAIR_FILE, BOOTSTRAP_PAIR_FILE, CertStore, CertifiedKeyPair, TlsError,
     bootstrap_self_signed, crypto_provider, fingerprint, install_acme, load_acme, load_bootstrap,

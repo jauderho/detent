@@ -42,10 +42,12 @@ use detent_platform::service;
 use tempfile::TempDir;
 use tower::ServiceExt as _;
 
+use crate::auth::audit::AuthEvent;
 use crate::authz::Scope;
 use crate::engine::{EngineHandle, EngineThread, spawn as spawn_engine};
 use crate::server::harden;
 use crate::state::{AppState, TestState, test_state};
+use detent_ops::audit::AuditResult;
 
 type R = Result<(), Box<dyn std::error::Error>>;
 
@@ -1073,6 +1075,190 @@ async fn system_apply_needs_write_and_reports_the_stub() -> R {
     assert_eq!(error_body(stub).await?.1, "ops-unsupported");
 
     live.shutdown();
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/system/cert/renew
+// ---------------------------------------------------------------------------
+
+/// A renewer that counts its calls and fails when told to.
+#[derive(Debug, Default)]
+struct FakeRenewer {
+    calls: std::sync::atomic::AtomicUsize,
+    fail: bool,
+}
+
+impl FakeRenewer {
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl crate::state::CertRenewer for FakeRenewer {
+    fn renew_now(&self) -> Result<(), String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.fail {
+            Err("acme channel failed".to_owned())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+const RENEW: &str = "/api/v1/system/cert/renew";
+
+/// The one audit record of a renewal request, with its result and detail.
+fn renew_record(
+    fixture: &TestState,
+) -> Result<(AuditResult, Option<String>), Box<dyn std::error::Error>> {
+    let records = fixture.audit.records();
+    let [record] = records.as_slice() else {
+        return Err(format!("expected one audit record, got {records:?}").into());
+    };
+    assert_eq!(record.event, AuthEvent::CertRenewRequested);
+    assert!(record.subject.starts_with("token:"), "{record:?}");
+    Ok((record.result, record.detail.clone()))
+}
+
+#[tokio::test]
+async fn cert_renew_asks_the_renewer_once_and_answers_202() -> R {
+    let fixture = test_state()?;
+    let renewer = std::sync::Arc::new(FakeRenewer::default());
+    let state = fixture
+        .state
+        .clone()
+        .with_cert_renewer(std::sync::Arc::clone(&renewer) as _);
+    let (_read, write) = tokens(&state)?;
+
+    let response = post(&state, RENEW, Some(&write), "").await?;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        json(response).await?,
+        serde_json::json!({ "requested": true })
+    );
+    assert_eq!(renewer.calls(), 1);
+    assert_eq!(renew_record(&fixture)?, (AuditResult::Ok, None));
+    Ok(())
+}
+
+#[tokio::test]
+async fn cert_renew_without_a_renewer_is_409_not_acme() -> R {
+    let fixture = test_state()?;
+    let (_read, write) = tokens(&fixture.state)?;
+
+    let response = post(&fixture.state, RENEW, Some(&write), "").await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let (code, id) = error_body(response).await?;
+    assert_eq!(code, "conflict");
+    assert_eq!(id, "web-cert-renew-not-acme");
+    assert_eq!(
+        renew_record(&fixture)?,
+        (
+            AuditResult::Error,
+            Some("web-cert-renew-not-acme".to_owned())
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn cert_renew_answers_503_when_the_renewer_fails() -> R {
+    let fixture = test_state()?;
+    let renewer = std::sync::Arc::new(FakeRenewer {
+        fail: true,
+        ..FakeRenewer::default()
+    });
+    let state = fixture
+        .state
+        .clone()
+        .with_cert_renewer(std::sync::Arc::clone(&renewer) as _);
+    let (_read, write) = tokens(&state)?;
+
+    let response = post(&state, RENEW, Some(&write), "").await?;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let (code, id) = error_body(response).await?;
+    assert_eq!(code, "unavailable");
+    assert_eq!(id, "web-cert-renew-unavailable");
+    assert_eq!(renewer.calls(), 1);
+    assert_eq!(
+        renew_record(&fixture)?,
+        (
+            AuditResult::Error,
+            Some("web-cert-renew-unavailable".to_owned())
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn cert_renew_refuses_and_audits_a_read_caller() -> R {
+    let fixture = test_state()?;
+    let renewer = std::sync::Arc::new(FakeRenewer::default());
+    let state = fixture
+        .state
+        .clone()
+        .with_cert_renewer(std::sync::Arc::clone(&renewer) as _);
+    let (read, _write) = tokens(&state)?;
+
+    let unauthenticated = post(&state, RENEW, None, "").await?;
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    let response = post(&state, RENEW, Some(&read), "").await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(error_body(response).await?.1, "web-denied-scope");
+    assert_eq!(renewer.calls(), 0);
+    let records = fixture.audit.records();
+    let [record] = records.as_slice() else {
+        return Err(format!("expected one audit record, got {records:?}").into());
+    };
+    assert_eq!(record.event, AuthEvent::ScopeDenied);
+    assert_eq!(record.result, AuditResult::Denied);
+    assert_eq!(record.detail.as_deref(), Some("web-denied-scope"));
+    Ok(())
+}
+
+/// A cookie session must send the CSRF token, as for every other `POST`.
+#[tokio::test]
+async fn cert_renew_refuses_a_session_without_the_csrf_token() -> R {
+    let fixture = test_state()?;
+    let renewer = std::sync::Arc::new(FakeRenewer::default());
+    let state = fixture
+        .state
+        .clone()
+        .with_cert_renewer(std::sync::Arc::clone(&renewer) as _);
+    let (id, session) = state.auth.sessions.create(
+        "alice",
+        crate::authz::Scopes::read_write(),
+        false,
+        std::time::Instant::now(),
+    )?;
+    let request = |token: Option<&str>| {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri(RENEW)
+            .header(header::HOST, "box.example:3333")
+            .header(
+                header::COOKIE,
+                format!("{}={}", crate::auth::COOKIE_NAME, id.expose()),
+            )
+            .header(crate::csrf::SEC_FETCH_SITE, crate::csrf::SAME_ORIGIN)
+            .header(header::ORIGIN, "https://box.example:3333");
+        if let Some(token) = token {
+            builder = builder.header(crate::csrf::CSRF_HEADER, token);
+        }
+        builder.body(Body::empty())
+    };
+
+    let refused = app(&state).oneshot(request(None)?).await?;
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    assert_eq!(renewer.calls(), 0);
+
+    let accepted = app(&state)
+        .oneshot(request(Some(session.csrf_token.expose()))?)
+        .await?;
+    assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+    assert_eq!(renewer.calls(), 1);
     Ok(())
 }
 

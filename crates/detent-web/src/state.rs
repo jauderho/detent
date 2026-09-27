@@ -6,7 +6,9 @@
 //!                            │                   hasher, rate limiter, audit
 //!                            ├─ Arc<Config>    → the parsed detent.toml
 //!                            ├─ Arc<Origin>    → what CSRF compares against
-//!                            └─ Arc<CertStore> → the live TLS cert (renew swaps it)
+//!                            ├─ Arc<CertStore> → the live TLS cert (renew swaps it)
+//!                            └─ Option<Arc<dyn CertRenewer>> → asks the acme
+//!                                                process to renew now
 //! ```
 //!
 //! Phase 4c adds the `/api/v1` handlers on top of exactly this type, so it is
@@ -133,6 +135,21 @@ impl AuthState {
     }
 }
 
+/// Asks the ACME client to renew the served certificate now.
+///
+/// `detent serve` implements it over the worker's end of the acme channel
+/// (ADR-015) when `tls.bootstrap = "acme"`. This crate does not name the
+/// channel types, so a test can give the state a fake.
+pub trait CertRenewer: Send + Sync + std::fmt::Debug {
+    /// Send the request. It returns before the renewal starts.
+    ///
+    /// # Errors
+    ///
+    /// Why the request did not reach the ACME client, for the log. It is
+    /// never sent to the caller.
+    fn renew_now(&self) -> Result<(), String>;
+}
+
 /// The application state every handler receives.
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -156,6 +173,9 @@ pub struct AppState {
     /// Holds when the last live check failed, so a failure keeps the next
     /// one off the network for a while (L-WEB13).
     pub(crate) update_check: Arc<Mutex<Option<std::time::Instant>>>,
+    /// Asks the acme process to renew now; `None` unless `tls.bootstrap =
+    /// "acme"` ([`AppState::with_cert_renewer`]).
+    pub cert_renewer: Option<Arc<dyn CertRenewer>>,
 }
 
 impl AppState {
@@ -177,7 +197,15 @@ impl AppState {
             cert_store,
             state_root: Arc::new(state_root),
             update_check: Arc::new(Mutex::new(None)),
+            cert_renewer: None,
         }
+    }
+
+    /// The same state, with `renewer` behind `POST /api/v1/system/cert/renew`.
+    #[must_use]
+    pub fn with_cert_renewer(mut self, renewer: Arc<dyn CertRenewer>) -> Self {
+        self.cert_renewer = Some(renewer);
+        self
     }
 
     /// The interval-guarded update stamp (PLAN §2.9 step 6): the on-disk

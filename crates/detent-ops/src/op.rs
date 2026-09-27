@@ -7,13 +7,11 @@
 //!
 //! # Certificate renewal
 //!
-//! [`Operation::CertRenew`] is the one Phase 6 operation that needs no ACME
-//! plumbing to be useful: this build has no `[acme]` config surface yet, so
-//! the engine cannot order, install, or hot-swap a certificate. It answers
-//! [`OpsError::Unsupported`] with the catalogued `ops-unsupported` id, which
-//! the UI renders as a disabled control with a reason rather than a control
-//! that looks live until the server answers. A full renewal flow (order,
-//! install, `CertStore::replace`) arrives with the ACME wiring, not here.
+//! The engine does not answer [`Operation::CertRenew`]: the ACME client runs
+//! in its own process (ADR-015), and only the web front end holds the channel
+//! to it. `POST /api/v1/system/cert/renew` authorizes this operation and asks
+//! that process to renew now. The engine answers [`OpsError::Unsupported`]
+//! (`ops-unsupported`) when the operation reaches it.
 
 use std::time::Duration;
 
@@ -194,11 +192,10 @@ pub enum Operation {
     /// for a refusal carry this operation's own identity instead of
     /// borrowing [`Operation::HostProfile`]'s.
     CertStatus,
-    /// Check whether the serving certificate should renew, and renew it.
+    /// Renew the serving certificate now, also when it is not due.
     ///
-    /// Answered as [`OpsError::Unsupported`] until the ACME wiring lands (see
-    /// the module header): the variant exists so the API, authz, audit, and
-    /// UI can be built against the real shape instead of a stub that drifts.
+    /// Not answered by the engine (see the module header): the web front end
+    /// authorizes it and asks the acme process to renew.
     CertRenew,
     /// Install a verified update: the engine bridges the worker-staged release
     /// tag to the monitor's private runtime staging copy and asks the
