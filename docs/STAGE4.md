@@ -65,6 +65,7 @@ The gap analysis was done at `c50200e`. In short: the pieces exist, but nothing 
    - Read `[acme]`, order, `CertStore::install_acme` (hot reload), ARI window (`should_renew_ari`).
    - Remove the `cli-serve-acme-unsupported` refusal (`serve.rs:~309`). **DONE** (C3c): it stays only for a build without `acme-dns-providers`.
    - Implement `Operation::CertRenew`. **DONE through the web front end** (slices R1, R2): `POST /api/v1/system/cert/renew` authorizes `CertRenew` and sends `RenewNow` to the acme process, which starts a forced round at once (202; 409 without an acme process; 503 when the channel is closed). **R2b:** a forced order is rate-limited to one an hour (`MIN_FORCED_INTERVAL`), and a `RenewNow` during a backoff wait no longer cuts it short. The engine still answers `CertRenew` `Unsupported`, like `CertStatus`, so the MCP tool `cert_renew` is not wired. Open: the CLI and the UI button (item 3).
+   - **S1 DONE:** the next check after a round is the earlier of `CHECK_INTERVAL` (1 h) and the served certificate's due time (`next_check`/`due_at`), floored at `MIN_CHECK_INTERVAL` (1 min) — a certificate due sooner than an hour is no longer polled hourly.
    - Apply the `shortlived` profile by default on LE.
 3. **`detent cert status|renew` CLI**, journal/CLI warnings at 50 %/25 % lifetime, and a renew button on `CertificatesPage.tsx`.
 4. **Order-flow seam**, so fixtures can drive `order.rs` and raise the detent-acme floor from 87 toward 100.

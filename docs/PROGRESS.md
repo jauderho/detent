@@ -4,7 +4,9 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
-## 2026-09-27 - Phase 6 R2b: rate-limit "renew now" (STAGE4 4.3 item 2)
+## 2026-09-27 - Phase 6 S1: schedule the next check by the due time (STAGE4 4.3 item 5, slice S1)
+
+After a round the loop no longer always sleeps `CHECK_INTERVAL` (1 h): `next_check` (`detent/src/acme.rs`) takes the earlier of `CHECK_INTERVAL` and the time until `detent_acme::due_at` (new, `schedule.rs`) says the served or new certificate is due — the start of the ARI window when one is known, else two thirds of its lifetime — floored at a new `MIN_CHECK_INTERVAL` (1 min, matches `FIRST_RETRY`) so a due certificate whose install keeps failing is not polled without bound. `Outcome::Renewed` and `Outcome::NotDue` now carry the `not_before`/`not_after` (and, for `NotDue`, the ARI window) the loop needs; `Held` gained `not_before` for the same reason. Backoff after a failure is unchanged. Logged at `tracing::debug!` (fires every round). Closes the trap that blocked slice S2's short-lived-CA CI test: a 5-minute certificate is now rechecked near its own due time (about 198 s), not after a full hour.
 
 Closes the first R2 trap below. `MIN_FORCED_INTERVAL` (one hour) gates a forced order: `renew_once` skips a `RenewNow`'s order and falls back to the ordinary due check when one was already ordered inside the interval, logging the last order time and the next allowed one; a due renewal is never gated by this. `run_loop` tracks `last_order` (set on every successful `issue()`, install or not) across rounds. Separately, a `RenewNow` that arrives while the loop is in a backoff wait after a failure no longer cuts that wait short: it is logged and the same full delay is waited out again; only the round after the backoff is forced (and still subject to the interval). A held pair is retried regardless of either rule, since a retry is not a new order.
 
