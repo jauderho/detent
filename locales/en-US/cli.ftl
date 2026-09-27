@@ -132,6 +132,7 @@ cli-cert-fingerprint = fingerprint (sha-256): {$fingerprint}
 cli-cert-not-after = expires: {$not_after}
 cli-cert-not-after-unknown = expiry: unknown (the certificate did not parse).
 cli-cert-lifetime = lifetime used: {$percent} (warning: {$warning}).
+cli-cert-lifetime-no-warning = lifetime used: {$percent} (no warning).
 cli-cert-lifetime-unknown = lifetime used: unknown (the certificate did not parse).
 cli-cert-missing = no certificate is stored in {$path}; start the server once so it writes one.
 cli-cert-unreadable = the certificate in {$path} could not be read: {$reason}
