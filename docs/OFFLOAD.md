@@ -79,10 +79,7 @@ cargo clippy -p detent --all-targets -- -D warnings
 cargo test -p <crate you changed> --all-features --no-fail-fast
 ```
 
-Known state: when the tests run as **root**,
-`webadmin::tests::setup_with_force_reports_a_write_failure_as_a_credential_failure`
-fails (task T2 fixes this). As a normal user it passes. Any other failure
-is yours.
+Any failure is yours.
 
 Common web gates (run in `web/`):
 
