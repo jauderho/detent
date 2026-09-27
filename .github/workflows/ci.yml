@@ -319,6 +319,107 @@ jobs:
           # SAN = le.wtf). Capture its --nocapture output into the workflow log.
           cargo test -p detent-acme -- --ignored --nocapture
 
+  # ADR-015 slice C4: `detent serve` with `tls.bootstrap = "acme"`, run as
+  # root, gets a certificate from Pebble by dns-01 through the RFC 2136
+  # provider (TSIG) against a real BIND 9 primary, and serves it. The acme
+  # process must run confined (uid detent, seccomp `Acme`, Landlock), and no
+  # syscall of it may return EPERM under `strace -f`. See
+  # scripts/acme-serve-check.sh for every check.
+  acme-serve:
+    name: ACME serve end to end (Pebble + BIND 9, confined)
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # cargo never runs as root (D2'); only the check script does.
+      - name: Build detent with the dns-01 providers
+        run: cargo build -p detent --features acme-dns-providers
+
+      - name: Install strace and dig
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends strace dnsutils
+
+      # The TSIG key is made here, for this run only (CI runs gitleaks; no
+      # key is in the repository), and masked in the log.
+      - name: Make a TSIG key and the BIND configuration
+        run: |
+          set -euo pipefail
+          umask 077
+          openssl rand -base64 32 > "$RUNNER_TEMP/tsig.key"
+          echo "::add-mask::$(cat "$RUNNER_TEMP/tsig.key")"
+          scripts/acme-serve-check.sh --tsig-key-file "$RUNNER_TEMP/tsig.key" \
+            --write-dns-config "$RUNNER_TEMP/dns"
+
+      # BIND listens on 53 inside its container; the runner reaches it on
+      # 127.0.0.1:5300, Pebble by name on the shared bridge. Pebble checks
+      # the dns-01 record there (`-dnsserver`). PEBBLE_VA_NOSLEEP skips the
+      # random wait before each validation.
+      - name: Start BIND 9 and Pebble
+        run: |
+          set -euo pipefail
+          docker network create detent-acme
+          docker run -d --name bind9 --network detent-acme \
+            -p 127.0.0.1:5300:53/tcp -p 127.0.0.1:5300:53/udp \
+            -v "$RUNNER_TEMP/dns/etc:/etc/bind:ro" -v "$RUNNER_TEMP/dns/cache:/var/cache/bind" \
+            internetsystemsconsortium/bind9@sha256:f8506cfcbc8fcb44e40b922fa74b481ba23b50f00482bf6693ff8f120709a778 \
+            -g -c /etc/bind/named.conf
+          mkdir -p "$RUNNER_TEMP/pebble"
+          cat > "$RUNNER_TEMP/pebble/pebble-config.json" <<'EOF'
+          { "pebble": { "listenAddress": "0.0.0.0:14000",
+                        "managementListenAddress": "0.0.0.0:15000",
+                        "certificate": "/test/certs/localhost/cert.pem",
+                        "privateKey": "/test/certs/localhost/key.pem",
+                        "httpPort": 5002, "tlsPort": 5001 } }
+          EOF
+          docker run -d --name pebble-serve --network detent-acme -p 127.0.0.1:14000:14000 \
+            -e PEBBLE_VA_NOSLEEP=1 \
+            -v "$RUNNER_TEMP/pebble/pebble-config.json:/test/config/pebble-config.json" \
+            ghcr.io/letsencrypt/pebble@sha256:ddf230642b1a584f519f32e347de1b05a6e4c1f6c35c1863b33effeab5f78199 \
+            -config /test/config/pebble-config.json -dnsserver bind9:53
+          docker cp pebble-serve:/test/certs/pebble.minica.pem "$RUNNER_TEMP/pebble/pebble.minica.pem"
+          for _ in $(seq 1 30); do
+            if dig @127.0.0.1 -p 5300 +short serve.detent.test A | grep -q 127.0.0.1 \
+              && curl -fsS -k https://127.0.0.1:14000/dir >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          dig @127.0.0.1 -p 5300 +short serve.detent.test A
+          curl -fsS -k https://127.0.0.1:14000/dir >/dev/null
+
+      - name: Make the detent account and the state root
+        run: |
+          set -euo pipefail
+          sudo useradd --system --no-create-home --shell /usr/sbin/nologin detent
+          sudo install -d -m 0700 -o detent -g detent /var/lib/detent
+
+      - name: detent serve obtains, serves and stops (acme-serve-check.sh)
+        run: |
+          sudo scripts/acme-serve-check.sh --verbose \
+            --tsig-key-file "$RUNNER_TEMP/tsig.key" --dns-server 127.0.0.1:5300 \
+            target/debug/detent "$RUNNER_TEMP/pebble/pebble.minica.pem" \
+            https://127.0.0.1:14000/dir
+
+      - name: Container logs
+        if: failure()
+        run: |
+          docker logs bind9 2>&1 | tail -n 100 || true
+          docker logs pebble-serve 2>&1 | tail -n 100 || true
+
+      - name: Stop the containers
+        if: always()
+        run: docker rm -f bind9 pebble-serve || true
+
   rust-macos:
     name: Rust (build, test, clippy) on macOS
     runs-on: macos-latest
