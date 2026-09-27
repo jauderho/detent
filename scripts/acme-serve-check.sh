@@ -6,7 +6,9 @@
 # cleanly on SIGTERM (ADR-015, STAGE4 §4.3 item 2, slice C4). With
 # --expect-renewal, also proves the running server replaces a short-lived
 # certificate with a later-expiring one before the first expires, with no
-# restart (STAGE4 §4.3 item 5, slice S2).
+# restart (STAGE4 §4.3 item 5, slice S2). With --forced-renew, also proves
+# the operator-request path: `POST /api/v1/system/cert/renew` against the
+# running server (STAGE4 §4.3 item 5, slice W1).
 #
 # Usage:
 #   scripts/acme-serve-check.sh [OPTIONS] --tsig-key-file <path> \
@@ -42,6 +44,18 @@
 #                             restart of `serve`. Skipped when unset (the
 #                             default): use it with a short-lived Pebble
 #                             profile to prove renewal on schedule.
+#   --forced-renew           After --expect-renewal completes, mint a
+#                             write-scope API token as the worker account
+#                             (--state-root's owner) and send one
+#                             POST /api/v1/system/cert/renew. Requires
+#                             --expect-renewal. Checks: the answer is 202;
+#                             the auth audit log gains a
+#                             cert_renew_requested record; the serve log
+#                             shows the MIN_FORCED_INTERVAL "too soon" line
+#                             (the scheduled renewal already ordered one
+#                             inside the last hour); the worker's fdatasync
+#                             calls (the audit writers' File::sync_data())
+#                             all succeed. Skipped when unset (the default).
 #   --stop-timeout <secs>    How long `serve` may take to stop after SIGTERM
 #                             (default: 30).
 #   --trace <prefix>         `strace -ff -o` prefix: one file per thread,
@@ -63,21 +77,27 @@
 #   3. With --expect-renewal: waits for the listener to serve a different
 #      Pebble-issued leaf for the same domain with a later notAfter, with no
 #      restart of `serve`.
-#   4. Finds the four processes in the trace (monitor, runner, acme, worker),
+#   4. With --forced-renew: mints a write-scope token as the worker account
+#      and sends one POST /api/v1/system/cert/renew, then checks the 202
+#      answer, the new auth audit record and the "too soon" log line.
+#   5. Finds the four processes in the trace (monitor, runner, acme, worker),
 #      and checks the acme process: uid `detent`, NoNewPrivs 1, Seccomp 2,
 #      Landlock applied, and the TSIG update sent from it.
-#   5. Sends SIGTERM to the whole process group of `serve`, as systemd's
+#   6. Sends SIGTERM to the whole process group of `serve`, as systemd's
 #      default KillMode=control-group does, and requires all four processes
 #      to end within the stop timeout. The monitor has no SIGTERM handler:
 #      it may end by SIGTERM or exit 0, never by another signal (SIGSYS is a
 #      seccomp kill).
-#   6. Fails when a syscall of the acme or the worker process returned
+#   7. Fails when a syscall of the acme or the worker process returned
 #      EPERM, except the calls their seccomp tables document as refused and
 #      tolerated. Prints the distinct syscall names of the acme process, the
-#      monitor and the worker.
+#      monitor and the worker, and (with --forced-renew) confirms the
+#      worker's fdatasync calls all succeeded and reports whether the
+#      monitor or the acme process ever called fdatasync.
 #   Exits 0 only when every check passes.
 #
-# Requires: root, a `detent` system account, strace, openssl, timeout.
+# Requires: root, a `detent` system account, strace, openssl, timeout, curl,
+# jq, runuser.
 
 set -euo pipefail
 
@@ -91,6 +111,7 @@ PORT=3443
 STATE_ROOT="/var/lib/detent"
 ISSUE_TIMEOUT=180
 EXPECT_RENEWAL=0
+FORCED_RENEW=false
 STOP_TIMEOUT=30
 TRACE=""
 WORKDIR=""
@@ -152,7 +173,7 @@ die() {
 }
 
 show_usage() {
-  sed -n '2,80p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,100p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 need_value() {
@@ -184,6 +205,10 @@ while [[ $# -gt 0 ]]; do
         --workdir) WORKDIR="$2" ;;
       esac
       shift 2
+      ;;
+    --forced-renew)
+      FORCED_RENEW=true
+      shift
       ;;
     --dryrun)
       DRYRUN=true
@@ -221,6 +246,11 @@ done
 
 DOMAIN="${DOMAIN:-serve.${ZONE}}"
 DNS_PORT="${DNS_SERVER##*:}"
+
+if [[ "${FORCED_RENEW}" == true && "${EXPECT_RENEWAL}" -le 0 ]]; then
+  echo "${RED}Error: --forced-renew requires --expect-renewal${NC}" >&2
+  exit 1
+fi
 
 if [[ -z "${TSIG_KEY_FILE}" ]]; then
   echo "${RED}Error: --tsig-key-file is required${NC}" >&2
@@ -353,7 +383,10 @@ if [[ "${DRYRUN}" == true ]]; then
   log "would run: ${SERVE_CMD[*]}"
   log "would poll: openssl s_client -connect 127.0.0.1:${PORT} -servername ${DOMAIN}"
   if [[ "${EXPECT_RENEWAL}" -gt 0 ]]; then
-    log "would wait up to ${EXPECT_RENEWAL}s for a renewed Pebble leaf, then send a forced renew"
+    log "would wait up to ${EXPECT_RENEWAL}s for a renewed Pebble leaf"
+  fi
+  if [[ "${FORCED_RENEW}" == true ]]; then
+    log "would mint a write-scope token and POST /api/v1/system/cert/renew, expecting 202"
   fi
   log "would send SIGTERM to the process group of serve and wait ${STOP_TIMEOUT}s"
   log "would fail on EPERM in the acme process, except: ${TOLERATED_EPERM[*]}"
@@ -363,7 +396,11 @@ if [[ "${DRYRUN}" == true ]]; then
 fi
 
 [[ "$(id -u)" -eq 0 ]] || die "run as root: serve forks and drops to ${WORKER_USER}"
-for tool in strace openssl timeout; do
+REQUIRED_TOOLS=(strace openssl timeout)
+if [[ "${FORCED_RENEW}" == true ]]; then
+  REQUIRED_TOOLS+=(curl jq runuser)
+fi
+for tool in "${REQUIRED_TOOLS[@]}"; do
   command -v "${tool}" >/dev/null 2>&1 || die "${tool} not found"
 done
 [[ -x "${DETENT_BIN}" ]] || die "${DETENT_BIN} is not an executable"
@@ -417,6 +454,11 @@ show_serve_log() {
   done
 }
 
+if [[ "${FORCED_RENEW}" == true ]]; then
+  # RUST_LOG defaults to warn (run.rs): the "too soon" line --forced-renew
+  # checks for is tracing::info!, so it never reaches serve.log otherwise.
+  export RUST_LOG=info
+fi
 log "starting: ${SERVE_CMD[*]}"
 "${SERVE_CMD[@]}" >"${SERVE_LOG}" 2>&1 &
 SERVE_PID=$!
@@ -501,7 +543,72 @@ if [[ "${EXPECT_RENEWAL}" -gt 0 ]]; then
   pass "the listener replaced the leaf with no restart (notAfter ${first_not_after} -> ${renewed_not_after})"
 fi
 
-# --- 3. The four processes, and the acme process's confinement -----------
+# --- 3. Optional: the operator can force a renewal over the API -----------
+
+if [[ "${FORCED_RENEW}" == true ]]; then
+  AUTH_LOG="${STATE_ROOT}/audit/detent-auth.jsonl"
+  TOKEN_JSON="${WORKDIR}/operator-token.json"
+
+  log "minting a write-scope token as ${WORKER_USER}"
+  (
+    umask 077
+    runuser -u "${WORKER_USER}" -- "${DETENT_BIN}" --json --state-root "${STATE_ROOT}" \
+      token create w1-operator --write >"${TOKEN_JSON}"
+  )
+  chmod 0600 "${TOKEN_JSON}"
+  OPERATOR_TOKEN="$(jq -r '.token' "${TOKEN_JSON}")"
+  [[ -n "${OPERATOR_TOKEN}" && "${OPERATOR_TOKEN}" != "null" ]] ||
+    die "token create produced no token (see ${TOKEN_JSON})"
+
+  auth_log_lines() {
+    [[ -r "${AUTH_LOG}" ]] && wc -l <"${AUTH_LOG}" || echo 0
+  }
+  before_lines="$(auth_log_lines)"
+
+  RESPONSE="${WORKDIR}/renew-response.json"
+  # --noproxy '*': this is a loopback request with a synthetic --resolve'd
+  # SNI name, which an environment's HTTP(S) proxy cannot route; skipping it
+  # is required, not a style choice (a proxied CONNECT to it resets the
+  # connection). -k: this check exercises the API and the audit trail, not
+  # the TLS chain (like leaf_pem() above, which does not verify it either).
+  status="$(curl -sS -o "${RESPONSE}" -w '%{http_code}' --noproxy '*' -k \
+    --resolve "${DOMAIN}:${PORT}:127.0.0.1" \
+    -X POST -H "Authorization: Bearer ${OPERATOR_TOKEN}" \
+    "https://${DOMAIN}:${PORT}/api/v1/system/cert/renew")"
+  unset OPERATOR_TOKEN
+  [[ "${status}" == "202" ]] || die "cert/renew answered ${status}, not 202: $(cat "${RESPONSE}")"
+  pass "POST /api/v1/system/cert/renew answered 202"
+
+  deadline=$((SECONDS + 10))
+  got_record=""
+  while ((SECONDS < deadline)); do
+    if [[ "$(auth_log_lines)" -gt "${before_lines}" ]] &&
+      tail -n "+$((before_lines + 1))" "${AUTH_LOG}" | grep -q '"event":"cert_renew_requested"'; then
+      got_record=1
+      break
+    fi
+    sleep 1
+  done
+  [[ -n "${got_record}" ]] || die "no cert_renew_requested record appended to ${AUTH_LOG}"
+  pass "the auth audit log gained a cert_renew_requested record"
+
+  deadline=$((SECONDS + 10))
+  got_too_soon=""
+  while ((SECONDS < deadline)); do
+    if grep -q "too soon after the last order" "${SERVE_LOG}"; then
+      got_too_soon=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ -z "${got_too_soon}" ]]; then
+    show_serve_log
+    die "no MIN_FORCED_INTERVAL 'too soon' line in the serve log"
+  fi
+  pass "the forced renewal was logged as too soon after the scheduled order (MIN_FORCED_INTERVAL)"
+fi
+
+# --- 4. The four processes, and the acme process's confinement -----------
 
 # One line per clone in the trace: "<parent> <child> <thread|process>".
 list_clones() {
@@ -611,7 +718,7 @@ grep -qE '^landlock_restrict_self\(.*\) += 0$' "${TRACE}.${ACME}" ||
   die "the trace shows no Landlock ruleset applied by the acme process"
 pass "the acme process runs as ${WORKER_USER} with no_new_privs, seccomp (filter) and Landlock"
 
-# --- 4. SIGTERM to the process group ends all four ------------------------
+# --- 5. SIGTERM to the process group ends all four ------------------------
 
 log "sending SIGTERM to the process group of serve (${MAIN})"
 kill -TERM -- "-${MAIN}"
@@ -642,7 +749,7 @@ case "${ending}" in
 esac
 pass "all four processes ended after SIGTERM; the monitor: ${ending}"
 
-# --- 5. No EPERM outside the tolerated calls ------------------------------
+# --- 6. No EPERM outside the tolerated calls ------------------------------
 
 # Trace files of $1 and every thread or process it created.
 tree_files() {
@@ -690,6 +797,29 @@ log "syscalls of the monitor (after its fork of the worker):"
 awk -v w="${WORKER}" 'f { print } $0 ~ "= " w "$" { f = 1 }' "${TRACE}.${MAIN}" |
   grep -oE '^[a-z_0-9]+\(' | tr -d '(' | sort -u | tr '\n' ' '
 echo
+
+# W1: fdatasync (the audit writers' File::sync_data()) is allowed in the
+# worker now. --forced-renew is the only thing in this script that makes
+# the worker write an auth-audit record, so only it can confirm the call
+# actually happened and succeeded; without --forced-renew, check_eperm
+# above already proved no EPERM anywhere the worker is not tolerated,
+# which fdatasync is not.
+if [[ "${FORCED_RENEW}" == true ]]; then
+  mapfile -t worker_files < <(tree_files "${WORKER}")
+  fdatasync_calls="$(grep -h '^fdatasync(' "${worker_files[@]}" || true)"
+  [[ -n "${fdatasync_calls}" ]] ||
+    die "the worker never called fdatasync; --forced-renew did not exercise the audit write"
+  grep -q 'EPERM' <<<"${fdatasync_calls}" &&
+    die "fdatasync was refused in the worker: ${fdatasync_calls}"
+  pass "the worker's fdatasync calls all succeeded ($(wc -l <<<"${fdatasync_calls}") call(s))"
+fi
+
+# MONITOR and ACME: report only (owner decision, slice W1) — neither table
+# gains fdatasync unless a trace here shows one of them needs it.
+monitor_fdatasync="$(grep -c '^fdatasync(' "${TRACE}.${MAIN}" || true)"
+mapfile -t acme_files < <(tree_files "${ACME}")
+acme_fdatasync="$(cat "${acme_files[@]}" 2>/dev/null | grep -c '^fdatasync(' || true)"
+log "fdatasync calls seen: monitor ${monitor_fdatasync}, acme process ${acme_fdatasync}"
 
 if [[ "${VERBOSE}" == true ]]; then
   show_serve_log
