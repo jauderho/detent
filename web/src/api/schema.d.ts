@@ -303,6 +303,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/system/cert/renew": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/system/cert/renew`.
+         * @description Asks the ACME client to renew the served certificate now, also when it
+         *     is not due. The request goes to the acme process over its channel
+         *     (ADR-015) and returns before the renewal starts: `202` means the request
+         *     was sent, not that a certificate was issued. `GET /api/v1/system/cert`
+         *     shows the new certificate once the worker installs it. Every answer
+         *     after authorization is audited (`cert_renew_requested` in the auth log),
+         *     because the operations engine cannot answer `CertRenew`.
+         */
+        post: operations["renew_cert"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/system/profile": {
         parameters: {
             query?: never;
@@ -883,6 +909,11 @@ export interface components {
             unified_diff: string;
             /** @description Whether applying would change anything at all. */
             would_change: boolean;
+        };
+        /** @description Answer to `POST /api/v1/system/cert/renew`. */
+        RenewRequested: {
+            /** @description Always `true`: the ACME client got the request. */
+            requested: boolean;
         };
         /** @description The body of `POST /api/v1/modules/{id}/backups/{backup_id}/restore`. */
         RestoreRequest: {
@@ -1733,6 +1764,44 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CertReport"];
+                };
+            };
+        };
+    };
+    renew_cert: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The ACME client was asked to renew now */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RenewRequested"];
+                };
+            };
+            /** @description No ACME client runs: `tls.bootstrap` is not `acme` */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The request did not reach the ACME client */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
         };

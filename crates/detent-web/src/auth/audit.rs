@@ -1,7 +1,8 @@
 //! The auth event log (PLAN §2.7, "Misc": *audit for every auth event*).
 //!
 //! ```text
-//!   login / logout / lockout / token issue / token revoke
+//!   login / logout / lockout / token issue / token revoke / scope denied
+//!   / certificate renewal request
 //!            │
 //!            ├─▶ tracing::info!(… "detent audit")  ── journald, one stream
 //!            └─▶ AuthAudit sink ─▶ <state_root>/audit/detent-auth.jsonl (0600)
@@ -78,6 +79,10 @@ pub enum AuthEvent {
     TokenRevoked,
     /// A valid caller attempted an operation without its required scope.
     ScopeDenied,
+    /// A caller asked the ACME client to renew the certificate now
+    /// (`POST /api/v1/system/cert/renew`). The operations engine cannot
+    /// answer `CertRenew`, so the web front end records it here.
+    CertRenewRequested,
 }
 
 /// One line of the auth log.

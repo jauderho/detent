@@ -821,6 +821,48 @@
         }
       }
     },
+    "/api/v1/system/cert/renew": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "`POST /api/v1/system/cert/renew`.",
+        "description": "Asks the ACME client to renew the served certificate now, also when it\nis not due. The request goes to the acme process over its channel\n(ADR-015) and returns before the renewal starts: `202` means the request\nwas sent, not that a certificate was issued. `GET /api/v1/system/cert`\nshows the new certificate once the worker installs it. Every answer\nafter authorization is audited (`cert_renew_requested` in the auth log),\nbecause the operations engine cannot answer `CertRenew`.",
+        "operationId": "renew_cert",
+        "responses": {
+          "202": {
+            "description": "The ACME client was asked to renew now",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RenewRequested"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No ACME client runs: `tls.bootstrap` is not `acme`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The request did not reach the ACME client",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/system/profile": {
       "get": {
         "tags": [
@@ -2023,6 +2065,19 @@
           }
         }
       },
+      "RenewRequested": {
+        "type": "object",
+        "description": "Answer to `POST /api/v1/system/cert/renew`.",
+        "required": [
+          "requested"
+        ],
+        "properties": {
+          "requested": {
+            "type": "boolean",
+            "description": "Always `true`: the ACME client got the request."
+          }
+        }
+      },
       "RestoreRequest": {
         "type": "object",
         "description": "The body of `POST /api/v1/modules/{id}/backups/{backup_id}/restore`.",
@@ -2527,7 +2582,7 @@
     },
     {
       "name": "system",
-      "description": "Host profile, certificate status, update status, audit log, and liveness"
+      "description": "Host profile, certificate status and renewal, update status, audit log, and liveness"
     }
   ]
 }

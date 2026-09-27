@@ -138,6 +138,23 @@ because a check that cannot reach the release server must not be reported as
 
 `POST /api/v1/system/update` installs the named update. It takes a `write`-scoped, CSRF-checked `{"version": ...}` body (`UpdateApplyRequest`, `deny_unknown_fields`), authorizes against `Operation::UpdateApply` (`detent-web/src/authz.rs`), executes through the operations engine, and writes one audit record on success *and* on refusal (PLAN §2.5). The engine reads the worker-staged release tag and bundle under `<state_root>/update/staged`; the monitor materializes the verified digest image in its private `/run/detent/staging` base and drives the binary swap (`Request::ReplaceBinary` in `crates/detent-platform/src/privsep/proto.rs`, answered by `privsep/monitor.rs`), which keeps the previous binary at `<target>.prev`. `GET /api/v1/system/update` installs nothing, ever.
 
+## Certificate renewal
+
+`POST /api/v1/system/cert/renew` asks the ACME client to renew the served
+certificate now, also when it is not due. It takes no body, needs `write`
+scope (CSRF-checked for a cookie session), and authorizes against
+`Operation::CertRenew`. The operations engine does not answer that operation;
+the web front end sends `RenewNow` to the acme process (ADR-015) and answers
+`202` with `{"requested": true}`. `202` means that the request was sent, not
+that a certificate was issued: `GET /api/v1/system/cert` shows the new
+certificate once the worker installs it. Without an acme process
+(`tls.bootstrap` is not `acme`) the answer is `409`
+`web-cert-renew-not-acme`; when the request does not reach the acme process
+(it stopped), `503` `web-cert-renew-unavailable`. Each answer after
+authorization writes one `cert_renew_requested` record to the auth log
+(`detent-auth.jsonl`); a refusal for scope writes `scope_denied`. The MCP tool
+`cert_renew` still goes to the engine and answers `ops-unsupported`.
+
 ## Design notes
 
 - `GET /api/v1/openapi.json` **needs a credential**, like everything else under

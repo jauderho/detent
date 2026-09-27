@@ -326,13 +326,13 @@ impl OpsEngine {
             Operation::AuditQuery(query) => Ok(OpOutcome::Audit(
                 self.audit.query(&query).map_err(OpsError::from)?,
             )),
-            // No `[acme]` config surface yet: cannot order, install, or
-            // hot-swap a certificate. Answered as `Unsupported` (`ops-unsupported`)
-            // so the API renders a disabled control with a reason; full renewal
-            // arrives with the ACME wiring, not here.
-            // The front end that owns the TLS listener answers this one from
-            // its own resolver; it reaches the engine only if something routes
-            // it here by mistake, and then it must fail loudly.
+            // The front end that owns the TLS listener answers `CertStatus`
+            // from its own resolver, and `CertRenew` by asking the acme
+            // process (ADR-015) to renew now (`POST
+            // /api/v1/system/cert/renew`). The engine holds neither the
+            // certificate nor the acme channel. Either reaches the engine
+            // only if something routes it here by mistake, and then it must
+            // fail loudly (`ops-unsupported`).
             Operation::CertStatus => Err(OpsError::Unsupported {
                 what: "cert_status",
             }),

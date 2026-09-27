@@ -69,6 +69,8 @@ export const API_MESSAGE_IDS = [
   'web-auth-user-exists',
   'web-auth-user-name-invalid',
   'web-auth-user-unknown',
+  'web-cert-renew-not-acme',
+  'web-cert-renew-unavailable',
   'web-denied-scope',
   'web-engine-stopped',
   'web-request-malformed',

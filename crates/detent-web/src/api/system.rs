@@ -1,16 +1,17 @@
-//! `/api/v1/system/profile`, `/api/v1/system/cert`, `/api/v1/system/update`
+//! `/api/v1/system/profile`, `/api/v1/system/cert` (`GET` for status; `POST
+//! .../renew` asks the ACME client to renew now), `/api/v1/system/update`
 //! (`GET` for status, `POST` to install), and `/api/v1/audit`: host,
-//! certificate, update, and history views. Only the update `POST` mutates.
+//! certificate, update, and history views. Only the two `POST`s mutate.
 
 use axum::Json;
 use axum::Router;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, post};
 use detent_core::diag::MessageId;
 use detent_ops::Operation;
-use detent_ops::audit::{AuditQuery, AuditRecord};
+use detent_ops::audit::{AuditQuery, AuditRecord, AuditResult};
 use detent_ops::report::{CertReport, HostReport};
 use detent_update::fetch::Transport;
 use detent_update::policy::Policy;
@@ -19,9 +20,10 @@ use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 
+use crate::auth::audit::{AuthEvent, AuthRecord};
 use crate::auth::extract::{Caller, WriteCaller};
 use crate::error::ApiError;
-use crate::state::AppState;
+use crate::state::{AppState, CertRenewer};
 
 use super::{authorize, bad_request, json_rejection, query_rejection, unexpected_outcome};
 use detent_ops::OpOutcome;
@@ -30,6 +32,8 @@ use detent_ops::OpOutcome;
 pub const PROFILE_PATH: &str = "/api/v1/system/profile";
 /// `GET /api/v1/system/cert`.
 pub const CERT_PATH: &str = "/api/v1/system/cert";
+/// `POST /api/v1/system/cert/renew`.
+pub const CERT_RENEW_PATH: &str = "/api/v1/system/cert/renew";
 /// `GET /api/v1/system/update`.
 pub const UPDATE_PATH: &str = "/api/v1/system/update";
 /// `GET /api/v1/audit`.
@@ -40,6 +44,13 @@ pub const MAX_FILTER_LEN: usize = 128;
 
 /// Most records `?limit=` may ask for in one answer.
 pub const MAX_AUDIT_LIMIT: usize = 1000;
+
+/// Fluent id of a renewal request when no ACME client runs
+/// (`tls.bootstrap` is not `acme`).
+pub const RENEW_NOT_ACME_ID: &str = "web-cert-renew-not-acme";
+
+/// Fluent id of a renewal request that did not reach the ACME client.
+pub const RENEW_UNAVAILABLE_ID: &str = "web-cert-renew-unavailable";
 
 /// How long a failed live update check keeps the next one off the network
 /// (L-WEB13). A failed check writes no stamp, so without this every `GET`
@@ -61,6 +72,11 @@ pub fn table() -> Vec<crate::auth::routes::Route> {
             method: Method::GET,
             path: CERT_PATH,
             mutating: false,
+        },
+        Route {
+            method: Method::POST,
+            path: CERT_RENEW_PATH,
+            mutating: true,
         },
         Route {
             method: Method::GET,
@@ -85,6 +101,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route(PROFILE_PATH, get(profile))
         .route(CERT_PATH, get(cert))
+        .route(CERT_RENEW_PATH, post(renew_cert))
         .route(UPDATE_PATH, get(update).post(apply_update))
         .route(AUDIT_PATH, get(audit))
 }
@@ -110,6 +127,80 @@ pub(super) async fn cert(
     // read-only operation behaves (PLAN §2.5).
     authorize(&state, &caller, &Operation::CertStatus)?;
     Ok(Json(cert_report(&state)))
+}
+
+/// `POST /api/v1/system/cert/renew`.
+///
+/// Asks the ACME client to renew the served certificate now, also when it
+/// is not due. The request goes to the acme process over its channel
+/// (ADR-015) and returns before the renewal starts: `202` means the request
+/// was sent, not that a certificate was issued. `GET /api/v1/system/cert`
+/// shows the new certificate once the worker installs it. Every answer
+/// after authorization is audited (`cert_renew_requested` in the auth log),
+/// because the operations engine cannot answer `CertRenew`.
+#[cfg_attr(test, utoipa::path(
+    post,
+    path = CERT_RENEW_PATH,
+    tag = "system",
+    responses(
+        (status = 202, description = "The ACME client was asked to renew now", body = RenewRequested),
+        (status = 409, description = "No ACME client runs: `tls.bootstrap` is not `acme`", body = crate::error::ErrorBody),
+        (status = 503, description = "The request did not reach the ACME client", body = crate::error::ErrorBody),
+    ),
+))]
+pub(super) async fn renew_cert(
+    State(state): State<AppState>,
+    caller: WriteCaller,
+) -> Result<(StatusCode, Json<RenewRequested>), ApiError> {
+    let caller = caller.caller();
+    authorize(&state, caller, &Operation::CertRenew)?;
+    let answer = request_renewal(state.cert_renewer.as_deref());
+    let record = AuthRecord::new(
+        AuthEvent::CertRenewRequested,
+        caller.identity().subject.clone(),
+        if answer.is_ok() {
+            AuditResult::Ok
+        } else {
+            AuditResult::Error
+        },
+    )
+    .with_kind(caller.identity().kind);
+    state.auth.record(&match &answer {
+        Ok(()) => record,
+        Err(error) => record.with_detail(error.message_id()),
+    });
+    answer.map(|()| {
+        (
+            StatusCode::ACCEPTED,
+            Json(RenewRequested { requested: true }),
+        )
+    })
+}
+
+/// Send the renewal request through `renewer`.
+///
+/// # Errors
+///
+/// `409` [`RENEW_NOT_ACME_ID`] without a renewer, `503`
+/// [`RENEW_UNAVAILABLE_ID`] when the request did not reach the ACME client.
+fn request_renewal(renewer: Option<&dyn CertRenewer>) -> Result<(), ApiError> {
+    let renewer = renewer
+        .ok_or_else(|| ApiError::new(StatusCode::CONFLICT, MessageId::new(RENEW_NOT_ACME_ID)))?;
+    renewer.renew_now().map_err(|reason| {
+        tracing::warn!(%reason, "the renewal request did not reach the acme process");
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            MessageId::new(RENEW_UNAVAILABLE_ID),
+        )
+    })
+}
+
+/// Answer to `POST /api/v1/system/cert/renew`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(utoipa::ToSchema))]
+pub struct RenewRequested {
+    /// Always `true`: the ACME client got the request.
+    pub requested: bool,
 }
 
 /// The certificate answer, pulled out of [`cert`] so tests need no caller.
@@ -614,6 +705,18 @@ mod tests {
                 .is_some_and(|k| k.trim() == "web-update-check-failed")),
             "web-update-check-failed is missing from core.ftl"
         );
+    }
+
+    #[test]
+    fn the_renewal_ids_are_catalogued() {
+        for id in [super::RENEW_NOT_ACME_ID, super::RENEW_UNAVAILABLE_ID] {
+            assert!(
+                CATALOGUE
+                    .lines()
+                    .any(|line| line.split('=').next().is_some_and(|k| k.trim() == id)),
+                "{id} is missing from core.ftl"
+            );
+        }
     }
 
     #[test]
