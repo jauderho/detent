@@ -4,7 +4,8 @@
 //!   acme process                               worker
 //!   ────────────                               ──────
 //!   acme_main ─▶ hello ─▶ run_loop             serve_installs
-//!                           │ every hour           ▲
+//!                           │ every hour,          ▲
+//!                           │ or at RenewNow ◀─────┼── (worker's renewer)
 //!                           ▼                      │
 //!                        renew_once ── Install ────┘ check_and_install
 //!                           │  Issuer (the CA)         └─▶ install_acme
@@ -72,7 +73,7 @@ pub(crate) trait Issuer {
     fn renewal_window(&mut self, leaf_der: &[u8]) -> impl Future<Output = Option<(i64, i64)>>;
 }
 
-/// The hand-over to the worker.
+/// The hand-over to the worker, and the worker's renewal requests.
 pub(crate) trait Installer {
     /// Ask the worker to serve `chain_pem` with `key`.
     ///
@@ -80,11 +81,32 @@ pub(crate) trait Installer {
     ///
     /// As [`AcmeClient::install`].
     fn install(&mut self, chain_pem: String, key: KeyPem) -> Result<(), AcmeChannelError>;
+
+    /// True once when the worker asked for a renewal while `hello` or an
+    /// install waited for its answer ([`AcmeClient::take_pending_renew`]).
+    fn take_pending_renew(&mut self) -> bool;
+
+    /// Read the one message the worker sent on its own, once the channel is
+    /// readable. `Ok` means the worker asked for a renewal now.
+    ///
+    /// # Errors
+    ///
+    /// As [`AcmeClient::next_request`]: `Closed` when the worker closed the
+    /// channel, `Protocol` for any message other than `RenewNow`.
+    fn next_request(&mut self) -> Result<(), AcmeChannelError>;
 }
 
 impl Installer for AcmeClient {
     fn install(&mut self, chain_pem: String, key: KeyPem) -> Result<(), AcmeChannelError> {
         Self::install(self, chain_pem, key)
+    }
+
+    fn take_pending_renew(&mut self) -> bool {
+        Self::take_pending_renew(self)
+    }
+
+    fn next_request(&mut self) -> Result<(), AcmeChannelError> {
+        Self::next_request(self).map(drop)
     }
 }
 
@@ -260,9 +282,10 @@ fn warn_expiry(used_percent: u8, not_after: i64) {
 ///
 /// `served` is the stored ACME pair; `None` means the worker still serves
 /// the bootstrap certificate, so a certificate is issued at once. A served
-/// pair whose validity cannot be read is renewed too. Otherwise the
-/// certificate is renewed when the ARI window has started, or else at two
-/// thirds of its lifetime.
+/// pair whose validity cannot be read is renewed too. With `force` (the
+/// worker asked for a renewal), a certificate is issued in all cases.
+/// Otherwise the certificate is renewed when the ARI window has started, or
+/// else at two thirds of its lifetime.
 ///
 /// # Errors
 ///
@@ -272,6 +295,7 @@ fn warn_expiry(used_percent: u8, not_after: i64) {
 pub(crate) async fn renew_once(
     now: i64,
     served: Option<&CertifiedKeyPair>,
+    force: bool,
     issuer: &mut impl Issuer,
     installer: &mut impl Installer,
     held: &mut Option<Held>,
@@ -282,9 +306,11 @@ pub(crate) async fn renew_once(
         {
             let used_percent = detent_acme::percent_used(not_before, not_after, now);
             warn_expiry(used_percent, not_after);
-            let window = issuer.renewal_window(pair.cert_der()).await;
-            if !detent_acme::should_renew_in_window(not_before, not_after, now, window) {
-                return Ok(Outcome::NotDue { used_percent });
+            if !force {
+                let window = issuer.renewal_window(pair.cert_der()).await;
+                if !detent_acme::should_renew_in_window(not_before, not_after, now, window) {
+                    return Ok(Outcome::NotDue { used_percent });
+                }
             }
         } else {
             tracing::warn!("the served certificate's validity cannot be read");
@@ -322,11 +348,12 @@ fn install(
 }
 
 /// One round of the loop. A held pair that is still valid at `now` is
-/// installed again and nothing is ordered. Otherwise: read the served pair
-/// from `cert_dir`, then [`renew_once`].
+/// installed again and nothing is ordered, also when `force` is set. Otherwise:
+/// read the served pair from `cert_dir`, then [`renew_once`].
 async fn round(
     now: i64,
     cert_dir: &Path,
+    force: bool,
     issuer: &mut impl Issuer,
     installer: &mut impl Installer,
     held: &mut Option<Held>,
@@ -341,7 +368,7 @@ async fn round(
         );
     }
     let served = detent_web::load_acme(cert_dir).map_err(RenewError::Load)?;
-    renew_once(now, served.as_ref(), issuer, installer, held).await
+    renew_once(now, served.as_ref(), force, issuer, installer, held).await
 }
 
 /// The renewal loop: one round at once, then one every hour.
@@ -351,8 +378,15 @@ async fn round(
 /// failed install the next rounds retry that install until the pair
 /// expires; only then is a new certificate ordered. `now`
 /// reads the clock in Unix seconds and `sleep` waits, so a test drives the
-/// rounds without real time. The loop returns when the worker closes the
-/// channel: an install sees it closed, or `sleep` breaks.
+/// rounds without real time.
+///
+/// `sleep` breaks when the channel is readable; the loop then reads one
+/// message ([`Installer::next_request`]). A `RenewNow` ends the wait and
+/// starts a forced round ([`renew_once`]). A `RenewNow` recorded during
+/// `hello` or an install ([`Installer::take_pending_renew`]) forces the next
+/// round too, which then starts without a wait. The loop returns when the
+/// worker closes the channel (an install or the read sees it closed), and
+/// when the read fails in any other way; that is logged.
 pub(crate) async fn run_loop<F>(
     issuer: &mut impl Issuer,
     installer: &mut impl Installer,
@@ -364,8 +398,12 @@ pub(crate) async fn run_loop<F>(
 {
     let mut retry = FIRST_RETRY;
     let mut held = None;
+    // A request that arrived during `hello`.
+    let mut force = requested(installer.take_pending_renew());
     loop {
-        let delay = match round(now(), cert_dir, issuer, installer, &mut held).await {
+        let result = round(now(), cert_dir, force, issuer, installer, &mut held).await;
+        force = requested(installer.take_pending_renew());
+        let delay = match result {
             Ok(outcome) => {
                 if let Outcome::Renewed { not_after } = outcome {
                     tracing::info!(not_after, "the worker serves a new ACME certificate");
@@ -388,16 +426,35 @@ pub(crate) async fn run_loop<F>(
                 delay
             }
         };
-        if sleep(delay).await.is_break() {
-            tracing::info!("the worker closed the acme channel");
-            return;
+        if force || sleep(delay).await.is_continue() {
+            continue;
+        }
+        match installer.next_request() {
+            Ok(()) => force = requested(true),
+            Err(AcmeChannelError::Channel(ChannelError::Closed)) => {
+                tracing::info!("the worker closed the acme channel");
+                return;
+            }
+            Err(err) => {
+                tracing::warn!(reason = %err, "the acme channel failed; renewals stop");
+                return;
+            }
         }
     }
 }
 
+/// `pending`, logged when it is set.
+fn requested(pending: bool) -> bool {
+    if pending {
+        tracing::info!("renewal requested by the worker");
+    }
+    pending
+}
+
 /// Waits `delay`, or less when `channel` becomes readable: the worker
-/// closed its end, or sent a message out of turn. Either way the loop must
-/// stop, so the acme process ends when the worker does.
+/// sent a message (a `RenewNow`, or anything else) or closed its end. The
+/// caller then reads the channel ([`run_loop`]), so the acme process renews
+/// at once, or ends when the worker does.
 ///
 /// `channel` is registered with the runtime for this wait only, so a
 /// readiness left from an earlier answer cannot end it. Nothing is read,
@@ -597,8 +654,9 @@ mod tests {
     use detent_web::CertifiedKeyPair;
 
     use super::{
-        AcmeIssuer, FIRST_RETRY, Installer, Issuer, MAX_RETRY, Outcome, RenewError, acme_main,
-        check_and_install, renew_once, run_loop, serve_installs, spawn_installs, wait_or_peer,
+        AcmeIssuer, CHECK_INTERVAL, FIRST_RETRY, Installer, Issuer, MAX_RETRY, Outcome, RenewError,
+        acme_main, check_and_install, renew_once, run_loop, serve_installs, spawn_installs,
+        wait_or_peer,
     };
 
     type R = Result<(), Box<dyn std::error::Error>>;
@@ -700,12 +758,24 @@ mod tests {
     struct FakeInstaller {
         results: VecDeque<Result<(), AcmeChannelError>>,
         installed: Vec<String>,
+        /// What each `take_pending_renew` answers; `false` once it ends.
+        pending: VecDeque<bool>,
+        /// What each `next_request` answers; a closed channel once it ends.
+        requests: VecDeque<Result<(), AcmeChannelError>>,
     }
 
     impl Installer for FakeInstaller {
         fn install(&mut self, chain_pem: String, _key: KeyPem) -> Result<(), AcmeChannelError> {
             self.installed.push(chain_pem);
             self.results.pop_front().unwrap_or(Ok(()))
+        }
+
+        fn take_pending_renew(&mut self) -> bool {
+            self.pending.pop_front().unwrap_or(false)
+        }
+
+        fn next_request(&mut self) -> Result<(), AcmeChannelError> {
+            self.requests.pop_front().unwrap_or_else(|| Err(closed()))
         }
     }
 
@@ -776,7 +846,14 @@ mod tests {
         let cert = Cert::new(&["a.example"])?;
         let mut issuer = FakeIssuer::answering([Ok(cert.issued())]);
         let mut installer = FakeInstaller::default();
-        let outcome = block_on(renew_once(0, None, &mut issuer, &mut installer, &mut None))?;
+        let outcome = block_on(renew_once(
+            0,
+            None,
+            false,
+            &mut issuer,
+            &mut installer,
+            &mut None,
+        ))?;
         assert_eq!(
             outcome.ok(),
             Some(Outcome::Renewed {
@@ -796,6 +873,7 @@ mod tests {
         let outcome = block_on(renew_once(
             cert.at(1),
             Some(&pair),
+            false,
             &mut issuer,
             &mut installer,
             &mut None,
@@ -816,6 +894,7 @@ mod tests {
         let outcome = block_on(renew_once(
             cert.at(70),
             Some(&pair),
+            false,
             &mut issuer,
             &mut installer,
             &mut None,
@@ -842,6 +921,7 @@ mod tests {
         let outcome = block_on(renew_once(
             cert.at(10),
             Some(&pair),
+            false,
             &mut issuer,
             &mut installer,
             &mut None,
@@ -860,6 +940,7 @@ mod tests {
         let outcome = block_on(renew_once(
             cert.at(10),
             Some(&pair),
+            false,
             &mut issuer,
             &mut installer,
             &mut None,
@@ -877,6 +958,7 @@ mod tests {
         let outcome = block_on(renew_once(
             0,
             Some(&broken),
+            false,
             &mut issuer,
             &mut installer,
             &mut None,
@@ -892,7 +974,14 @@ mod tests {
     fn an_issue_error_installs_nothing() -> R {
         let mut issuer = FakeIssuer::answering([Err(AcmeError::NoDns01Challenge)]);
         let mut installer = FakeInstaller::default();
-        let outcome = block_on(renew_once(0, None, &mut issuer, &mut installer, &mut None))?;
+        let outcome = block_on(renew_once(
+            0,
+            None,
+            false,
+            &mut issuer,
+            &mut installer,
+            &mut None,
+        ))?;
         assert!(
             matches!(outcome, Err(RenewError::Issue(AcmeError::NoDns01Challenge))),
             "{outcome:?}"
@@ -904,7 +993,14 @@ mod tests {
             chain_pem: "no certificate here".to_owned(),
             key_pem: String::new(),
         })]);
-        let outcome = block_on(renew_once(0, None, &mut issuer, &mut installer, &mut None))?;
+        let outcome = block_on(renew_once(
+            0,
+            None,
+            false,
+            &mut issuer,
+            &mut installer,
+            &mut None,
+        ))?;
         assert!(matches!(outcome, Err(RenewError::Chain)), "{outcome:?}");
         assert!(installer.installed.is_empty());
         Ok(())
@@ -921,7 +1017,14 @@ mod tests {
             ..FakeInstaller::default()
         };
         let mut held = None;
-        let outcome = block_on(renew_once(0, None, &mut issuer, &mut installer, &mut held))?;
+        let outcome = block_on(renew_once(
+            0,
+            None,
+            false,
+            &mut issuer,
+            &mut installer,
+            &mut held,
+        ))?;
         assert!(
             matches!(
                 outcome,
@@ -949,6 +1052,7 @@ mod tests {
                 block_on(renew_once(
                     cert.at(percent),
                     Some(&pair),
+                    false,
                     &mut issuer,
                     &mut installer,
                     &mut None,
@@ -1350,10 +1454,209 @@ mod tests {
         let (acme_end, mut worker_end) = Channel::pair()?;
         let quiet = block_on(wait_or_peer(acme_end.as_fd(), Duration::from_millis(20)))?;
         assert_eq!(quiet, ControlFlow::Continue(()));
-        // A message out of turn ends the wait as a close does.
+        // A message ends the wait as a close does; the loop then reads it.
         worker_end.send(&WorkerMessage::Installed)?;
         let stirred = block_on(wait_or_peer(acme_end.as_fd(), Duration::from_secs(60)))?;
         assert_eq!(stirred, ControlFlow::Break(()));
+        Ok(())
+    }
+
+    /// A directory whose stored ACME pair is `cert`.
+    fn served_dir(cert: &Cert) -> Result<tempfile::TempDir, Box<dyn std::error::Error>> {
+        let dir = tempfile::TempDir::new()?;
+        let (store, _) = bootstrap_store()?;
+        let pair = cert.pair()?;
+        logged(|| detent_web::install_acme(dir.path(), &pair, &store))?;
+        Ok(dir)
+    }
+
+    #[test]
+    fn a_forced_check_renews_a_certificate_that_is_not_due() -> R {
+        let cert = Cert::new(&["a.example"])?;
+        let pair = cert.pair()?;
+        let mut issuer = FakeIssuer::answering([Ok(cert.issued())]);
+        let mut installer = FakeInstaller::default();
+        let outcome = block_on(renew_once(
+            cert.at(1),
+            Some(&pair),
+            true,
+            &mut issuer,
+            &mut installer,
+            &mut None,
+        ))?;
+        assert_eq!(
+            outcome.ok(),
+            Some(Outcome::Renewed {
+                not_after: cert.not_after
+            })
+        );
+        assert_eq!(issuer.calls, 1);
+        assert_eq!(installer.installed, vec![cert.chain_pem]);
+        Ok(())
+    }
+
+    /// Each wake reads one request: `RenewNow` starts a forced round (the
+    /// served certificate is not due), and a closed channel ends the loop.
+    #[test]
+    fn a_wake_reads_one_request_and_renew_now_forces_a_round() -> R {
+        let cert = Cert::new(&["a.example"])?;
+        let next = Cert::valid(&["a.example"], (2026, 1, 2), (2026, 1, 12))?;
+        let dir = served_dir(&cert)?;
+        let mut issuer = FakeIssuer::answering([Ok(next.issued())]);
+        let mut installer = FakeInstaller {
+            requests: VecDeque::from([Ok(())]),
+            ..FakeInstaller::default()
+        };
+        let mut delays = Vec::new();
+        let (ended, logs) = capture(|| {
+            block_on(run_loop(
+                &mut issuer,
+                &mut installer,
+                dir.path(),
+                || cert.at(1),
+                |delay| {
+                    delays.push(delay);
+                    std::future::ready(ControlFlow::Break(()))
+                },
+            ))
+        });
+        ended?;
+        assert_eq!(issuer.calls, 1);
+        assert_eq!(installer.installed, vec![next.chain_pem]);
+        assert_eq!(delays, vec![CHECK_INTERVAL, CHECK_INTERVAL]);
+        assert!(installer.requests.is_empty());
+        assert!(logs.contains("renewal requested by the worker"), "{logs}");
+        assert!(
+            logs.contains("the worker closed the acme channel"),
+            "{logs}"
+        );
+        Ok(())
+    }
+
+    /// A `RenewNow` recorded while `hello` or an install waited for its
+    /// answer forces the next round, and that round starts without a wait.
+    #[test]
+    fn a_renew_now_recorded_during_hello_or_an_install_forces_the_next_round() -> R {
+        let cert = Cert::new(&["a.example"])?;
+        let first = Cert::valid(&["a.example"], (2026, 1, 2), (2026, 1, 12))?;
+        let second = Cert::valid(&["a.example"], (2026, 1, 3), (2026, 1, 13))?;
+        let dir = served_dir(&cert)?;
+        let mut issuer = FakeIssuer::answering([Ok(first.issued()), Ok(second.issued())]);
+        let mut installer = FakeInstaller {
+            // During hello, then during the first install.
+            pending: VecDeque::from([true, true]),
+            results: VecDeque::from([Ok(()), Err(closed())]),
+            ..FakeInstaller::default()
+        };
+        let mut delays = Vec::new();
+        let (ended, logs) = capture(|| {
+            block_on(run_loop(
+                &mut issuer,
+                &mut installer,
+                dir.path(),
+                || cert.at(1),
+                |delay| {
+                    delays.push(delay);
+                    std::future::ready(ControlFlow::Continue(()))
+                },
+            ))
+        });
+        ended?;
+        assert_eq!(issuer.calls, 2);
+        assert_eq!(installer.installed, vec![first.chain_pem, second.chain_pem]);
+        assert!(delays.is_empty(), "{delays:?}");
+        assert!(logs.contains("renewal requested by the worker"), "{logs}");
+        Ok(())
+    }
+
+    /// Runs the loop over `dir` with a real client on `acme_end`, the real
+    /// wait, and the clock at `now`. Returns the delays, and the logs.
+    fn drive_channel(
+        acme_end: Channel,
+        issuer: &mut FakeIssuer,
+        dir: &std::path::Path,
+        now: i64,
+    ) -> Result<(Vec<Duration>, String), Box<dyn std::error::Error>> {
+        use std::os::fd::AsFd as _;
+        let peer = acme_end.as_fd().try_clone_to_owned()?;
+        let mut client = AcmeClient::new(acme_end);
+        let mut delays = Vec::new();
+        let (ended, logs) = capture(|| {
+            block_on(async {
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    run_loop(
+                        issuer,
+                        &mut client,
+                        dir,
+                        || now,
+                        |delay| {
+                            delays.push(delay);
+                            wait_or_peer(peer.as_fd(), delay)
+                        },
+                    ),
+                )
+                .await
+            })
+        });
+        ended?.map_err(|_| format!("the loop did not end; slept {delays:?}"))?;
+        Ok((delays, logs))
+    }
+
+    /// The worker asks for a renewal while the loop waits an hour: the wait
+    /// ends at once, and the certificate that is not due is renewed.
+    #[test]
+    fn a_renew_now_during_a_long_wait_starts_a_forced_round_at_once() -> R {
+        let cert = Cert::new(&["a.example"])?;
+        let next = Cert::valid(&["a.example"], (2026, 1, 2), (2026, 1, 12))?;
+        let dir = served_dir(&cert)?;
+        let (acme_end, mut worker_end) = Channel::pair()?;
+        let worker = std::thread::spawn(move || -> Result<AcmeMessage, ChannelError> {
+            worker_end.send(&WorkerMessage::RenewNow)?;
+            let install = worker_end.recv::<AcmeMessage>()?;
+            worker_end.send(&WorkerMessage::Installed)?;
+            // The channel closes here: the loop ends in its next wait.
+            Ok(install)
+        });
+        let mut issuer = FakeIssuer::answering([Ok(next.issued())]);
+        let started = std::time::Instant::now();
+        let (delays, logs) = drive_channel(acme_end, &mut issuer, dir.path(), cert.at(1))?;
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(delays, vec![CHECK_INTERVAL, CHECK_INTERVAL]);
+        assert_eq!(issuer.calls, 1);
+        let install = worker.join().map_err(|_| "worker thread panicked")??;
+        assert!(
+            matches!(install, AcmeMessage::Install { ref chain_pem, .. } if *chain_pem == next.chain_pem),
+            "{install:?}"
+        );
+        assert!(logs.contains("renewal requested by the worker"), "{logs}");
+        assert!(
+            logs.contains("the worker closed the acme channel"),
+            "{logs}"
+        );
+        assert!(!logs.contains("BEGIN"), "{logs}");
+        Ok(())
+    }
+
+    /// A message other than `RenewNow` during a wait ends the loop, and the
+    /// log says why.
+    #[test]
+    fn an_unexpected_message_during_a_wait_ends_the_loop_and_is_logged() -> R {
+        let cert = Cert::new(&["a.example"])?;
+        let dir = served_dir(&cert)?;
+        let (acme_end, mut worker_end) = Channel::pair()?;
+        worker_end.send(&WorkerMessage::Installed)?;
+        let mut issuer = FakeIssuer::default();
+        let (delays, logs) = drive_channel(acme_end, &mut issuer, dir.path(), cert.at(1))?;
+        assert_eq!(delays, vec![CHECK_INTERVAL]);
+        assert_eq!(issuer.calls, 0);
+        assert!(logs.contains("WARN"), "{logs}");
+        assert!(logs.contains("expected RenewNow"), "{logs}");
+        drop(worker_end);
         Ok(())
     }
 
