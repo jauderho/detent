@@ -159,6 +159,9 @@ dashboard-cert-expired = expired; replace this certificate.
 dashboard-cert-expiring-soon = expires within 30 days; plan renewal.
 dashboard-cert-half = half the certificate lifetime is used; renewal is scheduled.
 dashboard-cert-quarter = three quarters of the certificate lifetime is used; renew soon.
+cert-renew-panel = renewal
+cert-renew-now = renew now
+cert-renew-requested = renewal requested. The new certificate is installed when the CA issues it.
 dashboard-modules-panel = modules
 dashboard-modules-count = {$count ->
     [one] one module is compiled into this build.

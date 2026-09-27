@@ -4,6 +4,10 @@ A running handoff log, so another agent can pick the work up cold.
 [`PLAN.md`](PLAN.md) is the roadmap and does not change as work lands; **this
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
+## 2026-09-27 - OFFLOAD T3: renew-now button on the Certificates page
+
+`useRequestCertRenew` (`web/src/api/system.ts`) posts to `POST /api/v1/system/cert/renew` and invalidates the cert query on `202`. The Certificates page shows a "Renew now" panel gated on write scope (`useWriteGate`, disabled with reason otherwise, disabled while pending): success shows `cert-renew-requested`, errors show the localized server message (`web-cert-renew-not-acme`, `web-cert-renew-unavailable`) via `useApiErrorMessage`. Audit page needs no change: `audit-op-cert-renew` for the `cert_renew` op already exists and is tested. Tests cover read-only gating, 202 + refetch, 409, 503, and pending-disabled.
+
 ## 2026-09-27 - OFFLOAD T2: root-proof webadmin write-failure test
 
 `setup_with_force_reports_a_write_failure_as_a_credential_failure` swaps `users.json` for a symlink to a saved copy: `load` reads through the link, `create` reports `UserExists`, and `set_password`'s atomic write refuses the link (`AtomicError::Symlink`, never follows symlinks for any user including root). Keeps name, `Exit::Failed`, and the credential-failure note. Removed the §1.4 known-state sentence in the same commit.
