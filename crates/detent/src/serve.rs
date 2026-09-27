@@ -309,6 +309,20 @@ fn start_acme(
         .as_deref()
         .and_then(std::path::Path::parent)
         .unwrap_or(std::path::Path::new(""));
+    if let Err(err) = prepare_credentials_dir(credentials_dir, &settings.state_root) {
+        let runner_pid = runner.child_pid;
+        drop(runner);
+        reap_child(runner_pid);
+        renderer.line(
+            streams.notes,
+            MessageId::new("cli-serve-acme-credentials-dir"),
+            &[
+                ("path", &credentials_dir.display().to_string()),
+                ("reason", &err.to_string()),
+            ],
+        )?;
+        return Ok(Err(Exit::Failed));
+    }
     let hooks = hooks.with_acme(Policy::acme(credentials_dir));
     let runner_pid = runner.child_pid;
     let cert_dir = config.tls.cert_dir.clone();
@@ -332,6 +346,60 @@ fn start_acme(
             Ok(Err(exit_for_spawn(&err)))
         }
     }
+}
+
+/// Creates `dir`, the directory of `acme.credentials_path`, before the acme
+/// process forks. Landlock skips a path that does not exist, and the acme
+/// process may write nothing else, so it could not create the directory
+/// itself. Each missing level is made `0700`; each level made here and `dir`
+/// itself get the owner of `state_root` (the worker account, whose uid the
+/// acme process runs as), and `dir` gets mode `0700`.
+///
+/// This process is root and the state root belongs to the worker, so no step
+/// follows a symlink: the walk starts at `state_root` and opens each level
+/// with `O_NOFOLLOW | O_DIRECTORY`, and the owner and mode are set through
+/// the open descriptor.
+///
+/// # Errors
+///
+/// `InvalidInput` when `dir` is not under `state_root` (preflight refuses
+/// that first), and the I/O error of the first step that fails.
+#[cfg(all(feature = "web", feature = "acme-dns-providers"))]
+fn prepare_credentials_dir(
+    dir: &std::path::Path,
+    state_root: &std::path::Path,
+) -> std::io::Result<()> {
+    use rustix::fs::{CWD, Gid, Mode, OFlags, Uid, fchmod, fchown, fstat, mkdirat, openat};
+    use rustix::io::Errno;
+
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let private = Mode::from_bits_truncate(0o700);
+    let relative = std::path::absolute(dir)?
+        .strip_prefix(std::path::absolute(state_root)?)
+        .map(std::path::Path::to_path_buf)
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let mut level = openat(CWD, state_root, flags, Mode::empty())?;
+    let root = fstat(&level)?;
+    let owner = (
+        Some(Uid::from_raw(root.st_uid)),
+        Some(Gid::from_raw(root.st_gid)),
+    );
+    for part in relative.components() {
+        if !matches!(part, std::path::Component::Normal(_)) {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+        let created = match mkdirat(&level, part.as_os_str(), private) {
+            Err(Errno::EXIST) => false,
+            made => made.map(|()| true)?,
+        };
+        level = openat(&level, part.as_os_str(), flags, Mode::empty())?;
+        if created {
+            fchown(&level, owner.0, owner.1)?;
+        }
+    }
+    fchown(&level, owner.0, owner.1)?;
+    fchmod(&level, private)?;
+    Ok(())
 }
 
 /// Read this process's confinement (just installed by `spawn_pair`), note
@@ -2046,6 +2114,137 @@ mod web_tests {
             rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG).err(),
             Some(rustix::io::Errno::CHILD)
         );
+        Ok(())
+    }
+
+    /// Runs `start_acme` with `credentials_path` and a complete `[acme]`
+    /// table. Returns its outcome (the acme child already reaped) and the
+    /// notes.
+    #[cfg(feature = "acme-dns-providers")]
+    fn start_acme_with(
+        root: &std::path::Path,
+        credentials_path: std::path::PathBuf,
+    ) -> Result<(Result<(), Exit>, String), Box<dyn std::error::Error>> {
+        use detent_platform::sandbox::{Hooks as SandboxHooks, Policy};
+        let allow = Allowlist::from_modules(&[], &AllowConfig::with_state_root(root))?;
+        let hooks = SandboxHooks::new(Policy::monitor(&allow), Policy::worker(&allow));
+        let mut config = cheap_web_config(root);
+        config.acme = detent_web::AcmeConfig {
+            directory_url: Some("https://127.0.0.1:9/dir".to_owned()),
+            domains: vec!["box.example".to_owned()],
+            credentials_path: Some(credentials_path),
+            ..detent_web::AcmeConfig::default()
+        };
+        let provider = Box::new(detent_acme::CloudflareProvider::new(SECRET, ZONE_ID)?);
+        let messages = Messages::new(Some("en-US"));
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let mut input = std::io::empty();
+        let started = super::start_acme(
+            provider,
+            hooks,
+            idle_runner()?,
+            config,
+            &settings(root, root.join("detent.toml")),
+            &renderer(&messages),
+            &mut crate::run::Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        let outcome = match started {
+            Ok((_, acme, _, _)) => {
+                if let Some(acme) = acme {
+                    acme.channel.shutdown_write()?;
+                    acme.wait()?;
+                }
+                Ok(())
+            }
+            Err(exit) => Err(exit),
+        };
+        Ok((outcome, String::from_utf8(notes)?))
+    }
+
+    /// The acme process may write only the directory of
+    /// `acme.credentials_path`, and Landlock skips a path that does not
+    /// exist: `start_acme` creates it before the fork, each missing level
+    /// `0700` and owned by the state root's owner (the worker account).
+    #[cfg(feature = "acme-dns-providers")]
+    #[test]
+    fn start_acme_prepares_the_credentials_directory() -> R {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let dir = tempfile::TempDir::new()?;
+        let root = dir.path();
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o755))?;
+        let credentials = root.join("acme/keys");
+        let (_, notes) = start_acme_with(root, credentials.join("account.json"))?;
+        assert!(!notes.contains("could not be prepared"), "{notes}");
+        let owner = std::fs::metadata(root)?;
+        for made in [root.join("acme"), credentials.clone()] {
+            let meta = std::fs::symlink_metadata(&made)?;
+            assert!(meta.is_dir(), "{}", made.display());
+            assert_eq!(meta.mode() & 0o7777, 0o700, "{}", made.display());
+            assert_eq!((meta.uid(), meta.gid()), (owner.uid(), owner.gid()));
+        }
+        // An existing directory is tightened to 0700.
+        std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o755))?;
+        let (_, notes) = start_acme_with(root, credentials.join("account.json"))?;
+        assert!(!notes.contains("could not be prepared"), "{notes}");
+        assert_eq!(
+            std::fs::metadata(&credentials)?.mode() & 0o7777,
+            0o700,
+            "existing directory"
+        );
+        Ok(())
+    }
+
+    /// No step follows a symlink: a credentials directory (or a level above
+    /// it) that is a symlink is refused, nothing is forked, and the target
+    /// keeps its mode.
+    #[cfg(feature = "acme-dns-providers")]
+    #[test]
+    fn start_acme_refuses_a_symlinked_credentials_directory() -> R {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let dir = tempfile::TempDir::new()?;
+        let root = dir.path().join("root");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir(&root)?;
+        std::fs::create_dir(&elsewhere)?;
+        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o755))?;
+        std::os::unix::fs::symlink(&elsewhere, root.join("acme"))?;
+        for credentials in ["acme/account.json", "acme/keys/account.json"] {
+            let (outcome, notes) = start_acme_with(&root, root.join(credentials))?;
+            assert_eq!(outcome, Err(Exit::Failed), "{credentials}: {notes}");
+            assert!(notes.contains("could not be prepared"), "{notes}");
+            assert!(!notes.contains(SECRET), "{notes}");
+        }
+        assert_eq!(std::fs::metadata(&elsewhere)?.mode() & 0o7777, 0o755);
+        assert!(!elsewhere.join("keys").exists());
+        Ok(())
+    }
+
+    /// Preflight already refuses a credentials directory outside the state
+    /// root; the preparation refuses it again rather than create it.
+    #[cfg(feature = "acme-dns-providers")]
+    #[test]
+    fn preparing_the_credentials_directory_refuses_a_path_outside_the_state_root() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let root = dir.path().join("root");
+        std::fs::create_dir(&root)?;
+        let outside = dir.path().join("elsewhere");
+        for path in [outside.clone(), root.join("../elsewhere")] {
+            let err = super::prepare_credentials_dir(&path, &root)
+                .err()
+                .ok_or("an outside path was prepared")?;
+            assert_eq!(
+                err.kind(),
+                std::io::ErrorKind::InvalidInput,
+                "{}",
+                path.display()
+            );
+        }
+        assert!(!outside.exists());
         Ok(())
     }
 
