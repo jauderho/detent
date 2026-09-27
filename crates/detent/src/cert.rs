@@ -70,12 +70,12 @@ fn cert_status(
     let report = detent_web::api::system::cert_report_for_der(pair.cert_der());
     let not_after = detent_web::api::system::not_after_rfc3339(report.not_after_unix);
     // The warning's wire names (`half`, `quarter`) are interpolated verbatim,
-    // like every other enum wire name this CLI prints.
-    let warning = match report.expiry_warning {
-        Some(detent_ops::ExpiryWarning::Half) => "half",
-        Some(detent_ops::ExpiryWarning::Quarter) => "quarter",
-        None => "none",
-    };
+    // like every other enum wire name this CLI prints. No warning has its own
+    // message, so no English word is interpolated for it.
+    let warning = report.expiry_warning.map(|warning| match warning {
+        detent_ops::ExpiryWarning::Half => "half",
+        detent_ops::ExpiryWarning::Quarter => "quarter",
+    });
 
     if renderer.json {
         let text = serde_json::to_string_pretty(&serde_json::json!({
@@ -114,11 +114,21 @@ fn cert_status(
         )?,
     }
     match report.lifetime_used_percent {
-        Some(percent) => renderer.line(
-            streams.out,
-            MessageId::new("cli-cert-lifetime"),
-            &[("percent", &format!("{percent}%")), ("warning", warning)],
-        )?,
+        Some(percent) => {
+            let percent = format!("{percent}%");
+            match warning {
+                Some(warning) => renderer.line(
+                    streams.out,
+                    MessageId::new("cli-cert-lifetime"),
+                    &[("percent", &percent), ("warning", warning)],
+                )?,
+                None => renderer.line(
+                    streams.out,
+                    MessageId::new("cli-cert-lifetime-no-warning"),
+                    &[("percent", &percent)],
+                )?,
+            }
+        }
         None => renderer.line(
             streams.out,
             MessageId::new("cli-cert-lifetime-unknown"),
@@ -276,6 +286,7 @@ mod tests {
             let (exit, out, _) = run(&settings, &renderer(&messages, false))?;
             assert_eq!(exit, Exit::Ok, "{out}");
             assert!(out.contains("fingerprint"), "{out}");
+            assert!(out.contains("(no warning)"), "{out}");
             assert!(!out.contains("PRIVATE KEY"), "{out}");
 
             let (exit, out, _) = run(&settings, &renderer(&messages, true))?;
