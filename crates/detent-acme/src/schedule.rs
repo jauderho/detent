@@ -68,6 +68,33 @@ pub fn should_renew_in_window(
     }
 }
 
+/// The Unix-seconds instant a certificate valid `not_before`..`not_after`
+/// first becomes due: the start of `window` (the ARI suggested window) when
+/// one is given and it comes first, else two thirds of the lifetime — the
+/// same instant [`should_renew_in_window`] starts answering `true`.
+///
+/// `not_after <= not_before` is a broken lifetime ([`percent_used`]):
+/// already due, so this returns [`i64::MIN`], regardless of `window`.
+#[must_use]
+pub fn due_at(not_before: i64, not_after: i64, window: Option<(i64, i64)>) -> i64 {
+    if not_after <= not_before {
+        return i64::MIN;
+    }
+    // i128 math: i64 seconds × 66 cannot overflow it.
+    let lifetime = i128::from(not_after).saturating_sub(i128::from(not_before));
+    // ceil(66 % of the lifetime).
+    let two_thirds_offset = lifetime
+        .saturating_mul(66)
+        .saturating_add(99)
+        .saturating_div(100);
+    let two_thirds_offset = i64::try_from(two_thirds_offset).unwrap_or(i64::MAX);
+    let two_thirds = not_before.saturating_add(two_thirds_offset);
+    match window {
+        Some((start, _)) => start.min(two_thirds),
+        None => two_thirds,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,5 +151,34 @@ mod tests {
         // No window is the plain 66 % rule.
         assert!(!should_renew_in_window(NB, NA, NB + 60_000, None));
         assert!(should_renew_in_window(NB, NA, NB + 400_000, None));
+    }
+
+    #[test]
+    fn due_at_is_two_thirds_of_the_lifetime_without_a_window() {
+        // 66 % of 576_000 is exactly 380_160: no rounding to check here.
+        assert_eq!(due_at(NB, NA, None), NB + 380_160);
+        // A 300 s lifetime: ceil(66 % of 300) = 198.
+        assert_eq!(due_at(0, 300, None), 198);
+    }
+
+    #[test]
+    fn due_at_takes_the_sooner_of_the_window_and_two_thirds() {
+        // A window that starts before two thirds wins.
+        let early = Some((NB + 100_000, NB + 200_000));
+        assert_eq!(due_at(NB, NA, early), NB + 100_000);
+        // A window that starts after two thirds does not push it later.
+        let late = Some((NB + 400_000, NB + 500_000));
+        assert_eq!(due_at(NB, NA, late), NB + 380_160);
+    }
+
+    #[test]
+    fn due_at_of_a_broken_lifetime_is_always_due() {
+        assert_eq!(due_at(NA, NB, None), i64::MIN); // not_after < not_before
+        assert_eq!(due_at(NA, NA, None), i64::MIN); // not_after == not_before
+        // Even a window far in the future does not delay a broken lifetime.
+        assert_eq!(
+            due_at(NA, NB, Some((NA + 1_000_000, NA + 2_000_000))),
+            i64::MIN
+        );
     }
 }

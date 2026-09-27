@@ -4,7 +4,7 @@
 //!   acme process                               worker
 //!   ────────────                               ──────
 //!   acme_main ─▶ hello ─▶ run_loop             serve_installs
-//!                           │ every hour,          ▲
+//!                           │ at the next check,   ▲
 //!                           │ or at RenewNow ◀─────┼── (worker's renewer)
 //!                           ▼                      │
 //!                        renew_once ── Install ────┘ check_and_install
@@ -45,7 +45,8 @@ use rustls_pki_types::CertificateDer;
 use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 
-/// Time between two checks of the served certificate.
+/// The longest time between two checks of the served certificate. A
+/// certificate due sooner is checked at its due time instead ([`next_check`]).
 const CHECK_INTERVAL: Duration = Duration::from_hours(1);
 
 /// Wait before the first retry after a failure. Each further failure doubles
@@ -54,6 +55,12 @@ const FIRST_RETRY: Duration = Duration::from_secs(60);
 
 /// The longest wait between two attempts after failures.
 const MAX_RETRY: Duration = CHECK_INTERVAL;
+
+/// The floor under [`next_check`]'s next check, even for a certificate
+/// already due. It bounds the load on the CA and the worker when a due
+/// certificate's renewal keeps failing to install, and it matches
+/// [`FIRST_RETRY`].
+const MIN_CHECK_INTERVAL: Duration = FIRST_RETRY;
 
 /// The shortest time between two orders that a forced round (a `RenewNow`)
 /// starts. Let's Encrypt allows five duplicate certificates a week for the
@@ -125,6 +132,8 @@ impl Installer for AcmeClient {
 pub(crate) enum Outcome {
     /// A new certificate is issued and the worker serves it.
     Renewed {
+        /// The new leaf's start of validity, Unix seconds.
+        not_before: i64,
         /// The new leaf's end of validity, Unix seconds.
         not_after: i64,
     },
@@ -132,6 +141,12 @@ pub(crate) enum Outcome {
     NotDue {
         /// How much of its lifetime is used, in percent.
         used_percent: u8,
+        /// The served leaf's start of validity, Unix seconds.
+        not_before: i64,
+        /// The served leaf's end of validity, Unix seconds.
+        not_after: i64,
+        /// Its ARI suggested renewal window, when the CA gave one.
+        window: Option<(i64, i64)>,
     },
 }
 
@@ -142,6 +157,8 @@ pub(crate) enum Outcome {
 pub(crate) struct Held {
     chain_pem: String,
     key: KeyPem,
+    /// The leaf's start of validity, Unix seconds.
+    not_before: i64,
     /// The leaf's end of validity, Unix seconds.
     not_after: i64,
 }
@@ -307,6 +324,21 @@ fn forced_order_allowed(now: i64, last_order: Option<i64>) -> bool {
     false
 }
 
+/// The next check after a round at `now`, for the certificate valid
+/// `not_before`..`not_after` with ARI `window` (`None` when unknown): the
+/// earlier of [`CHECK_INTERVAL`] and the time until
+/// [`detent_acme::due_at`] says it is due, never under
+/// [`MIN_CHECK_INTERVAL`]. A certificate already due, or one whose lifetime
+/// does not parse (`not_after <= not_before`), gets the floor.
+fn next_check(now: i64, not_before: i64, not_after: i64, window: Option<(i64, i64)>) -> Duration {
+    let due = detent_acme::due_at(not_before, not_after, window);
+    let until_due = due.saturating_sub(now).max(0);
+    let cap = i64::try_from(CHECK_INTERVAL.as_secs()).unwrap_or(i64::MAX);
+    let floor = i64::try_from(MIN_CHECK_INTERVAL.as_secs()).unwrap_or(0);
+    let secs = until_due.min(cap).max(floor);
+    Duration::from_secs(u64::try_from(secs).unwrap_or(MIN_CHECK_INTERVAL.as_secs()))
+}
+
 /// One renewal check at `now`.
 ///
 /// `served` is the stored ACME pair; `None` means the worker still serves
@@ -344,7 +376,12 @@ pub(crate) async fn renew_once(
             if !(force && forced_order_allowed(now, *last_order)) {
                 let window = issuer.renewal_window(pair.cert_der()).await;
                 if !detent_acme::should_renew_in_window(not_before, not_after, now, window) {
-                    return Ok(Outcome::NotDue { used_percent });
+                    return Ok(Outcome::NotDue {
+                        used_percent,
+                        not_before,
+                        not_after,
+                        window,
+                    });
                 }
             }
         } else {
@@ -353,12 +390,13 @@ pub(crate) async fn renew_once(
     }
     let Issued { chain_pem, key_pem } = issuer.issue().await.map_err(RenewError::Issue)?;
     *last_order = Some(now);
-    let (_, not_after) =
+    let (not_before, not_after) =
         detent_acme::leaf_validity_pem(&chain_pem).map_err(|_| RenewError::Chain)?;
     install(
         Held {
             chain_pem,
             key: KeyPem::new(key_pem),
+            not_before,
             not_after,
         },
         installer,
@@ -374,6 +412,7 @@ fn install(
 ) -> Result<Outcome, RenewError> {
     match installer.install(pair.chain_pem.clone(), pair.key.clone()) {
         Ok(()) => Ok(Outcome::Renewed {
+            not_before: pair.not_before,
             not_after: pair.not_after,
         }),
         Err(err) => {
@@ -417,7 +456,34 @@ async fn round(
     .await
 }
 
-/// The renewal loop: one round at once, then one every hour.
+/// The delay before the next round after a successful one at `now`: logs a
+/// renewal, then [`next_check`] over whichever certificate is now served (the
+/// new one for [`Outcome::Renewed`], with no known ARI window yet; the served
+/// one for [`Outcome::NotDue`], with its window).
+fn success_delay(now: i64, outcome: Outcome) -> Duration {
+    let (not_before, not_after, window) = match outcome {
+        Outcome::Renewed {
+            not_before,
+            not_after,
+        } => {
+            tracing::info!(not_after, "the worker serves a new ACME certificate");
+            (not_before, not_after, None)
+        }
+        Outcome::NotDue {
+            not_before,
+            not_after,
+            window,
+            ..
+        } => (not_before, not_after, window),
+    };
+    let delay = next_check(now, not_before, not_after, window);
+    tracing::debug!(next_check_secs = delay.as_secs(), "next renewal check");
+    delay
+}
+
+/// The renewal loop: one round at once, then one at each next check
+/// ([`next_check`]) — the earlier of [`CHECK_INTERVAL`] and the served
+/// certificate's due time, never sooner than [`MIN_CHECK_INTERVAL`].
 ///
 /// After a failure the next round comes after [`FIRST_RETRY`], doubled for
 /// each further failure up to [`MAX_RETRY`]; a success resets it. After a
@@ -469,11 +535,8 @@ pub(crate) async fn run_loop<F>(
         let mut in_backoff = false;
         let delay = match result {
             Ok(outcome) => {
-                if let Outcome::Renewed { not_after } = outcome {
-                    tracing::info!(not_after, "the worker serves a new ACME certificate");
-                }
                 retry = FIRST_RETRY;
-                CHECK_INTERVAL
+                success_delay(started_at, outcome)
             }
             Err(RenewError::Install(AcmeChannelError::Channel(ChannelError::Closed))) => {
                 tracing::info!("the worker closed the acme channel");
@@ -773,11 +836,53 @@ mod tests {
 
     use super::{
         AcmeIssuer, CHECK_INTERVAL, FIRST_RETRY, Held, Installer, Issuer, MAX_RETRY,
-        MIN_FORCED_INTERVAL, Outcome, RenewError, acme_main, check_and_install, renew_once, round,
-        run_loop, serve_installs, spawn_installs, wait_or_peer,
+        MIN_CHECK_INTERVAL, MIN_FORCED_INTERVAL, Outcome, RenewError, acme_main, check_and_install,
+        next_check, renew_once, round, run_loop, serve_installs, spawn_installs, wait_or_peer,
     };
 
     type R = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn next_check_is_capped_at_check_interval_for_a_long_lived_certificate() {
+        // A 90-day certificate at 10 %: two thirds is days away, so the next
+        // check is the cap, not the due time.
+        let lifetime = 90 * 24 * 3600;
+        let not_before = 0;
+        let not_after = lifetime;
+        let now = lifetime / 10;
+        assert_eq!(next_check(now, not_before, not_after, None), CHECK_INTERVAL);
+    }
+
+    #[test]
+    fn next_check_follows_the_due_time_of_a_short_lived_certificate() {
+        // A 5-minute certificate just issued: due at two thirds, 198 s in
+        // (ceil(66 % of 300 s)), well under the hour cap and the floor.
+        assert_eq!(next_check(0, 0, 300, None), Duration::from_secs(198));
+    }
+
+    #[test]
+    fn next_check_never_goes_under_the_floor() {
+        // A certificate already past its due point.
+        assert_eq!(next_check(1_000, 0, 300, None), MIN_CHECK_INTERVAL);
+        // A broken lifetime is always due.
+        assert_eq!(next_check(0, 300, 0, None), MIN_CHECK_INTERVAL);
+    }
+
+    #[test]
+    fn next_check_follows_an_ari_window() {
+        // A window starting in 10 minutes, well inside a long lifetime.
+        let window = Some((600, 100_000));
+        assert_eq!(
+            next_check(0, 0, 90 * 24 * 3600, window),
+            Duration::from_secs(600)
+        );
+        // A window that has already started: the floor.
+        let started = Some((-10, 100_000));
+        assert_eq!(
+            next_check(0, 0, 90 * 24 * 3600, started),
+            MIN_CHECK_INTERVAL
+        );
+    }
 
     /// A stand-in secret: low entropy on purpose (CI runs gitleaks).
     const SECRET: &str = "not-a-real-token";
@@ -810,6 +915,30 @@ mod tests {
             )?;
             params.not_before = rcgen::date_time_ymd(from.0, from.1, from.2);
             params.not_after = rcgen::date_time_ymd(to.0, to.1, to.2);
+            let chain_pem = params.self_signed(&key)?.pem();
+            let (not_before, not_after) = detent_acme::leaf_validity_pem(&chain_pem)?;
+            Ok(Self {
+                chain_pem,
+                key_pem: key.serialize_pem(),
+                not_before,
+                not_after,
+            })
+        }
+
+        /// Valid for 5 minutes from 2026-01-01: a CI-profile-like lifetime
+        /// (slice S2), short enough that its due time is well under
+        /// [`CHECK_INTERVAL`].
+        fn short_lived(names: &[&str]) -> Result<Self, Box<dyn std::error::Error>> {
+            let key = rcgen::KeyPair::generate()?;
+            let mut params = rcgen::CertificateParams::new(
+                names
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect::<Vec<_>>(),
+            )?;
+            let start = rcgen::date_time_ymd(2026, 1, 1);
+            params.not_before = start;
+            params.not_after = start.replace_minute(5)?;
             let chain_pem = params.self_signed(&key)?.pem();
             let (not_before, not_after) = detent_acme::leaf_validity_pem(&chain_pem)?;
             Ok(Self {
@@ -976,6 +1105,7 @@ mod tests {
         assert_eq!(
             outcome.ok(),
             Some(Outcome::Renewed {
+                not_before: cert.not_before,
                 not_after: cert.not_after
             })
         );
@@ -998,7 +1128,15 @@ mod tests {
             &mut None,
             &mut None,
         ))?;
-        assert_eq!(outcome.ok(), Some(Outcome::NotDue { used_percent: 1 }));
+        assert_eq!(
+            outcome.ok(),
+            Some(Outcome::NotDue {
+                used_percent: 1,
+                not_before: cert.not_before,
+                not_after: cert.not_after,
+                window: None,
+            })
+        );
         assert_eq!(issuer.calls, 0);
         assert!(installer.installed.is_empty());
         Ok(())
@@ -1023,6 +1161,7 @@ mod tests {
         assert_eq!(
             outcome.ok(),
             Some(Outcome::Renewed {
+                not_before: next.not_before,
                 not_after: next.not_after
             })
         );
@@ -1068,7 +1207,15 @@ mod tests {
             &mut None,
             &mut None,
         ))?;
-        assert_eq!(outcome.ok(), Some(Outcome::NotDue { used_percent: 10 }));
+        assert_eq!(
+            outcome.ok(),
+            Some(Outcome::NotDue {
+                used_percent: 10,
+                not_before: cert.not_before,
+                not_after: cert.not_after,
+                window: Some((cert.at(20), cert.at(30))),
+            })
+        );
         Ok(())
     }
 
@@ -1243,6 +1390,38 @@ mod tests {
         // The loop stopped at the closed channel: nothing is left to issue.
         assert_eq!(issuer.calls, 11);
         assert!(issuer.results.is_empty());
+        Ok(())
+    }
+
+    /// A short-lived certificate (slice S2's target) is checked near its own
+    /// due time, not after the full hour: the bootstrap round issues it, and
+    /// the next sleep is its two-thirds point (198 s of a 300 s lifetime),
+    /// not [`CHECK_INTERVAL`].
+    #[test]
+    fn a_short_lived_certificate_is_rechecked_near_its_due_time() -> R {
+        let cert = Cert::short_lived(&["a.example"])?;
+        let dir = tempfile::TempDir::new()?;
+        let mut issuer = FakeIssuer::answering([Ok(cert.issued())]);
+        let mut installer = FakeInstaller::default();
+        let mut delays = Vec::new();
+        let (ended, _logs) = capture(|| {
+            block_on(run_loop(
+                &mut issuer,
+                &mut installer,
+                dir.path(),
+                || cert.not_before,
+                |delay| {
+                    delays.push(delay);
+                    // Breaks at once: `next_request` then sees the default
+                    // `FakeInstaller`'s empty queue as a closed channel, so
+                    // the loop ends after this one round instead of reissuing
+                    // (the fake install never writes `cert_dir`).
+                    std::future::ready(ControlFlow::Break(()))
+                },
+            ))
+        });
+        ended?;
+        assert_eq!(delays, vec![Duration::from_secs(198)]);
         Ok(())
     }
 
@@ -1616,6 +1795,7 @@ mod tests {
         assert_eq!(
             outcome.ok(),
             Some(Outcome::Renewed {
+                not_before: cert.not_before,
                 not_after: cert.not_after
             })
         );
@@ -1647,7 +1827,15 @@ mod tests {
                 &mut last_order,
             ))
         });
-        assert_eq!(outcome?.ok(), Some(Outcome::NotDue { used_percent: 1 }));
+        assert_eq!(
+            outcome?.ok(),
+            Some(Outcome::NotDue {
+                used_percent: 1,
+                not_before: cert.not_before,
+                not_after: cert.not_after,
+                window: None,
+            })
+        );
         assert_eq!(issuer.calls, 0);
         assert!(installer.installed.is_empty());
         assert!(logs.contains("too soon after the last order"), "{logs}");
@@ -1678,6 +1866,7 @@ mod tests {
         assert_eq!(
             outcome.ok(),
             Some(Outcome::Renewed {
+                not_before: next.not_before,
                 not_after: next.not_after
             })
         );
@@ -1709,6 +1898,7 @@ mod tests {
         assert_eq!(
             outcome.ok(),
             Some(Outcome::Renewed {
+                not_before: next.not_before,
                 not_after: next.not_after
             })
         );
@@ -1728,6 +1918,7 @@ mod tests {
         let mut held = Some(Held {
             chain_pem: cert.chain_pem.clone(),
             key: KeyPem::new(cert.key_pem.clone()),
+            not_before: cert.not_before,
             not_after: cert.not_after,
         });
         let now = cert.at(1);
@@ -1744,6 +1935,7 @@ mod tests {
         assert_eq!(
             outcome.ok(),
             Some(Outcome::Renewed {
+                not_before: cert.not_before,
                 not_after: cert.not_after
             })
         );

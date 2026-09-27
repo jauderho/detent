@@ -43,7 +43,9 @@ pub use order::{
 pub use providers::fuzz_provider_response;
 #[cfg(any(feature = "dns-providers", feature = "fuzzing"))]
 pub use providers::{AcmeDnsProvider, CloudflareProvider, DeSecProvider, Rfc2136Provider};
-pub use schedule::{Warning, percent_used, should_renew, should_renew_in_window, warning_for};
+pub use schedule::{
+    Warning, due_at, percent_used, should_renew, should_renew_in_window, warning_for,
+};
 
 /// Mode of the challenge files and the state directory holding them:
 /// readable only by the account that runs the worker.
