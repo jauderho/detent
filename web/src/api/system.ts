@@ -6,8 +6,8 @@
  * host itself changes — so they share this file rather than each getting one.
  */
 
-import type { UseQueryResult } from '@tanstack/react-query'
-import { useQuery } from '@tanstack/react-query'
+import type { UseMutationResult, UseQueryResult } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useApiClient } from './ApiProvider'
 import type { ApiClient, ApiResult } from './client'
 import { type ApiRequestError, unwrap } from './query'
@@ -67,6 +67,13 @@ export function fetchAudit(
   })
 }
 
+export type RenewRequested = components['schemas']['RenewRequested']
+
+/** `POST /api/v1/system/cert/renew`. Needs `write`. */
+export function requestCertRenew(client: ApiClient): Promise<ApiResult<RenewRequested>> {
+  return client.post('/api/v1/system/cert/renew', {})
+}
+
 // ── hooks ───────────────────────────────────────────────────────────────────
 
 export function useHostProfile(): UseQueryResult<HostReport, ApiRequestError> {
@@ -103,5 +110,21 @@ export function useAudit(query: AuditQuery = {}): UseQueryResult<AuditRecord[], 
   return useQuery({
     queryKey: auditQueryKey(query),
     queryFn: ({ signal }) => unwrap(fetchAudit(client, query, signal)),
+  })
+}
+
+/**
+ * Ask the ACME client to renew now. `202` means the request was sent, not
+ * that a certificate was issued — the cert query is invalidated so the page
+ * shows the new certificate once the worker installs it.
+ */
+export function useRequestCertRenew(): UseMutationResult<RenewRequested, ApiRequestError, void> {
+  const client = useApiClient()
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => unwrap(requestCertRenew(client)),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: CERT_QUERY_KEY })
+    },
   })
 }
