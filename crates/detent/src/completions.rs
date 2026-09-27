@@ -193,7 +193,7 @@ mod tests {
         let command = crate::cli::Cli::command();
         let table = table(&command);
         let paths: Vec<&str> = table.iter().map(|(path, _)| path.as_str()).collect();
-        let mut expected = vec![
+        let expected = vec![
             "detent",
             "detent config",
             "detent config apply",
@@ -203,9 +203,9 @@ mod tests {
             "detent completions",
             "detent host",
             "detent audit",
+            #[cfg(feature = "update")]
+            "detent update",
         ];
-        #[cfg(feature = "update")]
-        expected.push("detent update");
         for expected in expected {
             assert!(
                 paths.contains(&expected),
@@ -224,9 +224,16 @@ mod tests {
     fn every_shell_script_mentions_every_top_level_command() -> R {
         for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
             let text = script(shell)?;
-            let mut commands = vec!["serve", "config", "doctor", "completions", "host", "audit"];
-            #[cfg(feature = "update")]
-            commands.push("update");
+            let commands = [
+                "serve",
+                "config",
+                "doctor",
+                "completions",
+                "host",
+                "audit",
+                #[cfg(feature = "update")]
+                "update",
+            ];
             for command in commands {
                 assert!(text.contains(command), "{shell:?} omits {command}");
             }
