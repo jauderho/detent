@@ -105,10 +105,22 @@ privilege.
   the full `detent_web::Config` first. The worker answers on a thread it
   starts once its `CertStore` exists (`spawn_installs`); it keeps serving
   if that thread ends.
+- Renew now: `spawn_installs` splits the worker's end once (`acme_link`).
+  The `AcmeServer` half goes to the install thread; the `AcmeRenewer` half
+  goes into the web state (`WorkerRenewer`, `detent_web::CertRenewer`).
+  `POST /api/v1/system/cert/renew` (write scope, CSRF, `Operation::CertRenew`,
+  one `cert_renew_requested` auth-log record) sends `RenewNow` and answers
+  `202`; `409` without an acme process, `503` when the channel is closed.
+  The acme process reads the request when its wait between rounds sees the
+  channel readable (`next_request`), or records it during `Hello` or an
+  install (`take_pending_renew`); either way the next round starts at once
+  and renews also a certificate that is not due (`run_loop`,
+  `renew_once(force)`). A held pair is still installed first. Any other
+  message during the wait ends the loop, with a warning.
 - Shutdown order: the worker exits (SIGTERM/SIGINT) and the monitor reaps
   it; the monitor drops the runner channel and reaps the runner; the acme
   process sees its channel readable during its wait between rounds
-  (`wait_or_peer`), ends with status 0, and the monitor reaps it last. The
+  (`wait_or_peer`), reads EOF, ends with status 0, and the monitor reaps it last. The
   monitor has no `CAP_KILL`: it can only wait. During a round the acme
   process ends at its next install or wait, so the last reap can take as
   long as one order.

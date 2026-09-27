@@ -1063,9 +1063,11 @@ fn prepare_worker(
 /// listener — everything between the operations engine being ready and the
 /// server being ready to [`serve`](detent_web::Server::serve).
 ///
-/// With `config.acme`, the worker's end of the acme channel, it starts the
-/// thread that installs each certificate the acme process sends into the
-/// store ([`crate::acme::spawn_installs`]) once the store exists.
+/// With `config.acme`, the worker's end of the acme channel, it splits the
+/// channel and starts the thread that installs each certificate the acme
+/// process sends into the store ([`crate::acme::spawn_installs`]) once the
+/// store exists. The other half goes into the web state, for
+/// `POST /api/v1/system/cert/renew`.
 ///
 /// `None` on any failure; the caller has already been told why through
 /// `renderer`.
@@ -1127,16 +1129,16 @@ async fn bind_web_server(
     };
     let store = std::sync::Arc::new(store);
     #[cfg(feature = "acme-dns-providers")]
-    if let Some(channel) = acme
-        && let Err(err) = crate::acme::spawn_installs(
+    let renewer = acme.and_then(|channel| {
+        crate::acme::spawn_installs(
             channel,
             config.acme.domains.clone(),
             config.tls.cert_dir.clone(),
             std::sync::Arc::clone(&store),
         )
-    {
-        tracing::warn!(reason = %err, "the worker cannot start its acme thread");
-    }
+        .inspect_err(|err| tracing::warn!(reason = %err, "the worker cannot start its acme thread"))
+        .ok()
+    });
     #[cfg(not(feature = "acme-dns-providers"))]
     drop(acme);
     let tls_config = match detent_web::server_config_from_store(
@@ -1159,6 +1161,11 @@ async fn bind_web_server(
         std::sync::Arc::clone(&store),
         state_root,
     );
+    #[cfg(feature = "acme-dns-providers")]
+    let state = match renewer {
+        Some((_thread, renewer)) => state.with_cert_renewer(std::sync::Arc::new(renewer)),
+        None => state,
+    };
     let bind_config = std::sync::Arc::clone(&state.config);
     let router = detent_web::router(state);
 
