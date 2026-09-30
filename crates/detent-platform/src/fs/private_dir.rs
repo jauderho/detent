@@ -58,10 +58,14 @@ pub fn ensure_private(dir: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::{PermissionsExt as _, chown, symlink};
+    use std::path::PathBuf;
 
     use super::*;
 
     type R = Result<(), Box<dyn std::error::Error>>;
+
+    /// The uid of `nobody`, a user that is not the test user.
+    const NOBODY_UID: u32 = 65534;
 
     fn mode_of(path: &Path) -> Result<u32, std::io::Error> {
         Ok(std::fs::metadata(path)?.permissions().mode() & 0o7777)
@@ -119,18 +123,21 @@ mod tests {
 
     #[test]
     fn a_directory_owned_by_another_user_is_refused_and_not_changed() -> R {
-        assert!(
-            geteuid().is_root(),
-            "this test needs root to give a directory to another user"
-        );
         let root = tempfile::tempdir()?;
-        let dir = root.path().join("audit");
-        std::fs::create_dir(&dir)?;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))?;
-        chown(&dir, Some(4242), None)?;
+        let dir = if geteuid().is_root() {
+            let dir = root.path().join("audit");
+            std::fs::create_dir(&dir)?;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))?;
+            chown(&dir, Some(NOBODY_UID), None)?;
+            dir
+        } else {
+            // Unprivileged: an existing directory that root owns.
+            PathBuf::from("/usr")
+        };
+        let mode_before = mode_of(&dir)?;
         let err = ensure_private(&dir).err().ok_or("no error")?;
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
-        assert_eq!(mode_of(&dir)?, 0o755);
+        assert_eq!(mode_of(&dir)?, mode_before);
         Ok(())
     }
 }

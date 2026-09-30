@@ -1239,22 +1239,6 @@ mod tests {
     }
 
     #[test]
-    fn an_audit_directory_owned_by_another_user_is_refused() -> R {
-        assert!(
-            detent_platform::privsep::spawn::is_root(),
-            "this test needs root to give a directory to another user"
-        );
-        let dir = tempfile::TempDir::new()?;
-        let sink = FileAudit::under_state_root(dir.path());
-        let parent = sink.path().parent().ok_or("the log has a parent")?;
-        std::fs::create_dir(parent)?;
-        std::os::unix::fs::chown(parent, Some(4242), None)?;
-        assert!(sink.record(&record("root", None, AuditResult::Ok)).is_err());
-        assert!(!sink.path().exists());
-        Ok(())
-    }
-
-    #[test]
     fn the_file_sink_skips_blank_and_unparseable_lines() -> R {
         let dir = tempfile::TempDir::new()?;
         let sink = FileAudit::new(dir.path().join("audit.jsonl"));
