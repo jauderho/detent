@@ -138,6 +138,7 @@ async fn serve(_caller: crate::auth::extract::Caller) -> impl axum::response::In
         (status = 200, description = "Signed in; the session cookie is set", body = crate::auth::session::SessionView),
         (status = 401, description = "The credentials were refused", body = crate::error::ErrorBody),
         (status = 429, description = "Too many attempts", body = crate::error::ErrorBody),
+        (status = 503, description = "The limiter is busy or the session table is full", body = crate::error::ErrorBody),
     ),
 )]
 #[allow(dead_code)]
@@ -359,6 +360,19 @@ mod tests {
         ] {
             assert!(paths.contains_key(path), "{path} is missing from the doc");
         }
+        Ok(())
+    }
+
+    /// Login answers `503` when the limiter is busy or the session table is
+    /// full, so the document must list it.
+    #[test]
+    fn login_documents_the_503_answer() -> R {
+        let json = serde_json::to_value(ApiDoc::openapi())?;
+        assert!(
+            json.pointer("/paths/~1api~1v1~1auth~1login/post/responses/503")
+                .is_some(),
+            "POST /api/v1/auth/login does not document 503"
+        );
         Ok(())
     }
 
