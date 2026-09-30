@@ -218,7 +218,9 @@ deferred by the owner.
 
 ### Track C — testhost (owner's local setup; parallel)
 
-1. **A1 (H6) — trace a confined `serve`, then shrink the monitor filter.**
+1. ~~**A1 (H6) — trace a confined `serve`, then shrink the monitor filter.**~~
+   Done 2026-09-30 (`PROGRESS.md`): 23 process-creation rows removed; found
+   A5 (AppArmor).
    Run `detent serve` under `strace -f` with one module that has a validator
    (chrony); drive one `plan` and one `systemctl restart` through the API.
    Confirm the validator and `systemctl` ran in the runner's tree with no

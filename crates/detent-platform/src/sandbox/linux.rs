@@ -656,28 +656,59 @@ mod tests {
         unsafe { syscall(nr, 0_i64, 0_i64, 0_i64, 0_i64) }
     }
 
-    /// STAGE3 H6 spec test: confine as the monitor (`Enforce`, the real
-    /// `confine`), then run `/bin/true` through the production runner.
-    /// The parent asserts exit 0. Fails while the table forbids anything
-    /// the spawn path needs; passes once it allows the full set.
-    #[test]
-    fn enforce_mode_monitor_can_spawn_a_validator() -> Result<(), Box<dyn std::error::Error>> {
-        use crate::service::exec::{ProcessRunner, RealProcessRunner};
-        use std::time::Duration;
-        in_forked_child(|| {
-            let dir =
-                std::env::temp_dir().join(format!("detent-sandbox-spawn-{}", std::process::id()));
-            let _ = std::fs::create_dir_all(&dir);
-            let Ok(allow) = fixture_allowlist(&dir) else {
-                return false;
-            };
-            if confine(Role::Monitor, &Policy::monitor(&allow)).is_err() {
-                return false;
+    /// Fork, confine the child as the monitor (`Enforce`, the real
+    /// `confine`), run `act`, and return the signal that ended the child
+    /// (`None` when it exited). Exit codes: 2 no allow-list, 3 `confine`
+    /// failed, 4 `act` returned.
+    fn confined_monitor_death(
+        tag: &str,
+        act: fn(),
+    ) -> Result<Option<i32>, Box<dyn std::error::Error>> {
+        // SAFETY: as `in_forked_child`.
+        #[allow(unsafe_code)]
+        let side = unsafe { fork::fork_process() }?;
+        match side {
+            fork::Side::Child => {
+                let dir = std::env::temp_dir().join(format!("{tag}{}", std::process::id()));
+                let _ = std::fs::create_dir_all(&dir);
+                let allow = fixture_allowlist(&dir).unwrap_or_else(|_| {
+                    fork::exit_immediately_unflushed(2);
+                });
+                if confine(Role::Monitor, &Policy::monitor(&allow)).is_err() {
+                    fork::exit_immediately_unflushed(3);
+                }
+                act();
+                fork::exit_immediately_unflushed(4);
             }
-            RealProcessRunner
-                .run("/bin/true", &[], Duration::from_secs(5))
-                .is_ok_and(|out| out.status == Some(0) && !out.timed_out)
-        })
+            fork::Side::Parent(pid) => {
+                let Some(pid) = rustix::process::Pid::from_raw(pid) else {
+                    return Err("fork returned an invalid pid".into());
+                };
+                let status =
+                    rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::empty())?;
+                Ok(status.and_then(|(_, s)| s.terminating_signal()))
+            }
+        }
+    }
+
+    /// Track C A1: validators and `systemctl` run in the runner, so the
+    /// monitor filter allows no process creation. Confine as the monitor,
+    /// then `exec` `/bin/true` in place (`CommandExt::exec`: no fork and no
+    /// pipes, unlike `spawn`). The monitor's default action is
+    /// `SCMP_ACT_KILL_PROCESS`, so the child must die by `SIGSYS` and never
+    /// reach its exit call.
+    #[test]
+    fn enforce_mode_monitor_dies_by_sigsys_on_execve() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::process::CommandExt;
+        let signal = confined_monitor_death("detent-sandbox-exec-", || {
+            let _ = std::process::Command::new("/bin/true").exec();
+        })?;
+        assert_eq!(
+            signal,
+            Some(rustix::process::Signal::SYS.as_raw()),
+            "monitor should have been killed by SIGSYS"
+        );
+        Ok(())
     }
 
     /// A validator that needs what real ones need: `uname`, the uid calls,
@@ -829,43 +860,20 @@ mod tests {
     #[test]
     fn enforce_mode_seccomp_kills_the_monitor_on_a_forbidden_syscall()
     -> Result<(), Box<dyn std::error::Error>> {
-        // SAFETY: as `in_forked_child`.
-        #[allow(unsafe_code)]
-        let side = unsafe { fork::fork_process() }?;
-        match side {
-            fork::Side::Child => {
-                let dir = std::env::temp_dir()
-                    .join(format!("detent-sandbox-kill-{}", std::process::id()));
-                let _ = std::fs::create_dir_all(&dir);
-                let allow = fixture_allowlist(&dir).unwrap_or_else(|_| {
-                    fork::exit_immediately_unflushed(2);
-                });
-                if confine(Role::Monitor, &Policy::monitor(&allow)).is_err() {
-                    fork::exit_immediately_unflushed(3);
-                }
-                // Not on the monitor's allow-list; the monitor's default
-                // action is `SCMP_ACT_KILL_PROCESS`, so this must never
-                // return.
-                #[allow(unsafe_code)]
-                let _ = unsafe { libc_ptrace_traceme() };
-                fork::exit_immediately_unflushed(4);
-            }
-            fork::Side::Parent(pid) => {
-                let Some(pid) = rustix::process::Pid::from_raw(pid) else {
-                    return Err("fork returned an invalid pid".into());
-                };
-                let status =
-                    rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::empty())?;
-                // `SCMP_ACT_KILL_PROCESS` terminates the process with
-                // `SIGSYS`; `exit_status()` is `None` for a signal death.
-                let signalled = status.is_some_and(|(_, s)| s.exit_status().is_none());
-                assert!(
-                    signalled,
-                    "monitor should have been killed by SIGSYS, status={status:?}"
-                );
-                Ok(())
-            }
-        }
+        let signal = confined_monitor_death("detent-sandbox-kill-", || {
+            // Not on the monitor's allow-list; the monitor's default
+            // action is `SCMP_ACT_KILL_PROCESS`, so this must never
+            // return.
+            #[allow(unsafe_code)]
+            let _ = unsafe { libc_ptrace_traceme() };
+        })?;
+        // `SCMP_ACT_KILL_PROCESS` terminates the process with `SIGSYS`.
+        assert_eq!(
+            signal,
+            Some(rustix::process::Signal::SYS.as_raw()),
+            "monitor should have been killed by SIGSYS"
+        );
+        Ok(())
     }
 
     /// C4 trace: the confined monitor of a real `detent serve` takes the
