@@ -62,6 +62,8 @@ mod i18n;
 #[cfg(feature = "mcp")]
 mod mcp;
 mod output;
+#[cfg(feature = "web")]
+mod renew;
 mod run;
 mod serve;
 #[cfg(test)]

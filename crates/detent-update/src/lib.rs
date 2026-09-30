@@ -38,6 +38,8 @@ pub mod health;
 #[cfg(feature = "client")]
 pub mod install;
 #[cfg(feature = "client")]
+pub mod listener;
+#[cfg(feature = "client")]
 pub mod policy;
 pub mod trust;
 #[cfg(feature = "client")]

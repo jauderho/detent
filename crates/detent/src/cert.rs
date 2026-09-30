@@ -1,4 +1,5 @@
-//! `detent cert status` (PLAN §2.6).
+//! `detent cert status` (PLAN §2.6), and the dispatch to `detent cert
+//! renew` ([`crate::renew`]).
 //!
 //! A read-only view of the served TLS certificate: what `serve` offers from
 //! `tls.cert_dir`, without contacting any server or CA. The report math is
@@ -19,12 +20,21 @@ use crate::run::{Settings, Streams, report_web_config_error};
 /// Whatever the streams report.
 pub fn status(
     action: &CertAction,
+    dryrun: bool,
     settings: &Settings,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
-    match *action {
+    match action {
         CertAction::Status => cert_status(settings, renderer, streams),
+        CertAction::Renew(args) => crate::renew::run(
+            args,
+            dryrun,
+            std::env::var_os(crate::renew::TOKEN_ENV),
+            settings,
+            renderer,
+            streams,
+        ),
     }
 }
 
@@ -160,7 +170,7 @@ fn cert_status(
 /// # Errors
 ///
 /// Whatever the streams report.
-fn cert_unreadable(
+pub(crate) fn cert_unreadable(
     cert_dir: &std::path::Path,
     reason: &str,
     renderer: &Renderer<'_>,
@@ -223,6 +233,7 @@ mod tests {
         let mut notes = Vec::new();
         let exit = status(
             &CertAction::Status,
+            false,
             settings,
             renderer,
             &mut Streams {
@@ -372,6 +383,41 @@ mod tests {
         assert_eq!(
             parsed.pointer("/source").and_then(|v| v.as_str()),
             Some("bootstrap")
+        );
+        Ok(())
+    }
+
+    /// `cert renew` goes through the same dispatch; its token file is read
+    /// before anything else, so a missing one fails without a server.
+    #[test]
+    fn renew_is_dispatched_to_the_renew_command() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let cfg = fixture_settings(&dir.path().join("certs"))?;
+        let args = crate::cli::RenewArgs {
+            token_file: Some(dir.path().join("no-token")),
+            url: None,
+            ca_file: None,
+        };
+        let messages = messages();
+        let mut input = std::io::empty();
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = status(
+            &CertAction::Renew(args),
+            false,
+            &cfg,
+            &renderer(&messages, false),
+            &mut Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        assert_eq!(exit, Exit::Failed);
+        let notes = String::from_utf8(notes)?;
+        assert!(
+            notes.contains("no-token") && notes.contains("does not exist"),
+            "{notes}"
         );
         Ok(())
     }

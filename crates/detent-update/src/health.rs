@@ -66,6 +66,18 @@ pub fn wait_healthy(
 
 /// A TLS configuration trusting exactly one certificate.
 fn client_config(pinned_cert_der: &[u8]) -> Result<Arc<rustls::ClientConfig>, UpdateError> {
+    pinned_client_config(pinned_cert_der).map_err(|reason| UpdateError::Unhealthy {
+        waited_secs: 0,
+        reason,
+    })
+}
+
+/// A TLS 1.3 configuration trusting exactly the certificate
+/// `pinned_cert_der`: the peer's end-entity certificate must equal it byte
+/// for byte. The error is the reason, for the caller's own error type.
+pub(crate) fn pinned_client_config(
+    pinned_cert_der: &[u8],
+) -> Result<Arc<rustls::ClientConfig>, String> {
     use rustls::pki_types::CertificateDer;
 
     // The pinned cert must be a parseable certificate; otherwise there is no
@@ -73,11 +85,9 @@ fn client_config(pinned_cert_der: &[u8]) -> Result<Arc<rustls::ClientConfig>, Up
     // previous `RootCertStore::add` path used.
     let cert = CertificateDer::from(pinned_cert_der.to_vec());
     if webpki::EndEntityCert::try_from(&cert).is_err() {
-        return Err(UpdateError::Unhealthy {
-            waited_secs: 0,
-            reason: "the serving certificate is not usable as a trust anchor: BadEncoding"
-                .to_owned(),
-        });
+        return Err(
+            "the serving certificate is not usable as a trust anchor: BadEncoding".to_owned(),
+        );
     }
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> = Arc::new(PinnedVerifier {
@@ -86,10 +96,7 @@ fn client_config(pinned_cert_der: &[u8]) -> Result<Arc<rustls::ClientConfig>, Up
     });
     let config = rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
         .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(|err| UpdateError::Unhealthy {
-            waited_secs: 0,
-            reason: format!("TLS 1.3 client config: {err}"),
-        })?
+        .map_err(|err| format!("TLS 1.3 client config: {err}"))?
         .dangerous()
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();

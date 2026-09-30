@@ -2837,6 +2837,363 @@ mod web_tests {
         );
         Ok(())
     }
+
+    // -----------------------------------------------------------------------
+    // `detent cert renew` against a real listener: the same router, TLS and
+    // auth state `bind_web_server` assembles, with a renewer that counts.
+    // -----------------------------------------------------------------------
+
+    /// A renewer that counts requests, and fails each one when `fail`.
+    #[derive(Debug, Default)]
+    struct CountingRenewer {
+        calls: std::sync::atomic::AtomicUsize,
+        fail: bool,
+    }
+
+    impl detent_web::CertRenewer for CountingRenewer {
+        fn renew_now(&self) -> Result<(), String> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail {
+                Err("the channel is closed".to_owned())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl CountingRenewer {
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// A running server with a bootstrap certificate for `box.example`, a
+    /// write and a read token, and a `detent.toml` that points at both.
+    struct RenewServer {
+        dir: tempfile::TempDir,
+        settings: Settings,
+        write: String,
+        read: String,
+        shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+        serving: Option<std::thread::JoinHandle<()>>,
+        engine: Option<(detent_web::EngineThread, std::thread::JoinHandle<()>)>,
+    }
+
+    impl RenewServer {
+        fn start(
+            renewer: Option<std::sync::Arc<CountingRenewer>>,
+        ) -> Result<Self, Box<dyn std::error::Error>> {
+            let dir = tempfile::TempDir::new()?;
+            let (handle, thread, monitor) = engine_fixture(dir.path())?;
+            let auth_state =
+                detent_web::AuthState::open(dir.path(), &detent_web::AuthConfig::default(), 4096)?;
+            let (write, _) =
+                auth_state
+                    .tokens
+                    .issue("renew-write", detent_web::authz::Scope::Write, None)?;
+            let (read, _) =
+                auth_state
+                    .tokens
+                    .issue("renew-read", detent_web::authz::Scope::Read, None)?;
+            let config = cheap_web_config(dir.path());
+            let pair = detent_web::load_or_bootstrap(
+                &config.tls.cert_dir,
+                &["box.example".to_owned()],
+                false,
+            )?;
+            let store = std::sync::Arc::new(detent_web::CertStore::new(&pair)?);
+            let tls = detent_web::server_config_from_store(
+                std::sync::Arc::clone(&store),
+                detent_web::tls::ALPN_H2_HTTP11,
+            )?;
+            let origin = detent_web::Origin::for_config(&config);
+            let state = detent_web::AppState::new(
+                handle,
+                auth_state,
+                config.clone(),
+                origin,
+                store,
+                dir.path().to_path_buf(),
+            );
+            let state = match renewer {
+                Some(renewer) => state.with_cert_renewer(renewer),
+                None => state,
+            };
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let server = runtime.block_on(detent_web::Server::bind(
+                &config,
+                tls,
+                detent_web::router(state),
+            ))?;
+            let addr = server.local_addr();
+            let (shutdown, stop) = tokio::sync::oneshot::channel::<()>();
+            let serving = std::thread::spawn(move || {
+                runtime.block_on(server.serve(async {
+                    let _ = stop.await;
+                }));
+            });
+            let config_path = dir.path().join("detent.toml");
+            std::fs::write(
+                &config_path,
+                format!(
+                    "[listen]\naddr = \"{addr}\"\n[tls]\ncert_dir = {:?}\n",
+                    config.tls.cert_dir.display().to_string()
+                ),
+            )?;
+            Ok(Self {
+                settings: settings(dir.path(), config_path),
+                dir,
+                write: write.expose().to_owned(),
+                read: read.expose().to_owned(),
+                shutdown: Some(shutdown),
+                serving: Some(serving),
+                engine: Some((thread, monitor)),
+            })
+        }
+
+        /// `detent cert renew` with `token` in `DETENT_TOKEN`, under a log
+        /// capture: exit, stdout, stderr and the log lines.
+        fn renew(
+            &self,
+            args: &crate::cli::RenewArgs,
+            token: &str,
+            json: bool,
+        ) -> Result<(Exit, String, String, String), Box<dyn std::error::Error>> {
+            let messages = Messages::new(Some("en-US"));
+            let renderer = Renderer {
+                messages: &messages,
+                json,
+                verbose: true,
+            };
+            let mut input = std::io::empty();
+            let mut out = Vec::new();
+            let mut notes = Vec::new();
+            let (exit, logs) = crate::tests_support::capture(|| {
+                crate::renew::run(
+                    args,
+                    false,
+                    Some(token.into()),
+                    &self.settings,
+                    &renderer,
+                    &mut crate::run::Streams {
+                        input: &mut input,
+                        out: &mut out,
+                        notes: &mut notes,
+                    },
+                )
+            });
+            Ok((
+                exit?,
+                String::from_utf8(out)?,
+                String::from_utf8(notes)?,
+                logs,
+            ))
+        }
+
+        fn stop(mut self) -> R {
+            if let Some(shutdown) = self.shutdown.take() {
+                let _ = shutdown.send(());
+            }
+            if let Some(serving) = self.serving.take() {
+                serving.join().map_err(|_| "the server thread panicked")?;
+            }
+            if let Some((thread, monitor)) = self.engine.take() {
+                thread.join().map_err(|err| format!("{err:?}"))?;
+                monitor.join().map_err(|_| "monitor thread panicked")?;
+            }
+            Ok(())
+        }
+    }
+
+    fn renew_args(
+        url: Option<&str>,
+        ca_file: Option<std::path::PathBuf>,
+    ) -> Result<crate::cli::RenewArgs, String> {
+        Ok(crate::cli::RenewArgs {
+            token_file: None,
+            url: url.map(crate::cli::parse_https_url).transpose()?,
+            ca_file,
+        })
+    }
+
+    /// Fails when any output or log line holds any form of `tokens`.
+    fn assert_no_token(what: &str, texts: &[&str], tokens: &[&str]) {
+        for text in texts {
+            crate::tests_support::assert_clean(what, text, tokens);
+        }
+    }
+
+    #[test]
+    fn cert_renew_is_accepted_for_a_write_token_and_refused_for_a_read_one() -> R {
+        let renewer = std::sync::Arc::new(CountingRenewer::default());
+        let server = RenewServer::start(Some(std::sync::Arc::clone(&renewer)))?;
+        let tokens = [server.write.as_str(), server.read.as_str()];
+
+        let (exit, out, notes, logs) =
+            server.renew(&renew_args(None, None)?, &server.write, false)?;
+        assert_eq!(exit, Exit::Ok, "{notes}");
+        assert!(out.contains("renewal requested"), "{out}");
+        assert_eq!(renewer.calls(), 1);
+        assert_no_token("a requested renewal", &[&out, &notes, &logs], &tokens);
+
+        let (exit, out, notes, logs) =
+            server.renew(&renew_args(None, None)?, &server.write, true)?;
+        assert_eq!(exit, Exit::Ok, "{notes}");
+        let parsed: serde_json::Value = serde_json::from_str(&out)?;
+        assert_eq!(
+            parsed.pointer("/outcome").and_then(|v| v.as_str()),
+            Some("requested")
+        );
+        assert_eq!(
+            parsed
+                .pointer("/status")
+                .and_then(serde_json::Value::as_u64),
+            Some(202)
+        );
+        assert_eq!(renewer.calls(), 2);
+        assert_no_token("a JSON renewal", &[&out, &notes, &logs], &tokens);
+
+        // A read token over a token file: the same answer the web button
+        // gets, and the renewer is not asked.
+        let token_file = server.dir.path().join("read-token");
+        std::fs::write(&token_file, format!("{}\n", server.read))?;
+        std::fs::set_permissions(
+            &token_file,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )?;
+        let mut args = renew_args(None, None)?;
+        args.token_file = Some(token_file);
+        let (exit, out, notes, logs) = server.renew(&args, &server.write, false)?;
+        assert_eq!(exit, Exit::Failed);
+        assert!(
+            notes.contains("HTTP 403") && notes.contains("write scope"),
+            "{notes}"
+        );
+        assert_no_token("a read token", &[&out, &notes, &logs], &tokens);
+
+        let unknown = "0".repeat(64);
+        let (exit, out, notes, logs) = server.renew(&renew_args(None, None)?, &unknown, false)?;
+        assert_eq!(exit, Exit::Failed);
+        assert!(notes.contains("HTTP 401"), "{notes}");
+        assert_no_token("an unknown token", &[&out, &notes, &logs], &[&unknown]);
+        assert_eq!(renewer.calls(), 2);
+
+        // Every answer after authorization is in the auth log, as for the
+        // button.
+        let audit =
+            std::fs::read_to_string(server.dir.path().join("audit").join("detent-auth.jsonl"))?;
+        assert_eq!(audit.matches("cert_renew_requested").count(), 2, "{audit}");
+        assert_no_token("the auth log", &[&audit], &tokens);
+        server.stop()
+    }
+
+    #[test]
+    fn cert_renew_reports_a_server_without_acme_and_a_closed_channel() -> R {
+        let server = RenewServer::start(None)?;
+        let (exit, out, notes, logs) =
+            server.renew(&renew_args(None, None)?, &server.write, false)?;
+        assert_eq!(exit, Exit::Failed);
+        assert!(notes.contains("no ACME process"), "{notes}");
+        assert_no_token("a 409", &[&out, &notes, &logs], &[&server.write]);
+        server.stop()?;
+
+        let renewer = std::sync::Arc::new(CountingRenewer {
+            fail: true,
+            ..CountingRenewer::default()
+        });
+        let server = RenewServer::start(Some(std::sync::Arc::clone(&renewer)))?;
+        let (exit, out, notes, logs) =
+            server.renew(&renew_args(None, None)?, &server.write, false)?;
+        assert_eq!(exit, Exit::Failed);
+        assert!(
+            notes.contains("HTTP 503: web-cert-renew-unavailable"),
+            "{notes}"
+        );
+        assert_eq!(renewer.calls(), 1);
+        assert_no_token("a 503", &[&out, &notes, &logs], &[&server.write]);
+        let (exit, out, _, _) = server.renew(&renew_args(None, None)?, &server.write, true)?;
+        assert_eq!(exit, Exit::Failed);
+        let parsed: serde_json::Value = serde_json::from_str(&out)?;
+        assert_eq!(
+            parsed.pointer("/message_id").and_then(|v| v.as_str()),
+            Some("web-cert-renew-unavailable")
+        );
+        server.stop()
+    }
+
+    /// PEM text of a DER certificate.
+    fn pem(der: &[u8]) -> String {
+        format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            crate::tests_support::base64(der, false)
+        )
+    }
+
+    #[test]
+    fn cert_renew_trusts_only_the_served_certificate_or_the_ca_file() -> R {
+        let renewer = std::sync::Arc::new(CountingRenewer::default());
+        let server = RenewServer::start(Some(std::sync::Arc::clone(&renewer)))?;
+        let pair = detent_web::serving_pair(&server.dir.path().join("certs"))?
+            .ok_or("the server stored no certificate")?;
+        let text = std::fs::read_to_string(&server.settings.config_path)?;
+        let addr = text
+            .lines()
+            .find_map(|line| line.strip_prefix("addr = \""))
+            .and_then(|rest| rest.strip_suffix('"'))
+            .ok_or("no listen address in detent.toml")?
+            .to_owned();
+        let url = format!("https://{addr}");
+
+        // `--url` with the served certificate as the CA file: the IP is
+        // verified against the certificate's IP name.
+        let ca = server.dir.path().join("served.pem");
+        std::fs::write(&ca, pem(pair.cert_der()))?;
+        let (exit, _, notes, _) =
+            server.renew(&renew_args(Some(&url), Some(ca))?, &server.write, false)?;
+        assert_eq!(exit, Exit::Ok, "{notes}");
+        assert_eq!(renewer.calls(), 1);
+
+        // Another certificate as the CA file: the handshake fails.
+        let other = detent_web::bootstrap_self_signed(&["box.example".to_owned()])?;
+        let wrong_ca = server.dir.path().join("other.pem");
+        std::fs::write(&wrong_ca, pem(other.cert_der()))?;
+        let (exit, out, notes, logs) = server.renew(
+            &renew_args(Some(&url), Some(wrong_ca))?,
+            &server.write,
+            false,
+        )?;
+        assert_eq!(exit, Exit::Failed);
+        assert!(
+            notes.contains(&addr) && notes.contains("TLS handshake failed"),
+            "{notes}"
+        );
+        assert_no_token("a wrong CA", &[&out, &notes, &logs], &[&server.write]);
+
+        // Another certificate in `tls.cert_dir`: the pin fails.
+        let other_dir = server.dir.path().join("other-certs");
+        detent_web::tls::store_bootstrap(&other_dir, &other)?;
+        let wrong_config = server.dir.path().join("wrong.toml");
+        std::fs::write(
+            &wrong_config,
+            format!(
+                "[listen]\naddr = \"{addr}\"\n[tls]\ncert_dir = {:?}\n",
+                other_dir.display().to_string()
+            ),
+        )?;
+        let wrong = RenewServer {
+            settings: settings(server.dir.path(), wrong_config),
+            ..server
+        };
+        let (exit, out, notes, logs) =
+            wrong.renew(&renew_args(None, None)?, &wrong.write, false)?;
+        assert_eq!(exit, Exit::Failed);
+        assert!(notes.contains("TLS handshake failed"), "{notes}");
+        assert_no_token("a wrong pin", &[&out, &notes, &logs], &[&wrong.write]);
+        assert_eq!(renewer.calls(), 1);
+        wrong.stop()
+    }
 }
 #[cfg(test)]
 mod dry_run_tests {

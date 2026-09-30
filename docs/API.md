@@ -155,6 +155,13 @@ authorization writes one `cert_renew_requested` record to the auth log
 (`detent-auth.jsonl`); a refusal for scope writes `scope_denied`. The MCP tool
 `cert_renew` still goes to the engine and answers `ops-unsupported`.
 
+`detent cert renew` sends this same request with a bearer token (from
+`--token-file` or `DETENT_TOKEN`; mint one with `detent token create <name>
+--write`). It trusts only the certificate the server serves, read from
+`tls.cert_dir`, or with `--url` a `--ca-file`; verification cannot be turned
+off. It gets the same scope check, audit record and one-forced-order-per-hour
+limit as the console's button.
+
 ## Design notes
 
 - `GET /api/v1/openapi.json` **needs a credential**, like everything else under
