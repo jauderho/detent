@@ -174,9 +174,14 @@ B3 (real Fulcio/Rekor trust roots) moved to Track E, item 2.
 ### Track B — close Phase 6 (any dev machine)
 
 1. ~~**Log-capture test**~~ Done 2026-09-30 (`PROGRESS.md`).
-2. **Order-flow seam** (`detent-acme` `order.rs`) so fixtures can drive the
-   order flow; raise the `detent-acme` coverage floor from 87 toward 100.
-   Then **M18**: a real test of `present_challenges`.
+2. ~~**Order-flow seam** and **M18**~~ — done 2026-09-30 (`PROGRESS.md`):
+   a scripted `instant_acme::HttpClient` drives `present_challenges`,
+   `wait_ready` and `finalize`; `detent-acme` floor 87 → 93.
+   Follow-up found there, not fixed: a wildcard order cannot issue.
+   `present_challenges` names the TXT record after the authorization's
+   display form, `_acme-challenge.*.example.com`, which `DnsRecord::new`
+   refuses (`InvalidFqdn`). RFC 8555 §8.4 wants
+   `_acme-challenge.example.com`. `serve` accepts wildcard names.
 3. **`detent cert renew`**: it must authenticate to the running server (a
    token, not a local bypass). Also wire `Operation::CertRenew` and
    `CertStatus` in the engine so the MCP tools stop answering `Unsupported`.
