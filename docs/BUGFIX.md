@@ -99,9 +99,11 @@ daemons and root sandbox runs.
   samba unbound nfs-kernel-server dnsmasq kea-dhcp4-server`. No compilers.
   Do not change network config, users, firewall, sysctls or kernel
   parameters. Start a daemon only for the test that needs it.
-- aarch64: no host. For a seccomp change, run `cargo check --target
-  aarch64-unknown-linux-gnu -p detent-platform`, pin the aarch64 numbers in a
-  unit test, and write "aarch64 runtime unverified".
+- aarch64: the owner's Apple silicon Mac with OrbStack runs a native
+  aarch64 Linux kernel (Landlock, seccomp, ptrace). Use a `--privileged`
+  container (Docker's own seccomp profile is then off) and cross-built
+  binaries. x86_64 containers there run under Rosetta: not valid for a
+  seccomp trace; use testhost.
 
 ### 2.4 Traps (do not repeat)
 - **`git commit` takes the whole index.** Run `git diff --cached --stat`
@@ -166,8 +168,13 @@ Follow-ups found while reviewing Track A (not yet scheduled):
 - **Legacy syscalls in `MONITOR`, not yet traced.** The confined monitor
   now uses only the `*at` forms on the request paths (`unlinkat`, `fchmod`,
   `renameat`; a read and write copy in place of `copy_file_range`; owner
-  decision 2026-09-30, no table change). Not traced: musl release binaries
-  (musl issues legacy forms for more calls) and aarch64 (no legacy forms).
+  decision 2026-09-30, no table change). Traced 2026-09-30 (`PROGRESS.md`):
+  aarch64 musl has no call outside `MONITOR`. **x86_64 musl (the release
+  target) kills the monitor with `SIGSYS`** in 10 of 13
+  `enforce_mode_monitor_*` tests: musl issues `stat` and `lstat`, and
+  `MONITOR` has only `newfstatat`/`statx`. `WORKER` has the same gap
+  (`stat`, `EPERM`; `enforce_mode_worker_can_tighten_an_audit_directory`
+  fails). Table change waits for the owner (§4, "Legacy stat forms").
 
 B3 (real Fulcio/Rekor trust roots) moved to Track E, item 2.
 
@@ -187,8 +194,12 @@ B3 (real Fulcio/Rekor trust roots) moved to Track E, item 2.
    logs a `tracing::warn!` at half and at a quarter of the lifetime to
    stderr, and systemd sends stderr to the journal (test
    `expiry_warnings_go_to_the_log_at_half_and_a_quarter`, `acme.rs`).
-6. **aarch64 syscall trace** of the acme process (C4 was x86_64 only). Needs
-   an aarch64 host or runner; until then keep "aarch64 runtime unverified".
+6. **aarch64 syscall trace** of the acme process — traced 2026-09-30
+   (`PROGRESS.md`): `scripts/acme-serve-check.sh`, unchanged, on the
+   aarch64 musl binary. All serve checks pass; the one call outside `ACME`
+   is `faccessat` (mimalloc's NUMA probe, the aarch64 form of the tolerated
+   `access`), refused with `EPERM`, so the script fails. Harness change
+   waits for the owner (§4, "Legacy stat forms").
 
 Follow-ups found in item 3 (not yet scheduled):
 - **`mcp` without `web` has no certificate hook.** `crates/detent/Cargo.toml`
@@ -304,6 +315,11 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   owner answer:
 - libbz2 on testhost: `libbz2-1.0` was downgraded to `1.0.8-6build2` by an earlier
   agent. — proposed: restore the distro version — owner answer:
+- Legacy stat forms: add `stat` and `lstat` (x86_64 only; aarch64 has
+  neither) to `MONITOR`, and `stat` to `WORKER`, so the x86_64 musl release
+  binary works; add `faccessat` to the acme `TOLERATED_EPERM` list in
+  `scripts/acme-serve-check.sh` (the aarch64 form of `access`). —
+  proposed: yes (same operation as the allowed `newfstatat`) — owner answer:
 - Track G: defer `hickory-client`, the TPM attestor and the LE staging run past
   v1, so Phase 6 can close? — proposed: defer the TPM attestor; keep the other
   two for v1 — owner answer:
