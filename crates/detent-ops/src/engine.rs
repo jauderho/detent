@@ -36,7 +36,7 @@ use detent_platform::fs::atomic::Sha256Digest;
 use detent_platform::host::Detected;
 use detent_platform::privsep::proto::{
     BackupId, BindingId, CheckId, CommitId, PendingService, ProtoError,
-    ServiceAction as WireServiceAction, TargetId,
+    ServiceAction as WireServiceAction, TargetId, WriteReceipt,
 };
 use detent_platform::privsep::worker::{Client, ClientError};
 use detent_platform::service::ServiceManager;
@@ -616,7 +616,8 @@ impl OpsEngine {
         //    before touching the service, including when the monitor made no
         //    backup so the no-backup refusal below can clear the window.
         let commit = if commit_required {
-            let commit = self.arm_commit(confirm, pending_service)?;
+            let commit =
+                self.arm_or_undo(confirm, pending_service, descriptor, &wiring, &receipt)?;
             hashes.commit_id = Some(commit.commit_id.get());
             self.pending_commit = Some(commit.clone());
             Some(commit)
@@ -652,6 +653,60 @@ impl OpsEngine {
             commit,
             checks,
         })
+    }
+
+    /// Arm commit-confirm for a write already on disk. When arming fails the new
+    /// contents sit on disk with no window to undo them, so put the previous
+    /// contents back (`written` is the write's receipt) and report both outcomes.
+    fn arm_or_undo(
+        &mut self,
+        confirm: Option<Duration>,
+        service: Option<PendingService>,
+        descriptor: &ModuleDescriptor,
+        wiring: &Wiring,
+        written: &WriteReceipt,
+    ) -> Result<PendingCommit, OpsError> {
+        match self.arm_commit(confirm, service) {
+            Ok(commit) => Ok(commit),
+            Err(arming) => {
+                let restored = self.undo_write(
+                    descriptor.id,
+                    wiring.target,
+                    written.prev_digest,
+                    written.backed_up,
+                );
+                Err(OpsError::ArmFailed {
+                    arming: Box::new(arming),
+                    restore_error: restored.err().map(Box::new),
+                })
+            }
+        }
+    }
+
+    /// Put back the contents a write just replaced, from the backup that write
+    /// made, for a write with no commit-confirm window to undo it. The backup is
+    /// the newest one of `target` whose digest is `prev`, so a concurrent older
+    /// backup is never picked. A write with no backup cannot be undone.
+    fn undo_write(
+        &mut self,
+        module: &str,
+        target: TargetId,
+        prev: Option<Sha256Digest>,
+        backed_up: bool,
+    ) -> Result<(), OpsError> {
+        let (true, Some(prev)) = (backed_up, prev) else {
+            return Err(OpsError::NoBackup);
+        };
+        let module = module_id(&self.client, find_module(&self.modules, module)?)?;
+        let backup = self
+            .client
+            .list_backups(module)
+            .map_err(map_client)?
+            .into_iter()
+            .find(|info| info.target == target && info.digest == prev)
+            .ok_or(OpsError::NoBackup)?;
+        self.client.restore(module, backup.id).map_err(map_client)?;
+        Ok(())
     }
 
     /// Roll back `commit`, if one was armed, and forget it once the monitor

@@ -40,7 +40,7 @@ use detent_platform::privsep::monitor::{
     CheckRunner, ExitReason, HookError, Hooks, Monitor, MonitorError, ServiceControl,
 };
 use detent_platform::privsep::proto::{
-    BackupId, CheckId, CheckOutcome, CommitId, ProtoError, ServiceOutcome,
+    BackupId, CheckId, CheckOutcome, CommitId, ProtoError, Request, Response, ServiceOutcome,
 };
 use detent_platform::privsep::transport::Channel;
 use detent_platform::privsep::worker::{Client, ClientError};
@@ -415,6 +415,11 @@ struct Setup {
     services: Services,
     /// Disable retained backups, leaving commit-confirm nothing to restore.
     disable_backups: bool,
+    /// Answer every `StartConfirmTimer` with a planted error, as a monitor
+    /// that cannot write its marker would.
+    fail_arm: bool,
+    /// Answer every `Restore` with a planted error.
+    fail_restore: bool,
 }
 
 /// Which [`ServiceManager`] the engine is built with.
@@ -524,6 +529,15 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
         monitor.serve(&mut channel)
     });
 
+    let worker_end = if setup.fail_arm || setup.fail_restore {
+        let (engine_end, proxy_end) = Channel::pair()?;
+        thread::spawn(move || {
+            proxy(proxy_end, worker_end, setup.fail_arm, setup.fail_restore);
+        });
+        engine_end
+    } else {
+        worker_end
+    };
     let mut client = Client::new(worker_end);
     client.hello()?;
 
@@ -566,6 +580,39 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
         authz,
         _dir: dir,
     })
+}
+
+/// Sit between the engine and the real monitor and forward every frame, except
+/// that `StartConfirmTimer` (with `fail_arm`) and `Restore` (with
+/// `fail_restore`) get a planted error instead of reaching the monitor. Ends
+/// when either side closes.
+fn proxy(mut engine: Channel, mut monitor: Channel, fail_arm: bool, fail_restore: bool) {
+    loop {
+        let request = match engine.poll_recv::<Request>() {
+            Ok(Some(request)) => request,
+            Ok(None) => continue,
+            Err(_) => return,
+        };
+        let planted = match request {
+            Request::StartConfirmTimer { .. } if fail_arm => Some("planted arming failure"),
+            Request::Restore { .. } if fail_restore => Some("planted restore failure"),
+            _ => None,
+        };
+        let response = if let Some(reason) = planted {
+            Response::Error(ProtoError::Io(reason.to_owned()))
+        } else {
+            if monitor.send(&request).is_err() {
+                return;
+            }
+            match monitor.recv::<Response>() {
+                Ok(response) => response,
+                Err(_) => return,
+            }
+        };
+        if engine.send(&response).is_err() {
+            return;
+        }
+    }
 }
 
 /// The id the registry advertises, which is `fake` unless the setup asked for
@@ -1615,6 +1662,75 @@ fn a_second_commit_confirm_apply_while_one_is_pending_writes_nothing() -> TestRe
     fx.run(Operation::RollbackCommit {
         commit_id: CommitId(1),
     })?;
+    fx.finish()
+}
+
+#[test]
+fn a_failed_arming_restores_the_previous_contents() -> TestResult {
+    let mut fx = harness(
+        b"v1\n",
+        Setup {
+            shape: Shape {
+                commit_confirm: true,
+                ..Shape::default()
+            },
+            fail_arm: true,
+            ..Setup::default()
+        },
+    )?;
+    let result = fx.run(Operation::Apply {
+        id: MODULE.to_owned(),
+        model: json!({"text": "v2\n"}),
+        expected_hash: None,
+        service_action: None,
+        confirm: Some(CONFIRM_WINDOW),
+    });
+    assert!(
+        matches!(
+            result,
+            Err(OpsError::ArmFailed {
+                restore_error: None,
+                ..
+            })
+        ),
+        "{result:?}"
+    );
+    assert_eq!(fx.contents()?, "v1\n");
+    assert!(fx.engine.pending_commit()?.is_none());
+    fx.finish()
+}
+
+#[test]
+fn a_failed_arming_reports_a_failed_restore_too() -> TestResult {
+    let mut fx = harness(
+        b"v1\n",
+        Setup {
+            shape: Shape {
+                commit_confirm: true,
+                ..Shape::default()
+            },
+            fail_arm: true,
+            fail_restore: true,
+            ..Setup::default()
+        },
+    )?;
+    let result = fx.run(Operation::Apply {
+        id: MODULE.to_owned(),
+        model: json!({"text": "v2\n"}),
+        expected_hash: None,
+        service_action: None,
+        confirm: Some(CONFIRM_WINDOW),
+    });
+    let Err(error @ OpsError::ArmFailed { .. }) = result else {
+        return Err(format!("expected ArmFailed, got {result:?}").into());
+    };
+    assert_eq!(error.message_id().as_str(), "ops-arm-failed-unrestored");
+    let text = error.to_string();
+    assert!(text.contains("planted arming failure"), "{text}");
+    assert!(text.contains("planted restore failure"), "{text}");
+    // The restore failed, so the new contents are still there: the error above
+    // is the only thing that tells the operator so.
+    assert_eq!(fx.contents()?, "v2\n");
     fx.finish()
 }
 

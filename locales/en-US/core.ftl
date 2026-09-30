@@ -250,6 +250,8 @@ ops-audit-unavailable = the audit log could not be written, so the operation was
 ops-unsupported = {$what} is not supported in this build.
 ops-commit-pending = another commit-confirm window is already pending.
 ops-no-backup = commit-confirm requires a retained backup; nothing was changed.
+ops-arm-failed-restored = commit-confirm could not be armed, so the change was undone; the previous contents are back.
+ops-arm-failed-unrestored = commit-confirm could not be armed and the change could NOT be undone; the new contents are still on disk. Restore the previous backup now.
 ops-target-missing = the managed file does not exist; create it (install its package or create it by hand), then try again.
 ops-denied = you are not permitted to do that.
 

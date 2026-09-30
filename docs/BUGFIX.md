@@ -148,11 +148,6 @@ Owner decisions that block or change items are in §4.
 
 In this order (highest risk first):
 
-1. **B7 (H2) — arming failure after the write.** `detent-ops/src/engine.rs`:
-   if arming the commit-confirm timer fails after `WriteTarget` succeeded,
-   nothing rolls the write back. Roll back (or arm before the write). Test: a
-   fake monitor fails `StartConfirmTimer` after a good write; the target is
-   restored and the error is reported.
 2. **B6 (H1) — the state lock fallback.** `privsep/monitor.rs` `lock_state`
    falls back to a `/dev/null` lock on `EACCES`, so two monitors share no
    mutual exclusion. Refuse to start with a clear error. Test: a lock file

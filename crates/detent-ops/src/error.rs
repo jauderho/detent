@@ -83,6 +83,20 @@ pub enum OpsError {
     /// A commit-confirm apply was refused because its write had no backup.
     #[error("commit-confirm requires a retained backup")]
     NoBackup,
+    /// The write succeeded but arming commit-confirm failed. The engine tried
+    /// to put the previous contents back before returning; `restore_error` is
+    /// `None` when that worked, and the reason it did not otherwise (the new
+    /// contents are then still on disk, with no window to undo them).
+    #[error(
+        "commit-confirm could not be armed ({arming}); {}",
+        restore_summary(.restore_error.as_deref())
+    )]
+    ArmFailed {
+        /// Why arming failed.
+        arming: Box<OpsError>,
+        /// Why the restore failed; `None` when the previous contents are back.
+        restore_error: Option<Box<OpsError>>,
+    },
     /// The managed file does not exist. Apply never creates a target; the
     /// operator creates it (with its package or by hand) first.
     #[error("the target file does not exist")]
@@ -120,9 +134,22 @@ impl OpsError {
             Self::AuditUnavailable(_) => MessageId::new("ops-audit-unavailable"),
             Self::CommitPending(_) => MessageId::new("ops-commit-pending"),
             Self::NoBackup => MessageId::new("ops-no-backup"),
+            Self::ArmFailed {
+                restore_error: None,
+                ..
+            } => MessageId::new("ops-arm-failed-restored"),
+            Self::ArmFailed { .. } => MessageId::new("ops-arm-failed-unrestored"),
             Self::TargetMissing => MessageId::new("ops-target-missing"),
             Self::Unsupported { .. } => MessageId::new("ops-unsupported"),
         }
+    }
+}
+
+/// The restore half of an [`OpsError::ArmFailed`] message.
+fn restore_summary(restore_error: Option<&OpsError>) -> String {
+    match restore_error {
+        None => "the previous contents were restored".to_owned(),
+        Some(err) => format!("the restore failed too ({err}); the new contents are still on disk"),
     }
 }
 
@@ -231,6 +258,31 @@ mod tests {
             assert_eq!(error.message_id().as_str(), id);
             assert!(!error.to_string().is_empty(), "{error:?} renders empty");
             assert!(!format!("{error:?}").is_empty());
+            assert!(
+                catalogue
+                    .lines()
+                    .any(|line| line.split('=').next().is_some_and(|k| k.trim() == id)),
+                "`{id}` has no entry in locales/en-US/core.ftl"
+            );
+        }
+    }
+
+    #[test]
+    fn arm_failed_has_a_message_id_and_display_text_for_each_restore_outcome() {
+        let catalogue = include_str!("../../../locales/en-US/core.ftl");
+        for (restore_error, id) in [
+            (None, "ops-arm-failed-restored"),
+            (
+                Some(Box::new(OpsError::NoBackup)),
+                "ops-arm-failed-unrestored",
+            ),
+        ] {
+            let error = OpsError::ArmFailed {
+                arming: Box::new(OpsError::CommitPending(CommitId(1))),
+                restore_error,
+            };
+            assert_eq!(error.message_id().as_str(), id);
+            assert!(error.to_string().contains("commit 1 is already pending"));
             assert!(
                 catalogue
                     .lines()
