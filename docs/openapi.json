@@ -111,6 +111,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "The limiter is busy or the session table is full",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
