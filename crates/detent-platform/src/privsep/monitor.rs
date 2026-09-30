@@ -41,7 +41,7 @@ use detent_core::descriptor::{
 use detent_core::module::DynModule;
 use serde::{Deserialize, Serialize};
 
-use super::allowlist::Allowlist;
+use super::allowlist::{Allowlist, CANDIDATE_PREFIX};
 use super::proto::{
     BackupId, BackupInfo, BindingId, CheckId, CheckOutcome, CommitId, IdKind, ModuleId,
     PendingService, ProtoError, Request, Response, ServiceAction, ServiceOutcome, TargetContents,
@@ -846,14 +846,13 @@ impl<'a> Monitor<'a> {
         if descriptor.checks.is_empty() {
             return Ok(());
         }
-        let dir = ensure_staging_dir(&self.staging_dir).map_err(Response::Error)?;
-        let (candidate, candidate_path) =
-            create_candidate(&dir, "detent-validate-").map_err(|err| {
-                Response::Error(ProtoError::Io(format!(
-                    "cannot create a candidate file: {}",
-                    err.kind()
-                )))
-            })?;
+        let dir = self.candidate_dir(module).map_err(Response::Error)?;
+        let (candidate, candidate_path) = create_candidate(&dir).map_err(|err| {
+            Response::Error(ProtoError::Io(format!(
+                "cannot create a candidate file: {}",
+                err.kind()
+            )))
+        })?;
         let _remove = RemoveOnDrop(&candidate_path);
         write_all_and_sync(&candidate, bytes).map_err(|err| {
             Response::Error(ProtoError::Io(format!(
@@ -913,15 +912,32 @@ impl<'a> Monitor<'a> {
         super::exec_deny::adds_exec_directive(module, previous, candidate)
     }
 
+    /// Where a candidate for `module`'s validators is written: beside the
+    /// module's primary target ([`Allowlist::candidate_dir`]), where the
+    /// distro's `AppArmor` profile for the validator allows it to read, or
+    /// monitor staging when the module has no file target. The directory
+    /// comes from the allow-list, never from the request. A target directory
+    /// that fails [`require_trusted_dir`] (owner root or the monitor's euid,
+    /// so capability-user mode works) is refused, with no fallback.
+    fn candidate_dir(&self, module: ModuleId) -> Result<PathBuf, ProtoError> {
+        match self.allow.candidate_dir(module, &self.host_profile) {
+            Some(dir) => {
+                require_trusted_dir(dir, "candidate directory", DirOwner::EuidOrRoot)?;
+                Ok(dir.to_path_buf())
+            }
+            None => ensure_staging_dir(&self.staging_dir),
+        }
+    }
+
     fn run_check(&self, id: CheckId, bytes: &[u8]) -> Response {
         let Some(entry) = self.allow.check(id) else {
             return unknown(IdKind::Check, u32::from(id.get()));
         };
-        let dir = match ensure_staging_dir(&self.staging_dir) {
+        let dir = match self.candidate_dir(entry.module) {
             Ok(dir) => dir,
             Err(err) => return Response::Error(err),
         };
-        let (candidate, candidate_path) = match create_candidate(&dir, "detent-candidate-") {
+        let (candidate, candidate_path) = match create_candidate(&dir) {
             Ok(created) => created,
             Err(err) => {
                 return Response::Error(ProtoError::Io(format!(
@@ -1498,7 +1514,6 @@ fn open_staged_input(state_root: &Path, name: &str) -> Result<std::fs::File, Pro
 /// the monitor's euid, with no group or other write bit. An existing
 /// directory that fails the check is refused, never repaired.
 pub(crate) fn ensure_staging_dir(monitor_staging_dir: &Path) -> Result<PathBuf, ProtoError> {
-    use rustix::fs::{FileType, Mode, OFlags, fstat};
     use std::os::unix::fs::DirBuilderExt as _;
     if let Some(parent) = monitor_staging_dir
         .parent()
@@ -1521,25 +1536,62 @@ pub(crate) fn ensure_staging_dir(monitor_staging_dir: &Path) -> Result<PathBuf, 
             )));
         }
     }
-    let untrusted = || ProtoError::Io("monitor staging directory is not trusted".to_owned());
-    let fd = rustix::fs::open(
+    require_trusted_dir(
         monitor_staging_dir,
+        "monitor staging directory",
+        DirOwner::Euid,
+    )?;
+    Ok(monitor_staging_dir.to_path_buf())
+}
+
+/// Which owners [`require_trusted_dir`] accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DirOwner {
+    /// Only this process's euid: a directory `detent` owns (staging).
+    Euid,
+    /// This process's euid or root: a target's directory, which root owns
+    /// even when the monitor runs as `detent` (capability-user mode).
+    EuidOrRoot,
+}
+
+impl DirOwner {
+    /// Whether a directory owned by `uid` is accepted from a process whose
+    /// effective uid is `euid`.
+    const fn accepts(self, uid: u32, euid: u32) -> bool {
+        match self {
+            Self::Euid => uid == euid,
+            Self::EuidOrRoot => uid == euid || uid == 0,
+        }
+    }
+}
+
+/// Require that `dir` is a real directory, not a symlink, owned as `owner`
+/// accepts (against [`process_euid`]), with no group or other write bit.
+/// `what` names it in the error.
+pub(crate) fn require_trusted_dir(
+    dir: &Path,
+    what: &str,
+    owner: DirOwner,
+) -> Result<(), ProtoError> {
+    use rustix::fs::{FileType, Mode, OFlags, fstat};
+    let untrusted = || ProtoError::Io(format!("{what} is not trusted"));
+    let fd = rustix::fs::open(
+        dir,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map_err(|err| match err {
         rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR => untrusted(),
-        err => ProtoError::Io(format!("open monitor staging directory: {err}")),
+        err => ProtoError::Io(format!("open {what}: {err}")),
     })?;
-    let stat = fstat(&fd)
-        .map_err(|err| ProtoError::Io(format!("stat monitor staging directory: {err}")))?;
+    let stat = fstat(&fd).map_err(|err| ProtoError::Io(format!("stat {what}: {err}")))?;
     if FileType::from_raw_mode(stat.st_mode) != FileType::Directory
-        || stat.st_uid != process_euid()
+        || !owner.accepts(stat.st_uid, process_euid())
         || stat.st_mode & 0o022 != 0
     {
         return Err(untrusted());
     }
-    Ok(monitor_staging_dir.to_path_buf())
+    Ok(())
 }
 
 /// Remove `path` with `unlinkat(2)`.
@@ -1594,12 +1646,12 @@ impl Drop for RemoveOnDrop<'_> {
     }
 }
 
-/// Create a candidate file in `dir` that `tempfile` will not remove: its own
-/// drop calls the legacy `unlink` (see [`unlink`]). The caller removes the
-/// returned path with [`RemoveOnDrop`].
-fn create_candidate(dir: &Path, prefix: &str) -> std::io::Result<(std::fs::File, PathBuf)> {
+/// Create a [`CANDIDATE_PREFIX`] file in `dir` (`O_EXCL`, `0600`) that
+/// `tempfile` will not remove: its own drop calls the legacy `unlink` (see
+/// [`unlink`]). The caller removes the returned path with [`RemoveOnDrop`].
+fn create_candidate(dir: &Path) -> std::io::Result<(std::fs::File, PathBuf)> {
     let (file, path) = tempfile::Builder::new()
-        .prefix(prefix)
+        .prefix(CANDIDATE_PREFIX)
         .disable_cleanup(true)
         .tempfile_in(dir)?
         .into_parts();
@@ -1966,10 +2018,10 @@ fn finish_send_error(err: ChannelError) -> Result<ExitReason, MonitorError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CheckRunner, ExitReason, HookError, Hooks, MAX_CONFIRM_TIMEOUT_S, MONITOR_LOCK, Monitor,
-        PENDING_COMMIT_MARKER, PREVIOUS_SUFFIX, PendingCommitMarker, STAGED_DIR, ServiceControl,
-        StateLock, finish_send_error, materialize_staged, read_staged_verified, staged_path,
-        swap_running_binary, write_temp_and_swap,
+        CheckRunner, DirOwner, ExitReason, HookError, Hooks, MAX_CONFIRM_TIMEOUT_S, MONITOR_LOCK,
+        Monitor, PENDING_COMMIT_MARKER, PREVIOUS_SUFFIX, PendingCommitMarker, STAGED_DIR,
+        ServiceControl, StateLock, finish_send_error, materialize_staged, read_staged_verified,
+        staged_path, swap_running_binary, write_temp_and_swap,
     };
     use crate::fs::atomic::{AtomicError, Sha256Digest};
     use crate::privsep::allowlist::{Allowlist, AllowlistError, Config};
@@ -2052,10 +2104,18 @@ mod tests {
         target_path: &Path,
         module_id: &'static str,
     ) -> &'static ModuleDescriptor {
+        descriptor_with_kind(target_path, module_id, TargetKind::File)
+    }
+
+    fn descriptor_with_kind(
+        target_path: &Path,
+        module_id: &'static str,
+        kind: TargetKind,
+    ) -> &'static ModuleDescriptor {
         let target_path = leak_str(target_path.display().to_string());
         let targets: &'static [Target] = leak(vec![Target {
             path: PathSpec::new(target_path),
-            kind: TargetKind::File,
+            kind,
             mode: 0o644,
             owner: Owner::Root,
             backend_detect: always,
@@ -2145,6 +2205,14 @@ mod tests {
     impl Fixture {
         fn allow(&self) -> Result<Allowlist, AllowlistError> {
             let module = descriptor(&self.target);
+            Allowlist::from_modules(&[module], &Config::with_state_root(&self.state_root))
+        }
+
+        /// The allow-list of a module whose only target is the drop-in
+        /// directory `conf.d`, so it has no file target to write beside.
+        fn allow_without_a_file_target(&self) -> Result<Allowlist, AllowlistError> {
+            let module =
+                descriptor_with_kind(&self.root.join("conf.d"), "fake", TargetKind::DropInDir);
             Allowlist::from_modules(&[module], &Config::with_state_root(&self.state_root))
         }
     }
@@ -2242,6 +2310,53 @@ mod tests {
         }
     }
 
+    /// Records each candidate's path and contents while the check runs.
+    #[derive(Default)]
+    struct RecordingChecks(std::sync::Mutex<Vec<(PathBuf, Vec<u8>)>>);
+    impl RecordingChecks {
+        fn seen(&self) -> Vec<(PathBuf, Vec<u8>)> {
+            self.0.lock().map(|seen| seen.clone()).unwrap_or_default()
+        }
+    }
+    impl CheckRunner for RecordingChecks {
+        fn run_check(
+            &self,
+            _check: &ExternalCheck,
+            candidate: &Path,
+        ) -> Result<CheckOutcome, HookError> {
+            let bytes =
+                std::fs::read(candidate).map_err(|err| HookError::Failed(err.to_string()))?;
+            self.0
+                .lock()
+                .map_err(|_| HookError::Failed("poisoned".to_owned()))?
+                .push((candidate.to_path_buf(), bytes));
+            Ok(CheckOutcome {
+                check: CheckId(0),
+                passed: true,
+                exit_code: Some(0),
+                detail: "ok".to_owned(),
+            })
+        }
+    }
+
+    /// True when `path` is a `.detent-candidate-` file directly in `dir`.
+    fn is_candidate_in(path: &Path, dir: &Path) -> bool {
+        path.parent() == Some(dir)
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".detent-candidate-"))
+    }
+
+    /// Names of the entries of `dir`, sorted.
+    fn entries(dir: &Path) -> Result<Vec<String>, std::io::Error> {
+        let mut names = std::fs::read_dir(dir)?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<Vec<_>, _>>()?;
+        names.sort();
+        Ok(names)
+    }
+
     struct FailingChecks;
     impl CheckRunner for FailingChecks {
         fn run_check(
@@ -2316,29 +2431,190 @@ mod tests {
         Ok(())
     }
 
+    /// The candidate goes beside the module's primary target, where the
+    /// distro's `AppArmor` profile for the validator lets it read, under a
+    /// dot name that include-directory loaders skip, and is removed after.
     #[test]
-    fn run_check_places_the_candidate_in_monitor_staging() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn run_check_places_the_candidate_beside_the_primary_target()
+    -> Result<(), Box<dyn std::error::Error>> {
         let fx = fixture()?;
         let allow = fx.allow()?;
-        let staging_dir = fx
-            .state_root
-            .parent()
-            .unwrap_or(&fx.root)
-            .join("monitor-staging");
-        let checks = CandidateChecks(staging_dir.clone());
+        let staging_dir = allow.state_root().with_file_name("monitor-staging");
+        let checks = RecordingChecks::default();
         let hooks = Hooks {
             checks: &checks,
             services: &super::NoServices,
         };
         let mut monitor = greeted(allow, hooks);
-        monitor.set_staging_dir(staging_dir);
         let response = monitor.dispatch(Request::RunCheck {
             check: CheckId(0),
             bytes: b"candidate".to_vec(),
         })?;
         assert!(matches!(response, Response::Checked(outcome) if outcome.passed));
+        let seen = checks.seen();
+        assert_eq!(seen.len(), 1);
+        let (path, bytes) = seen.first().ok_or("the check did not run")?;
+        assert!(is_candidate_in(path, &fx.root), "candidate at {path:?}");
+        assert_eq!(bytes, b"candidate");
+        assert!(!path.exists(), "the candidate must be removed");
+        assert_eq!(entries(&fx.root)?, ["target.conf"]);
+        assert!(!staging_dir.exists(), "staging must not be used");
         Ok(())
+    }
+
+    /// A module whose primary target is not a file keeps using monitor
+    /// staging.
+    #[test]
+    fn run_check_uses_monitor_staging_for_a_module_without_a_file_target()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let allow = fx.allow_without_a_file_target()?;
+        let staging_dir = allow.state_root().with_file_name("monitor-staging");
+        let checks = RecordingChecks::default();
+        let hooks = Hooks {
+            checks: &checks,
+            services: &super::NoServices,
+        };
+        let mut monitor = greeted(allow, hooks);
+        let response = monitor.dispatch(Request::RunCheck {
+            check: CheckId(0),
+            bytes: b"candidate".to_vec(),
+        })?;
+        assert!(matches!(response, Response::Checked(outcome) if outcome.passed));
+        let seen = checks.seen();
+        let (path, bytes) = seen.first().ok_or("the check did not run")?;
+        assert!(is_candidate_in(path, &staging_dir), "candidate at {path:?}");
+        assert_eq!(bytes, b"candidate");
+        assert_eq!(std::fs::read_dir(&staging_dir)?.count(), 0);
+        Ok(())
+    }
+
+    /// A monitor over the fixture module with its target at `target`.
+    fn run_check_beside(
+        target: &Path,
+        checks: &RecordingChecks,
+    ) -> Result<Response, Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let allow = Allowlist::from_modules(
+            &[descriptor(target)],
+            &Config::with_state_root(work.path().join("state")),
+        )?;
+        let hooks = Hooks {
+            checks,
+            services: &super::NoServices,
+        };
+        let mut monitor = greeted(allow, hooks);
+        Ok(monitor.dispatch(Request::RunCheck {
+            check: CheckId(0),
+            bytes: b"candidate".to_vec(),
+        })?)
+    }
+
+    fn assert_candidate_dir_refused(response: &Response) {
+        assert!(
+            matches!(response, Response::Error(ProtoError::Io(message)) if message == "candidate directory is not trusted"),
+            "expected the candidate directory to be refused, got {response:?}"
+        );
+    }
+
+    /// Fail closed on a target directory others can write to: no fallback
+    /// to staging, and nothing is left behind.
+    #[test]
+    fn run_check_refuses_a_group_writable_target_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let etc = fx.root.join("etc");
+        std::fs::create_dir(&etc)?;
+        std::fs::set_permissions(&etc, std::fs::Permissions::from_mode(0o770))?;
+        let checks = RecordingChecks::default();
+        assert_candidate_dir_refused(&run_check_beside(&etc.join("target.conf"), &checks)?);
+        assert!(checks.seen().is_empty());
+        assert!(entries(&etc)?.is_empty());
+        assert_eq!(
+            std::fs::metadata(&etc)?.permissions().mode() & 0o777,
+            0o770,
+            "an existing directory must not be chmodded"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn run_check_refuses_a_symlinked_target_directory() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let real = fx.root.join("real");
+        std::fs::create_dir(&real)?;
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755))?;
+        let link = fx.root.join("etc");
+        std::os::unix::fs::symlink(&real, &link)?;
+        let checks = RecordingChecks::default();
+        assert_candidate_dir_refused(&run_check_beside(&link.join("target.conf"), &checks)?);
+        assert!(checks.seen().is_empty());
+        assert!(entries(&real)?.is_empty());
+        Ok(())
+    }
+
+    /// A uid that is neither root nor, in these tests, the euid.
+    const STRANGER_UID: u32 = 65534;
+
+    /// A target directory owned by a uid that is neither root nor the euid is
+    /// refused. Only root can make one, so an unprivileged run relies on
+    /// `dir_owner_accepts_only_the_owners_it_names` instead.
+    #[test]
+    fn run_check_refuses_a_target_directory_owned_by_another_user()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if !rustix::process::geteuid().is_root() {
+            return Ok(());
+        }
+        let fx = fixture()?;
+        let etc = fx.root.join("etc");
+        std::fs::create_dir(&etc)?;
+        std::fs::set_permissions(&etc, std::fs::Permissions::from_mode(0o755))?;
+        rustix::fs::chown(
+            &etc,
+            Some(rustix::fs::Uid::from_raw(STRANGER_UID)),
+            Some(rustix::fs::Gid::from_raw(STRANGER_UID)),
+        )?;
+        let checks = RecordingChecks::default();
+        assert_candidate_dir_refused(&run_check_beside(&etc.join("target.conf"), &checks)?);
+        assert!(checks.seen().is_empty());
+        assert!(entries(&etc)?.is_empty());
+        Ok(())
+    }
+
+    /// Capability-user mode: a monitor that is not root still trusts a
+    /// root-owned target directory. `/usr` is root-owned and not writable
+    /// for an unprivileged user, so the directory check passes and creating
+    /// the candidate then fails; nothing is written. As root the directory
+    /// would really be written to, so that run relies on
+    /// `dir_owner_accepts_only_the_owners_it_names` instead.
+    #[test]
+    fn run_check_trusts_a_root_owned_target_directory() -> Result<(), Box<dyn std::error::Error>> {
+        if rustix::process::geteuid().is_root() {
+            return Ok(());
+        }
+        let checks = RecordingChecks::default();
+        let response = run_check_beside(Path::new("/usr/detent-monitor-test.conf"), &checks)?;
+        assert!(
+            matches!(&response, Response::Error(ProtoError::Io(message)) if message.starts_with("cannot create a candidate file")),
+            "expected the root-owned directory to be trusted, got {response:?}"
+        );
+        assert!(checks.seen().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn dir_owner_accepts_only_the_owners_it_names() {
+        let euid = 1000;
+        assert!(DirOwner::Euid.accepts(euid, euid));
+        assert!(!DirOwner::Euid.accepts(0, euid));
+        assert!(!DirOwner::Euid.accepts(STRANGER_UID, euid));
+        assert!(DirOwner::EuidOrRoot.accepts(euid, euid));
+        assert!(DirOwner::EuidOrRoot.accepts(0, euid));
+        assert!(!DirOwner::EuidOrRoot.accepts(STRANGER_UID, euid));
+        // A root monitor: root is its own euid.
+        assert!(DirOwner::Euid.accepts(0, 0));
+        assert!(DirOwner::EuidOrRoot.accepts(0, 0));
+        assert!(!DirOwner::EuidOrRoot.accepts(STRANGER_UID, 0));
     }
 
     #[test]
@@ -2379,7 +2655,7 @@ mod tests {
         assert!(std::fs::create_dir_all(&fx.state_root).is_ok());
         let staging_dir = fx.state_root.join("staging");
         assert!(std::fs::write(&staging_dir, b"not a directory").is_ok());
-        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        let mut monitor = greeted(fx.allow_without_a_file_target()?, Hooks::default());
         monitor.set_staging_dir(staging_dir);
         let response = monitor.dispatch(Request::RunCheck {
             check: CheckId(0),
@@ -2400,7 +2676,7 @@ mod tests {
         let tmp_dir = fx.state_root.join("staging");
         assert!(std::fs::create_dir_all(&tmp_dir).is_ok());
         assert!(std::fs::set_permissions(&tmp_dir, std::fs::Permissions::from_mode(0o500)).is_ok());
-        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        let mut monitor = greeted(fx.allow_without_a_file_target()?, Hooks::default());
         monitor.set_staging_dir(tmp_dir.clone());
         let response = monitor.dispatch(Request::RunCheck {
             check: CheckId(0),
@@ -2418,7 +2694,7 @@ mod tests {
             checks: &checks,
             services: &super::NoServices,
         };
-        let mut monitor = greeted(fx.allow()?, hooks);
+        let mut monitor = greeted(fx.allow_without_a_file_target()?, hooks);
         monitor.set_staging_dir(staging_dir);
         Ok(monitor.dispatch(Request::RunCheck {
             check: CheckId(0),
@@ -3873,21 +4149,54 @@ mod tests {
     }
 
     #[test]
-    fn write_target_installs_content_the_external_check_accepts_from_monitor_staging()
+    fn write_target_installs_content_the_external_check_accepts_beside_the_target()
     -> Result<(), Box<dyn std::error::Error>> {
         let fx = fixture()?;
-        let staging_dir = fx.root.join("monitor-staging");
-        let checks = CandidateChecks(staging_dir.clone());
+        let checks = RecordingChecks::default();
         let hooks = Hooks {
             checks: &checks,
             services: &super::NoServices,
         };
         let mut monitor = greeted(fx.allow()?, hooks);
-        monitor.set_staging_dir(staging_dir.clone());
         assert!(matches!(write_v2(&mut monitor)?, Response::Written(_)));
         assert_eq!(std::fs::read(&fx.target)?, b"v2");
-        // The candidate file is temporary: nothing is left in staging.
-        assert_eq!(std::fs::read_dir(&staging_dir)?.count(), 0);
+        let seen = checks.seen();
+        let (path, bytes) = seen.first().ok_or("the check did not run")?;
+        assert!(is_candidate_in(path, &fx.root), "candidate at {path:?}");
+        assert_eq!(bytes, b"v2");
+        // The candidate file is temporary: nothing is left beside the target.
+        assert!(
+            entries(&fx.root)?
+                .iter()
+                .all(|name| !name.starts_with(".detent-candidate-")),
+            "a candidate was left behind"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn write_target_refuses_when_the_target_directory_is_group_writable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let etc = work.path().join("etc");
+        std::fs::create_dir(&etc)?;
+        std::fs::set_permissions(&etc, std::fs::Permissions::from_mode(0o775))?;
+        let target = etc.join("target.conf");
+        std::fs::write(&target, b"v1")?;
+        let allow = Allowlist::from_modules(
+            &[descriptor(&target)],
+            &Config::with_state_root(work.path().join("state")),
+        )?;
+        let checks = RecordingChecks::default();
+        let hooks = Hooks {
+            checks: &checks,
+            services: &super::NoServices,
+        };
+        let mut monitor = greeted(allow, hooks);
+        assert_candidate_dir_refused(&write_v2(&mut monitor)?);
+        assert!(checks.seen().is_empty());
+        assert_eq!(std::fs::read(&target)?, b"v1");
+        assert_eq!(entries(&etc)?, ["target.conf"]);
         Ok(())
     }
 
@@ -3932,7 +4241,7 @@ mod tests {
             checks: &OkChecks,
             services: &super::NoServices,
         };
-        let mut monitor = greeted(fx.allow()?, hooks);
+        let mut monitor = greeted(fx.allow_without_a_file_target()?, hooks);
         // A directory below a regular file cannot exist (ENOTDIR), root or not.
         monitor.set_staging_dir(fx.target.join("staging"));
         let response = write_v2(&mut monitor)?;

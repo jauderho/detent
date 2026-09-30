@@ -306,7 +306,9 @@ pub struct RunnerHandle {
 /// Fork the runner, which answers [`RunnerRequest`](super::runner::RunnerRequest)s
 /// with the real validator and service hooks, unconfined, until its channel
 /// closes. Call it before [`spawn_pair`], so that the monitor's confinement
-/// does not reach the runner's children.
+/// does not reach the runner's children. `profile` must be the one the
+/// monitor is given: both pick the candidate directory from it
+/// ([`Allowlist::candidate_dir`](super::allowlist::Allowlist::candidate_dir)).
 ///
 /// # Errors
 ///
@@ -314,7 +316,7 @@ pub struct RunnerHandle {
 pub fn spawn_runner(
     allow: &super::allowlist::Allowlist,
     staging_dir: &std::path::Path,
-    init: detent_core::descriptor::InitSystem,
+    profile: &detent_core::descriptor::HostProfile,
 ) -> Result<RunnerHandle, SpawnError> {
     let (monitor_end, runner_end) =
         Channel::pair_with(super::runner::RUNNER_TIMEOUT, super::runner::RUNNER_TIMEOUT)
@@ -331,12 +333,13 @@ pub fn spawn_runner(
             drop(monitor_end);
             let mut channel = runner_end;
             let checks = crate::service::checks::ExternalCheckRunner::new();
-            let services = crate::service::ServiceControlAdapter(crate::service::for_host(init));
+            let services =
+                crate::service::ServiceControlAdapter(crate::service::for_host(profile.init));
             let hooks = super::monitor::Hooks {
                 checks: &checks,
                 services: &services,
             };
-            super::runner::serve_runner(allow, staging_dir, &hooks, &mut channel);
+            super::runner::serve_runner(allow, staging_dir, profile, &hooks, &mut channel);
             abort_child(0);
         }
     }

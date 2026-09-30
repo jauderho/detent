@@ -247,7 +247,7 @@ deferred by the owner.
    | M1 | `caps_that_do_not_drop_are_fatal_only_when_required` | yes (root) |
    | M11 | `bind_table_keeps_bearer_on_loopback`, `http_config_enforces_origin_validation` | no |
    | L-PLAT6 | `stdout_pattern_requires_literal_match_and_exit_zero` | no |
-   | L-PLAT7 | `run_check_places_the_candidate_in_monitor_staging` | no |
+   | L-PLAT7 | `run_check_places_the_candidate_beside_the_primary_target`, `run_check_uses_monitor_staging_for_a_module_without_a_file_target` | no |
    | L-BIN16 | the two `spawn.rs` child-abort tests | no |
 
    The rows marked "no" can run on any dev machine and may go with Track A.
@@ -257,7 +257,7 @@ deferred by the owner.
    Test on a010 as root: compare `/proc/self/status` `CapBnd` with the
    reported outcome.
 
-5. **A5 (new, found in A1, 2026-09-30) — AppArmor blocks validators that
+5. ~~**A5 (new, found in A1, 2026-09-30) — AppArmor blocks validators that
    read the candidate.** On a010 (Ubuntu) the `chrony` check ran in the
    runner and failed: `chronyd: Could not open
    /run/detent/staging/detent-candidate-V2VU39 : Permission denied`; the
@@ -267,6 +267,10 @@ deferred by the owner.
    `plan`/`apply` of these modules always reports the check as failed on
    Ubuntu. Owner choice (§4, "AppArmor validators"). Not a seccomp or
    Landlock refusal.
+   Done 2026-09-30 (owner: move the candidate to paths the profiles
+   already allow): the candidate is written beside the module's primary
+   target as `.detent-candidate-*`; a010 `serve` chrony check ran and
+   passed with AppArmor enforcing.
 
 ### Track D — Phase 7/8 gaps
 
@@ -337,12 +341,10 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   `scripts/acme-serve-check.sh` (the aarch64 form of `access`). —
   proposed: yes (same operation as the allowed `newfstatat`) — owner answer:
   yes, all (2026-09-30).
-- AppArmor validators (Track C A5): ship an AppArmor local include per
-  confined validator (e.g. `/etc/apparmor.d/local/usr.sbin.chronyd`:
-  `/run/detent/staging/detent-candidate-* r,`) in `packaging/`, or stage
-  the candidate in a path the distro profiles already allow. — proposed:
-  packaged local includes (no change to where the candidate lives) — owner
-  answer:
+- AppArmor validators (Track C A5): ship AppArmor local includes, or
+  stage the candidate in a path the distro profiles already allow. — owner
+  answer (2026-09-30): the latter; real config locations stay as they are
+  (detent supplements the host's binaries, it does not replace them).
 - Track G: defer `hickory-client`, the TPM attestor and the LE staging run past
   v1, so Phase 6 can close? — proposed: defer the TPM attestor; keep the other
   two for v1 — owner answer:
