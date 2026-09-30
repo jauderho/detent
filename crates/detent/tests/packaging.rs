@@ -119,3 +119,17 @@ fn the_unit_does_not_take_the_state_root_from_the_worker() -> Result<(), &'stati
     }
     Ok(())
 }
+
+/// systemd warns at every start when `ConfigurationDirectoryMode` (default
+/// 0755) differs from the mode `tmpfiles.d` gave `/etc/detent`.
+#[test]
+fn the_configuration_directory_mode_matches_tmpfiles() -> Result<(), &'static str> {
+    let (mode, _, _) = tmpfiles_dir("/etc/detent").ok_or("tmpfiles.d does not make /etc/detent")?;
+    if unit_value("ConfigurationDirectory").is_some() {
+        assert_eq!(
+            unit_value("ConfigurationDirectoryMode"),
+            Some(mode.as_str())
+        );
+    }
+    Ok(())
+}

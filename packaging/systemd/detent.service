@@ -95,6 +95,7 @@ ReadWritePaths=/etc/hosts /etc/resolv.conf /etc/fstab -/etc/exports -/etc/samba 
 RuntimeDirectory=detent detent/staging
 RuntimeDirectoryMode=0700
 ConfigurationDirectory=detent
+ConfigurationDirectoryMode=0750
 
 Restart=always
 RestartSec=2
