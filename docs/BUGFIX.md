@@ -158,10 +158,6 @@ In this order (highest risk first):
    check, regular file, `O_NONBLOCK`), and remove the `O_EXCL` copy on every
    failure path. Tests: symlinked bundle refused; FIFO bundle does not block;
    no copy left after a failed verify.
-4. **B8 (H12) — MCP HTTP transport and capabilities.** `detent/src/mcp.rs`
-   refuses `--transport http` only for euid 0. Also refuse when the effective
-   or permitted capability set is not empty. Test: inject the capability
-   reader.
 5. **B9 (L-PLAT7) — trust the staging directory.** Create it `0700`, then
    require owner = monitor euid and no group/other write. Test: mode `0777` or
    another owner is refused.

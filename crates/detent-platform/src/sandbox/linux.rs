@@ -77,6 +77,22 @@ const fn to_caps_capability(cap: Capability) -> CapsCapability {
     }
 }
 
+/// Whether the effective or permitted capability set is not empty.
+pub(super) fn holds_capabilities() -> bool {
+    sets_hold_capabilities(
+        caps::read(None, CapSet::Effective),
+        caps::read(None, CapSet::Permitted),
+    )
+}
+
+/// A failed read counts as holding capabilities (fail closed).
+fn sets_hold_capabilities(
+    effective: Result<CapsHashSet, caps::errors::CapsError>,
+    permitted: Result<CapsHashSet, caps::errors::CapsError>,
+) -> bool {
+    !matches!((effective, permitted), (Ok(e), Ok(p)) if e.is_empty() && p.is_empty())
+}
+
 fn drop_capabilities(policy: &Policy) -> Outcome {
     // An unprivileged worker can reach this hook after `setuid`. Its
     // effective and permitted sets are then already empty, so attempting to
@@ -243,6 +259,33 @@ mod tests {
     };
     use detent_core::diag::MessageId;
     use std::path::Path;
+
+    #[test]
+    fn capability_read_fails_closed_and_reports_any_non_empty_set() {
+        use super::{CapsHashSet, sets_hold_capabilities};
+        let empty = || Ok(CapsHashSet::new());
+        let full = || Ok([caps::Capability::CAP_CHOWN].into_iter().collect());
+        let failed = || Err(caps::errors::CapsError::from("read failed"));
+        assert!(!sets_hold_capabilities(empty(), empty()));
+        assert!(sets_hold_capabilities(full(), empty()));
+        assert!(sets_hold_capabilities(empty(), full()));
+        assert!(sets_hold_capabilities(failed(), empty()));
+        assert!(sets_hold_capabilities(empty(), failed()));
+    }
+
+    /// The container runs the tests as root, so the effective set is full.
+    #[test]
+    fn root_in_the_container_holds_capabilities() {
+        if caps::has_cap(
+            None,
+            super::CapSet::Effective,
+            caps::Capability::CAP_DAC_OVERRIDE,
+        )
+        .unwrap_or(false)
+        {
+            assert!(super::holds_capabilities());
+        }
+    }
 
     /// The production policies fail closed on seccomp, and every other
     /// combination is permitted. This is the guard on a failure that is
