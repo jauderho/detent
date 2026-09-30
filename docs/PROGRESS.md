@@ -5,6 +5,10 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-30 - Track A B5 (C1-f): capability-user mode documented; Track A closed
+
+ADR-001 (Consequences) and `SECURITY_HARDENING.md` Gaps item 14 now say that in capability-user mode (`User=detent`) the monitor and the worker share one uid, so the owner checks on staged inputs, the monitor staging directory and the audit directories separate nothing; the barriers left are Landlock, seccomp, the worker's capability drop and Sigstore verification. No code change. With B5, all ten Track A items of `BUGFIX.md` are landed; two review follow-ups are listed there.
+
 ## 2026-09-30 - Track A B10 (L-BIN18): the typed password is never a plain `String`
 
 `read_secret_line` (`crates/detent/src/webadmin.rs`) turned the typed bytes into a plain `String` and wrapped it in `Zeroizing` only after `trim_newline` returned, so an early return in between left the plaintext in an unwiped buffer. It now wraps the `String` at once and `trim_newline` trims in place (`&mut String`). No other plain `String` of the password remains in `webadmin.rs` (`rg`).
