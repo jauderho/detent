@@ -245,6 +245,22 @@ fn authz_json(n: usize, domain: &str, status: &str, kinds: &[&str]) -> String {
     .to_string()
 }
 
+/// Like [`authz_json`], for a wildcard order: the server reports the base
+/// domain with `"wildcard": true` (RFC 8555 §7.1.4).
+fn wildcard_authz_json(
+    n: usize,
+    domain: &str,
+    kinds: &[&str],
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut authz: serde_json::Value =
+        serde_json::from_str(&authz_json(n, domain, "pending", kinds))?;
+    authz
+        .as_object_mut()
+        .ok_or("the authorization fixture is a JSON object")?
+        .insert("wildcard".to_owned(), serde_json::Value::Bool(true));
+    Ok(authz.to_string())
+}
+
 /// The challenge object Pebble returns once a challenge is marked ready.
 fn challenge_processing(n: usize, kind: &str) -> Reply {
     Reply::ok(
@@ -895,5 +911,82 @@ async fn present_challenges_stops_at_the_first_error_and_withdraws_its_records()
         );
         assert_eq!(fake.posts_to(&authz_url(3)), 0, "{stage:?}");
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn present_challenges_puts_a_wildcard_record_at_the_base_domain() -> TestResult {
+    let fake = FakeAcme::default();
+    let authz = [authz_url(1)];
+    fake.on(
+        &authz_url(1),
+        [Reply::ok(wildcard_authz_json(
+            1,
+            "example.com",
+            &["dns-01"],
+        )?)],
+    );
+    fake.on(&chall_url(1, "dns-01"), [challenge_processing(1, "dns-01")]);
+    let (account, mut order) = fake.account_and_order(&["*.example.com"], &authz).await?;
+    let provider = RecordingProvider::new(Refuse::Nothing, "");
+
+    let records = present_challenges(&mut order, &provider, &|_| Ok(())).await?;
+
+    // RFC 8555 §8.4: no `*.` in the TXT name.
+    let expected = vec![expected_record(&account, 1, "example.com")?];
+    assert_eq!(records, expected);
+    assert_eq!(provider.presented(), expected);
+    assert_eq!(fake.posts_to(&chall_url(1, "dns-01")), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn present_challenges_publishes_apex_and_wildcard_at_one_name() -> TestResult {
+    let fake = FakeAcme::default();
+    let authz = [authz_url(1), authz_url(2)];
+    fake.on(
+        &authz_url(1),
+        [Reply::ok(authz_json(
+            1,
+            "example.com",
+            "pending",
+            &["dns-01"],
+        ))],
+    );
+    fake.on(
+        &authz_url(2),
+        [Reply::ok(wildcard_authz_json(
+            2,
+            "example.com",
+            &["dns-01"],
+        )?)],
+    );
+    fake.on(&chall_url(1, "dns-01"), [challenge_processing(1, "dns-01")]);
+    fake.on(&chall_url(2, "dns-01"), [challenge_processing(2, "dns-01")]);
+    let (account, mut order) = fake
+        .account_and_order(&["example.com", "*.example.com"], &authz)
+        .await?;
+    let provider = RecordingProvider::new(Refuse::Nothing, "");
+
+    let records = present_challenges(&mut order, &provider, &|_| Ok(())).await?;
+
+    let apex = expected_record(&account, 1, "example.com")?;
+    let wildcard = expected_record(&account, 2, "example.com")?;
+    assert_ne!(apex.value(), wildcard.value(), "two different values");
+    assert_eq!(records, vec![apex, wildcard]);
+    assert_eq!(provider.presented(), records);
+    cleanup_challenges(&provider, &records);
+    assert_eq!(
+        provider.deleted_fqdns(),
+        vec!["_acme-challenge.example.com"; 2],
+        "cleanup withdraws both records"
+    );
+    assert_eq!(
+        *provider
+            .deleted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner),
+        records
+    );
     Ok(())
 }
