@@ -99,6 +99,10 @@ daemons and root sandbox runs.
   samba unbound nfs-kernel-server dnsmasq kea-dhcp4-server`. No compilers.
   Do not change network config, users, firewall, sysctls or kernel
   parameters. Start a daemon only for the test that needs it.
+- Exception (owner, 2026-09-30): system user `detent` (uid 999, gid 979,
+  no home, `nologin`) was added on testhost for Track C `serve` runs, which
+  drop the worker to it. **Remove it later** (`sudo userdel detent`) with
+  the D4 cleanup. Restarting `chrony` for Track C is allowed.
 - aarch64: the owner's Apple silicon Mac with OrbStack runs a native
   aarch64 Linux kernel (Landlock, seccomp, ptrace). Use a `--privileged`
   container (Docker's own seccomp profile is then off) and cross-built
