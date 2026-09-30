@@ -2,8 +2,13 @@
 //!
 //! All four implement [`DnsProvider`] synchronously and follow the
 //! [`HookProvider`](crate::HookProvider) idempotency contract: `present` is a
-//! refresh, `delete` tolerates an already-gone record. Every constructor
-//! validates its inputs, so a misconfigured provider cannot be built.
+//! refresh, `delete` tolerates an already-gone record. An order for an apex
+//! and its wildcard holds two values at one name (RFC 8555 §8.4), so
+//! `present` adds its value beside the others and `delete` removes only its
+//! own. A crash between the two can leave a value behind; that is harmless,
+//! because an ACME server accepts a challenge when any value at the name
+//! matches. Every constructor validates its inputs, so a misconfigured
+//! provider cannot be built.
 //!
 //! Each HTTPS provider drives its API through a small transport seam. The
 //! real transport is the crate's TLS 1.3 client (`https.rs`); the unit tests
@@ -342,10 +347,13 @@ const DESEC_API: &str = "https://desec.io/api/v1/domains";
 
 /// Publishes dns-01 records through the deSEC.io API.
 ///
-/// [`DnsProvider::present`] `PUT`s the challenge `RRset` — a `PUT` replaces it
-/// wholesale, which is exactly the refresh contract. [`DnsProvider::delete`]
-/// `DELETE`s the `RRset` and tolerates 404. [`DnsProvider::wait_propagated`]
-/// reads the `RRset` back and confirms our value is in it.
+/// A `PUT` replaces the `RRset` wholesale, so both calls first `GET` the
+/// `RRset` and write back the whole set. [`DnsProvider::present`] `PUT`s the
+/// set plus our value (a value already there is the refresh).
+/// [`DnsProvider::delete`] `PUT`s the set minus our value, and `DELETE`s the
+/// `RRset` only when nothing else is left in it; an absent value or `RRset`
+/// is success. [`DnsProvider::wait_propagated`] reads the `RRset` back and
+/// confirms our value is in it.
 pub struct DeSecProvider {
     token: String,
     domain: String,
@@ -406,11 +414,29 @@ impl DeSecProvider {
     fn rrset_url(&self, subname: &str) -> String {
         format!("{DESEC_API}/{}/rrsets/{subname}/TXT/", self.domain)
     }
-}
 
-impl DnsProvider for DeSecProvider {
-    fn present(&self, record: &DnsRecord) -> Result<(), AcmeError> {
-        let subname = self.subname(record)?;
+    /// The values now in the `RRset` at `subname`, as deSEC returns them
+    /// (quoted); none when the `RRset` does not exist.
+    fn read_records(&self, subname: &str) -> Result<Vec<String>, AcmeError> {
+        let send = &*self.send;
+        let get = HttpRequest {
+            method: "GET",
+            url: self.rrset_url(subname),
+            headers: self.auth().to_vec(),
+            body: String::new(),
+        };
+        let (status, body) = send(&get)?;
+        match status {
+            404 => Ok(Vec::new()),
+            200..=299 => rrset_records(&body),
+            _ => Err(AcmeError::Config(format!(
+                "deSEC: RRset GET returned HTTP {status}"
+            ))),
+        }
+    }
+
+    /// Replaces the `RRset` at `subname` with `records`, which is not empty.
+    fn put_records(&self, subname: &str, records: &[String]) -> Result<(), AcmeError> {
         let send = &*self.send;
         let put = HttpRequest {
             method: "PUT",
@@ -419,7 +445,7 @@ impl DnsProvider for DeSecProvider {
             body: serde_json::json!({
                 "subname": subname,
                 "type": "TXT",
-                "records": [format!("\"{}\"", record.value())],
+                "records": records,
                 "ttl": 3600,
             })
             .to_string(),
@@ -433,9 +459,32 @@ impl DnsProvider for DeSecProvider {
             )))
         }
     }
+}
+
+impl DnsProvider for DeSecProvider {
+    fn present(&self, record: &DnsRecord) -> Result<(), AcmeError> {
+        let subname = self.subname(record)?;
+        let mut records = self.read_records(subname)?;
+        if !records.iter().any(|r| is_value(r, record.value())) {
+            records.push(format!("\"{}\"", record.value()));
+        }
+        self.put_records(subname, &records)
+    }
 
     fn delete(&self, record: &DnsRecord) -> Result<(), AcmeError> {
         let subname = self.subname(record)?;
+        let records = self.read_records(subname)?;
+        let kept: Vec<String> = records
+            .iter()
+            .filter(|r| !is_value(r, record.value()))
+            .cloned()
+            .collect();
+        if kept.len() == records.len() {
+            return Ok(()); // already gone is the success delete promises
+        }
+        if !kept.is_empty() {
+            return self.put_records(subname, &kept);
+        }
         let send = &*self.send;
         let remove = HttpRequest {
             method: "DELETE",
@@ -479,6 +528,25 @@ impl DnsProvider for DeSecProvider {
     }
 }
 
+/// Whether the deSEC record `entry` (quoted or not) is `value`.
+fn is_value(entry: &str, value: &str) -> bool {
+    entry == value || entry.strip_prefix('"').and_then(|e| e.strip_suffix('"')) == Some(value)
+}
+
+/// The record values in a deSEC single-`RRset` response.
+fn rrset_records(body: &str) -> Result<Vec<String>, AcmeError> {
+    let parsed: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| AcmeError::Config(format!("deSEC: unreadable RRset response: {e}")))?;
+    let unreadable = || AcmeError::Config("deSEC: RRset response has no records array".into());
+    parsed
+        .get("records")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(unreadable)?
+        .iter()
+        .map(|v| v.as_str().map(str::to_owned).ok_or_else(unreadable))
+        .collect()
+}
+
 /// Whether any `RRset` in a deSEC records response carries `value`.
 fn rrset_contains(body: &str, value: &str) -> Result<bool, AcmeError> {
     let parsed: serde_json::Value = serde_json::from_str(body)
@@ -515,10 +583,12 @@ type DnsExchange = dyn Fn(&str, &[u8]) -> Result<Vec<u8>, AcmeError> + Send + Sy
 /// Publishes dns-01 records with RFC 2136 dynamic updates to a zone's primary
 /// server.
 ///
-/// [`DnsProvider::present`] builds one UPDATE that replaces the challenge TXT
-/// (a class-ANY delete of the old value, then the add); [`DnsProvider::delete`]
-/// sends just the delete-all. Both are idempotent by construction: re-adding
-/// an existing record overwrites it, and deleting a missing name succeeds.
+/// [`DnsProvider::present`] builds one UPDATE that adds one TXT record
+/// (RFC 2136 §2.5.1); [`DnsProvider::delete`] builds one UPDATE that removes
+/// that one record (class NONE, §2.5.4), not the whole set. Other values at
+/// the name stay. Both are idempotent by construction: adding a record that
+/// exists changes nothing, and removing a record that is not there succeeds
+/// (§3.4.2).
 ///
 /// Every UPDATE is TSIG-signed (RFC 8945) and sent over TCP; the server's
 /// answer must carry a valid TSIG from the same key and RCODE NOERROR (see
@@ -597,10 +667,10 @@ impl Rfc2136Provider {
         self
     }
 
-    /// Builds the UPDATE for `record`, adding `add` as the new TXT when set.
-    fn update(&self, record: &DnsRecord, add: Option<&str>) -> Result<Vec<u8>, AcmeError> {
+    /// Builds the UPDATE that applies `change` to `record`'s name.
+    fn update(&self, record: &DnsRecord, change: Change<'_>) -> Result<Vec<u8>, AcmeError> {
         let zone = self.zone_for(record)?;
-        update_message(zone, record.fqdn(), add)
+        update_message(zone, record.fqdn(), change)
     }
 
     /// Gives `message` a random id, signs it, sends it, and checks the
@@ -620,11 +690,11 @@ impl Rfc2136Provider {
 
 impl DnsProvider for Rfc2136Provider {
     fn present(&self, record: &DnsRecord) -> Result<(), AcmeError> {
-        self.send_signed(&self.update(record, Some(record.value()))?)
+        self.send_signed(&self.update(record, Change::Add(record.value()))?)
     }
 
     fn delete(&self, record: &DnsRecord) -> Result<(), AcmeError> {
-        self.send_signed(&self.update(record, None)?)
+        self.send_signed(&self.update(record, Change::Remove(record.value()))?)
     }
 }
 
@@ -663,49 +733,55 @@ fn txt_rdata(value: &str) -> Vec<u8> {
     rdata
 }
 
+/// One change to the TXT set at a name.
+#[derive(Clone, Copy)]
+enum Change<'a> {
+    /// Add this value (class IN, RFC 2136 §2.5.1).
+    Add(&'a str),
+    /// Remove this one value (class NONE, RFC 2136 §2.5.4).
+    Remove(&'a str),
+}
+
 /// Builds an RFC 2136 UPDATE message: the SOA-named `zone` in the zone
-/// section, a class-ANY delete of every TXT for `name`, and — when `add` is
-/// set — the new TXT with a 60s TTL. The TSIG additional record would be
-/// appended by the signer (`tsig.rs`), not here.
-fn update_message(zone: &str, name: &str, add: Option<&str>) -> Result<Vec<u8>, AcmeError> {
+/// section and one update record. An add carries the TXT with a 60s TTL; a
+/// remove carries the same rdata in class NONE with TTL 0, so it deletes that
+/// one record and no other. The TSIG additional record would be appended by
+/// the signer (`tsig.rs`), not here.
+fn update_message(zone: &str, name: &str, change: Change<'_>) -> Result<Vec<u8>, AcmeError> {
     const HEADER: [u8; 4] = [0, 0, 0x28, 0x00]; // id 0, opcode 5 (UPDATE)
     const TYPE_SOA: [u8; 2] = [0, 6];
     const TYPE_TXT: [u8; 2] = [0, 16];
     const CLASS_IN: [u8; 2] = [0, 1];
-    const CLASS_ANY: [u8; 2] = [0, 255];
+    const CLASS_NONE: [u8; 2] = [0, 254];
     const TTL_60: [u8; 4] = [0, 0, 0, 60];
+    const TTL_0: [u8; 4] = [0, 0, 0, 0];
+
+    let (value, class, ttl) = match change {
+        Change::Add(value) => (value, CLASS_IN, TTL_60),
+        Change::Remove(value) => (value, CLASS_NONE, TTL_0),
+    };
+    let rdata = txt_rdata(value);
+    let rdlen = u16::try_from(rdata.len())
+        .map_err(|_| AcmeError::Config("rfc2136: TXT rdata exceeds 64 KiB".into()))?;
 
     let mut msg = Vec::with_capacity(160);
     msg.extend_from_slice(&HEADER);
-    // Counts: zone 1, prerequisite 0, update 1(+1), additional 0.
-    let updates: u16 = if add.is_some() { 2 } else { 1 };
+    // Counts: zone 1, prerequisite 0, update 1, additional 0.
     msg.extend_from_slice(&[0, 1]);
     msg.extend_from_slice(&[0, 0]);
-    msg.extend_from_slice(&updates.to_be_bytes());
+    msg.extend_from_slice(&[0, 1]);
     msg.extend_from_slice(&[0, 0]);
 
     encode_name(zone, &mut msg)?;
     msg.extend_from_slice(&TYPE_SOA);
     msg.extend_from_slice(&CLASS_IN);
 
-    // Update 1: delete every TXT set for `name` (class ANY, empty rdata).
     encode_name(name, &mut msg)?;
     msg.extend_from_slice(&TYPE_TXT);
-    msg.extend_from_slice(&CLASS_ANY);
-    msg.extend_from_slice(&[0, 0, 0, 0]); // ttl 0
-    msg.extend_from_slice(&[0, 0]); // rdlength 0
-
-    if let Some(value) = add {
-        let rdata = txt_rdata(value);
-        let rdlen = u16::try_from(rdata.len())
-            .map_err(|_| AcmeError::Config("rfc2136: TXT rdata exceeds 64 KiB".into()))?;
-        encode_name(name, &mut msg)?;
-        msg.extend_from_slice(&TYPE_TXT);
-        msg.extend_from_slice(&CLASS_IN);
-        msg.extend_from_slice(&TTL_60);
-        msg.extend_from_slice(&rdlen.to_be_bytes());
-        msg.extend_from_slice(&rdata);
-    }
+    msg.extend_from_slice(&class);
+    msg.extend_from_slice(&ttl);
+    msg.extend_from_slice(&rdlen.to_be_bytes());
+    msg.extend_from_slice(&rdata);
     Ok(msg)
 }
 
@@ -736,8 +812,9 @@ impl fmt::Debug for Rfc2136Provider {
 pub fn fuzz_provider_response(body: &str, value: &str) {
     let _ = cf_txt_id(body, value);
     let _ = rrset_contains(body, value);
-    let _ = update_message(body, value, Some(value));
-    let _ = update_message(body, value, None);
+    let _ = rrset_records(body);
+    let _ = update_message(body, value, Change::Add(value));
+    let _ = update_message(body, value, Change::Remove(value));
     // The RFC 2136 server answer is parsed before its MAC is checked.
     if let Ok(key) = crate::tsig::Key::new("k.example.com", crate::tsig::Algorithm::Sha256, "a2V5")
     {
@@ -962,11 +1039,15 @@ mod tests {
     }
 
     #[test]
-    fn desec_derives_subnames_and_replaces_wholesale() -> R {
+    fn desec_derives_subnames_and_puts_the_union() -> R {
         let record = DnsRecord::new("_acme-challenge.sub.example.com", "digest-value-42")?;
-        let (send, script) = scripted(&[(201, "{}")]);
+        let (send, script) = scripted(&[
+            (404, r#"{"detail":"Not found."}"#), // GET: no RRset yet
+            (201, "{}"),                         // PUT
+        ]);
         let ds = DeSecProvider::new("s3cr3t-token", "example.com")?.with_transport(send);
         ds.present(&record)?;
+        assert_eq!(lock(&script)?.requests.len(), 2);
         let req = last(&script)?;
         assert_eq!(req.method, "PUT");
         assert_eq!(
@@ -995,7 +1076,18 @@ mod tests {
 
     #[test]
     fn desec_delete_tolerates_an_already_gone_rrset() -> R {
+        // No RRset at all: only the read ran, nothing is written or deleted.
         let (send, script) = scripted(&[(404, r#"{"detail":"Not found."}"#)]);
+        let ds = DeSecProvider::new("tok", "example.com")?.with_transport(send);
+        ds.delete(&record()?)?;
+        assert_eq!(lock(&script)?.requests.len(), 1);
+        assert_eq!(last(&script)?.method, "GET");
+
+        // The RRset vanishes between the read and the DELETE.
+        let (send, script) = scripted(&[
+            (200, r#"{"records":["\"digest-value-42\""]}"#),
+            (404, r#"{"detail":"Not found."}"#),
+        ]);
         let ds = DeSecProvider::new("tok", "example.com")?.with_transport(send);
         ds.delete(&record()?)?;
         assert_eq!(last(&script)?.method, "DELETE");
@@ -1033,34 +1125,45 @@ mod tests {
         let msg = update_message(
             "example.com",
             "_acme-challenge.example.com",
-            Some("digest-value-42"),
+            Change::Add("digest-value-42"),
         )?;
-        // Header: id 0, opcode 5 (UPDATE), one zone entry, two update entries.
+        // Header: id 0, opcode 5 (UPDATE), one zone entry, one update entry.
         assert!(msg.starts_with(&[0, 0, 0x28, 0x00]));
-        assert_eq!(msg.get(8..10).map(<[u8]>::to_vec), Some(vec![0, 2]));
+        assert_eq!(msg.get(4..6).map(<[u8]>::to_vec), Some(vec![0, 1]));
+        assert_eq!(msg.get(8..10).map(<[u8]>::to_vec), Some(vec![0, 1]));
         // Zone: example.com IN SOA — the encoded name followed by SOA/IN.
         let mut zone = Vec::new();
         encode_name("example.com", &mut zone)?;
         assert!(msg.windows(zone.len()).any(|w| w == zone.as_slice()));
         assert!(has(&msg, &[0, 6, 0, 1]));
-        // Delete-all entry: TXT, class ANY (255), ttl 0, empty rdata.
-        assert!(has(&msg, &[0, 16, 0, 255, 0, 0, 0, 0, 0, 0]));
+        // No class-ANY delete-all: the other values at the name stay.
+        assert!(!has(&msg, &[0, 16, 0, 255]));
         // Add entry: TXT IN with a 60s TTL…
         assert!(has(&msg, &[0, 16, 0, 1, 0, 0, 0, 60]));
         // …and rdata "digest-value-42" as one 15-byte character-string.
         let mut rdata = vec![15u8];
         rdata.extend_from_slice(b"digest-value-42");
         assert!(has(&msg, &rdata));
-        assert_eq!(msg.len(), 123);
+        assert_eq!(msg.len(), 84);
         Ok(())
     }
 
     #[test]
-    fn rfc2136_delete_message_only_withdraws() -> R {
-        let msg = update_message("example.com", "_acme-challenge.example.com", None)?;
-        assert_eq!(msg.len(), 68);
+    fn rfc2136_delete_message_removes_one_record() -> R {
+        let msg = update_message(
+            "example.com",
+            "_acme-challenge.example.com",
+            Change::Remove("digest-value-42"),
+        )?;
         assert_eq!(msg.get(8..10).map(<[u8]>::to_vec), Some(vec![0, 1]));
+        // RFC 2136 §2.5.4: TXT, class NONE (254), TTL 0, and the rdata of the
+        // one record to remove — not the class-ANY delete of the whole set.
+        let mut entry = vec![0, 16, 0, 254, 0, 0, 0, 0, 0, 16, 15];
+        entry.extend_from_slice(b"digest-value-42");
+        assert!(has(&msg, &entry));
+        assert!(!has(&msg, &[0, 16, 0, 255]));
         assert!(!has(&msg, &[0, 16, 0, 1]));
+        assert_eq!(msg.len(), 84);
         Ok(())
     }
 
@@ -1075,13 +1178,13 @@ mod tests {
             "hmac-sha256",
         )?;
         let record = record()?;
-        let add = r2.update(&record, Some(record.value()))?;
+        let add = r2.update(&record, Change::Add(record.value()))?;
         assert_eq!(
             add,
-            update_message("example.com", record.fqdn(), Some(record.value()))?
+            update_message("example.com", record.fqdn(), Change::Add(record.value()))?
         );
-        let withdraw = r2.update(&record, None)?;
-        assert!(withdraw.len() < add.len(), "a delete carries no rdata");
+        let remove = r2.update(&record, Change::Remove(record.value()))?;
+        assert_ne!(remove, add, "a remove is not an add");
         Ok(())
     }
 
@@ -1218,7 +1321,7 @@ mod tests {
         // compare there rather than searching: the encoded parent label
         // `b.example.com` is a *substring* of the encoded record name, and a
         // search would find it whichever zone was used.
-        let msg = update_message("example.com", deep.fqdn(), Some(deep.value()))?;
+        let msg = update_message("example.com", deep.fqdn(), Change::Add(deep.value()))?;
         let mut want = Vec::new();
         encode_name("example.com", &mut want)?;
         assert_eq!(
@@ -1308,6 +1411,13 @@ mod tests {
         let ds = DeSecProvider::new("tok", "example.com")?.with_transport(send);
         assert!(matches!(
             ds.present(&record),
+            Err(AcmeError::Config(m)) if m.contains("GET returned HTTP 500")
+        ));
+
+        let (send, _) = scripted(&[(404, ""), (500, "")]);
+        let ds = DeSecProvider::new("tok", "example.com")?.with_transport(send);
+        assert!(matches!(
+            ds.present(&record),
             Err(AcmeError::Config(m)) if m.contains("PUT returned HTTP 500")
         ));
 
@@ -1315,7 +1425,24 @@ mod tests {
         let ds = DeSecProvider::new("tok", "example.com")?.with_transport(send);
         assert!(matches!(
             ds.delete(&record),
+            Err(AcmeError::Config(m)) if m.contains("GET returned HTTP 500")
+        ));
+
+        let (send, _) = scripted(&[(200, r#"{"records":["\"digest-value-42\""]}"#), (500, "")]);
+        let ds = DeSecProvider::new("tok", "example.com")?.with_transport(send);
+        assert!(matches!(
+            ds.delete(&record),
             Err(AcmeError::Config(m)) if m.contains("DELETE returned HTTP 500")
+        ));
+
+        let (send, _) = scripted(&[
+            (200, r#"{"records":["\"digest-value-42\"","\"other\""]}"#),
+            (500, ""),
+        ]);
+        let ds = DeSecProvider::new("tok", "example.com")?.with_transport(send);
+        assert!(matches!(
+            ds.delete(&record),
+            Err(AcmeError::Config(m)) if m.contains("PUT returned HTTP 500")
         ));
 
         let (send, _) = scripted(&[(500, "")]);
@@ -1351,13 +1478,32 @@ mod tests {
         ));
         // A well-formed response that simply does not carry our value.
         assert!(!rrset_contains(r#"[{"records":["other"]}]"#, "mine")?);
+        // The single-RRset read refuses a body without a records array, or
+        // with a record that is not a string, rather than reading it as
+        // empty: an empty read would make `present` PUT over the real set.
+        assert!(matches!(
+            rrset_records("not json"),
+            Err(AcmeError::Config(m)) if m.contains("unreadable RRset response")
+        ));
+        for body in ["{}", r#"{"records":"x"}"#, r#"{"records":[1]}"#, "[]"] {
+            assert!(matches!(
+                rrset_records(body),
+                Err(AcmeError::Config(m)) if m.contains("no records array")
+            ));
+        }
+        assert_eq!(
+            rrset_records(r#"{"records":["\"a\"","b"]}"#)?,
+            strings(&["\"a\"", "b"])
+        );
+        assert!(is_value("\"mine\"", "mine") && is_value("mine", "mine"));
+        assert!(!is_value("\"other\"", "mine") && !is_value("\"mine", "mine"));
         Ok(())
     }
 
     #[test]
     fn desec_maps_the_zone_apex_to_the_at_subname() -> R {
         let apex = DnsRecord::new("example.com", "digest-value-42")?;
-        let (send, script) = scripted(&[(200, "{}")]);
+        let (send, script) = scripted(&[(404, ""), (200, "{}")]);
         let ds = DeSecProvider::new("tok", "example.com")?.with_transport(send);
         ds.present(&apex)?;
         assert!(
@@ -1365,6 +1511,298 @@ mod tests {
             "the apex is `@`, not an empty subname: {}",
             last(&script)?.url
         );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Two values at one name
+    //
+    // An order for `example.com` and `*.example.com` holds two dns-01 values
+    // at `_acme-challenge.example.com` at once (RFC 8555 §8.4). `present` must
+    // add its value beside the other one, and `delete` must remove only its
+    // own. Each provider runs against a fake that keeps state.
+    // -----------------------------------------------------------------------
+
+    /// Two challenge records at one name, as an apex plus wildcard order has.
+    fn pair() -> Result<(DnsRecord, DnsRecord), AcmeError> {
+        Ok((
+            DnsRecord::new("_acme-challenge.example.com", "digest-a")?,
+            DnsRecord::new("_acme-challenge.example.com", "digest-b")?,
+        ))
+    }
+
+    fn sorted(mut values: Vec<String>) -> Vec<String> {
+        values.sort();
+        values
+    }
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| (*v).to_owned()).collect()
+    }
+
+    fn json_error(err: &serde_json::Error) -> AcmeError {
+        AcmeError::Config(err.to_string())
+    }
+
+    fn poisoned<T>(err: &std::sync::PoisonError<T>) -> AcmeError {
+        AcmeError::Io(io::Error::other(err.to_string()))
+    }
+
+    /// The TXT values a Cloudflare fake holds, as `(id, content)`.
+    type CfZone = Arc<Mutex<Vec<(String, String)>>>;
+
+    fn cf_content(req: &HttpRequest) -> Result<String, AcmeError> {
+        let body: serde_json::Value =
+            serde_json::from_str(&req.body).map_err(|e| json_error(&e))?;
+        body.get("content")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| AcmeError::Config("fake cloudflare: no content".into()))
+    }
+
+    /// A fake Cloudflare zone: list, create, update and delete over `held`.
+    fn cloudflare_server(held: CfZone) -> Box<HttpTransport> {
+        Box::new(move |req: &HttpRequest| {
+            let mut held = held.lock().map_err(|p| poisoned(&p))?;
+            let id = req.url.rsplit_once("/dns_records/").map(|(_, id)| id);
+            match (req.method, id) {
+                ("GET", _) => {
+                    let result: Vec<_> = held
+                        .iter()
+                        .map(|(id, content)| serde_json::json!({"id": id, "content": content}))
+                        .collect();
+                    Ok((200, serde_json::json!({"result": result}).to_string()))
+                }
+                ("POST", None) => {
+                    let id = format!("cf-{}", held.len());
+                    held.push((id, cf_content(req)?));
+                    Ok((200, "{}".to_owned()))
+                }
+                ("PUT", Some(id)) => {
+                    let content = cf_content(req)?;
+                    if let Some(entry) = held.iter_mut().find(|(have, _)| have == id) {
+                        entry.1 = content;
+                    }
+                    Ok((200, "{}".to_owned()))
+                }
+                ("DELETE", Some(id)) => {
+                    held.retain(|(have, _)| have != id);
+                    Ok((200, "{}".to_owned()))
+                }
+                _ => Ok((405, String::new())),
+            }
+        })
+    }
+
+    #[test]
+    fn cloudflare_holds_two_values_at_one_name() -> R {
+        let (a, b) = pair()?;
+        let held = CfZone::default();
+        let cf = CloudflareProvider::new("tok", "a".repeat(32))?
+            .with_transport(cloudflare_server(Arc::clone(&held)));
+        let contents = || -> Result<Vec<String>, AcmeError> {
+            let held = held.lock().map_err(|p| poisoned(&p))?;
+            Ok(sorted(held.iter().map(|(_, c)| c.clone()).collect()))
+        };
+        cf.present(&a)?;
+        cf.present(&b)?;
+        cf.present(&a)?; // a refresh must not add a third record
+        assert_eq!(contents()?, strings(&["digest-a", "digest-b"]));
+        cf.delete(&a)?;
+        assert_eq!(contents()?, strings(&["digest-b"]));
+        cf.delete(&b)?;
+        assert_eq!(contents()?, Vec::<String>::new());
+        Ok(())
+    }
+
+    /// The one deSEC `RRset` a fake holds; `None` when it does not exist.
+    type RrSet = Arc<Mutex<Option<Vec<String>>>>;
+
+    /// A fake deSEC API for a single `RRset`: GET, PUT and DELETE on its URL.
+    /// Like the real API, it refuses a PUT that empties the set.
+    fn desec_server(rrset: RrSet) -> Box<HttpTransport> {
+        Box::new(move |req: &HttpRequest| {
+            let mut held = rrset.lock().map_err(|p| poisoned(&p))?;
+            match req.method {
+                "GET" => Ok(match held.as_ref() {
+                    Some(records) => (
+                        200,
+                        serde_json::json!({
+                            "subname": "_acme-challenge", "type": "TXT",
+                            "records": records, "ttl": 3600,
+                        })
+                        .to_string(),
+                    ),
+                    None => (404, r#"{"detail":"Not found."}"#.to_owned()),
+                }),
+                "PUT" => {
+                    let body: serde_json::Value =
+                        serde_json::from_str(&req.body).map_err(|e| json_error(&e))?;
+                    let records: Vec<String> = body
+                        .get("records")
+                        .and_then(serde_json::Value::as_array)
+                        .ok_or_else(|| AcmeError::Config("fake deSEC: no records".into()))?
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect();
+                    if records.is_empty() {
+                        return Ok((400, r#"{"records":["empty"]}"#.to_owned()));
+                    }
+                    *held = Some(records);
+                    Ok((200, "{}".to_owned()))
+                }
+                "DELETE" => Ok(if held.take().is_some() {
+                    (204, String::new())
+                } else {
+                    (404, r#"{"detail":"Not found."}"#.to_owned())
+                }),
+                _ => Ok((405, String::new())),
+            }
+        })
+    }
+
+    #[test]
+    fn desec_holds_two_values_at_one_name() -> R {
+        let (a, b) = pair()?;
+        let rrset = RrSet::default();
+        let ds = DeSecProvider::new("tok", "example.com")?
+            .with_transport(desec_server(Arc::clone(&rrset)));
+        let values = || -> Result<Option<Vec<String>>, AcmeError> {
+            Ok(rrset.lock().map_err(|p| poisoned(&p))?.clone().map(sorted))
+        };
+        ds.present(&a)?;
+        ds.present(&b)?;
+        ds.present(&a)?; // a refresh must not add a second copy
+        assert_eq!(values()?, Some(strings(&["\"digest-a\"", "\"digest-b\""])));
+        ds.delete(&a)?;
+        assert_eq!(values()?, Some(strings(&["\"digest-b\""])));
+        ds.delete(&b)?;
+        assert_eq!(values()?, None, "the empty RRset is deleted, not PUT");
+        ds.delete(&b)?; // an already-gone value is not a failure
+        Ok(())
+    }
+
+    #[test]
+    fn desec_keeps_values_it_did_not_write() -> R {
+        // A value left by another client, or by a crashed run, stays put.
+        let (a, _) = pair()?;
+        let rrset = RrSet::new(Mutex::new(Some(strings(&["\"foreign\""]))));
+        let ds = DeSecProvider::new("tok", "example.com")?
+            .with_transport(desec_server(Arc::clone(&rrset)));
+        ds.present(&a)?;
+        ds.delete(&a)?;
+        let held = rrset.lock().map_err(|p| poisoned(&p))?.clone();
+        assert_eq!(held, Some(strings(&["\"foreign\""])));
+        Ok(())
+    }
+
+    /// The TXT rdata a fake primary holds at the challenge name.
+    type Zone = Arc<Mutex<Vec<Vec<u8>>>>;
+
+    fn take<'a>(msg: &'a [u8], pos: &mut usize, len: usize) -> Result<&'a [u8], AcmeError> {
+        let end = pos.checked_add(len);
+        let bytes = end.and_then(|end| msg.get(*pos..end));
+        let bytes = bytes.ok_or_else(|| AcmeError::Config("fake primary: short message".into()))?;
+        *pos = pos.saturating_add(len);
+        Ok(bytes)
+    }
+
+    fn take_u16(msg: &[u8], pos: &mut usize) -> Result<u16, AcmeError> {
+        let bytes = <[u8; 2]>::try_from(take(msg, pos, 2)?)
+            .map_err(|_| AcmeError::Config("fake primary: short message".into()))?;
+        Ok(u16::from_be_bytes(bytes))
+    }
+
+    /// Skips an uncompressed name.
+    fn skip_name(msg: &[u8], pos: &mut usize) -> Result<(), AcmeError> {
+        loop {
+            let len = usize::from(take(msg, pos, 1)?.first().copied().unwrap_or_default());
+            if len == 0 {
+                return Ok(());
+            }
+            take(msg, pos, len)?;
+        }
+    }
+
+    /// Applies the TXT changes of an UPDATE message to `zone`, as RFC 2136
+    /// §2.5 defines them: class IN adds a record, class ANY deletes the whole
+    /// set, class NONE deletes the one record that matches.
+    fn apply_update(msg: &[u8], zone: &mut Vec<Vec<u8>>) -> Result<(), AcmeError> {
+        const TYPE_TXT: u16 = 16;
+        const CLASS_IN: u16 = 1;
+        const CLASS_NONE: u16 = 254;
+        const CLASS_ANY: u16 = 255;
+        let mut pos = 0;
+        take(msg, &mut pos, 4)?; // id, flags
+        let zocount = take_u16(msg, &mut pos)?;
+        let prcount = take_u16(msg, &mut pos)?;
+        let upcount = take_u16(msg, &mut pos)?;
+        take(msg, &mut pos, 2)?; // adcount
+        assert_eq!(prcount, 0);
+        for _ in 0..zocount {
+            skip_name(msg, &mut pos)?;
+            take(msg, &mut pos, 4)?;
+        }
+        for _ in 0..upcount {
+            skip_name(msg, &mut pos)?;
+            let rtype = take_u16(msg, &mut pos)?;
+            let class = take_u16(msg, &mut pos)?;
+            take(msg, &mut pos, 4)?; // ttl
+            let rdlen = take_u16(msg, &mut pos)?;
+            let rdata = take(msg, &mut pos, usize::from(rdlen))?.to_vec();
+            if rtype != TYPE_TXT {
+                continue;
+            }
+            match class {
+                CLASS_IN if !zone.contains(&rdata) => zone.push(rdata),
+                CLASS_IN => {}
+                CLASS_ANY => zone.clear(),
+                CLASS_NONE => zone.retain(|held| *held != rdata),
+                other => {
+                    return Err(AcmeError::Config(format!("fake primary: class {other}")));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The signing fake primary of [`tsig_server`], with a zone behind it.
+    fn tsig_zone(zone: Zone) -> Box<DnsExchange> {
+        let answer = tsig_server(0, Arc::new(Mutex::new(Vec::new())));
+        Box::new(move |server: &str, signed: &[u8]| {
+            let mut held = zone.lock().map_err(|p| poisoned(&p))?;
+            apply_update(signed, &mut held)?;
+            drop(held);
+            answer(server, signed)
+        })
+    }
+
+    #[test]
+    fn rfc2136_holds_two_values_at_one_name() -> R {
+        let (a, b) = pair()?;
+        let zone = Zone::default();
+        let r2 = Rfc2136Provider::new(
+            "ns1.example.com:53",
+            "example.com",
+            "k.example.com",
+            TSIG_B64,
+            "hmac-sha256",
+        )?
+        .with_exchange(tsig_zone(Arc::clone(&zone)));
+        let held = || -> Result<Vec<Vec<u8>>, AcmeError> {
+            let mut held = zone.lock().map_err(|p| poisoned(&p))?.clone();
+            held.sort();
+            Ok(held)
+        };
+        r2.present(&a)?;
+        r2.present(&b)?;
+        r2.present(&a)?; // a refresh must not add a second copy
+        assert_eq!(held()?, vec![txt_rdata("digest-a"), txt_rdata("digest-b")]);
+        r2.delete(&a)?;
+        assert_eq!(held()?, vec![txt_rdata("digest-b")]);
+        r2.delete(&b)?;
+        assert_eq!(held()?, Vec::<Vec<u8>>::new());
+        r2.delete(&b)?; // an already-gone value is not a failure
         Ok(())
     }
 
