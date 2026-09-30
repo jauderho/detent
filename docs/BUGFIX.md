@@ -163,11 +163,20 @@ Follow-ups found while reviewing Track A (not yet scheduled):
   update binary and, since B4, its bundle) checks the owner of each
   directory, not of the file. Consider requiring the file's owner to be the
   worker uid (root-confined mode) as a second barrier.
-- **Legacy `unlink` in `MONITOR`.** A confined monitor is killed with
-  `SIGSYS` on x86_64 when `run_check` drops its `tempfile` candidate:
-  `std::fs::remove_file` issues `unlink(2)`, and `MONITOR` lists only
-  `unlinkat`. Needs an owner decision (seccomp table change). Seen with
-  strace while proving the B9 follow-up; the aarch64 table is not affected.
+- **Legacy `chmod` and `rename` in `MONITOR`.** The confined monitor now
+  removes its own files with `unlinkat` (`monitor.rs` `unlink`; owner
+  decision 2026-09-30, no table change). Two more x86_64 legacy calls remain
+  that `MONITOR` lacks; both need an owner decision (a table change or a
+  code change), and both are seen with `strace -f` on x86_64 glibc:
+  `chmod` from `std::fs::set_permissions` in `ensure_backup_dir`
+  (`fs/atomic.rs`), so the first backup of a target kills the monitor with
+  `SIGSYS` (the `enforce_mode_monitor_*` tests make the backup directory
+  first); and `rename` from `std::fs::rename` in `write_temp_and_swap`
+  (`monitor.rs`), so a `ReplaceBinary` that passes verification is killed at
+  the swap (no confined test reaches it). Not traced: musl release
+  binaries (musl issues legacy forms for more calls), aarch64 (no legacy
+  forms), and the `std::fs::copy` fallback in `swap_running_binary`
+  (`copy_file_range`).
 
 B3 (real Fulcio/Rekor trust roots) moved to Track E, item 2.
 

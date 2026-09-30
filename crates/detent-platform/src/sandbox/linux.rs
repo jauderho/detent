@@ -374,6 +374,18 @@ mod tests {
         }
     }
 
+    /// Confines the monitor with the real `confine`, for a test that goes
+    /// through `spawn_pair`.
+    struct ConfineMonitor(Policy);
+
+    impl SandboxHooks for ConfineMonitor {
+        fn confine_monitor(&self) -> Result<(), crate::privsep::spawn::SandboxError> {
+            confine(Role::Monitor, &self.0)
+                .map(|_| ())
+                .map_err(|err| crate::privsep::spawn::SandboxError(err.to_string()))
+        }
+    }
+
     fn fixture_allowlist(root: &Path) -> Result<Allowlist, Box<dyn std::error::Error>> {
         static TARGETS: &[Target] = &[Target {
             path: PathSpec::new("/etc/hosts"),
@@ -383,8 +395,8 @@ mod tests {
             backend_detect: always,
         }];
         static HOSTS: ModuleDescriptor = ModuleDescriptor {
-            id: "hosts",
-            display_name_id: MessageId::new("hosts-name"),
+            id: "trace",
+            display_name_id: MessageId::new("trace-name"),
             targets: TARGETS,
             upstream: UPSTREAM,
             services: &[],
@@ -752,9 +764,8 @@ mod tests {
     /// must be read before confinement. The runner test above never reaches
     /// this code: it drives `RunnerClient` directly, with no `Monitor`, and
     /// makes the staging directory itself before it confines. Only the
-    /// directory step is run here: the candidate file that `RunCheck` then
-    /// drops calls the legacy `unlink`, which `MONITOR` also lacks (reported
-    /// separately; not changed here).
+    /// directory step is run here; the candidate file that `RunCheck` then
+    /// removes is covered by `enforce_mode_monitor_runs_a_check_and_removes_its_candidate`.
     #[test]
     fn enforce_mode_monitor_checks_its_staging_directory_owner()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -788,14 +799,6 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         use crate::privsep::monitor::{Hooks, Monitor, ensure_staging_dir};
         use crate::privsep::spawn::{Role as SpawnRole, SpawnConfig, spawn_pair};
-        struct ConfineMonitor(Policy);
-        impl SandboxHooks for ConfineMonitor {
-            fn confine_monitor(&self) -> Result<(), crate::privsep::spawn::SandboxError> {
-                confine(Role::Monitor, &self.0)
-                    .map(|_| ())
-                    .map_err(|err| crate::privsep::spawn::SandboxError(err.to_string()))
-            }
-        }
         in_forked_child(|| {
             let dir = std::env::temp_dir().join(format!(
                 "detent-sandbox-spawn-staging-{}",
@@ -1158,5 +1161,334 @@ mod tests {
                 Ok(())
             }
         }
+    }
+
+    // -- A confined monitor, driven end to end ---------------------------------
+
+    static DRIVE_CHECKS: &[detent_core::descriptor::ExternalCheck] =
+        &[detent_core::descriptor::ExternalCheck {
+            program: PathSpec::new("/bin/sh"),
+            args: &[
+                detent_core::descriptor::ArgTemplate::Literal("-c"),
+                detent_core::descriptor::ArgTemplate::Literal("test -s \"$0\""),
+                detent_core::descriptor::ArgTemplate::TempFile,
+            ],
+            expects: detent_core::descriptor::CheckExpectation::ExitZero,
+        }];
+
+    type Json = serde_json::Value;
+    type DynResult<T> = Result<T, detent_core::module::DynError>;
+
+    /// A module with one target, and a check that runs.
+    struct DriveModule(&'static ModuleDescriptor);
+
+    impl detent_core::module::DynModule for DriveModule {
+        fn id(&self) -> &'static str {
+            self.0.id
+        }
+        fn descriptor(&self) -> &'static ModuleDescriptor {
+            self.0
+        }
+        fn clone_box(&self) -> Box<dyn detent_core::module::DynModule> {
+            Box::new(Self(self.0))
+        }
+        fn schema_json(&self) -> Json {
+            Json::Null
+        }
+        fn parse_to_model_json(&self, src: &str) -> DynResult<Json> {
+            Ok(serde_json::json!({ "text": src }))
+        }
+        fn apply_json(&self, src: &str, _model: &Json) -> DynResult<String> {
+            Ok(src.to_owned())
+        }
+        fn validate_json(
+            &self,
+            _model: &Json,
+            _ctx: &detent_core::descriptor::ValidationCtx<'_>,
+        ) -> DynResult<detent_core::diag::Diagnostics> {
+            Ok(detent_core::diag::Diagnostics::new())
+        }
+        fn defaults_json(&self, _profile: &HostProfile) -> DynResult<Json> {
+            Ok(Json::Null)
+        }
+    }
+
+    /// What a confined-monitor scenario, which runs in the worker, works on.
+    struct Drive {
+        state: std::path::PathBuf,
+        target: std::path::PathBuf,
+        staging: std::path::PathBuf,
+        module: crate::privsep::proto::ModuleId,
+        target_id: crate::privsep::proto::TargetId,
+        check: crate::privsep::proto::CheckId,
+    }
+
+    /// The descriptor of the module a confined-monitor scenario serves.
+    fn drive_descriptor(target_path: &str) -> &'static ModuleDescriptor {
+        Box::leak(Box::new(ModuleDescriptor {
+            id: "trace",
+            display_name_id: MessageId::new("trace-name"),
+            targets: Box::leak(Box::new([Target {
+                path: PathSpec::new(Box::leak(target_path.to_owned().into_boxed_str())),
+                kind: TargetKind::File,
+                mode: 0o644,
+                owner: Owner::Root,
+                backend_detect: always,
+            }])),
+            upstream: UPSTREAM,
+            services: &[],
+            checks: DRIVE_CHECKS,
+            commit_confirm: true,
+            security_notes: &[],
+        }))
+    }
+
+    /// Run a real confined `Role::Monitor` (`Monitor::serve`, the real
+    /// dispatch, a real runner for the check) against a worker that runs
+    /// `scenario`. The test passes only when the worker's requests all
+    /// succeed and the monitor exits after `Shutdown`. A syscall outside
+    /// `MONITOR` kills the monitor with `SIGSYS`, which fails the forked
+    /// child's exit check. `prepare` gets the state root before the fork.
+    fn drive_confined_monitor(
+        keep_backups: usize,
+        prepare: fn(&Path) -> bool,
+        scenario: fn(&mut crate::privsep::worker::Client, &Drive) -> bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::privsep::monitor::{ExitReason, Hooks, Monitor, NoServices};
+        use crate::privsep::proto::PathKind;
+        use crate::privsep::runner::RunnerClient;
+        use crate::privsep::spawn::{
+            Role as SpawnRole, SpawnConfig, reap_child, spawn_pair, spawn_runner,
+        };
+        let work = tempfile::TempDir::new()?;
+        let state = work.path().join("state");
+        let target = work.path().join("etc/target.conf");
+        let staging = state.join("staging");
+        // The first backup of a target creates its backup directory and
+        // calls `chmod`, which `MONITOR` lacks (`ensure_backup_dir`; listed
+        // in BUGFIX.md, not fixed here). Make the directory first, as a
+        // monitor that has already made one backup finds it.
+        let backups = state.join("backups/trace/0");
+        std::fs::create_dir_all(&backups)?;
+        std::fs::set_permissions(
+            &backups,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )?;
+        std::fs::create_dir_all(target.parent().ok_or("the target has no parent")?)?;
+        std::fs::write(&target, b"v1")?;
+        let target_name = target.to_str().ok_or("target is not UTF-8")?.to_owned();
+        let descriptor = drive_descriptor(&target_name);
+        let config = Config {
+            keep_backups,
+            ..Config::with_state_root(&state)
+        };
+        let allow = Allowlist::from_modules(&[descriptor], &config)?;
+        assert!(prepare(&state), "the scenario could not prepare its files");
+        let runner = spawn_runner(&allow, &staging, detent_core::descriptor::InitSystem::None)?;
+        let runner_pid = runner.child_pid;
+        let hooks = ConfineMonitor(Policy::monitor(&allow));
+        // The runner ends when the last copy of its channel closes: the
+        // forked child's, and this thread's own, which the closure holds.
+        in_forked_child(move || {
+            let Ok(spawned) = spawn_pair(&SpawnConfig::unprivileged(), &hooks) else {
+                return false;
+            };
+            match spawned.role {
+                SpawnRole::Worker(mut client) => {
+                    drop(runner);
+                    let ok = client.hello().is_ok()
+                        && client
+                            .module_id("trace")
+                            .zip(client.target_id("trace", &target_name, PathKind::File))
+                            .zip(client.check_id("trace"))
+                            .is_some_and(|((module, target_id), check)| {
+                                let drive = Drive {
+                                    state,
+                                    target,
+                                    staging,
+                                    module,
+                                    target_id,
+                                    check,
+                                };
+                                scenario(&mut client, &drive)
+                            })
+                        && client.shutdown().is_ok();
+                    // Not confined: the coverage profile is written.
+                    fork::exit_immediately(i32::from(!ok))
+                }
+                SpawnRole::Monitor(mut handle) => {
+                    let checker = RunnerClient::new(runner.channel, &allow);
+                    let hooks = Hooks {
+                        checks: &checker,
+                        services: &NoServices,
+                    };
+                    let mut monitor = Monitor::new(allow, hooks);
+                    monitor.set_module_registry(vec![Box::new(DriveModule(descriptor))]);
+                    monitor.set_staging_dir(staging);
+                    let served = monitor.serve(&mut handle.channel);
+                    drop(monitor);
+                    drop(checker);
+                    matches!(served, Ok(ExitReason::Shutdown))
+                        && matches!(handle.wait(), Ok(Some(0)))
+                }
+            }
+        })?;
+        reap_child(runner_pid);
+        Ok(())
+    }
+
+    /// Write `bytes` to the target, guarded by the digest of its current
+    /// contents, and keep a rollback entry.
+    fn drive_write(
+        client: &mut crate::privsep::worker::Client,
+        drive: &Drive,
+        bytes: &[u8],
+    ) -> bool {
+        client.read_target(drive.target_id).is_ok_and(|current| {
+            client
+                .write_target(drive.target_id, Some(current.digest), bytes.to_vec(), true)
+                .is_ok_and(|receipt| receipt.backed_up)
+        })
+    }
+
+    /// True when the monitor's staging directory holds no file.
+    fn drive_staging_is_empty(drive: &Drive) -> bool {
+        std::fs::read_dir(&drive.staging).is_ok_and(|mut entries| entries.next().is_none())
+    }
+
+    /// `RunCheck` writes a candidate file in the staging directory, runs the
+    /// check on it, and removes it.
+    #[test]
+    fn enforce_mode_monitor_runs_a_check_and_removes_its_candidate()
+    -> Result<(), Box<dyn std::error::Error>> {
+        drive_confined_monitor(
+            2,
+            |_| true,
+            |client, drive| {
+                client
+                    .run_check(drive.check, b"candidate".to_vec())
+                    .is_ok_and(|outcome| outcome.passed)
+                    && drive_staging_is_empty(drive)
+            },
+        )
+    }
+
+    /// `WriteTarget` of a module that has a check runs the check on a
+    /// candidate file, removes it, and backs the old contents up.
+    #[test]
+    fn enforce_mode_monitor_writes_a_target_that_has_a_check_and_a_backup()
+    -> Result<(), Box<dyn std::error::Error>> {
+        drive_confined_monitor(
+            2,
+            |_| true,
+            |client, drive| {
+                drive_write(client, drive, b"v2")
+                    && drive_staging_is_empty(drive)
+                    && std::fs::read(&drive.target).is_ok_and(|now| now == b"v2")
+            },
+        )
+    }
+
+    /// More writes than `keep_backups` rotate the oldest backup away.
+    #[test]
+    fn enforce_mode_monitor_rotates_backups() -> Result<(), Box<dyn std::error::Error>> {
+        drive_confined_monitor(
+            2,
+            |_| true,
+            |client, drive| {
+                (2..=6).all(|n| drive_write(client, drive, format!("v{n}").as_bytes()))
+                    && client
+                        .list_backups(drive.module)
+                        .is_ok_and(|backups| backups.len() == 2)
+            },
+        )
+    }
+
+    /// `Restore` puts a backup back over the target.
+    #[test]
+    fn enforce_mode_monitor_restores_a_backup() -> Result<(), Box<dyn std::error::Error>> {
+        drive_confined_monitor(
+            2,
+            |_| true,
+            |client, drive| {
+                drive_write(client, drive, b"v2")
+                    && client
+                        .list_backups(drive.module)
+                        .ok()
+                        .and_then(|backups| backups.first().map(|newest| newest.id))
+                        .is_some_and(|newest| client.restore(drive.module, newest).is_ok())
+                    && std::fs::read(&drive.target).is_ok_and(|now| now == b"v1")
+            },
+        )
+    }
+
+    /// A `ReplaceBinary` that fails verification removes the monitor's own
+    /// copy of the candidate image (B4's cleanup guard).
+    #[test]
+    fn enforce_mode_monitor_removes_the_staged_copy_of_a_refused_release()
+    -> Result<(), Box<dyn std::error::Error>> {
+        drive_confined_monitor(
+            2,
+            |state| {
+                let staged = state.join("update/staged");
+                std::fs::create_dir_all(&staged).is_ok()
+                    && std::fs::write(staged.join("v999.0.0"), b"not a release").is_ok()
+            },
+            |client, drive| {
+                let digest = crate::fs::atomic::Sha256Digest::of(b"not a release");
+                matches!(
+                    client.replace_binary("v999.0.0", 13, digest),
+                    Err(crate::privsep::worker::ClientError::Remote(
+                        crate::privsep::proto::ProtoError::VerificationFailed
+                    ))
+                ) && !drive.staging.join(digest.to_string()).exists()
+            },
+        )
+    }
+
+    /// Confirming and rolling back a commit remove the crash-recovery marker.
+    #[test]
+    fn enforce_mode_monitor_clears_the_commit_marker() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::privsep::proto::CommitId;
+        drive_confined_monitor(
+            2,
+            |_| true,
+            |client, drive| {
+                let marker = drive
+                    .state
+                    .join(crate::privsep::monitor::PENDING_COMMIT_MARKER);
+                drive_write(client, drive, b"v2")
+                    && client.start_confirm_timer(CommitId(1), 60, None).is_ok()
+                    && marker.exists()
+                    && client.confirm_commit(CommitId(1)).is_ok()
+                    && !marker.exists()
+                    && drive_write(client, drive, b"v3")
+                    && client.start_confirm_timer(CommitId(2), 60, None).is_ok()
+                    && client.rollback_commit(CommitId(2)).is_ok()
+                    && !marker.exists()
+            },
+        )
+    }
+
+    /// Startup recovery of a marker a dead monitor left removes it.
+    #[test]
+    fn enforce_mode_monitor_removes_a_recovered_commit_marker()
+    -> Result<(), Box<dyn std::error::Error>> {
+        drive_confined_monitor(
+            2,
+            |state| {
+                std::fs::write(
+                    state.join(crate::privsep::monitor::PENDING_COMMIT_MARKER),
+                    br#"{"commit":1,"deadline_unix_ms":0,"entries":[]}"#,
+                )
+                .is_ok()
+            },
+            |_, drive| {
+                !drive
+                    .state
+                    .join(crate::privsep::monitor::PENDING_COMMIT_MARKER)
+                    .exists()
+            },
+        )
     }
 }
