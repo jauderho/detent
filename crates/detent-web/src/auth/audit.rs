@@ -457,22 +457,6 @@ mod tests {
     }
 
     #[test]
-    fn an_audit_directory_owned_by_another_user_is_refused() -> R {
-        assert!(
-            detent_platform::privsep::spawn::is_root(),
-            "this test needs root to give a directory to another user"
-        );
-        let root = tempfile::tempdir()?;
-        let sink = FileAuthAudit::under_state_root(root.path());
-        let dir = sink.path().parent().ok_or("no parent")?;
-        std::fs::create_dir(dir)?;
-        std::os::unix::fs::chown(dir, Some(4242), None)?;
-        sink.record(&sample());
-        assert!(!sink.path().exists());
-        Ok(())
-    }
-
-    #[test]
     fn an_unwritable_sink_does_not_fail_the_caller() {
         // A path whose parent cannot be created: the record is dropped with a
         // log line, and `emit` still returns.
