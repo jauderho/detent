@@ -350,8 +350,8 @@ any degraded step (`report_confinement`, `serve.rs`).
    Gaps). Seccomp and the capability cut still apply.
 5. **aarch64 confinement is compiled and unit-tested but not run on
    hardware.**
-6. Open STAGE3 items are tracked in [`STAGE3.md`](STAGE3.md) §11–§12 and
-   [`STAGE4.md`](STAGE4.md).
+6. Open items (including the STAGE3 review items) are tracked in
+   [`BUGFIX.md`](BUGFIX.md).
 
 ## 12. How to verify
 

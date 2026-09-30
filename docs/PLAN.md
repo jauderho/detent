@@ -1,6 +1,8 @@
 # detent — Implementation Plan
 
-> **Status:** DRAFT — awaiting approval. Nothing in this plan is implemented.
+> **Status:** approved 2026-09-03. Phases 0–5 and 10 are done; 6–9 are in progress.
+> The open work and its order are in [`BUGFIX.md`](BUGFIX.md); landed work is in
+> [`PROGRESS.md`](PROGRESS.md).
 > **Audience:** the orchestrator (Fable Medium, or Opus 5 High as fallback) and the
 > implementor agents it delegates to. This document is written so that a fresh
 > session with no conversation context can pick up any phase and finish it.
@@ -618,7 +620,7 @@ localized, with schema-driven module forms.
 
 ---
 
-### Phase 6 — ACME: dns-01, short-lived certs, device-attest-01 `[ ]`
+### Phase 6 — ACME: dns-01, short-lived certs, device-attest-01 `[~]`
 
 **Goal:** real certs, renewed automatically, from public and private CAs.
 
@@ -641,7 +643,7 @@ localized, with schema-driven module forms.
 
 ---
 
-### Phase 7 — Modules wave 1: resolver, chrony, mounts, NFS, Samba `[ ]`
+### Phase 7 — Modules wave 1: resolver, chrony, mounts, NFS, Samba `[~]`
 
 **Goal:** the most-used SBC configs, with smart secure defaults and upstream tracking.
 
@@ -663,7 +665,7 @@ Per module (each is one subtask following `MODULE_GUIDE.md`): lossless CST, mode
 
 ---
 
-### Phase 8 — Modules wave 2: network, DHCP `[ ]`
+### Phase 8 — Modules wave 2: network, DHCP `[~]`
 
 **Goal:** interface configuration across the tier-1 backends, and DHCP servers.
 
@@ -680,7 +682,7 @@ Both are commit-confirm modules. Network model is backend-neutral (interface →
 
 ---
 
-### Phase 9 — Release pipeline and self-update (Milestone M3) `[ ]`
+### Phase 9 — Release pipeline and self-update (Milestone M3) `[~]`
 
 **Goal:** reproducible, attested, immutable releases; detent updates itself safely.
 
@@ -916,6 +918,7 @@ TLS 1.3 → session or Bearer → (cookie path) `Sec-Fetch-Site` + `Origin` + `X
 
 | Date | Change | By |
 |---|---|---|
+| 2026-09-30 | STAGE2/3/4 consolidated into `docs/BUGFIX.md` (the one open-work queue). Status header and Phase 6–9 lines brought up to date (`[~]`); §10 checkpoint now points to PROGRESS and BUGFIX. | orchestrator |
 | 2026-09-22 | Phase 10 deviations recorded at close-out (§0 item 5, §1.6): (1) FreeBSD C-example CI deferred to parked Phase 11 — the Phase 10 deliverables line wants the C example on "Linux and FreeBSD CI" but §1.6 tier-3 forbids FreeBSD CI until a later pass and Phase 11 (BSD tier 2, incl. the `vmactions/freebsd-vm` job) is parked; tier-3/Phase 11 win by §1.6 authority, C example runs on Linux CI only. (2) `cargo-semver-checks` wired with an `origin/main` git baseline (not crates.io) since every crate sets `publish = false`; Rust API surface is internal so the check is advisory next to `cbindgen --verify`, which remains the binding C ABI gate. | orchestrator |
 | 2026-09-10 | Phase 4 closed: TLS 1.3 listener, Argon2id auth, sessions, API tokens, TOTP, rate limiting, CSRF, scoped authz, API v1 + OpenAPI, SPA serving, `serve` wired to the real server, credential CLI. Seccomp now **fails closed** (`Policy::require_seccomp`) after a filter that failed to compile left the worker unconfined while `confine` reported success. `rt_sigreturn` was missing from both…
 | 2026-09-17 | Phase 5 closed; **Milestone M2 reached** (see `docs/spikes/m2-ui.md`). Certificates + settings stay placeholders (Phase 6 / missing API). E2e against the real binary stays deferred per §5. |
@@ -928,57 +931,7 @@ TLS 1.3 → session or Bearer → (cookie path) `Sec-Fetch-Site` + `Origin` + `X
 
 ## 10. Checkpoint for the next session (read this first if resuming cold)
 
-**State on 2026‑09‑10, branch `phase-0-foundations` (from `main`):** Phases 0–4 complete; Phase 5 (web UI, Milestone M2) not started. **944 workspace tests pass.** `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo fmt --all --check` and `cargo deny check` are clean on macOS and in a Linux container. Coverage gate PASSES: core/i18n/ops/modules 100 %, platform 97.7 (floor 92), web 97.4 (floor 97), detent 95.2 (floor 95), global 97.4 %.
-
-Phase 4 delivered (all committed, `78cee86`…`4eab643`):
-- `detent-web`: `config` (TOML, `Argon2Params::for_host`), `tls` (TLS 1.3 only — rustls is compiled **without** `tls12`, so the shipped binary cannot speak it; `CertStore` is the ACME reload seam), `engine` (the sync `OpsEngine` on its own thread behind an async handle), `headers`, `server`, `auth/*` (Argon2id with a dummy-hash miss branch, in-memory sessions, SHA-256 API tokens, RFC 6238 TOTP with replay refusal, in-tree base32, bounded rate limiter), `csrf`, `authz` (`ScopedAuthz`, matched variant by variant), `api/*` (13 endpoints + utoipa; `docs/openapi.json` checked in and diffed by a test), `spa` (negotiated br/gzip, immutable hashed assets, ETag/304, behind an off-by-default `ui` feature until Phase 5 builds `web/dist`).
-- `detent serve` runs it for real: engine, auth stores, TLS bootstrap with the fingerprint logged, graceful SIGTERM/SIGINT. Verified as root in a container serving HTTPS `/healthz` with seccomp confirmed installed for both halves via `strace`.
-- `detent setup|user|token`, `detent.toml` parsed at last, `Zeroizing` passwords, fuzz targets `fuzz_api_json`/`fuzz_session_cookie`, `docs/SECURITY_HARDENING.md`, `scripts/tls-check.sh`, three real size baselines.
-
-**Defects found and fixed during Phase 4 review** (each has a test now): seccomp failed open — a filter that did not install left the process unconfined while `confine` returned `Ok` (`Policy::require_seccomp`, default **on** for monitor and worker); `rt_sigreturn` missing from both tables since Phase 2, so a real `SIGTERM` fault-looped; CSRF read only the first `Sec-Fetch-Site`, so a repeated header smuggled a cross-site request past it; the CSP pinned the hash of `theme-init.js` while `index.html` inlined a re-indented copy that hashes differently; OpenAPI described auth with hand-copied mirror structs that had already drifted; `/api/v1/openapi.json` was undocumented by the document it serves; three fuzz assertions restated their implementations and could not fail; `main.rs` demanded a rustls provider even with `web` off.
-
-**Known-broken CI, now fixed, never yet run:** every `dtolnay/rust-toolchain` step omitted the *required* `toolchain` input, so all five `ci.yml` jobs would have died at their first step, and `fuzz.yml` pinned a SHA that does not exist in that repository (the `nightly` branch is force-pushed daily). A `Toolchain pin matches rust-toolchain.toml` step now guards against drift. **The first PR is still what proves CI works.**
-
-Carried into Phase 5+: `detent-web` is 97.4 %, not the 100 % Phase 4 set as its own acceptance bar (`auth/token.rs` 93.6, `auth/users.rs` 94.6 are the weakest); `docs/SECURITY_HARDENING.md`'s Gaps section lists 9 further untested controls; `scripts/tls-check.sh` is not wired into CI (needs root); Phase 2's privileged Docker job and multi-slice LCOV merge (§6.1) are still not wired.
-
-Phase 1 delivered (all committed): `detent-core` (lossless `Document`, diagnostics, descriptor types incl. `x-detent` hints, `ConfigModule` with provided `schema()`, `DynModule`, `module_conformance!` with a non-vacuous check), `crates/modules/hosts` (62+ tests, 3 fuzz targets, fixtures, `locales/en-US/core.ftl`), `crates/modules/_template` (excluded from the workspace; README recipe validated by a fresh-copy dry run), `detent-modules` registry (`modules()`, all eight `module-*` features forwarded from the binary), `docs/MODULE_GUIDE.md`, coverage gate at 100 % for core and modules (computed from lcov `DA` records — see `scripts/coverage-merge.sh` comment on why not `LF/LH`).
-
-Phase 2 delivered (all committed):
-- `fs::atomic` — `write_atomic`, `read_with_digest`, `list_backups`, `restore_backup`, `Sha256Digest`. Symlink/FIFO/relative-path refusal, optimistic-concurrency conflict check, backup rotation, crash-consistency test.
-- `privsep` — `proto` (closed `Request`/`Response`, ids not names; `decode` rejects trailing bytes via `take_from_bytes`), `transport` (length-framed `SOCK_STREAM`, portable to macOS), `allowlist`, `monitor` (commit-confirm timer + `pending-commit.json` recovery), `worker`, `spawn` (fork, uid drop, `SandboxHooks`), `sys` (the crate's only `unsafe`, one small module). Fuzz target `fuzz_privsep_decode`.
-- `sandbox` — caps drop, `no_new_privs`, `PR_SET_DUMPABLE=0`, Landlock (ABI probe, BestEffort, ABI-1 minimum, documented degrade path) and seccomp (`SCMP_ACT_KILL_PROCESS` monitor / `SCMP_ACT_ERRNO(EPERM)` worker; x86_64 + aarch64 tables derived empirically, syscall numbers read from `<asm/unistd.h>`). Verified on Linux: ABI 5, `FullyEnforced`, `EACCES` on denied writes, works unprivileged.
-- `service` — `ServiceManager` with systemd/OpenRC/launchd backends and unit-name alternatives resolution; `ExternalCheckRunner`. Execution discipline: absolute paths only, no shell, no `PATH` lookup, unit names validated before becoming argv, env cleared, 64 KiB output cap, timeouts. `systemctl` rather than zbus (no async runtime in the synchronous monitor).
-- `host` — `os-release` parsing, init/network/resolver backend detection, service version probing, all behind injectable `HostFs`/`Prober`.
-- `packaging/` — hardened systemd unit (measured `systemd-analyze security` **2.5** root-confined, **1.8** capability-user), drop-in, sysusers/tmpfiles, polkit allow-list, `install.sh` with `--dryrun`/`--prefix`/`--uninstall`.
-
-Coverage: core and modules 100 %; `detent-platform` gated at **92**, measured 92.55 % on Linux (97.5 % on macOS). The difference is structural, not missing tests — see `coverage-baseline.json`'s note: forked children exit via `_exit(2)`, which skips LLVM's `atexit` flush. `privsep::sys::exit_immediately` now calls `__llvm_profile_write_file()` first under `cfg(coverage)` (production builds contain no reference to it — verified with `nm`/`strings` on a release binary); confined children must use `exit_immediately_unflushed`, because writing a profile needs syscalls the seccomp filter denies.
-
-Phase 3 delivered (all committed):
-- `detent-ops` — `Operation`/`OpOutcome`, `OpsEngine`, `Authz`/`Identity`, append-only JSONL audit (hashes only, never bodies — asserted by test), and an **in-tree Myers diff** (no `similar`, per the size budget) whose property test caught a real hunk-numbering bug that made insertions into a non-empty file unappliable. 100 % lines.
-- `detent-i18n` — compiled-in Fluent catalogue (`include_str!`, not `i18n-embed`: appliances have no guaranteed locale directory), locale negotiation with `en-US` fallback, unknown ids degrading to the id itself, bidi marks stripped for terminals, and a **message-id parity test in both directions** so translation PRs are safe to accept. 100 % lines.
-- `privsep` gained `Request::RollbackCommit`/`Response::RolledBack`, closing the §2.5 gap where `RollbackCommit` returned `Unsupported`. `PROTO_VERSION` deliberately **not** bumped — appending to a closed enum only breaks "old peer reads new message", and `spawn_pair` forks the worker from the monitor's own image, so both ends are always the same binary; that bump belongs to whichever change implements `ReplaceBinary`.
-- `detent` CLI — `config <module> get|validate|plan|apply|defaults`, `commit confirm|rollback`, `service`, `backup list|restore`, `audit`, `host`, `doctor`, `completions`, `serve` (process-model skeleton). Global `--dryrun`, `--verbose`, `--json`, `--config`, `--locale`, `--state-root`. Exit codes 0/1/2/3, documented. Every user-facing string is a Fluent id, guarded by a test that fails on bare English in an output path.
-- **Error catalogue gate**: `detent-core` and `detent-ops` now assert every error `MessageId` exists in `locales/en-US/core.ftl`. Writing that guard immediately caught that *every* `detent-core` parse/model/edit error id was missing — users would have seen `[core-parse-malformed]` instead of a sentence.
-
-**M1 evidence:** `docs/spikes/m1-e2e.md` — a genuine `rust:1-bookworm` root run against a real `/etc/hosts`: get → validate → plan → dry-run (hash unchanged) → apply (hash changed, backup kept) → `backup list` → `backup restore` (hash back to the original) → `audit` → stale `--expect-hash` refused → all four exit codes → a real `serve` fork with privilege drop. Release binary 1.58 MB, inside the ≤ 3 MiB CLI budget.
-
-Deviations recorded in Phase 3: one-shot CLI commands run the monitor on a **background thread**, not a fork (`run.rs` module docs) — ADR-001's boundary exists to contain the *network-facing* worker, and a one-shot command run by root has no such side, so forking would only produce a second process with identical privileges; the id-only allow-list discipline is unchanged, and `serve` still forks for real. `--config` is resolved but not parsed (no TOML parser in the dependency set; Phase 4 needs the listen address and brings one). `setup` and `install` were deliberately deferred — `setup` writes admin credentials belonging to Phase 4's auth work, `install` duplicates `packaging/install.sh`.
-
-Coverage gate now: core/i18n/ops/modules 100, `detent-platform` 92 (measured 97.8), `detent` 95 (measured 96.7).
-
-Not started for Phase 2's CI story: the privileged Docker job and the Linux/macOS coverage-slice merge described in §6.1 (`ci.yml` currently runs one unprivileged Linux slice).
-
-Phase 0 state (still true):
-
-What exists and passes locally:
-- Workspace of 19 crates (`crates/*`, `crates/modules/*`), all empty except the `detent` binary (clap skeleton, mimalloc secure). `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace`, `cargo deny check` pass. Toolchain pinned to 1.98.0.
-- `web/`: Vite + React 19 + TS strict + Tailwind v4 + shadcn (radius 0) + biome + Fluent i18n + `bun test` (13 tests). Catfu tokens in `web/src/styles/tokens.css`; components `StatusBar`, `ThemeRocker`, `Led`, `Label`, `KickerTag`; nameplate page per `docs/DESIGN_SEED.md`. `bun run lint|typecheck|test|i18n:check|build` pass. Preview via `.claude/launch.json` (`web-preview`, port 4173).
-- `docs/adr/ADR-001…012`, `docs/DESIGN_SEED.md`, `docs/spikes/00-02`, `CONTRIBUTING.md`, `.github/CODEOWNERS`, stubs for `MODULE_GUIDE.md`/`TRANSLATING.md`.
-- CI: `.github/workflows/ci.yml` (rust, supply-chain incl. cargo-cooldown, coverage gate at 0 % ratchet, web, shell, size, pins) and `fuzz.yml`; Dependabot cooldown 7 days for cargo/bun/docker/actions; `scripts/size-check.sh`, `scripts/coverage-merge.sh`. **Not yet executed on GitHub** — first PR will prove it.
-- Local tooling installed: cargo-llvm-cov, cargo-deny, cargo-audit, cbindgen, cargo-cyclonedx, cargo-auditable, cargo-zigbuild (zig via `uv`; shim at `spikes/bin/zig`), musl/FreeBSD rustup targets. Docker is OrbStack.
-
-Known gaps carried into later phases: coverage gate must be raised to 100 % for `detent-core` and modules in Phase 1; `cargo tree -i ring` CI assertion lands with the first TLS dependency (Phase 4); Landlock-less kernel and Pi kernel untested (Phase 2); Capsicum untested (Phase 11); aarch64-freebsd unattempted (ADR-013, Phase 9).
-
-**Scope note:** §1.6 supersedes every earlier mention of BSD/armv7/riscv64 as active work.
-
-**Next action:** start Phase 5 (web UI, Milestone M2). `web/` already has the Vite + React 19 + Tailwind v4 + shadcn + Fluent scaffold from Phase 0 and the catfu tokens from `docs/DESIGN_SEED.md`; `AESTHETIC_CONTRACT.md` is binding. Two things wait on it specifically: turn on `detent-web`'s `ui` feature once `web/dist` is a real build (the serving logic is done and tested against fixtures), and make `index.html`'s inline theme script *byte-identical* to `web/src/theme-init.js` at build time rather than a hand-edited copy — `headers.rs` pins its SHA-256 in the CSP and a test fails if they diverge. The API the UI talks to is `docs/openapi.json`; `docs/API.md` explains auth, scopes, CSRF and the commit-confirm flow. `detent-modules::modules()` still registers only `hosts`, so the UI has one module to drive until Phases 7–8.
+Read [`PROGRESS.md`](PROGRESS.md) (newest entries first) for the current state, then
+[`BUGFIX.md`](BUGFIX.md) for the open work, its order and the binding rules. The
+checkpoint that stood here (state on 2026-09-10) is in git:
+`git show 02fd9d5:docs/PLAN.md`.

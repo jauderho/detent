@@ -7,6 +7,8 @@ Bias toward correctness and minimal diff over speed.
 what is done, what is next, and the traps. Read it before planning work, and
 append to it when a phase or a self-contained piece of work lands.
 [`docs/PLAN.md`](docs/PLAN.md) is the roadmap it tracks against.
+[`docs/BUGFIX.md`](docs/BUGFIX.md) is the one list of open work, in order, with
+the rules that bind it.
 
 ---
 
