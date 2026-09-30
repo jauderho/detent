@@ -41,3 +41,24 @@ fn every_module_path_in_read_write_paths_is_optional() {
         "these paths stop the unit on a host that lacks them: {required:?}"
     );
 }
+
+/// systemd removes `RuntimeDirectory=` on stop and makes it again on start;
+/// `tmpfiles.d` runs only at boot or install. A `/run` path the unit needs
+/// must therefore be one of its runtime directories, or `Restart=always`
+/// fails at `226/NAMESPACE` (Track C A2).
+#[test]
+fn every_run_path_is_a_runtime_directory() {
+    let joined = UNIT.replace("\\\n", " ");
+    let runtime: Vec<String> = joined
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("RuntimeDirectory="))
+        .flat_map(str::split_whitespace)
+        .map(|dir| format!("/run/{dir}"))
+        .collect();
+    let missing: Vec<String> = read_write_paths()
+        .into_iter()
+        .map(|path| path.trim_start_matches('-').to_owned())
+        .filter(|path| path.starts_with("/run/") && !runtime.contains(path))
+        .collect();
+    assert!(missing.is_empty(), "not made on restart: {missing:?}");
+}
