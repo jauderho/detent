@@ -1217,6 +1217,8 @@ mod tests {
     struct Drive {
         state: std::path::PathBuf,
         target: std::path::PathBuf,
+        #[cfg(feature = "update")]
+        binary: std::path::PathBuf,
         staging: std::path::PathBuf,
         module: crate::privsep::proto::ModuleId,
         target_id: crate::privsep::proto::TargetId,
@@ -1243,6 +1245,22 @@ mod tests {
         }))
     }
 
+    /// The tag and the Sigstore fixtures of a release the verifier accepts.
+    #[cfg(feature = "update")]
+    const FIXTURE_TAG: &str = "v0.0.2";
+
+    #[cfg(feature = "update")]
+    fn fixture_dir() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../detent-update/tests/fixtures")
+    }
+
+    #[cfg(feature = "update")]
+    fn fixture_trust() -> Result<detent_update::trust::TrustRoot, Box<dyn std::error::Error>> {
+        let root = std::fs::read_to_string(fixture_dir().join("fulcio-root.pem"))?;
+        let rekor = std::fs::read_to_string(fixture_dir().join("rekor-pub.pem"))?;
+        Ok(detent_update::trust::from_pems(&root, &rekor)?)
+    }
+
     /// Run a real confined `Role::Monitor` (`Monitor::serve`, the real
     /// dispatch, a real runner for the check) against a worker that runs
     /// `scenario`. The test passes only when the worker's requests all
@@ -1264,18 +1282,17 @@ mod tests {
         let state = work.path().join("state");
         let target = work.path().join("etc/target.conf");
         let staging = state.join("staging");
-        // The first backup of a target creates its backup directory and
-        // calls `chmod`, which `MONITOR` lacks (`ensure_backup_dir`; listed
-        // in BUGFIX.md, not fixed here). Make the directory first, as a
-        // monitor that has already made one backup finds it.
-        let backups = state.join("backups/trace/0");
-        std::fs::create_dir_all(&backups)?;
-        std::fs::set_permissions(
-            &backups,
-            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
-        )?;
+        // The running binary `ReplaceBinary` swaps: beside the target, so the
+        // monitor's Landlock policy covers it (production: `current_exe`).
+        let binary = work.path().join("etc/detent-old");
+        std::fs::create_dir_all(&state)?;
         std::fs::create_dir_all(target.parent().ok_or("the target has no parent")?)?;
         std::fs::write(&target, b"v1")?;
+        std::fs::write(&binary, b"old-binary")?;
+        std::fs::set_permissions(
+            &binary,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )?;
         let target_name = target.to_str().ok_or("target is not UTF-8")?.to_owned();
         let descriptor = drive_descriptor(&target_name);
         let config = Config {
@@ -1287,6 +1304,8 @@ mod tests {
         let runner = spawn_runner(&allow, &staging, detent_core::descriptor::InitSystem::None)?;
         let runner_pid = runner.child_pid;
         let hooks = ConfineMonitor(Policy::monitor(&allow));
+        #[cfg(feature = "update")]
+        let trust = fixture_trust()?;
         // The runner ends when the last copy of its channel closes: the
         // forked child's, and this thread's own, which the closure holds.
         in_forked_child(move || {
@@ -1305,6 +1324,8 @@ mod tests {
                                 let drive = Drive {
                                     state,
                                     target,
+                                    #[cfg(feature = "update")]
+                                    binary,
                                     staging,
                                     module,
                                     target_id,
@@ -1325,6 +1346,9 @@ mod tests {
                     let mut monitor = Monitor::new(allow, hooks);
                     monitor.set_module_registry(vec![Box::new(DriveModule(descriptor))]);
                     monitor.set_staging_dir(staging);
+                    monitor.set_binary_override(binary);
+                    #[cfg(feature = "update")]
+                    monitor.set_update_trust(trust);
                     let served = monitor.serve(&mut handle.channel);
                     drop(monitor);
                     drop(checker);
@@ -1490,5 +1514,67 @@ mod tests {
                     .exists()
             },
         )
+    }
+
+    /// A `ReplaceBinary` that passes verification swaps the new image over
+    /// the running binary with `rename` and keeps the old one as `.prev`.
+    #[cfg(feature = "update")]
+    #[test]
+    fn enforce_mode_monitor_swaps_a_verified_release() -> Result<(), Box<dyn std::error::Error>> {
+        drive_confined_monitor(
+            2,
+            |state| {
+                let staged = state.join("update/staged");
+                std::fs::create_dir_all(&staged).is_ok()
+                    && std::fs::copy(fixture_dir().join("binary.bin"), staged.join(FIXTURE_TAG))
+                        .is_ok()
+                    && std::fs::copy(
+                        fixture_dir().join("valid.json"),
+                        staged.join(format!("{FIXTURE_TAG}.sigstore.json")),
+                    )
+                    .is_ok()
+            },
+            |client, drive| {
+                let Ok(image) = std::fs::read(fixture_dir().join("binary.bin")) else {
+                    return false;
+                };
+                let digest = crate::fs::atomic::Sha256Digest::of(&image);
+                let previous = drive.binary.with_file_name("detent-old.prev");
+                client
+                    .replace_binary(FIXTURE_TAG, image.len() as u64, digest)
+                    .is_ok_and(|version| version == digest.to_string())
+                    && std::fs::read(&drive.binary).is_ok_and(|now| now == image)
+                    && std::fs::read(&previous).is_ok_and(|old| old == b"old-binary")
+                    && std::fs::metadata(&drive.binary).is_ok_and(|meta| {
+                        std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o777
+                            == 0o755
+                    })
+                    && drive_staging_is_empty(drive)
+            },
+        )
+    }
+
+    /// The previous-binary copy that `swap_running_binary` falls back to when
+    /// the filesystem refuses a hard link, run under the monitor's filter.
+    #[test]
+    fn enforce_mode_monitor_copies_the_previous_binary() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let work = tempfile::TempDir::new()?;
+        let target = work.path().join("detent");
+        let previous = work.path().join("detent.prev");
+        std::fs::write(&target, b"old-binary")?;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o750))?;
+        let allow = Allowlist::from_modules(&[], &Config::with_state_root(work.path()))?;
+        let policy = Policy::monitor(&allow);
+        in_forked_child(|| {
+            confine(Role::Monitor, &policy).is_ok()
+                && crate::privsep::monitor::copy_file(&target, &previous).is_ok()
+        })?;
+        assert_eq!(std::fs::read(&previous)?, b"old-binary");
+        assert_eq!(
+            std::fs::metadata(&previous)?.permissions().mode() & 0o7777,
+            0o750
+        );
+        Ok(())
     }
 }
