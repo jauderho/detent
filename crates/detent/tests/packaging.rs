@@ -86,3 +86,36 @@ fn the_bounding_set_lets_the_monitor_drop_what_it_does_not_keep() {
         "the monitor cannot drop {extra:?} without CAP_SETPCAP"
     );
 }
+
+const TMPFILES: &str = include_str!("../../../packaging/tmpfiles.d/detent.conf");
+
+/// `(mode, user, group)` of a `d` line in `tmpfiles.d/detent.conf`.
+fn tmpfiles_dir(path: &str) -> Option<(String, String, String)> {
+    TMPFILES.lines().find_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        match fields.as_slice() {
+            ["d", p, mode, user, group, ..] if *p == path => {
+                Some(((*mode).to_owned(), (*user).to_owned(), (*group).to_owned()))
+            }
+            _ => None,
+        }
+    })
+}
+
+fn unit_value(key: &str) -> Option<&'static str> {
+    UNIT.lines()
+        .find_map(|line| line.trim().strip_prefix(key)?.strip_prefix('='))
+}
+
+/// `StateDirectory=` chowns the directory to the unit's `User=` on every
+/// start, which undid `tmpfiles.d`'s `detent:detent` and locked the worker
+/// out of its state root (Track C A2: the worker exited 1 at once).
+#[test]
+fn the_unit_does_not_take_the_state_root_from_the_worker() -> Result<(), &'static str> {
+    let (_, owner, _) =
+        tmpfiles_dir("/var/lib/detent").ok_or("tmpfiles.d does not make /var/lib/detent")?;
+    if owner != unit_value("User").unwrap_or("root") {
+        assert_eq!(unit_value("StateDirectory"), None);
+    }
+    Ok(())
+}
