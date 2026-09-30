@@ -127,8 +127,9 @@ WORKER_USER="detent"
 # Syscalls the `ACME` table leaves out on purpose: the traces showed them
 # refused and the callers go on (see the table's doc comment in
 # crates/detent-platform/src/sandbox/seccomp.rs). mimalloc probes NUMA
-# nodes with access(/sys/devices/system/node/node1).
-TOLERATED_EPERM=(uname ioctl prctl access)
+# nodes with access(/sys/devices/system/node/node1); aarch64 has no access,
+# so there the probe is faccessat (traced 2026-09-30).
+TOLERATED_EPERM=(uname ioctl prctl access faccessat)
 # The same for the worker (`WORKER` doc comment): thread names and
 # mimalloc's mapping names (prctl), and mimalloc's NUMA probe (access).
 # Installing a second certificate (a renewal) makes `write_atomic`
