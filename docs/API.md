@@ -256,7 +256,7 @@ spellings. Freshness of that document is forced by detent-web's
 `the_checked_in_document_matches_what_this_build_generates`, so a
 REST-side addition, rename, or optionality flip regenerates the document
 and fails the parity test with no table to keep fresh. A new `Operation`
-must add both a route and a tool or one of the three fails. Two pinned
-exceptions: the commit tools rename REST's path `id` to MCP's
-`commit_id`, and `cert_renew` is MCP-only (renewal has no REST route) —
-its empty shape is asserted as-is.
+must add both a route and a tool or one of the three fails. One pinned
+exception: the commit tools rename REST's path `id` to MCP's
+`commit_id`. `cert_renew` pairs with `POST /api/v1/system/cert/renew`
+(`renew_cert`); both take no input.

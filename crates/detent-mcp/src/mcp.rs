@@ -1133,8 +1133,7 @@ mod tests {
     }
 
     // (MCP tool, REST operationId, param renames). The commit tools rename
-    // REST's path `id` to MCP's `commit_id`; `cert_renew` is MCP-only and
-    // asserted empty in the test.
+    // REST's path `id` to MCP's `commit_id`.
     const PAIRS: &[Pair] = &[
         ("list_modules", "list_modules", &[]),
         ("get_module", "get_one", &[]),
@@ -1152,6 +1151,7 @@ mod tests {
         ("update_status", "update", &[]),
         ("cert_status", "cert", &[]),
         ("update_apply", "apply_update", &[]),
+        ("cert_renew", "renew_cert", &[]),
     ];
 
     #[test]
@@ -1189,19 +1189,6 @@ mod tests {
         let tools: Vec<Tool> = server.tool_router.list_all();
         for (tool, op_id, renames) in PAIRS {
             check_pair(&ops, schemas, &tools, tool, op_id, renames)?;
-        }
-        let renew = tools
-            .iter()
-            .find(|t| t.name == "cert_renew")
-            .ok_or("missing tool cert_renew")?;
-        let (renew_required, renew_props) =
-            field_sets(&Value::Object(renew.input_schema.as_ref().clone()));
-        if !renew_required.is_empty() || !renew_props.is_empty() {
-            return Err(format!(
-                "cert_renew must stay empty (MCP-only): \
-                 required {renew_required:?} props {renew_props:?}"
-            )
-            .into());
         }
         // `service_action`/`action` wire spelling must match REST's
         // `ApiServiceCommand` enum, read from the same document.
