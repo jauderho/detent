@@ -11,7 +11,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use detent_core::descriptor::{ExternalCheck, ModuleDescriptor, ServiceBinding, Target};
+use detent_core::descriptor::{
+    ExternalCheck, HostProfile, ModuleDescriptor, ServiceBinding, Target,
+};
 
 use super::proto::{
     BindingId, BindingInfo, CheckId, CheckInfo, HelloAck, ModuleId, ModuleInfo, PROTO_VERSION,
@@ -27,6 +29,11 @@ pub const BACKUPS_DIR: &str = "backups";
 
 /// The subdirectory of the state root used for external-check candidate files.
 pub const CHECK_TMP_DIR: &str = "tmp";
+
+/// Name prefix of every external-check candidate file. The leading dot makes
+/// include-directory loaders (dnsmasq's `conf-dir`, `run-parts`) skip a
+/// candidate written beside a module's target.
+pub const CANDIDATE_PREFIX: &str = ".detent-candidate-";
 
 /// Everything the allow-list needs that does not come from a module.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,6 +285,36 @@ impl Allowlist {
     /// Every target belonging to `module`, in id order.
     pub fn targets_of(&self, module: ModuleId) -> impl Iterator<Item = &TargetEntry> {
         self.targets.iter().filter(move |t| t.module == module)
+    }
+
+    /// The directory an external-check candidate for `module` is written to:
+    /// the parent of the module's primary target when that target is a file,
+    /// `None` otherwise (the caller then uses monitor staging).
+    ///
+    /// The primary target is the one the operations engine reads and renders
+    /// (`detent_ops` `wiring`): the first of the module's declared targets
+    /// whose `backend_detect` accepts `profile`, else its first target. The
+    /// monitor and the runner both call this, so neither takes the directory
+    /// from the other.
+    #[must_use]
+    pub fn candidate_dir(&self, module: ModuleId, profile: &HostProfile) -> Option<&Path> {
+        let descriptor = self.module(module)?;
+        let targets: Vec<&TargetEntry> = self.targets_of(module).collect();
+        let primary = descriptor
+            .targets
+            .iter()
+            .filter(|target| (target.backend_detect)(profile))
+            .find_map(|target| {
+                targets
+                    .iter()
+                    .find(|entry| entry.path.as_os_str() == target.path.as_str())
+                    .copied()
+            })
+            .or_else(|| targets.first().copied())?;
+        if primary.kind != PathKind::File {
+            return None;
+        }
+        primary.path.parent()
     }
 
     /// Number of targets in the table.
@@ -711,12 +748,101 @@ mod tests {
         assert!(format!("{config:?}").contains("detent"));
     }
 
-    /// `Target::backend_detect` is not called by anything in this module yet
-    /// (host-specific target selection is later work); this exercises the
-    /// fixtures' shared `always` function directly so its trivial body is not
-    /// silently untested.
+    /// Exercises the fixtures' shared `always` function directly so its
+    /// trivial body is not silently untested.
     #[test]
     fn the_test_fixtures_backend_detect_always_matches() {
         assert!(always(&HostProfile::default_for_tests()));
+    }
+
+    const fn never(_: &HostProfile) -> bool {
+        false
+    }
+
+    const fn file(path: &'static str, backend_detect: fn(&HostProfile) -> bool) -> Target {
+        Target {
+            path: PathSpec::new(path),
+            kind: TargetKind::File,
+            mode: 0o644,
+            owner: Owner::Root,
+            backend_detect,
+        }
+    }
+
+    const fn module(id: &'static str, targets: &'static [Target]) -> ModuleDescriptor {
+        ModuleDescriptor {
+            id,
+            display_name_id: MessageId::new("picky-name"),
+            targets,
+            upstream: UPSTREAM,
+            services: &[],
+            checks: &[],
+            commit_confirm: false,
+            security_notes: &[],
+        }
+    }
+
+    /// The first target is not detected, so the second one is primary.
+    static SECOND_DETECTED: ModuleDescriptor = module(
+        "second",
+        &[
+            file("/etc/first/first.conf", never),
+            file("/etc/second/second.conf", always),
+        ],
+    );
+
+    /// Nothing is detected, so the first advertised target is primary.
+    static NONE_DETECTED: ModuleDescriptor = module(
+        "none",
+        &[
+            file("/etc/first/first.conf", never),
+            file("/etc/second/second.conf", never),
+        ],
+    );
+
+    /// The detected target is a drop-in directory, not a file.
+    static DROP_IN_PRIMARY: ModuleDescriptor = module(
+        "drop-in",
+        &[
+            file("/etc/network/interfaces", never),
+            Target {
+                path: PathSpec::new("/etc/systemd/network"),
+                kind: TargetKind::DropInDir,
+                mode: 0o755,
+                owner: Owner::Root,
+                backend_detect: always,
+            },
+        ],
+    );
+
+    static NO_TARGETS: ModuleDescriptor = module("bare", &[]);
+
+    #[test]
+    fn the_candidate_dir_is_the_parent_of_the_primary_file_target()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let list = Allowlist::from_modules(
+            &[
+                &HOSTS,
+                &CHRONY,
+                &SECOND_DETECTED,
+                &NONE_DETECTED,
+                &DROP_IN_PRIMARY,
+                &NO_TARGETS,
+            ],
+            &Config::with_state_root("/tmp/detent-test"),
+        )?;
+        let profile = HostProfile::default_for_tests();
+        let dir = |name: &str| {
+            list.module_id(name)
+                .and_then(|module| list.candidate_dir(module, &profile))
+        };
+        assert_eq!(dir("hosts"), Some(Path::new("/etc")));
+        assert_eq!(dir("chrony"), Some(Path::new("/etc/chrony")));
+        assert_eq!(dir("second"), Some(Path::new("/etc/second")));
+        assert_eq!(dir("none"), Some(Path::new("/etc/first")));
+        assert_eq!(dir("drop-in"), None);
+        assert_eq!(dir("bare"), None);
+        assert_eq!(list.candidate_dir(ModuleId(99), &profile), None);
+        Ok(())
     }
 }

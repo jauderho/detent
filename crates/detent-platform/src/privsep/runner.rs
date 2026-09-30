@@ -17,20 +17,30 @@
 //!
 //! The runner is the more privileged process, so it trusts the monitor no
 //! more than it must. It takes only ids into its own copy of the allow-list
-//! and the file name of a candidate in the staging directory: never a path,
-//! a program or an argument. A compromised monitor can run only the declared
-//! validators on files in the staging directory and the declared service
-//! actions — nothing it could not already ask for through the protocol.
+//! and the file name of a candidate: never a path, a program or an argument.
+//! It works out the candidate's directory itself, from the check's module
+//! ([`Allowlist::candidate_dir`]: beside the module's primary target, or the
+//! staging directory when the module has no file target), and beside a
+//! target it accepts only a [`CANDIDATE_PREFIX`] file, in a directory that
+//! passes the monitor's own trust check (owned by root or the runner's euid,
+//! no group or other write bit, not a symlink). A compromised monitor
+//! can run only the declared validators on such files and the declared
+//! service actions — nothing it could not already ask for through the
+//! protocol.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use detent_core::descriptor::{ExternalCheck, ServiceAction as CoreServiceAction, ServiceBinding};
+use detent_core::descriptor::{
+    ExternalCheck, HostProfile, ServiceAction as CoreServiceAction, ServiceBinding,
+};
 use serde::{Deserialize, Serialize};
 
-use super::allowlist::Allowlist;
-use super::monitor::{CheckRunner, HookError, Hooks, ServiceControl};
+use super::allowlist::{Allowlist, CANDIDATE_PREFIX};
+use super::monitor::{
+    CheckRunner, DirOwner, HookError, Hooks, ServiceControl, require_trusted_dir,
+};
 use super::proto::{BindingId, CheckId, CheckOutcome, ServiceAction, ServiceOutcome};
 use super::transport::{Channel, ChannelError};
 
@@ -42,11 +52,12 @@ pub const RUNNER_TIMEOUT: Duration = Duration::from_secs(120);
 /// What the monitor asks of the runner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RunnerRequest {
-    /// Run allow-listed check `check` on the staged file `candidate`.
+    /// Run allow-listed check `check` on the candidate file `candidate`.
     Check {
         /// Index into the allow-list's check table.
         check: CheckId,
-        /// File name (one path component) inside the staging directory.
+        /// File name (one path component) inside the check's candidate
+        /// directory, which the runner derives itself.
         candidate: String,
     },
     /// Apply `action` to allow-listed binding `binding`.
@@ -74,10 +85,13 @@ pub enum RunnerResponse {
 /// Answer requests on `channel` with `hooks` until the monitor goes away.
 ///
 /// Every id is looked up in `allow`; a candidate must be a regular file
-/// directly inside `staging_dir`.
+/// directly inside the check's candidate directory for `profile` (the
+/// monitor's own profile), or inside `staging_dir` when its module has no
+/// file target.
 pub fn serve_runner(
     allow: &Allowlist,
     staging_dir: &Path,
+    profile: &HostProfile,
     hooks: &Hooks<'_>,
     channel: &mut Channel,
 ) {
@@ -89,7 +103,7 @@ pub fn serve_runner(
             // Closed, or a peer speaking nonsense: stop.
             Err(_) => return,
         };
-        let response = answer(allow, staging_dir, hooks, request);
+        let response = answer(allow, staging_dir, profile, hooks, request);
         if channel.send(&response).is_err() {
             return;
         }
@@ -99,6 +113,7 @@ pub fn serve_runner(
 fn answer(
     allow: &Allowlist,
     staging_dir: &Path,
+    profile: &HostProfile,
     hooks: &Hooks<'_>,
     request: RunnerRequest,
 ) -> RunnerResponse {
@@ -107,7 +122,26 @@ fn answer(
             let Some(entry) = allow.check(check) else {
                 return RunnerResponse::Failed("unknown check".to_owned());
             };
-            let Some(path) = staged_candidate(staging_dir, &candidate) else {
+            // The same directory the monitor wrote to, worked out here
+            // from the check's module, not taken from the monitor. Beside
+            // real configuration only a candidate-named file in a directory
+            // that passes the monitor's own trust check is accepted.
+            let path = match allow.candidate_dir(entry.module, profile) {
+                Some(dir)
+                    if candidate.starts_with(CANDIDATE_PREFIX)
+                        && require_trusted_dir(
+                            dir,
+                            "candidate directory",
+                            DirOwner::EuidOrRoot,
+                        )
+                        .is_ok() =>
+                {
+                    staged_candidate(dir, &candidate)
+                }
+                Some(_) => None,
+                None => staged_candidate(staging_dir, &candidate),
+            };
+            let Some(path) = path else {
                 return RunnerResponse::Failed("candidate is not a staged file".to_owned());
             };
             hooks
@@ -139,9 +173,9 @@ fn answer(
     })
 }
 
-/// `staging_dir/name` when `name` is one plain path component and names a
-/// regular file there (not a symlink).
-fn staged_candidate(staging_dir: &Path, name: &str) -> Option<PathBuf> {
+/// `dir/name` when `name` is one plain path component and names a regular
+/// file there (not a symlink).
+fn staged_candidate(dir: &Path, name: &str) -> Option<PathBuf> {
     let mut parts = Path::new(name).components();
     if !matches!(
         (parts.next(), parts.next()),
@@ -149,7 +183,7 @@ fn staged_candidate(staging_dir: &Path, name: &str) -> Option<PathBuf> {
     ) {
         return None;
     }
-    let path = staging_dir.join(name);
+    let path = dir.join(name);
     std::fs::symlink_metadata(&path)
         .ok()
         .filter(std::fs::Metadata::is_file)
@@ -320,12 +354,13 @@ mod tests {
         },
         actions: &[CoreServiceAction::Restart],
     }];
+    /// Its only target is a drop-in directory, so its candidates are staged.
     static MODULE: ModuleDescriptor = ModuleDescriptor {
         id: "fake",
         display_name_id: MessageId::new("fake-name"),
         targets: &[Target {
-            path: PathSpec::new("/etc/hosts"),
-            kind: TargetKind::File,
+            path: PathSpec::new("/etc/hosts.d"),
+            kind: TargetKind::DropInDir,
             mode: 0o644,
             owner: Owner::Root,
             backend_detect: always,
@@ -389,23 +424,82 @@ mod tests {
         }
     }
 
+    static FILED_CHECKS: &[ExternalCheck] = &[ExternalCheck {
+        program: PathSpec::new("/bin/true"),
+        args: &[ArgTemplate::TempFile],
+        expects: CheckExpectation::ExitZero,
+    }];
+
+    /// The id of [`FILED_CHECKS`]' check in the fixture's allow-list.
+    const FILED_CHECK: CheckId = CheckId(1);
+
+    const fn never(_: &HostProfile) -> bool {
+        false
+    }
+
+    /// A module with two file targets, `first/first.conf` (never detected)
+    /// and `second/second.conf` (always), under `root`.
+    fn filed_module(root: &Path) -> &'static ModuleDescriptor {
+        let target = |name: &str, backend_detect: fn(&HostProfile) -> bool| Target {
+            path: PathSpec::new(Box::leak(
+                root.join(name).display().to_string().into_boxed_str(),
+            )),
+            kind: TargetKind::File,
+            mode: 0o644,
+            owner: Owner::Root,
+            backend_detect,
+        };
+        let targets = Box::leak(Box::new([
+            target("first/first.conf", never),
+            target("second/second.conf", always),
+        ]));
+        Box::leak(Box::new(ModuleDescriptor {
+            id: "filed",
+            targets,
+            services: &[],
+            checks: FILED_CHECKS,
+            ..MODULE
+        }))
+    }
+
     struct Fixture {
         _dir: tempfile::TempDir,
         staging: std::path::PathBuf,
+        /// The directory of `filed`'s undetected first target.
+        first: std::path::PathBuf,
+        /// The directory of `filed`'s primary target.
+        second: std::path::PathBuf,
         allow: Allowlist,
     }
 
     fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
         let dir = tempfile::TempDir::new()?;
         let staging = dir.path().join("staging");
-        std::fs::create_dir_all(&staging)?;
-        let allow =
-            Allowlist::from_modules(&[&MODULE], &Config::with_state_root(dir.path().join("s")))?;
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        for made in [&staging, &first, &second] {
+            std::fs::create_dir_all(made)?;
+            // Trusted target directories whatever the umask.
+            std::fs::set_permissions(
+                made,
+                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+            )?;
+        }
+        let allow = Allowlist::from_modules(
+            &[&MODULE, filed_module(dir.path())],
+            &Config::with_state_root(dir.path().join("s")),
+        )?;
         Ok(Fixture {
             _dir: dir,
             staging,
+            first,
+            second,
             allow,
         })
+    }
+
+    fn profile() -> HostProfile {
+        HostProfile::default_for_tests()
     }
 
     /// Run `test` against a client whose runner serves [`Fake`] on a thread.
@@ -418,7 +512,7 @@ mod tests {
                 checks: &Fake,
                 services: &Fake,
             };
-            serve_runner(&allow, &staging, &hooks, &mut runner_end);
+            serve_runner(&allow, &staging, &profile(), &hooks, &mut runner_end);
         });
         let client = RunnerClient::new(monitor_end, &fx.allow);
         let result = test(&client);
@@ -549,16 +643,127 @@ mod tests {
             },
         ];
         for request in refused {
-            let response = answer(&fx.allow, &fx.staging, &hooks, request.clone());
+            let response = answer(&fx.allow, &fx.staging, &profile(), &hooks, request.clone());
             assert!(
                 matches!(response, RunnerResponse::Failed(_)),
                 "{request:?} answered {response:?}"
             );
         }
         assert!(matches!(
-            answer(&fx.allow, &fx.staging, &hooks, check("real")),
+            answer(&fx.allow, &fx.staging, &profile(), &hooks, check("real")),
             RunnerResponse::Checked(_)
         ));
+        Ok(())
+    }
+
+    fn filed_check(name: &str) -> RunnerRequest {
+        RunnerRequest::Check {
+            check: FILED_CHECK,
+            candidate: name.to_owned(),
+        }
+    }
+
+    /// A module with a file target has its candidate beside its primary
+    /// target: the runner resolves the directory itself, from the check id.
+    #[test]
+    fn the_runner_finds_a_candidate_beside_the_primary_target() -> R {
+        let fx = fixture()?;
+        let candidate = fx.second.join(".detent-candidate-x");
+        std::fs::write(&candidate, b"x")?;
+        let hooks = Hooks {
+            checks: &Fake,
+            services: &Fake,
+        };
+        let response = answer(
+            &fx.allow,
+            &fx.staging,
+            &profile(),
+            &hooks,
+            filed_check(".detent-candidate-x"),
+        );
+        assert!(
+            matches!(&response, RunnerResponse::Checked(outcome) if outcome.detail == candidate.display().to_string()),
+            "answered {response:?}"
+        );
+        Ok(())
+    }
+
+    /// In a target directory the runner takes only a regular
+    /// `.detent-candidate-` file: never the real configuration beside it,
+    /// a symlink, or a file in the wrong directory.
+    #[test]
+    fn the_runner_refuses_anything_but_a_candidate_in_a_target_directory() -> R {
+        let fx = fixture()?;
+        std::fs::write(fx.second.join("second.conf"), b"real")?;
+        std::fs::write(fx.second.join("x"), b"x")?;
+        std::fs::write(fx.staging.join(".detent-candidate-staged"), b"x")?;
+        std::fs::write(fx.first.join(".detent-candidate-first"), b"x")?;
+        std::fs::write(fx.second.join(".detent-candidate-real"), b"x")?;
+        std::os::unix::fs::symlink(
+            fx.second.join(".detent-candidate-real"),
+            fx.second.join(".detent-candidate-link"),
+        )?;
+        std::os::unix::fs::symlink(
+            fx.second.join("second.conf"),
+            fx.second.join(".detent-candidate-conf"),
+        )?;
+        std::fs::create_dir(fx.second.join(".detent-candidate-dir"))?;
+        let hooks = Hooks {
+            checks: &Fake,
+            services: &Fake,
+        };
+        for name in [
+            "second.conf",
+            "x",
+            ".detent-candidate-staged",
+            ".detent-candidate-first",
+            ".detent-candidate-link",
+            ".detent-candidate-conf",
+            ".detent-candidate-dir",
+            ".detent-candidate-missing",
+            "../second/.detent-candidate-real",
+        ] {
+            let response = answer(
+                &fx.allow,
+                &fx.staging,
+                &profile(),
+                &hooks,
+                filed_check(name),
+            );
+            assert!(
+                matches!(response, RunnerResponse::Failed(_)),
+                "{name} answered {response:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Defense in depth: the runner applies the monitor's target-directory
+    /// check itself, so a candidate in a directory others can write to is
+    /// never handed to a validator.
+    #[test]
+    fn the_runner_refuses_a_candidate_in_a_group_writable_target_directory() -> R {
+        let fx = fixture()?;
+        std::fs::write(fx.second.join(".detent-candidate-x"), b"x")?;
+        std::fs::set_permissions(
+            &fx.second,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o775),
+        )?;
+        let hooks = Hooks {
+            checks: &Fake,
+            services: &Fake,
+        };
+        let response = answer(
+            &fx.allow,
+            &fx.staging,
+            &profile(),
+            &hooks,
+            filed_check(".detent-candidate-x"),
+        );
+        assert!(
+            matches!(response, RunnerResponse::Failed(_)),
+            "answered {response:?}"
+        );
         Ok(())
     }
 
@@ -630,7 +835,7 @@ mod tests {
                 checks: &Fake,
                 services: &Fake,
             };
-            serve_runner(&allow, &staging, &hooks, &mut runner_end);
+            serve_runner(&allow, &staging, &profile(), &hooks, &mut runner_end);
         });
         // A `String` is not a `RunnerRequest`.
         monitor_end.send(&"not a request".to_owned())?;

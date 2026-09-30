@@ -952,6 +952,193 @@ fn plan_runs_the_upstream_validator_through_the_monitor() -> TestResult {
     fx.finish()
 }
 
+/// Records the candidate path a check ran on and whether it held bytes.
+struct SeenCandidate(std::sync::Mutex<Option<(PathBuf, Vec<u8>)>>);
+
+impl CheckRunner for SeenCandidate {
+    fn run_check(
+        &self,
+        _check: &ExternalCheck,
+        candidate: &Path,
+    ) -> Result<CheckOutcome, HookError> {
+        let bytes = std::fs::read(candidate).map_err(|err| HookError::Failed(err.to_string()))?;
+        *self
+            .0
+            .lock()
+            .map_err(|_| HookError::Failed("poisoned".to_owned()))? =
+            Some((candidate.to_path_buf(), bytes));
+        Ok(CheckOutcome {
+            check: CheckId(0),
+            passed: true,
+            exit_code: Some(0),
+            detail: "ok".to_owned(),
+        })
+    }
+}
+
+/// Entries of `dir` named like a check candidate.
+fn candidates_in(dir: &Path) -> Result<usize, std::io::Error> {
+    let names = std::fs::read_dir(dir)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(names
+        .iter()
+        .filter(|name| name.to_string_lossy().starts_with(".detent-candidate-"))
+        .count())
+}
+
+/// The `fake` module with one check and two file targets: `target`, and
+/// before it a never-detected decoy of the same name in `decoy_dir`.
+fn decoy_first_descriptor(
+    decoy_dir: &Path,
+    target: &Path,
+) -> Result<&'static ModuleDescriptor, &'static str> {
+    let base = build_descriptor(
+        "fake",
+        target,
+        Shape {
+            check: true,
+            ..Shape::default()
+        },
+    );
+    let real = *base.targets.first().ok_or("the descriptor has a target")?;
+    let decoy = Target {
+        path: PathSpec::new(leak_str(
+            decoy_dir.join("target.conf").display().to_string(),
+        )),
+        backend_detect: never,
+        ..real
+    };
+    let targets: &'static [Target] = leak(vec![decoy, real]).as_slice();
+    Ok(leak(ModuleDescriptor { targets, ..*base }))
+}
+
+/// The runner thread, the monitor thread, and the worker's end of the
+/// monitor channel.
+type Served = (
+    thread::JoinHandle<()>,
+    thread::JoinHandle<ServeResult>,
+    Channel,
+);
+
+/// A runner thread serving `seen` and a monitor thread whose checks go
+/// through it, as `detent serve` wires them, both with [`host`]'s profile.
+fn serve_with_a_runner(
+    allow: Allowlist,
+    descriptor: &'static ModuleDescriptor,
+    staging_dir: PathBuf,
+    seen: &'static SeenCandidate,
+) -> Result<Served, Box<dyn std::error::Error>> {
+    use detent_platform::privsep::runner::{RunnerClient, serve_runner};
+    let (runner_client_end, mut runner_end) = Channel::pair()?;
+    let runner_allow = allow.clone();
+    let runner_staging = staging_dir.clone();
+    let runner = thread::spawn(move || {
+        let hooks = Hooks {
+            checks: seen,
+            services: &OK_SERVICES,
+        };
+        serve_runner(
+            &runner_allow,
+            &runner_staging,
+            &host().profile,
+            &hooks,
+            &mut runner_end,
+        );
+    });
+    let (monitor_end, worker_end) = Channel::pair()?;
+    let monitor = thread::spawn(move || {
+        let checks = RunnerClient::new(runner_client_end, &allow);
+        let mut channel = monitor_end;
+        let mut monitor = Monitor::new(
+            allow,
+            Hooks {
+                checks: &checks,
+                services: &OK_SERVICES,
+            },
+        );
+        monitor.set_module_registry(vec![Box::new(FakeModule { descriptor })]);
+        monitor.set_staging_dir(staging_dir);
+        monitor.set_host_profile(host().profile);
+        monitor.serve(&mut channel)
+    });
+    Ok((runner, monitor, worker_end))
+}
+
+/// The engine plans against the module's primary target, the monitor writes
+/// the candidate beside it, and the runner, which gets only a file name,
+/// finds it there on its own: all three agree even when the module's first
+/// target is not detected on this host and lives in another directory.
+#[test]
+fn engine_monitor_and_runner_agree_on_the_candidate_directory() -> TestResult {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = TempDir::new()?;
+    let decoy_dir = dir.path().join("decoy");
+    let real_dir = dir.path().join("real");
+    for made in [&decoy_dir, &real_dir] {
+        std::fs::create_dir(made)?;
+        std::fs::set_permissions(made, std::fs::Permissions::from_mode(0o755))?;
+    }
+    let target = real_dir.join("target.conf");
+    std::fs::write(&target, b"a\n")?;
+    let descriptor = decoy_first_descriptor(&decoy_dir, &target)?;
+    let allow = Allowlist::from_modules(
+        &[descriptor],
+        &Config::with_state_root(dir.path().join("state")),
+    )?;
+    let seen: &'static SeenCandidate = leak(SeenCandidate(std::sync::Mutex::new(None)));
+    let (runner, monitor, worker_end) =
+        serve_with_a_runner(allow, descriptor, dir.path().join("monitor-staging"), seen)?;
+
+    let mut client = Client::new(worker_end);
+    client.hello()?;
+    let mut engine = OpsEngine::new(
+        vec![Box::new(FakeModule { descriptor })],
+        client,
+        host(),
+        Box::new(CaptureAudit::new()),
+        fake_services(),
+    );
+    let outcome = engine.execute(
+        Operation::Plan {
+            id: MODULE.to_owned(),
+            model: json!({"text": "b\n"}),
+        },
+        &who(),
+        &AllowAll,
+    )?;
+    let OpOutcome::Planned(plan) = outcome else {
+        return Err("Plan must answer with a plan report".into());
+    };
+    assert_eq!(plan.path, target.display().to_string());
+    let check = plan.checks.first().ok_or("the plan ran no check")?;
+    assert!(check.ran && check.passed, "check report {check:?}");
+    let (path, bytes) = seen
+        .0
+        .lock()
+        .map_err(|_| "poisoned")?
+        .clone()
+        .ok_or("the runner ran no check")?;
+    assert_eq!(path.parent(), Some(real_dir.as_path()));
+    assert!(
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".detent-candidate-")),
+        "candidate at {path:?}"
+    );
+    assert_eq!(bytes, b"b\n");
+    assert_eq!(candidates_in(&real_dir)?, 0);
+    assert_eq!(candidates_in(&decoy_dir)?, 0);
+    assert!(!dir.path().join("monitor-staging").exists());
+
+    engine.shutdown()?;
+    let served = monitor.join().map_err(|_| "the monitor thread panicked")?;
+    assert_eq!(served.ok(), Some(ExitReason::Shutdown));
+    runner.join().map_err(|_| "the runner thread panicked")?;
+    Ok(())
+}
+
 #[test]
 fn plan_refuses_a_model_the_module_cannot_render() -> TestResult {
     let mut fx = harness(b"a\n", Setup::default())?;

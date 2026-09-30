@@ -221,7 +221,15 @@ confined monitor does not start programs itself.
   copy of the allow-list (forked before confinement) and builds the program
   and arguments from the static declaration.
 - A candidate must be one plain path component naming a regular file (not
-  a symlink) directly in the staging directory (`staged_candidate`).
+  a symlink) directly in the check's candidate directory
+  (`staged_candidate`). The runner derives that directory itself from the
+  check's module (`Allowlist::candidate_dir`): the parent of the module's
+  primary target, the one the engine plans against, where the distro's
+  AppArmor profile lets the validator read; there the name must also start
+  with `.detent-candidate-`, and the directory must pass the monitor's own
+  check (`require_trusted_dir`: owned by root or the runner's euid, no group
+  or other write bit, not a symlink). A module with no file target uses the staging
+  directory.
 - A `Service` action must be declared by the binding; `Status` is refused.
 - Any channel error disables the client for good, so every later check or
   service call is `Unavailable` and apply fails closed.
@@ -334,7 +342,8 @@ any degraded step (`report_confinement`, `serve.rs`).
 | `…/pending-commit.json` | monitor | commit-confirm marker, replayed at start |
 | `…/update/staged/` | worker | downloaded release and bundle (untrusted until verified) |
 | `/var/lib/detent/certs` | worker | TLS pair, `0600` in a `0700` dir |
-| `/run/detent/staging` | monitor | candidate files for validators; verified update bytes |
+| `/run/detent/staging` | monitor | candidate files for validators of modules with no file target; verified update bytes |
+| target's directory, `.detent-candidate-*` | monitor | candidate file for a module's validators, removed after the check |
 
 ## 11. Residual risks an auditor should weigh
 

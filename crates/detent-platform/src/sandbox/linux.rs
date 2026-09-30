@@ -737,39 +737,50 @@ mod tests {
         use crate::privsep::monitor::CheckRunner as _;
         use crate::privsep::runner::RunnerClient;
         use crate::privsep::spawn::{reap_child, spawn_runner};
-        static PROBE: ModuleDescriptor = ModuleDescriptor {
-            id: "probe",
-            display_name_id: MessageId::new("probe-name"),
-            targets: &[Target {
-                path: PathSpec::new("/etc/hosts"),
-                kind: TargetKind::File,
-                mode: 0o644,
-                owner: Owner::Root,
-                backend_detect: always,
-            }],
-            upstream: UPSTREAM,
-            services: &[],
-            checks: PROBE_CHECKS,
-            commit_confirm: false,
-            security_notes: &[],
-        };
         in_forked_child(|| {
             let dir =
                 std::env::temp_dir().join(format!("detent-sandbox-runner-{}", std::process::id()));
             let staging = dir.join("staging");
-            let candidate = staging.join("detent-validate-probe");
+            // The runner reads the candidate beside the module's target, as
+            // the monitor writes it.
+            let etc = dir.join("etc");
+            let candidate = etc.join(".detent-candidate-probe");
             if std::fs::create_dir_all(&staging).is_err()
+                || std::fs::create_dir_all(&etc).is_err()
+                // The runner trusts no group- or other-writable directory.
+                || std::fs::set_permissions(
+                    &etc,
+                    <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+                )
+                .is_err()
                 || std::fs::write(&candidate, b"candidate").is_err()
             {
                 return false;
             }
-            let Ok(allow) = Allowlist::from_modules(&[&PROBE], &Config::with_state_root(&dir))
+            let Some(target) = etc.join("probe.conf").to_str().map(ToOwned::to_owned) else {
+                return false;
+            };
+            let probe: &'static ModuleDescriptor = Box::leak(Box::new(ModuleDescriptor {
+                id: "probe",
+                display_name_id: MessageId::new("probe-name"),
+                targets: Box::leak(Box::new([Target {
+                    path: PathSpec::new(Box::leak(target.into_boxed_str())),
+                    kind: TargetKind::File,
+                    mode: 0o644,
+                    owner: Owner::Root,
+                    backend_detect: always,
+                }])),
+                upstream: UPSTREAM,
+                services: &[],
+                checks: PROBE_CHECKS,
+                commit_confirm: false,
+                security_notes: &[],
+            }));
+            let Ok(allow) = Allowlist::from_modules(&[probe], &Config::with_state_root(&dir))
             else {
                 return false;
             };
-            let Ok(runner) =
-                spawn_runner(&allow, &staging, detent_core::descriptor::InitSystem::None)
-            else {
+            let Ok(runner) = spawn_runner(&allow, &staging, &HostProfile::default()) else {
                 return false;
             };
             if confine(Role::Monitor, &Policy::monitor(&allow)).is_err() {
@@ -789,8 +800,9 @@ mod tests {
     }
 
     /// B9 follow-up: the confined monitor makes its staging directory
-    /// (`ensure_staging_dir`, reached by `RunCheck` and `UpdateApply`) and
-    /// checks that it belongs to the monitor's effective uid. `MONITOR` does
+    /// (`ensure_staging_dir`, reached by `UpdateApply`, and by `RunCheck` for
+    /// a module with no file target) and checks that it belongs to the
+    /// monitor's effective uid. `MONITOR` does
     /// not list `geteuid` and kills the process on any call to it, so the uid
     /// must be read before confinement. The runner test above never reaches
     /// this code: it drives `RunnerClient` directly, with no `Monitor`, and
@@ -1178,7 +1190,9 @@ mod tests {
             program: PathSpec::new("/bin/sh"),
             args: &[
                 detent_core::descriptor::ArgTemplate::Literal("-c"),
-                detent_core::descriptor::ArgTemplate::Literal("test -s \"$0\""),
+                detent_core::descriptor::ArgTemplate::Literal(
+                    "case \"$0\" in */etc/.detent-candidate-*) test -s \"$0\" ;; *) exit 1 ;; esac",
+                ),
                 detent_core::descriptor::ArgTemplate::TempFile,
             ],
             expects: detent_core::descriptor::CheckExpectation::ExitZero,
@@ -1294,7 +1308,14 @@ mod tests {
         // monitor's Landlock policy covers it (production: `current_exe`).
         let binary = work.path().join("etc/detent-old");
         std::fs::create_dir_all(&state)?;
-        std::fs::create_dir_all(target.parent().ok_or("the target has no parent")?)?;
+        let etc = target.parent().ok_or("the target has no parent")?;
+        std::fs::create_dir_all(etc)?;
+        // Candidates are written here: it must pass the monitor's
+        // candidate-directory check whatever the umask.
+        std::fs::set_permissions(
+            etc,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )?;
         std::fs::write(&target, b"v1")?;
         std::fs::write(&binary, b"old-binary")?;
         std::fs::set_permissions(
@@ -1309,7 +1330,7 @@ mod tests {
         };
         let allow = Allowlist::from_modules(&[descriptor], &config)?;
         assert!(prepare(&state), "the scenario could not prepare its files");
-        let runner = spawn_runner(&allow, &staging, detent_core::descriptor::InitSystem::None)?;
+        let runner = spawn_runner(&allow, &staging, &HostProfile::default())?;
         let runner_pid = runner.child_pid;
         let hooks = ConfineMonitor(Policy::monitor(&allow));
         #[cfg(feature = "update")]
@@ -1388,8 +1409,25 @@ mod tests {
         std::fs::read_dir(&drive.staging).is_ok_and(|mut entries| entries.next().is_none())
     }
 
-    /// `RunCheck` writes a candidate file in the staging directory, runs the
-    /// check on it, and removes it.
+    /// True when no candidate file is left beside the target.
+    fn drive_left_no_candidate(drive: &Drive) -> bool {
+        drive
+            .target
+            .parent()
+            .and_then(|dir| std::fs::read_dir(dir).ok())
+            .is_some_and(|entries| {
+                entries.flatten().all(|entry| {
+                    !entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".detent-candidate-")
+                })
+            })
+    }
+
+    /// `RunCheck` writes a candidate file beside the target, the runner runs
+    /// the check on it there (the check fails anywhere else), and the
+    /// monitor removes it.
     #[test]
     fn enforce_mode_monitor_runs_a_check_and_removes_its_candidate()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1400,7 +1438,7 @@ mod tests {
                 client
                     .run_check(drive.check, b"candidate".to_vec())
                     .is_ok_and(|outcome| outcome.passed)
-                    && drive_staging_is_empty(drive)
+                    && drive_left_no_candidate(drive)
             },
         )
     }
@@ -1415,7 +1453,7 @@ mod tests {
             |_| true,
             |client, drive| {
                 drive_write(client, drive, b"v2")
-                    && drive_staging_is_empty(drive)
+                    && drive_left_no_candidate(drive)
                     && std::fs::read(&drive.target).is_ok_and(|now| now == b"v2")
             },
         )

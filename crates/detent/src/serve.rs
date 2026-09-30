@@ -109,7 +109,7 @@ pub fn run(
 
     // Before the pair, so the monitor's confinement never reaches the
     // runner or the validators and service commands it starts.
-    let runner = match start_runner(&allow, host.profile.init, renderer, streams)? {
+    let runner = match start_runner(&allow, &host.profile, renderer, streams)? {
         Ok(runner) => runner,
         Err(exit) => return Ok(exit),
     };
@@ -239,11 +239,11 @@ fn start_pair(
 /// Forks the runner (STAGE3 H6), or reports why it could not.
 fn start_runner(
     allow: &Allowlist,
-    init: detent_core::descriptor::InitSystem,
+    profile: &detent_core::descriptor::HostProfile,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Result<RunnerHandle, Exit>> {
-    match spawn_runner(allow, std::path::Path::new(DEFAULT_STAGING_DIR), init) {
+    match spawn_runner(allow, std::path::Path::new(DEFAULT_STAGING_DIR), profile) {
         Ok(runner) => Ok(Ok(runner)),
         Err(err) => {
             renderer.line(
