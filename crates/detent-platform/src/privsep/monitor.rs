@@ -662,7 +662,7 @@ impl<'a> Monitor<'a> {
         }
         // From here the monitor holds a copy of the candidate. Remove it on
         // every path that does not swap it in (the swap consumes it itself).
-        let _copy = StagedCopy(&staged);
+        let _copy = RemoveOnDrop(&staged);
         let bytes = match read_staged_verified(&staged, len, sha256) {
             Ok(bytes) => bytes,
             Err(err) => return Response::Error(err),
@@ -847,16 +847,15 @@ impl<'a> Monitor<'a> {
             return Ok(());
         }
         let dir = ensure_staging_dir(&self.staging_dir).map_err(Response::Error)?;
-        let candidate = tempfile::Builder::new()
-            .prefix("detent-validate-")
-            .tempfile_in(&dir)
-            .map_err(|err| {
+        let (candidate, candidate_path) =
+            create_candidate(&dir, "detent-validate-").map_err(|err| {
                 Response::Error(ProtoError::Io(format!(
                     "cannot create a candidate file: {}",
                     err.kind()
                 )))
             })?;
-        write_all_and_sync(candidate.as_file(), bytes).map_err(|err| {
+        let _remove = RemoveOnDrop(&candidate_path);
+        write_all_and_sync(&candidate, bytes).map_err(|err| {
             Response::Error(ProtoError::Io(format!(
                 "cannot write the candidate file: {}",
                 err.kind()
@@ -866,7 +865,7 @@ impl<'a> Monitor<'a> {
             let outcome = self
                 .hooks
                 .checks
-                .run_check(check, candidate.path())
+                .run_check(check, &candidate_path)
                 .map_err(|err| Response::Error(err.into()))?;
             if !outcome.passed {
                 return Err(Response::Error(ProtoError::Io(
@@ -922,11 +921,8 @@ impl<'a> Monitor<'a> {
             Ok(dir) => dir,
             Err(err) => return Response::Error(err),
         };
-        let candidate = match tempfile::Builder::new()
-            .prefix("detent-candidate-")
-            .tempfile_in(&dir)
-        {
-            Ok(file) => file,
+        let (candidate, candidate_path) = match create_candidate(&dir, "detent-candidate-") {
+            Ok(created) => created,
             Err(err) => {
                 return Response::Error(ProtoError::Io(format!(
                     "cannot create a candidate file: {}",
@@ -934,13 +930,14 @@ impl<'a> Monitor<'a> {
                 )));
             }
         };
-        if let Err(err) = write_all_and_sync(candidate.as_file(), bytes) {
+        let _remove = RemoveOnDrop(&candidate_path);
+        if let Err(err) = write_all_and_sync(&candidate, bytes) {
             return Response::Error(ProtoError::Io(format!(
                 "cannot write the candidate file: {}",
                 err.kind()
             )));
         }
-        match self.hooks.checks.run_check(entry.check, candidate.path()) {
+        match self.hooks.checks.run_check(entry.check, &candidate_path) {
             Ok(mut outcome) => {
                 outcome.check = id;
                 outcome.detail = truncate(&outcome.detail);
@@ -1197,7 +1194,7 @@ impl<'a> Monitor<'a> {
     }
 
     fn clear_marker(&self) -> Result<(), MonitorError> {
-        match std::fs::remove_file(self.marker_path()) {
+        match unlink(&self.marker_path()) {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(source) => Err(MonitorError::State {
@@ -1268,7 +1265,7 @@ impl<'a> Monitor<'a> {
         if let Err(err) = self.replay_service(marker.service) {
             failures.push(err.to_string());
         }
-        std::fs::remove_file(&path).map_err(|source| MonitorError::State {
+        unlink(&path).map_err(|source| MonitorError::State {
             op: "remove_file",
             source,
         })?;
@@ -1545,15 +1542,38 @@ pub(crate) fn ensure_staging_dir(monitor_staging_dir: &Path) -> Result<PathBuf, 
     Ok(monitor_staging_dir.to_path_buf())
 }
 
-/// The monitor's own copy of a candidate binary. Dropping the guard removes
-/// the file, so no failure path leaves an unauthenticated image behind; a
-/// missing file (already swapped in) is not an error.
-struct StagedCopy<'a>(&'a Path);
+/// Remove `path` with `unlinkat(2)`.
+///
+/// The confined monitor's seccomp table (`MONITOR`) allows `unlinkat` but not
+/// the legacy `unlink` that `std::fs::remove_file` issues on `x86_64`, which
+/// kills the process with `SIGSYS`. Every removal the monitor makes while it
+/// serves goes through here.
+fn unlink(path: &Path) -> std::io::Result<()> {
+    rustix::fs::unlinkat(rustix::fs::CWD, path, rustix::fs::AtFlags::empty())
+        .map_err(std::io::Error::from)
+}
 
-impl Drop for StagedCopy<'_> {
+/// Removes a file the monitor owns when dropped, so no failure path leaves a
+/// candidate or an unauthenticated image behind; a missing file (already
+/// swapped in) is not an error.
+struct RemoveOnDrop<'a>(&'a Path);
+
+impl Drop for RemoveOnDrop<'_> {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(self.0);
+        let _ = unlink(self.0);
     }
+}
+
+/// Create a candidate file in `dir` that `tempfile` will not remove: its own
+/// drop calls the legacy `unlink` (see [`unlink`]). The caller removes the
+/// returned path with [`RemoveOnDrop`].
+fn create_candidate(dir: &Path, prefix: &str) -> std::io::Result<(std::fs::File, PathBuf)> {
+    let (file, path) = tempfile::Builder::new()
+        .prefix(prefix)
+        .disable_cleanup(true)
+        .tempfile_in(dir)?
+        .into_parts();
+    Ok((file, path.to_path_buf()))
 }
 
 fn materialize_staged(
@@ -1609,7 +1629,7 @@ fn materialize_staged(
         });
     if written.is_err() {
         // The copy is incomplete or not durable: do not leave it to be found.
-        let _ = std::fs::remove_file(&destination);
+        let _ = unlink(&destination);
     }
     written
 }
@@ -1779,7 +1799,7 @@ fn swap_running_binary(bytes: &[u8], staged: &Path, target: &Path) -> Result<(),
         ));
     }
 
-    if let Err(err) = std::fs::remove_file(&previous)
+    if let Err(err) = unlink(&previous)
         && err.kind() != std::io::ErrorKind::NotFound
     {
         return Err(ProtoError::Io(format!(
@@ -1814,7 +1834,7 @@ fn swap_running_binary(bytes: &[u8], staged: &Path, target: &Path) -> Result<(),
     // `.tmp.<pid>` beside target.
     tmp_name.push(format!(".tmp.{}", std::process::id()));
     let tmp = target_dir.join(tmp_name);
-    let _ = std::fs::remove_file(&tmp);
+    let _ = unlink(&tmp);
     write_temp_and_swap(
         bytes,
         staged,
@@ -1848,13 +1868,13 @@ fn write_temp_and_swap(
     ) {
         Ok(fd) => fd,
         Err(err) => {
-            let _ = std::fs::remove_file(tmp);
+            let _ = unlink(tmp);
             return Err(ProtoError::Io(format!("stage binary in target dir: {err}")));
         }
     };
     let tmp_file: std::fs::File = fd.into();
     if let Err(err) = write_all_and_sync(&tmp_file, bytes) {
-        let _ = std::fs::remove_file(tmp);
+        let _ = unlink(tmp);
         return Err(ProtoError::Io(format!(
             "stage binary in target dir: {}",
             err.kind()
@@ -1864,14 +1884,14 @@ fn write_temp_and_swap(
     // file's — otherwise the swap installs a non-executable binary and the
     // next `--self-test` fails with EACCES (a58f89c / stage_exec.rs).
     if let Err(err) = tmp_file.set_permissions(permissions.clone()) {
-        let _ = std::fs::remove_file(tmp);
+        let _ = unlink(tmp);
         return Err(ProtoError::Io(format!(
             "chmod staged binary: {}",
             err.kind()
         )));
     }
     if let Err(err) = tmp_file.sync_all() {
-        let _ = std::fs::remove_file(tmp);
+        let _ = unlink(tmp);
         return Err(ProtoError::Io(format!(
             "sync staged binary: {}",
             err.kind()
@@ -1879,7 +1899,7 @@ fn write_temp_and_swap(
     }
     drop(tmp_file);
     if let Err(err) = std::fs::rename(tmp, target) {
-        let _ = std::fs::remove_file(tmp);
+        let _ = unlink(tmp);
         return Err(ProtoError::Io(format!(
             "rename staged binary over target: {}",
             err.kind()
@@ -1895,7 +1915,7 @@ fn write_temp_and_swap(
         )));
     }
     // Staged file consumed: the verified bytes now live at the target.
-    let _ = std::fs::remove_file(staged);
+    let _ = unlink(staged);
     Ok(())
 }
 
