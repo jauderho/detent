@@ -38,7 +38,9 @@
 
 use detent_core::diag::MessageId;
 use detent_platform::privsep::allowlist::{Allowlist, Config};
-use detent_platform::privsep::monitor::{DEFAULT_STAGING_DIR, ExitReason, Hooks, Monitor};
+use detent_platform::privsep::monitor::{
+    DEFAULT_STAGING_DIR, ExitReason, Hooks, Monitor, MonitorError,
+};
 use detent_platform::privsep::runner::RunnerClient;
 use detent_platform::privsep::spawn::{
     AcmeHandle, Role, RunnerHandle, SpawnConfig, SpawnError, abort_child, reap_child, spawn_pair,
@@ -565,7 +567,20 @@ fn run_monitor(
             ("dropped", if dropped_privileges { "1" } else { "0" }),
         ],
     )?;
-    let state_lock = Monitor::lock(allow.state_root()).map_err(std::io::Error::other)?;
+    // The monitor writes targets, backups and commit-confirm state, so it
+    // must hold the real lock: refuse now rather than on the first write.
+    let state_lock = match Monitor::lock_exclusive(allow.state_root()) {
+        Ok(lock) => lock,
+        Err(MonitorError::LockUnavailable) => {
+            renderer.line(
+                streams.notes,
+                MessageId::new("cli-monitor-lock-unavailable"),
+                &[("path", &allow.state_root().display().to_string())],
+            )?;
+            return Ok(Exit::Failed);
+        }
+        Err(err) => return Err(std::io::Error::other(err)),
+    };
     let runner_pid = runner.child_pid;
     let client = RunnerClient::new(runner.channel, &allow);
     let mut monitor = Monitor::new(

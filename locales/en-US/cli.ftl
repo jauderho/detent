@@ -29,6 +29,7 @@ cli-bad-hash = `{$value}` is not a sha-256 digest of 64 hex characters.
 cli-start-failed = the privileged helper could not be started: {$reason}
 cli-monitor-stop = the privileged helper did not stop cleanly: {$reason}
 cli-monitor-busy = another detent monitor already owns this state root; retry through the web UI or run `detent serve`.
+cli-monitor-lock-unavailable = the state lock in {$path} cannot be taken, so this command cannot change anything; run it as a user who can write that directory, or pass --state-root.
 cli-commit-recovered = recovered unconfirmed commit {$commit}; restored {$restored} targets with {$failures} failures.
 cli-commit-confirm-needs-serve = this module requires commit-confirm; use the web UI or `detent serve` so the confirmation window remains enforced.
 cli-config-load-failed = the configuration at {$path} could not be loaded: {$reason}

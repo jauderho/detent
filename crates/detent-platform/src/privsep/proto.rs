@@ -334,6 +334,34 @@ pub enum Request {
     PendingCommit,
 }
 
+impl Request {
+    /// True when serving this request can change state on disk or on the host.
+    ///
+    /// A monitor without the state lock refuses these. The match is
+    /// exhaustive on purpose: a new request must be classified here.
+    /// [`Request::Mount`] counts as a change although the monitor answers it
+    /// `Unsupported` today, so wiring it up later cannot skip the lock.
+    #[must_use]
+    pub const fn changes_state(&self) -> bool {
+        match self {
+            Self::WriteTarget { .. }
+            | Self::Restore { .. }
+            | Self::StartConfirmTimer { .. }
+            | Self::ConfirmCommit { .. }
+            | Self::RollbackCommit { .. }
+            | Self::Mount { .. }
+            | Self::ReplaceBinary { .. } => true,
+            Self::Service { action, .. } => !matches!(action, ServiceAction::Status),
+            Self::Hello { .. }
+            | Self::ReadTarget { .. }
+            | Self::RunCheck { .. }
+            | Self::ListBackups { .. }
+            | Self::PendingCommit
+            | Self::Shutdown => false,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Responses
 // ---------------------------------------------------------------------------
@@ -621,6 +649,13 @@ pub enum ProtoError {
     /// target by id, so this reveals no path.
     #[error("target does not exist")]
     NotFound,
+    /// The monitor does not hold the state lock, so it refuses every request
+    /// that changes state. Reads still work.
+    ///
+    /// Appended after [`ProtoError::NotFound`] to keep every existing
+    /// discriminant; see [`PROTO_VERSION`]'s doc comment.
+    #[error("the monitor does not hold the state lock; state changes are refused")]
+    StateLockUnavailable,
 }
 
 /// Which allow-list table an [`ProtoError::UnknownId`] refers to.
