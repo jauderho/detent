@@ -220,6 +220,12 @@ impl Renderer<'_> {
             OpOutcome::UpdateApplied { .. } => {
                 Err(std::io::Error::other("update install is not wired yet"))
             }
+            // Unreachable: the CLI asks the server itself (`detent cert
+            // status`, `detent cert renew`); only the `detent mcp` engine has
+            // a certificate hook, and it renders JSON.
+            OpOutcome::CertStatus(_) | OpOutcome::CertRenewRequested => Err(std::io::Error::other(
+                "the CLI answers certificate commands itself",
+            )),
         }
     }
 
@@ -1128,5 +1134,32 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(out.is_empty());
+    }
+
+    /// The certificate outcomes come from the `detent mcp` hook only: the
+    /// text renderer refuses them rather than print a blank line.
+    #[test]
+    fn a_certificate_outcome_is_not_rendered_as_text() {
+        let messages = Messages::new(Some("en-US"));
+        let renderer = Renderer {
+            messages: &messages,
+            json: false,
+            verbose: false,
+        };
+        for outcome in [
+            OpOutcome::CertRenewRequested,
+            OpOutcome::CertStatus(Box::new(detent_ops::CertReport {
+                fingerprint: "AA:BB".to_owned(),
+                not_after_unix: None,
+                lifetime_used_percent: None,
+                renewal_due: None,
+                expiry_warning: None,
+            })),
+        ] {
+            let mut out = Vec::new();
+            let mut notes = Vec::new();
+            assert!(renderer.outcome(&mut out, &mut notes, &outcome).is_err());
+            assert!(out.is_empty());
+        }
     }
 }

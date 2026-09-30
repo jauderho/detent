@@ -2992,6 +2992,18 @@ mod web_tests {
             ))
         }
 
+        /// The address the server listens on, as `detent.toml` names it.
+        #[cfg(feature = "mcp")]
+        fn listen_addr(&self) -> Result<String, Box<dyn std::error::Error>> {
+            let text = std::fs::read_to_string(&self.settings.config_path)?;
+            Ok(text
+                .lines()
+                .find_map(|line| line.strip_prefix("addr = \""))
+                .and_then(|rest| rest.strip_suffix('"'))
+                .ok_or("no listen address in detent.toml")?
+                .to_owned())
+        }
+
         fn stop(mut self) -> R {
             if let Some(shutdown) = self.shutdown.take() {
                 let _ = shutdown.send(());
@@ -3193,6 +3205,346 @@ mod web_tests {
         assert_no_token("a wrong pin", &[&out, &notes, &logs], &[&wrong.write]);
         assert_eq!(renewer.calls(), 1);
         wrong.stop()
+    }
+
+    // -----------------------------------------------------------------------
+    // The `detent mcp` certificate tools against the same real listener: a
+    // session with the hook `detent mcp` installs, run as a token.
+    // -----------------------------------------------------------------------
+
+    /// A monitor-backed session (its own state root: the server holds the
+    /// other one) whose engine has the certificate hook for `settings` and
+    /// `token`.
+    #[cfg(feature = "mcp")]
+    fn mcp_session(
+        settings: &Settings,
+        token: &str,
+    ) -> Result<crate::tests_support::Harness, Box<dyn std::error::Error>> {
+        let mut harness = crate::tests_support::Harness::start(b"v1\n", false)?;
+        harness
+            .session
+            .set_cert_front_end(crate::mcp::cert_front_end(settings, token));
+        Ok(harness)
+    }
+
+    /// One operation as a token of `scope`, the way a tool call runs.
+    #[cfg(feature = "mcp")]
+    fn mcp_call(
+        harness: &mut crate::tests_support::Harness,
+        op: detent_ops::Operation,
+        scope: detent_web::authz::Scope,
+    ) -> Result<detent_ops::OpOutcome, detent_ops::OpsError> {
+        let who = detent_ops::Identity::new("token:t1", detent_ops::IdentityKind::Token);
+        let authz = detent_web::authz::ScopedAuthz::new(detent_web::authz::Scopes::of(scope));
+        match harness.session.execute_as(op, false, &who, &authz)? {
+            crate::run::Executed::Ran(outcome) => Ok(outcome),
+            crate::run::Executed::WouldRun(_) => Err(detent_ops::OpsError::Unsupported {
+                what: "dryrun_mutation",
+            }),
+        }
+    }
+
+    /// One audit record, as `(result, error id)`.
+    #[cfg(feature = "mcp")]
+    type Logged = (detent_ops::AuditResult, Option<String>);
+
+    /// The `CertRenew` records of the session's audit log.
+    #[cfg(feature = "mcp")]
+    fn renew_records(
+        harness: &mut crate::tests_support::Harness,
+    ) -> Result<Vec<Logged>, Box<dyn std::error::Error>> {
+        let audit = mcp_call(
+            harness,
+            detent_ops::Operation::AuditQuery(detent_ops::AuditQuery::default()),
+            detent_web::authz::Scope::Read,
+        )?;
+        let mut records = crate::tests_support::records_of(audit).ok_or("audit answers records")?;
+        records.reverse();
+        Ok(records
+            .into_iter()
+            .filter(|record| record.op == detent_ops::OpKind::CertRenew)
+            .map(|record| (record.result, record.error_id))
+            .collect())
+    }
+
+    /// `detent.toml` text for `addr` and `cert_dir`.
+    #[cfg(feature = "mcp")]
+    fn config_text(addr: &str, cert_dir: &std::path::Path) -> String {
+        format!(
+            "[listen]\naddr = \"{addr}\"\n[tls]\ncert_dir = {:?}\n",
+            cert_dir.display().to_string()
+        )
+    }
+
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn mcp_cert_status_reports_the_certificate_the_server_serves() -> R {
+        use detent_ops::{OpOutcome, Operation};
+        let server = RenewServer::start(None)?;
+        let mut mcp = mcp_session(&server.settings, &server.read)?;
+        let pair = detent_web::serving_pair(&server.dir.path().join("certs"))?
+            .ok_or("the server stored no certificate")?;
+
+        let outcome = mcp_call(
+            &mut mcp,
+            Operation::CertStatus,
+            detent_web::authz::Scope::Read,
+        )?;
+        let OpOutcome::CertStatus(ref report) = outcome else {
+            return Err(format!("CertStatus answered {outcome:?}").into());
+        };
+        assert_eq!(report.fingerprint, pair.fingerprint());
+        assert!(report.not_after_unix.is_some(), "{report:?}");
+        assert_eq!(report.renewal_due, Some(false));
+        // The JSON carries the REST field names.
+        let json = serde_json::to_value(&outcome)?;
+        let mut names: Vec<&str> = json
+            .pointer("/cert_status")
+            .and_then(serde_json::Value::as_object)
+            .ok_or("the answer has no cert_status object")?
+            .keys()
+            .map(String::as_str)
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "expiry_warning",
+                "fingerprint",
+                "lifetime_used_percent",
+                "not_after_unix",
+                "renewal_due",
+            ]
+        );
+        // Read-only: nothing is audited.
+        assert!(renew_records(&mut mcp)?.is_empty());
+        server.stop()
+    }
+
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn mcp_cert_renew_asks_the_server_once_for_a_write_token_and_never_for_a_read_one() -> R {
+        use detent_ops::{AuditResult, OpOutcome, Operation, OpsError};
+        use detent_web::authz::Scope;
+        let renewer = std::sync::Arc::new(CountingRenewer::default());
+        let server = RenewServer::start(Some(std::sync::Arc::clone(&renewer)))?;
+        let mut mcp = mcp_session(&server.settings, &server.write)?;
+
+        let outcome = mcp_call(&mut mcp, Operation::CertRenew, Scope::Write)?;
+        assert!(
+            matches!(outcome, OpOutcome::CertRenewRequested),
+            "{outcome:?}"
+        );
+        assert_eq!(renewer.calls(), 1);
+        assert_eq!(
+            renew_records(&mut mcp)?,
+            [(AuditResult::Started, None), (AuditResult::Ok, None)]
+        );
+
+        // A read token: the engine refuses before the hook, so the server is
+        // not even contacted (its auth log holds one request only).
+        let refused = mcp_call(&mut mcp, Operation::CertRenew, Scope::Read);
+        assert!(matches!(refused, Err(OpsError::Denied(_))), "{refused:?}");
+        assert_eq!(renewer.calls(), 1);
+        let records = renew_records(&mut mcp)?;
+        assert_eq!(records.len(), 3, "{records:?}");
+        assert_eq!(
+            records.last().map(|(result, _)| *result),
+            Some(AuditResult::Denied)
+        );
+        let audit =
+            std::fs::read_to_string(server.dir.path().join("audit").join("detent-auth.jsonl"))?;
+        assert_eq!(audit.matches("cert_renew_requested").count(), 1, "{audit}");
+        server.stop()
+    }
+
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn mcp_cert_renew_tells_the_servers_refusals_apart() -> R {
+        use detent_ops::{AuditResult, Operation, OpsError};
+        use detent_web::authz::Scope;
+        let cert_error = |result: Result<_, OpsError>| match result {
+            Err(OpsError::Cert { id, reason }) => Ok((id.as_str(), reason)),
+            other => Err(format!("expected a certificate error, got {other:?}")),
+        };
+
+        // A token the server does not know: 401.
+        let renewer = std::sync::Arc::new(CountingRenewer::default());
+        let server = RenewServer::start(Some(std::sync::Arc::clone(&renewer)))?;
+        let unknown = "0".repeat(64);
+        let mut mcp = mcp_session(&server.settings, &unknown)?;
+        let (id, reason) = cert_error(mcp_call(&mut mcp, Operation::CertRenew, Scope::Write))?;
+        assert_eq!(id, "cli-cert-renew-token-refused");
+        assert!(reason.contains("HTTP 401"), "{reason}");
+        assert_eq!(renewer.calls(), 0);
+        // The refusal is audited with its id.
+        assert_eq!(
+            renew_records(&mut mcp)?,
+            [
+                (AuditResult::Started, None),
+                (
+                    AuditResult::Error,
+                    Some("cli-cert-renew-token-refused".to_owned())
+                ),
+            ]
+        );
+        // A read-only token at the server although the engine let it by: 403.
+        let mut mcp = mcp_session(&server.settings, &server.read)?;
+        let (id, reason) = cert_error(mcp_call(&mut mcp, Operation::CertRenew, Scope::Write))?;
+        assert_eq!(id, "cli-cert-renew-token-refused");
+        assert!(reason.contains("HTTP 403"), "{reason}");
+        assert_eq!(renewer.calls(), 0);
+        server.stop()?;
+
+        // No acme process: 409.
+        let server = RenewServer::start(None)?;
+        let mut mcp = mcp_session(&server.settings, &server.write)?;
+        let (id, _) = cert_error(mcp_call(&mut mcp, Operation::CertRenew, Scope::Write))?;
+        assert_eq!(id, "cli-cert-renew-not-acme");
+        server.stop()?;
+
+        // The acme channel is closed: 503 with the server's own id.
+        let renewer = std::sync::Arc::new(CountingRenewer {
+            fail: true,
+            ..CountingRenewer::default()
+        });
+        let server = RenewServer::start(Some(std::sync::Arc::clone(&renewer)))?;
+        let mut mcp = mcp_session(&server.settings, &server.write)?;
+        let (id, reason) = cert_error(mcp_call(&mut mcp, Operation::CertRenew, Scope::Write))?;
+        assert_eq!(id, "cli-cert-renew-server-error");
+        assert!(
+            reason.contains("HTTP 503: web-cert-renew-unavailable"),
+            "{reason}"
+        );
+        assert_eq!(renewer.calls(), 1);
+        server.stop()
+    }
+
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn mcp_cert_tools_name_the_address_they_could_not_use() -> R {
+        use detent_ops::{Operation, OpsError};
+        use detent_web::authz::Scope;
+        let cert_error = |result: Result<_, OpsError>| match result {
+            Err(OpsError::Cert { id, reason }) => Ok((id.as_str(), reason)),
+            other => Err(format!("expected a certificate error, got {other:?}")),
+        };
+        let renewer = std::sync::Arc::new(CountingRenewer::default());
+        let server = RenewServer::start(Some(std::sync::Arc::clone(&renewer)))?;
+        let certs = server.dir.path().join("certs");
+
+        // Nothing listens on the configured address.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")?
+            .local_addr()?
+            .to_string();
+        let path = server.dir.path().join("closed.toml");
+        std::fs::write(&path, config_text(&closed, &certs))?;
+        let mut mcp = mcp_session(&settings(server.dir.path(), path), &server.write)?;
+        let (id, reason) = cert_error(mcp_call(&mut mcp, Operation::CertRenew, Scope::Write))?;
+        assert_eq!(id, "cli-cert-renew-unreachable");
+        assert!(reason.contains(&closed), "{reason}");
+
+        // Another certificate in `tls.cert_dir`: the pin fails.
+        let addr = server.listen_addr()?;
+        let other = detent_web::bootstrap_self_signed(&["box.example".to_owned()])?;
+        let other_certs = server.dir.path().join("other-certs");
+        detent_web::tls::store_bootstrap(&other_certs, &other)?;
+        let path = server.dir.path().join("wrong.toml");
+        std::fs::write(&path, config_text(&addr, &other_certs))?;
+        let mut mcp = mcp_session(&settings(server.dir.path(), path), &server.write)?;
+        let (id, reason) = cert_error(mcp_call(&mut mcp, Operation::CertRenew, Scope::Write))?;
+        assert_eq!(id, "cli-cert-renew-unreachable");
+        assert!(
+            reason.contains(&addr) && reason.contains("TLS handshake failed"),
+            "{reason}"
+        );
+        assert_eq!(renewer.calls(), 0);
+
+        // No certificate stored: both tools say where.
+        let empty = server.dir.path().join("no-certs");
+        let path = server.dir.path().join("empty.toml");
+        std::fs::write(&path, config_text(&addr, &empty))?;
+        let mut mcp = mcp_session(&settings(server.dir.path(), path), &server.write)?;
+        for op in [Operation::CertStatus, Operation::CertRenew] {
+            let (id, reason) = cert_error(mcp_call(&mut mcp, op, Scope::Write))?;
+            assert_eq!(id, "cli-cert-missing");
+            assert!(reason.contains(&empty.display().to_string()), "{reason}");
+        }
+
+        // A configuration that does not parse.
+        let path = server.dir.path().join("broken.toml");
+        std::fs::write(&path, "listen = [")?;
+        let mut mcp = mcp_session(&settings(server.dir.path(), path.clone()), &server.write)?;
+        for op in [Operation::CertStatus, Operation::CertRenew] {
+            let (id, reason) = cert_error(mcp_call(&mut mcp, op, Scope::Write))?;
+            assert_eq!(id, "cli-config-load-failed");
+            assert!(reason.contains(&path.display().to_string()), "{reason}");
+        }
+        assert_eq!(renewer.calls(), 0);
+        server.stop()
+    }
+
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn the_token_never_reaches_a_tool_answer_an_error_or_a_log_line() -> R {
+        use detent_ops::{Operation, OpsError};
+        use detent_web::authz::Scope;
+        let renewer = std::sync::Arc::new(CountingRenewer::default());
+        let server = RenewServer::start(Some(std::sync::Arc::clone(&renewer)))?;
+        let token = server.write.clone();
+        let tokens = [token.as_str()];
+        let addr = server.listen_addr()?;
+        let certs = server.dir.path().join("certs");
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")?
+            .local_addr()?
+            .to_string();
+
+        // Each way a request ends: accepted, refused by the engine, not
+        // accepted by the server, not sent because the port is closed, and
+        // not sent because the certificate does not match.
+        let other = detent_web::bootstrap_self_signed(&["box.example".to_owned()])?;
+        let other_certs = server.dir.path().join("other-certs");
+        detent_web::tls::store_bootstrap(&other_certs, &other)?;
+        let mut seen = Vec::new();
+        let ((), logs) = crate::tests_support::capture(|| {
+            for (name, config, scope) in [
+                ("good", config_text(&addr, &certs), Scope::Write),
+                ("read", config_text(&addr, &certs), Scope::Read),
+                ("closed", config_text(&closed, &certs), Scope::Write),
+                ("pinned", config_text(&addr, &other_certs), Scope::Write),
+            ] {
+                let path = server.dir.path().join(format!("{name}.toml"));
+                if std::fs::write(&path, config).is_err() {
+                    continue;
+                }
+                let Ok(mut mcp) = mcp_session(&settings(server.dir.path(), path), &token) else {
+                    continue;
+                };
+                for op in [Operation::CertStatus, Operation::CertRenew] {
+                    let text = match mcp_call(&mut mcp, op, scope) {
+                        Ok(outcome) => format!(
+                            "{outcome:?} {}",
+                            serde_json::to_string(&outcome).unwrap_or_default()
+                        ),
+                        Err(err) => {
+                            format!("{err} {err:?} {}", OpsError::message_id(&err).as_str())
+                        }
+                    };
+                    seen.push(text);
+                }
+            }
+        });
+        assert!(seen.len() >= 8, "{seen:?}");
+        assert!(
+            seen.iter().any(|text| text.contains("CertRenewRequested")),
+            "{seen:?}"
+        );
+        assert!(seen.iter().any(|text| text.contains(&closed)), "{seen:?}");
+        for text in &seen {
+            crate::tests_support::assert_clean("a tool answer", text, &tokens);
+        }
+        crate::tests_support::assert_clean("the log", &logs, &tokens);
+        server.stop()
     }
 }
 #[cfg(test)]

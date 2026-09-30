@@ -5,13 +5,18 @@
 //! None of them touches a file or a service manager directly; that is what
 //! makes adding a front end cheap, and what makes the audit log complete.
 //!
-//! # Certificate renewal
+//! # Certificate operations
 //!
-//! The engine does not answer [`Operation::CertRenew`]: the ACME client runs
-//! in its own process (ADR-015), and only the web front end holds the channel
-//! to it. `POST /api/v1/system/cert/renew` authorizes this operation and asks
-//! that process to renew now. The engine answers [`OpsError::Unsupported`]
-//! (`ops-unsupported`) when the operation reaches it.
+//! The engine holds neither the serving certificate nor the channel to the
+//! ACME process (ADR-015). [`Operation::CertStatus`] and
+//! [`Operation::CertRenew`] are answered by a hook the front end installs
+//! ([`CertFrontEnd`](crate::CertFrontEnd)); `detent mcp` installs one that reads
+//! `tls.cert_dir` and asks the running server to renew with the MCP bearer
+//! token. The engine authorizes and audits first, then calls the hook. The web
+//! front end installs none: `GET /api/v1/system/cert` and `POST
+//! /api/v1/system/cert/renew` authorize these operations and answer from the
+//! web server's own state. With no hook the engine answers
+//! [`OpsError::Unsupported`](crate::OpsError::Unsupported) (`ops-unsupported`).
 
 use std::time::Duration;
 
@@ -186,16 +191,20 @@ pub enum Operation {
     UpdateStatus,
     /// Read the serving certificate's fingerprint and remaining lifetime.
     ///
-    /// Not answered by the engine: the serving certificate belongs to the
-    /// front end that owns the TLS listener, and `detent-ops` has no TLS
-    /// types. The variant exists so that authorization and the audit record
-    /// for a refusal carry this operation's own identity instead of
-    /// borrowing [`Operation::HostProfile`]'s.
+    /// Answered by the front end's [`CertFrontEnd`](crate::CertFrontEnd) hook,
+    /// not by the engine: the serving certificate belongs to the front end
+    /// that owns the TLS listener, and `detent-ops` has no TLS types. Without
+    /// a hook the engine answers [`OpsError::Unsupported`](crate::OpsError::Unsupported). The web front end
+    /// installs none and answers from its own resolver; it authorizes this
+    /// operation so the policy decision and the audit record for a refusal
+    /// carry its own identity instead of borrowing [`Operation::HostProfile`]'s.
     CertStatus,
     /// Renew the serving certificate now, also when it is not due.
     ///
-    /// Not answered by the engine (see the module header): the web front end
-    /// authorizes it and asks the acme process to renew.
+    /// Answered by the front end's [`CertFrontEnd`](crate::CertFrontEnd) hook
+    /// (see the module header); [`OpsError::Unsupported`](crate::OpsError::Unsupported) without one. The web
+    /// front end installs none: it authorizes this operation and asks the
+    /// acme process to renew.
     CertRenew,
     /// Install a verified update: the engine bridges the worker-staged release
     /// tag to the monitor's private runtime staging copy and asks the

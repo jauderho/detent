@@ -107,6 +107,17 @@ pub enum OpsError {
     /// The audit log could not be written before the operation.
     #[error("audit unavailable: {0}")]
     AuditUnavailable(AuditError),
+    /// The front end's certificate hook ([`CertFrontEnd`](crate::CertFrontEnd))
+    /// could not answer `CertStatus` or `CertRenew`. `id` names the failure
+    /// (it is what the audit record carries) and `reason` is the sentence for
+    /// logs and tool errors; neither ever holds a credential.
+    #[error("{reason}")]
+    Cert {
+        /// The Fluent id of the failure.
+        id: MessageId,
+        /// What went wrong, in English, for logs and tool errors.
+        reason: String,
+    },
     /// The operation is defined but this build cannot perform it.
     #[error("unsupported operation: {what}")]
     Unsupported {
@@ -140,6 +151,7 @@ impl OpsError {
             } => MessageId::new("ops-arm-failed-restored"),
             Self::ArmFailed { .. } => MessageId::new("ops-arm-failed-unrestored"),
             Self::TargetMissing => MessageId::new("ops-target-missing"),
+            Self::Cert { id, .. } => id,
             Self::Unsupported { .. } => MessageId::new("ops-unsupported"),
         }
     }
@@ -243,6 +255,13 @@ mod tests {
             (
                 OpsError::AuditUnavailable(AuditError::Encode("bad".to_owned())),
                 "ops-audit-unavailable",
+            ),
+            (
+                OpsError::Cert {
+                    id: MessageId::new("web-cert-renew-unavailable"),
+                    reason: "the server did not answer".to_owned(),
+                },
+                "web-cert-renew-unavailable",
             ),
             (
                 OpsError::Unsupported {

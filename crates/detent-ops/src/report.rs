@@ -324,6 +324,13 @@ pub enum OpOutcome {
         /// The version that was installed.
         version: String,
     },
+    /// Answer to `CertStatus`, from the front end's certificate hook. The
+    /// fields are those of `GET /api/v1/system/cert`.
+    CertStatus(Box<CertReport>),
+    /// Answer to `CertRenew`: the server accepted the request. It does not
+    /// say a certificate was issued; `CertStatus` shows the new one once the
+    /// server installs it.
+    CertRenewRequested,
 }
 
 #[cfg(test)]

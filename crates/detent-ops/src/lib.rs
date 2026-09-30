@@ -49,7 +49,7 @@ pub use audit::{
 };
 pub use authz::{AllowAll, Authz, Denied};
 pub use diff::{DiffLine, Hunk};
-pub use engine::OpsEngine;
+pub use engine::{CertFrontEnd, OpsEngine};
 pub use error::OpsError;
 pub use identity::{Identity, IdentityKind};
 pub use op::{OpKind, Operation, ServiceCommand};
