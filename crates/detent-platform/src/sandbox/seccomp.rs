@@ -306,6 +306,10 @@ const MONITOR: &[&str] = &[
 /// after each record, which `WORKER` did not allow. Confirmed live:
 /// `fdatasync(14) = -1 EPERM`, which made the ops engine fail the operation
 /// because its intent record could not be persisted.
+///
+/// **B11b follow-up:** `geteuid` added (owner decision 2026-09-30, `WORKER`
+/// only). `ensure_private` asks for the effective uid before each audit
+/// append; the refused call panicked inside rustix.
 const WORKER: &[&str] = &[
     "read",
     "write",
@@ -421,6 +425,13 @@ const WORKER: &[&str] = &[
     // `POST /api/v1/system/cert/renew`, which made the ops engine fail the
     // operation because its intent record could not be persisted.
     "fdatasync",
+    // The process's own effective uid: `fs::private_dir::ensure_private`,
+    // which both audit writers call before each append, refuses an audit
+    // directory owned by another uid and so asks for it. Seen live in the
+    // acme-serve trace: `geteuid() = -1 EPERM`; rustix treats `geteuid` as
+    // infallible and panics on the error, which killed the request thread in
+    // `FileAuthAudit::append`.
+    "geteuid",
     "unlinkat",
     "mkdirat",
     "fchmod",
@@ -607,7 +618,9 @@ pub const fn syscalls_for(role: Role) -> &'static [&'static str] {
 /// `chmod`) were read from the `x86_64` `<asm/unistd_64.h>` and
 /// `<asm-generic/unistd.h>` of the build container (Ubuntu 24.04). The W1
 /// row (`fdatasync`) was read the same way, from the same container: 75
-/// and 83.
+/// and 83. The `geteuid` row was read from the `x86_64`
+/// `<asm/unistd_64.h>` and the aarch64 `<asm-generic/unistd.h>` of the build
+/// container: 107 and 175.
 const SYSCALL_NUMBERS: &[(&str, i64, i64)] = &[
     ("read", 0, 63),
     ("write", 1, 64),
@@ -628,6 +641,7 @@ const SYSCALL_NUMBERS: &[(&str, i64, i64)] = &[
     ("fcntl", 72, 25),
     ("fsync", 74, 82),
     ("fdatasync", 75, 83),
+    ("geteuid", 107, 175),
     ("fchmod", 91, 52),
     ("fchown", 93, 55),
     ("getpid", 39, 172),
@@ -934,6 +948,17 @@ mod tests {
         assert!(syscalls_for(Role::Worker).contains(&"fdatasync"));
         assert_eq!(super::number("fdatasync", Arch::X86_64), Some(75));
         assert_eq!(super::number("fdatasync", Arch::Aarch64), Some(83));
+    }
+
+    /// B11b follow-up: `geteuid` (asked for by `ensure_private`) resolves on
+    /// both tier-one arches and is allowed in the worker only.
+    #[test]
+    fn the_worker_table_allows_geteuid_on_both_arches() {
+        assert!(syscalls_for(Role::Worker).contains(&"geteuid"));
+        assert!(!syscalls_for(Role::Monitor).contains(&"geteuid"));
+        assert!(!syscalls_for(Role::Acme).contains(&"geteuid"));
+        assert_eq!(super::number("geteuid", Arch::X86_64), Some(107));
+        assert_eq!(super::number("geteuid", Arch::Aarch64), Some(175));
     }
 
     /// The credentials store calls (slice C3b): each `x86_64` form has no

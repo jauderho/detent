@@ -595,6 +595,37 @@ mod tests {
         })
     }
 
+    /// B11b follow-up: under the real worker confinement, `ensure_private`
+    /// (called by both audit writers before each append) must tighten an
+    /// existing `0755` directory under the state root to `0700`. It failed
+    /// live: the helper asks for the effective uid (`geteuid`), which the
+    /// `WORKER` filter refuses with `EPERM`.
+    #[test]
+    fn enforce_mode_worker_can_tighten_an_audit_directory() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        in_forked_child(|| {
+            let dir = std::env::temp_dir()
+                .join(format!("detent-sandbox-private-dir-{}", std::process::id()));
+            let audit = dir.join("audit");
+            if std::fs::create_dir_all(&audit).is_err() {
+                return false;
+            }
+            if std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o755)).is_err() {
+                return false;
+            }
+            let Ok(allow) = fixture_allowlist(&dir) else {
+                return false;
+            };
+            if confine(Role::Worker, &Policy::worker(&allow)).is_err() {
+                return false;
+            }
+            crate::fs::private_dir::ensure_private(&audit).is_ok()
+                && std::fs::metadata(&audit)
+                    .is_ok_and(|meta| meta.permissions().mode() & 0o7777 == 0o700)
+        })
+    }
+
     #[allow(unsafe_code)]
     unsafe fn libc_ptrace_traceme() -> i64 {
         unsafe extern "C" {
