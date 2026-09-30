@@ -7,7 +7,7 @@ phase or a self-contained piece of work finishes.
 
 ## 2026-09-30 - Size baseline re-cut for `detent cert renew`
 
-CI Size check failed on `2f84c7b`: `full-default-aarch64-musl` measured 5455472 bytes, above the 5430736 maximum (5272560 + 3 %). No new crate; the growth is the command's own code (CLI, TLS 1.3 listener client, messages). The owner approved a re-cut: `size-baseline.json` now holds 5455472 (+182912), tolerance 3 %, still far under the 12 MiB budget. The other three entries passed and do not change.
+CI Size check failed on `2f84c7b`: `full-default-aarch64-musl` measured 5455472 bytes, above the 5430736 maximum (5272560 + 3 %). No new crate; the growth is the command's own code (CLI, TLS 1.3 listener client, messages). The owner approved a re-cut: `size-baseline.json` now holds 5455472 (+182912), tolerance 3 %, still far under the 12 MiB budget. CI stops at the first failed size step, so the next run then measured `resolver-web-aarch64-musl` at 5020144 bytes (+196224, 4.07 %; the command is part of `web`); that entry is re-cut the same way. `cli-aarch64-musl` has no `web` feature and does not change.
 
 ## 2026-09-30 - Track B 3: `detent cert renew` asks the running server
 
