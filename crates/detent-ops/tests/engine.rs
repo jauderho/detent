@@ -1735,6 +1735,43 @@ fn a_failed_arming_reports_a_failed_restore_too() -> TestResult {
 }
 
 #[test]
+fn a_failed_arming_after_a_write_with_no_backup_cannot_restore() -> TestResult {
+    let mut fx = harness(
+        b"v1\n",
+        Setup {
+            shape: Shape {
+                commit_confirm: true,
+                ..Shape::default()
+            },
+            disable_backups: true,
+            fail_arm: true,
+            ..Setup::default()
+        },
+    )?;
+    let result = fx.run(Operation::Apply {
+        id: MODULE.to_owned(),
+        model: json!({"text": "v2\n"}),
+        expected_hash: None,
+        service_action: None,
+        confirm: Some(CONFIRM_WINDOW),
+    });
+    assert!(
+        matches!(
+            result,
+            Err(OpsError::ArmFailed {
+                restore_error: Some(ref restore),
+                ..
+            }) if matches!(**restore, OpsError::NoBackup)
+        ),
+        "{result:?}"
+    );
+    // No backup was made, so nothing can be put back: the new contents stay.
+    assert_eq!(fx.contents()?, "v2\n");
+    assert!(fx.engine.pending_commit()?.is_none());
+    fx.finish()
+}
+
+#[test]
 fn a_failed_service_action_on_a_commit_confirm_module_restores_the_file() -> TestResult {
     let mut fx = harness(
         b"v1\n",
