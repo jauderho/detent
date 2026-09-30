@@ -163,6 +163,11 @@ Follow-ups found while reviewing Track A (not yet scheduled):
   update binary and, since B4, its bundle) checks the owner of each
   directory, not of the file. Consider requiring the file's owner to be the
   worker uid (root-confined mode) as a second barrier.
+- **Legacy `unlink` in `MONITOR`.** A confined monitor is killed with
+  `SIGSYS` on x86_64 when `run_check` drops its `tempfile` candidate:
+  `std::fs::remove_file` issues `unlink(2)`, and `MONITOR` lists only
+  `unlinkat`. Needs an owner decision (seccomp table change). Seen with
+  strace while proving the B9 follow-up; the aarch64 table is not affected.
 
 B3 (real Fulcio/Rekor trust roots) moved to Track E, item 2.
 

@@ -745,6 +745,84 @@ mod tests {
         })
     }
 
+    /// B9 follow-up: the confined monitor makes its staging directory
+    /// (`ensure_staging_dir`, reached by `RunCheck` and `UpdateApply`) and
+    /// checks that it belongs to the monitor's effective uid. `MONITOR` does
+    /// not list `geteuid` and kills the process on any call to it, so the uid
+    /// must be read before confinement. The runner test above never reaches
+    /// this code: it drives `RunnerClient` directly, with no `Monitor`, and
+    /// makes the staging directory itself before it confines. Only the
+    /// directory step is run here: the candidate file that `RunCheck` then
+    /// drops calls the legacy `unlink`, which `MONITOR` also lacks (reported
+    /// separately; not changed here).
+    #[test]
+    fn enforce_mode_monitor_checks_its_staging_directory_owner()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::privsep::monitor::{Hooks, Monitor, ensure_staging_dir};
+        in_forked_child(|| {
+            let dir = std::env::temp_dir().join(format!(
+                "detent-sandbox-monitor-staging-{}",
+                std::process::id()
+            ));
+            if std::fs::create_dir_all(&dir).is_err() {
+                return false;
+            }
+            let staging = dir.join("staging");
+            let Ok(allow) = fixture_allowlist(&dir) else {
+                return false;
+            };
+            let policy = Policy::monitor(&allow);
+            let _monitor = Monitor::new(allow, Hooks::default());
+            if confine(Role::Monitor, &policy).is_err() {
+                return false;
+            }
+            ensure_staging_dir(&staging).is_ok_and(|made| made == staging)
+        })
+    }
+
+    /// B9 follow-up, production order: `spawn_pair` confines the monitor
+    /// before the caller builds its `Monitor` (`detent serve` does this), so
+    /// the effective uid must already be read by then.
+    #[test]
+    fn enforce_mode_monitor_built_after_spawn_pair_checks_its_staging_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::privsep::monitor::{Hooks, Monitor, ensure_staging_dir};
+        use crate::privsep::spawn::{Role as SpawnRole, SpawnConfig, spawn_pair};
+        struct ConfineMonitor(Policy);
+        impl SandboxHooks for ConfineMonitor {
+            fn confine_monitor(&self) -> Result<(), crate::privsep::spawn::SandboxError> {
+                confine(Role::Monitor, &self.0)
+                    .map(|_| ())
+                    .map_err(|err| crate::privsep::spawn::SandboxError(err.to_string()))
+            }
+        }
+        in_forked_child(|| {
+            let dir = std::env::temp_dir().join(format!(
+                "detent-sandbox-spawn-staging-{}",
+                std::process::id()
+            ));
+            if std::fs::create_dir_all(&dir).is_err() {
+                return false;
+            }
+            let staging = dir.join("staging");
+            let Ok(allow) = fixture_allowlist(&dir) else {
+                return false;
+            };
+            let hooks = ConfineMonitor(Policy::monitor(&allow));
+            let Ok(spawned) = spawn_pair(&SpawnConfig::unprivileged(), &hooks) else {
+                return false;
+            };
+            match spawned.role {
+                SpawnRole::Worker(_client) => fork::exit_immediately_unflushed(0),
+                SpawnRole::Monitor(handle) => {
+                    let _monitor = Monitor::new(allow, Hooks::default());
+                    let made = ensure_staging_dir(&staging).is_ok_and(|made| made == staging);
+                    made && matches!(handle.wait(), Ok(Some(0)))
+                }
+            }
+        })
+    }
+
     #[test]
     fn enforce_mode_seccomp_kills_the_monitor_on_a_forbidden_syscall()
     -> Result<(), Box<dyn std::error::Error>> {
