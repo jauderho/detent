@@ -62,6 +62,8 @@ struct Script {
     replies: HashMap<String, VecDeque<Reply>>,
     /// Every request seen, as `"METHOD url"`.
     log: Vec<String>,
+    /// The decoded JWS payload of every POST, as `(url, payload)`.
+    payloads: Vec<(String, String)>,
     nonces: u64,
 }
 
@@ -87,6 +89,16 @@ impl FakeAcme {
         self.script().log.clone()
     }
 
+    /// The decoded JWS payloads sent to `url` by POST, in order.
+    fn payloads_to(&self, url: &str) -> Vec<String> {
+        self.script()
+            .payloads
+            .iter()
+            .filter(|(u, _)| u == url)
+            .map(|(_, p)| p.clone())
+            .collect()
+    }
+
     fn posts_to(&self, url: &str) -> usize {
         let wanted = format!("POST {url}");
         self.script().log.iter().filter(|l| **l == wanted).count()
@@ -99,7 +111,27 @@ impl FakeAcme {
         domains: &[&str],
         authz_urls: &[String],
     ) -> Result<(Account, Order), Box<dyn std::error::Error>> {
+        let (account, order, _) = self
+            .account_and_profiled_order(domains, authz_urls, &[], None)
+            .await?;
+        Ok((account, order))
+    }
+
+    /// As [`Self::account_and_order`], for a directory that advertises
+    /// `advertised` profiles and an operator who configured `configured`.
+    /// Returns the profile the order requested.
+    async fn account_and_profiled_order(
+        &self,
+        domains: &[&str],
+        authz_urls: &[String],
+        advertised: &[&str],
+        configured: Option<&str>,
+    ) -> Result<(Account, Order, Option<String>), Box<dyn std::error::Error>> {
         use base64::Engine as _;
+        let profiles: serde_json::Map<String, serde_json::Value> = advertised
+            .iter()
+            .map(|name| ((*name).to_owned(), serde_json::json!("a profile")))
+            .collect();
         let key = rcgen::KeyPair::generate()?;
         let credentials: AccountCredentials = serde_json::from_value(serde_json::json!({
             "id": ACCOUNT_ID,
@@ -116,6 +148,7 @@ impl FakeAcme {
                     "newOrder": NEW_ORDER,
                     "revokeCert": "https://acme.test/revoke-cert",
                     "keyChange": "https://acme.test/rollover-account-key",
+                    "meta": { "profiles": profiles },
                 })
                 .to_string(),
             )],
@@ -131,12 +164,32 @@ impl FakeAcme {
         let account = Account::builder_with_http(Box::new(self.clone()))
             .from_credentials(credentials)
             .await?;
-        let identifiers: Vec<Identifier> = domains
-            .iter()
-            .map(|d| Identifier::Dns((*d).to_owned()))
-            .collect();
-        let order = account.new_order(&NewOrder::new(&identifiers)).await?;
-        Ok((account, order))
+        let (order, chosen) = new_order_for(&account, domains, configured).await?;
+        Ok((account, order, chosen))
+    }
+}
+
+impl FakeAcme {
+    /// Stores the decoded JWS payload of a POST body. A body that is not a
+    /// JWS with a base64url payload is stored as an empty string.
+    async fn record_payload(&self, url: &str, body: BodyWrapper<Bytes>) {
+        use base64::Engine as _;
+        use http_body_util::BodyExt as _;
+        let bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(never) => match never {},
+        };
+        let payload = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|jws| jws.get("payload")?.as_str().map(str::to_owned))
+            .and_then(|b64| {
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(b64)
+                    .ok()
+            })
+            .and_then(|raw| String::from_utf8(raw).ok())
+            .unwrap_or_default();
+        self.script().payloads.push((url.to_owned(), payload));
     }
 }
 
@@ -146,12 +199,14 @@ impl HttpClient for FakeAcme {
         request: hyper::Request<BodyWrapper<Bytes>>,
     ) -> Pin<Box<dyn Future<Output = Result<BytesResponse, instant_acme::Error>> + Send>> {
         let url = request.uri().to_string();
+        let method = request.method().clone();
+        let body = request.into_body();
         let (reply, nonce) = {
             let mut script = self.script();
-            script.log.push(format!("{} {url}", request.method()));
+            script.log.push(format!("{method} {url}"));
             script.nonces = script.nonces.saturating_add(1);
             let nonce = format!("nonce-{}", script.nonces);
-            let reply = if request.method() == Method::HEAD && url == NEW_NONCE {
+            let reply = if method == Method::HEAD && url == NEW_NONCE {
                 Some(Reply::ok(""))
             } else {
                 script.replies.get_mut(&url).and_then(|queue| {
@@ -164,7 +219,11 @@ impl HttpClient for FakeAcme {
             };
             (reply, nonce)
         };
+        let this = self.clone();
         Box::pin(async move {
+            if method == Method::POST {
+                this.record_payload(&url, body).await;
+            }
             let reply = reply.ok_or_else(|| {
                 instant_acme::Error::Other(format!("fake ACME: nothing scripted for {url}").into())
             })?;
@@ -988,5 +1047,47 @@ async fn present_challenges_publishes_apex_and_wildcard_at_one_name() -> TestRes
             .unwrap_or_else(PoisonError::into_inner),
         records
     );
+    Ok(())
+}
+
+/// The new-order body a fake directory that advertises `advertised` got from
+/// an operator who configured `configured`, and the profile the order named.
+async fn new_order_body(
+    advertised: &[&str],
+    configured: Option<&str>,
+) -> Result<(serde_json::Value, Option<String>), Box<dyn std::error::Error>> {
+    let fake = FakeAcme::default();
+    let (_, _, chosen) = fake
+        .account_and_profiled_order(&["example.com"], &[authz_url(1)], advertised, configured)
+        .await?;
+    let payloads = fake.payloads_to(NEW_ORDER);
+    let [payload] = payloads.as_slice() else {
+        return Err(format!("expected one new-order POST, got {}", payloads.len()).into());
+    };
+    Ok((serde_json::from_str(payload)?, chosen))
+}
+
+#[tokio::test]
+async fn an_advertised_shortlived_profile_rides_the_new_order() -> TestResult {
+    let (body, chosen) = new_order_body(&["classic", "shortlived"], None).await?;
+    assert_eq!(body.get("profile"), Some(&serde_json::json!("shortlived")));
+    assert_eq!(chosen.as_deref(), Some("shortlived"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_directory_without_shortlived_gets_no_profile_field() -> TestResult {
+    for advertised in [&[][..], &["default"]] {
+        let (body, chosen) = new_order_body(advertised, None).await?;
+        assert!(body.get("profile").is_none(), "{body}");
+        assert_eq!(chosen, None);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_configured_profile_wins_over_the_advertised_default() -> TestResult {
+    let (body, _) = new_order_body(&["classic", "shortlived"], Some("classic")).await?;
+    assert_eq!(body.get("profile"), Some(&serde_json::json!("classic")));
     Ok(())
 }

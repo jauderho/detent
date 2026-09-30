@@ -289,6 +289,8 @@ pub struct IssueRequest<'a> {
 ///
 /// Returning the [`Account`] alongside [`Issued`] lets the caller ask ARI
 /// for the new certificate without restoring the account credentials again.
+/// The third value is the profile the order requested (see
+/// [`account_and_order`]), for the caller to log.
 ///
 /// # Errors
 ///
@@ -300,8 +302,8 @@ pub async fn issue(
     provider: &dyn DnsProvider,
     publish: &(dyn Fn(&DnsRecord) -> Result<(), AcmeError> + Sync),
     policy: &RetryPolicy,
-) -> Result<(Issued, Account), AcmeError> {
-    let (account, mut order) = account_and_order(
+) -> Result<(Issued, Account, Option<String>), AcmeError> {
+    let (account, mut order, profile) = account_and_order(
         req.directory_url,
         req.domains,
         req.credentials_path,
@@ -316,7 +318,7 @@ pub async fn issue(
     let records = present_challenges(&mut order, provider, publish).await?;
     let issued = finish_order(&mut order, policy).await;
     cleanup_challenges(provider, &records);
-    Ok((issued?, account))
+    Ok((issued?, account, profile))
 }
 
 /// The `wait_ready` → status check → `finalize` tail of [`issue`], split out
@@ -550,10 +552,12 @@ impl std::fmt::Debug for EabCredentials {
 /// permissions on first use and restored from it afterwards, so repeated
 /// runs reuse one ACME account.
 ///
-/// `profile` names the CA profile to request (e.g. `"shortlived"`, the
-/// default on Let's Encrypt); pass `None` where the server advertises no
-/// profiles extension (Pebble). An unsupported profile fails the order with
-/// [`AcmeError::Acme`] — the caller picks the fallback, not this module.
+/// `profile` names the CA profile to request. `None` requests
+/// [`choose_profile`]'s default: `shortlived` when the directory advertises
+/// it, else no profile (Pebble, CAs without the profiles extension). A named
+/// profile the CA does not support fails the order with [`AcmeError::Acme`]
+/// — the operator picks the fallback (`profile = "classic"`), not this
+/// module. The third value is the profile the order requested.
 ///
 /// `contacts` holds `mailto:`/`tel:` URIs recorded on fresh registration;
 /// `eab` binds registration to a CA-issued external account. Both are
@@ -571,14 +575,46 @@ pub async fn account_and_order(
     profile: Option<&str>,
     contacts: &[&str],
     eab: Option<&EabCredentials>,
-) -> Result<(Account, Order), AcmeError> {
+) -> Result<(Account, Order, Option<String>), AcmeError> {
     let account =
         load_or_create_account(directory_url, credentials_path, ca_root, contacts, eab).await?;
+    let (order, chosen) = new_order_for(&account, domains, profile).await?;
+    Ok((account, order, chosen))
+}
+
+/// The profile Let's Encrypt-style CAs offer for short-lived certificates,
+/// requested when the operator names none and the directory advertises it.
+const DEFAULT_PROFILE: &str = "shortlived";
+
+/// The profile to request: `configured` if the operator set one (an explicit
+/// choice wins, whatever the directory advertises), else [`DEFAULT_PROFILE`]
+/// if `advertised` lists it, else none.
+#[must_use]
+pub fn choose_profile(configured: Option<&str>, advertised: &[&str]) -> Option<String> {
+    configured
+        .or_else(|| {
+            advertised
+                .contains(&DEFAULT_PROFILE)
+                .then_some(DEFAULT_PROFILE)
+        })
+        .map(str::to_owned)
+}
+
+/// Opens a new order on `account` for `domains`, naming the profile
+/// [`choose_profile`] picks from the profiles the account's directory
+/// advertises. Returns the order and the profile it requested.
+async fn new_order_for(
+    account: &Account,
+    domains: &[&str],
+    configured: Option<&str>,
+) -> Result<(Order, Option<String>), AcmeError> {
+    let advertised: Vec<&str> = account.profiles().map(|p| p.name).collect();
+    let chosen = choose_profile(configured, &advertised);
     let identifiers: Vec<Identifier> = domains
         .iter()
         .map(|d| Identifier::Dns((*d).to_owned()))
         .collect();
-    let new_order = match profile {
+    let new_order = match chosen.as_deref() {
         Some(p) => NewOrder::new(&identifiers).profile(p),
         None => NewOrder::new(&identifiers),
     };
@@ -586,7 +622,7 @@ pub async fn account_and_order(
         .new_order(&new_order)
         .await
         .map_err(AcmeError::from)?;
-    Ok((account, order))
+    Ok((order, chosen))
 }
 
 /// Builds the RFC 8555 external-account key, decoding `key_b64` first.
@@ -1208,6 +1244,27 @@ mod tests {
             Err(AcmeError::Acme(_))
         ));
         Ok(())
+    }
+
+    #[test]
+    fn choose_profile_defaults_to_shortlived_only_when_advertised() {
+        assert_eq!(
+            choose_profile(None, &["classic", "shortlived"]).as_deref(),
+            Some("shortlived")
+        );
+        assert_eq!(choose_profile(None, &[]), None);
+        assert_eq!(choose_profile(None, &["default"]), None);
+        assert_eq!(choose_profile(None, &["classic", "tlsserver"]), None);
+    }
+
+    #[test]
+    fn choose_profile_keeps_an_explicit_choice() {
+        for advertised in [&[][..], &["shortlived"], &["classic", "shortlived"]] {
+            assert_eq!(
+                choose_profile(Some("classic"), advertised).as_deref(),
+                Some("classic")
+            );
+        }
     }
 
     /// The whole `account_and_order` entry point refuses an unreadable

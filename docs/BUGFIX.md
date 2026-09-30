@@ -189,9 +189,6 @@ B3 (real Fulcio/Rekor trust roots) moved to Track E, item 2.
    `CertStatus` in the engine so the MCP tools stop answering `Unsupported`.
 4. **Journal warnings** at 50 % and 25 % of lifetime from the acme process
    (the CLI and UI already warn).
-5. **`shortlived` by default on Let's Encrypt:** `order.rs` supports the
-   profile, but only a test requests it. Make the `serve` path request it
-   when the CA advertises it, and test that.
 6. **aarch64 syscall trace** of the acme process (C4 was x86_64 only). Needs
    an aarch64 host or runner; until then keep "aarch64 runtime unverified".
 

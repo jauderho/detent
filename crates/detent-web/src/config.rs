@@ -115,8 +115,9 @@ pub struct AcmeConfig {
     pub credentials_path: Option<PathBuf>,
     /// Optional PEM CA root for a private ACME server.
     pub ca_root: Option<PathBuf>,
-    /// CA profile to request (e.g. `"shortlived"`); `None` where the server
-    /// advertises no profiles extension (Pebble).
+    /// CA profile to request. `None` requests `shortlived` when the CA's
+    /// directory advertises it, else no profile (Pebble). A name is requested
+    /// as is, so `"classic"` opts out of `shortlived`.
     pub profile: Option<String>,
     /// `[acme.provider]`: the dns-01 provider that publishes the challenge
     /// record. `None` means no provider is configured. Its one secret is in
