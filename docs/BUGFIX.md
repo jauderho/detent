@@ -174,7 +174,8 @@ Follow-ups found while reviewing Track A (not yet scheduled):
   `enforce_mode_monitor_*` tests: musl issues `stat` and `lstat`, and
   `MONITOR` has only `newfstatat`/`statx`. `WORKER` has the same gap
   (`stat`, `EPERM`; `enforce_mode_worker_can_tighten_an_audit_directory`
-  fails). Table change waits for the owner (§4, "Legacy stat forms").
+  fails). Fixed 2026-09-30 (owner decision): `MONITOR` gets `stat` and
+  `lstat`, `WORKER` gets `stat`; testhost then passes 18 of 18 `enforce_mode_*`.
 
 B3 (real Fulcio/Rekor trust roots) moved to Track E, item 2.
 
@@ -198,8 +199,8 @@ B3 (real Fulcio/Rekor trust roots) moved to Track E, item 2.
    (`PROGRESS.md`): `scripts/acme-serve-check.sh`, unchanged, on the
    aarch64 musl binary. All serve checks pass; the one call outside `ACME`
    is `faccessat` (mimalloc's NUMA probe, the aarch64 form of the tolerated
-   `access`), refused with `EPERM`, so the script fails. Harness change
-   waits for the owner (§4, "Legacy stat forms").
+   `access`), refused with `EPERM`. The script now tolerates it (owner
+   decision 2026-09-30) and passes on aarch64. Done.
 
 Follow-ups found in item 3 (not yet scheduled):
 - ~~**`mcp` without `web` has no certificate hook.**~~ Done 2026-09-30:
@@ -318,6 +319,7 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   binary works; add `faccessat` to the acme `TOLERATED_EPERM` list in
   `scripts/acme-serve-check.sh` (the aarch64 form of `access`). —
   proposed: yes (same operation as the allowed `newfstatat`) — owner answer:
+  yes, all (2026-09-30).
 - Track G: defer `hickory-client`, the TPM attestor and the LE staging run past
   v1, so Phase 6 can close? — proposed: defer the TPM attestor; keep the other
   two for v1 — owner answer:
