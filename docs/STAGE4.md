@@ -67,6 +67,8 @@ The gap analysis was done at `c50200e`. In short: the pieces exist, but nothing 
    - Implement `Operation::CertRenew`. **DONE through the web front end** (slices R1, R2): `POST /api/v1/system/cert/renew` authorizes `CertRenew` and sends `RenewNow` to the acme process, which starts a forced round at once (202; 409 without an acme process; 503 when the channel is closed). **R2b:** a forced order is rate-limited to one an hour (`MIN_FORCED_INTERVAL`), and a `RenewNow` during a backoff wait no longer cuts it short. The engine still answers `CertRenew` `Unsupported`, like `CertStatus`, so the MCP tool `cert_renew` is not wired. Open: the CLI and the UI button (item 3).
    - Apply the `shortlived` profile by default on LE.
 3. **`detent cert status|renew` CLI**, journal/CLI warnings at 50 %/25 % lifetime, and a renew button on `CertificatesPage.tsx`.
+   - **DONE:** `detent cert status` (OFFLOAD T4: read-only, CLI warning at half/quarter lifetime, exit 1 when the certificate is expired or cannot be parsed) and the renew button (OFFLOAD T3). Both merged 2026-09-27.
+   - **Open:** `detent cert renew` (it must authenticate to the running server), and the journal warnings at 50 %/25 % lifetime.
 4. **Order-flow seam**, so fixtures can drive `order.rs` and raise the detent-acme floor from 87 toward 100.
 5. **Pebble test with a short-lifetime profile that really renews** (`ci.yml` job `acme-pebble`).
 
