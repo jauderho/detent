@@ -279,6 +279,13 @@ const MONITOR: &[&str] = &[
     "rseq",
     "set_robust_list",
     "sched_getaffinity",
+    // musl's `stat`/`lstat` on x86_64, where glibc issues `newfstatat`
+    // (above): `create_dir_all` after `mkdir` answers `EEXIST`, and
+    // `symlink_metadata` (`lstat`). Traced on testhost (x86_64 musl, 2026-09-30); without
+    // them the filter killed the monitor on 10 of 13 request-path tests.
+    // aarch64 has neither.
+    "stat",
+    "lstat",
 ];
 
 /// Syscalls the worker needs. Phase 4 gives the worker a real `detent-web`
@@ -453,6 +460,11 @@ const WORKER: &[&str] = &[
     "unlink",
     "open",
     "epoll_wait",
+    // musl's `stat` on x86_64 (`newfstatat` on glibc): `create_dir_all` in
+    // `write_atomic` checks an existing directory with `stat` after `mkdir`
+    // answers `EEXIST`, and `EPERM` fails it. Seen on testhost (x86_64 musl,
+    // 2026-09-30) in the audit-directory test.
+    "stat",
 ];
 
 /// Syscalls the acme process needs (ADR-015): an outbound HTTPS/TCP client
@@ -719,6 +731,7 @@ const SYSCALL_NUMBERS: &[(&str, i64, i64)] = &[
     ("mkdir", 83, -1),
     ("unlink", 87, -1),
     ("stat", 4, -1),
+    ("lstat", 6, -1),
     ("flock", 73, 32),
     ("chmod", 90, -1),
 ];
@@ -939,6 +952,22 @@ mod tests {
         assert_eq!(super::number("chmod", Arch::X86_64), Some(90));
         // Refused in the worker and tolerated, never allowed.
         assert!(!worker.contains(&"prctl") && !worker.contains(&"access"));
+    }
+
+    /// Track A follow-up: on testhost (`x86_64` musl) the monitor was killed on
+    /// `stat` and `lstat`, and the worker refused `stat`; glibc issues
+    /// `newfstatat` for the same calls. aarch64 has neither legacy form.
+    #[test]
+    fn the_monitor_and_worker_tables_carry_the_musl_stat_forms() {
+        let monitor = syscalls_for(Role::Monitor);
+        let worker = syscalls_for(Role::Worker);
+        for (table, x86_64_only) in [(monitor, "stat"), (monitor, "lstat"), (worker, "stat")] {
+            assert!(table.contains(&x86_64_only), "lacks {x86_64_only}");
+            assert!(table.contains(&"newfstatat"), "lacks newfstatat");
+            assert!(super::number(x86_64_only, Arch::Aarch64).is_none());
+        }
+        assert_eq!(super::number("stat", Arch::X86_64), Some(4));
+        assert_eq!(super::number("lstat", Arch::X86_64), Some(6));
     }
 
     /// W1: `fdatasync` (the audit writers' `File::sync_data()`) resolves on
