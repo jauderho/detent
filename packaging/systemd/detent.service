@@ -90,7 +90,7 @@ ReadWritePaths=/etc/hosts /etc/resolv.conf /etc/fstab -/etc/exports -/etc/samba 
 
 StateDirectory=detent
 StateDirectoryMode=0700
-RuntimeDirectory=detent
+RuntimeDirectory=detent detent/staging
 RuntimeDirectoryMode=0700
 ConfigurationDirectory=detent
 
