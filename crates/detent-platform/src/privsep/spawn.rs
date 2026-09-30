@@ -243,6 +243,9 @@ pub fn spawn_pair(config: &SpawnConfig, sandbox: &dyn SandboxHooks) -> Result<Sp
                 child_pid,
                 channel: monitor_end,
             };
+            // The confined monitor cannot ask for its uid (`geteuid` is not
+            // in its seccomp table): read it now, before the filter is on.
+            super::monitor::process_euid();
             if let Err(err) = sandbox.confine_monitor() {
                 drop(handle.channel);
                 reap_child(child_pid);

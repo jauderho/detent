@@ -369,6 +369,8 @@ impl<'a> Monitor<'a> {
     /// Build a monitor over `allow`, delegating checks and services to `hooks`.
     #[must_use]
     pub fn new(allow: Allowlist, hooks: Hooks<'a>) -> Self {
+        // A no-op after `spawn_pair` has read it; see `process_euid`.
+        process_euid();
         Self {
             allow,
             hooks,
@@ -1440,6 +1442,18 @@ fn staged_input_path(state_root: &Path, tag: &str) -> Result<PathBuf, ProtoError
     Ok(state_root.join(STAGED_DIR).join(tag))
 }
 
+/// The effective uid of this process, read once and then remembered.
+///
+/// `MONITOR` does not allow `geteuid` and kills the process on any call to
+/// it, so a request handler must never ask the kernel. `spawn_pair` calls
+/// this before it confines the monitor, and [`Monitor::new`] calls it for a
+/// monitor that is not confined; every later owner check uses the stored
+/// value. The monitor never changes its own uid, so the value stays true.
+pub(crate) fn process_euid() -> u32 {
+    static EUID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *EUID.get_or_init(|| rustix::process::geteuid().as_raw())
+}
+
 /// Open the worker-written input `<state_root>/update/staged/<name>` for
 /// reading without following a symlink at any component below `state_root`.
 ///
@@ -1486,7 +1500,7 @@ fn open_staged_input(state_root: &Path, name: &str) -> Result<std::fs::File, Pro
 /// before), then require that it is a real directory, not a symlink, owned by
 /// the monitor's euid, with no group or other write bit. An existing
 /// directory that fails the check is refused, never repaired.
-fn ensure_staging_dir(monitor_staging_dir: &Path) -> Result<PathBuf, ProtoError> {
+pub(crate) fn ensure_staging_dir(monitor_staging_dir: &Path) -> Result<PathBuf, ProtoError> {
     use rustix::fs::{FileType, Mode, OFlags, fstat};
     use std::os::unix::fs::DirBuilderExt as _;
     if let Some(parent) = monitor_staging_dir
@@ -1523,7 +1537,7 @@ fn ensure_staging_dir(monitor_staging_dir: &Path) -> Result<PathBuf, ProtoError>
     let stat = fstat(&fd)
         .map_err(|err| ProtoError::Io(format!("stat monitor staging directory: {err}")))?;
     if FileType::from_raw_mode(stat.st_mode) != FileType::Directory
-        || stat.st_uid != rustix::process::geteuid().as_raw()
+        || stat.st_uid != process_euid()
         || stat.st_mode & 0o022 != 0
     {
         return Err(untrusted());
@@ -1682,8 +1696,8 @@ fn read_staged_verified(
     // production that is root, so a `detent`-owned file the worker planted
     // refuses; in dev/test the monitor runs as the dev uid, so the same
     // comparison keeps the suite exercising the gate instead of skipping it.
-    if meta.uid() != rustix::process::geteuid().as_raw()
-        || parent_meta.uid() != rustix::process::geteuid().as_raw()
+    if meta.uid() != process_euid()
+        || parent_meta.uid() != process_euid()
         || parent_meta.mode() & 0o022 != 0
     {
         tracing::warn!("staged binary refused: untrusted owner");
