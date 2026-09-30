@@ -761,6 +761,9 @@ pub fn fuzz_acme_json(data: &[u8]) {
 }
 
 #[cfg(test)]
+mod flow_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use instant_acme::{AuthorizationState, ChallengeStatus, OrderState, OrderStatus, Problem};
