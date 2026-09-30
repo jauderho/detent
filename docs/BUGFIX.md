@@ -151,9 +151,6 @@ In this order (highest risk first):
 5. **B9 (L-PLAT7) — trust the staging directory.** Create it `0700`, then
    require owner = monitor euid and no group/other write. Test: mode `0777` or
    another owner is refused.
-6. **B2 (H17 step 6) — refuse unknown Rekor entry kinds.** Only
-   `hashedrekord` and `dsse`. Test: a `rekord`/`intoto` fixture is refused
-   with its own error.
 7. **B1 (H17 step 5) — parse the Rekor checkpoint as a signed note.** Size
    **equal** to the proof's `tree_size`, root equal to the computed root,
    signature verified (key hint per the note spec). Tests: the real staging

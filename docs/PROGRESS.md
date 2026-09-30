@@ -5,9 +5,14 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-30 - Track A B2 (H17 step 6): unknown Rekor entry kinds are refused
+
+`verify_body_agreement` (`crates/detent-update/src/verify.rs`) took `intoto` as `dsse` and sent every other kind to the `hashedrekord` body check. It now branches on `decoded.kind`: `hashedrekord` and `dsse` keep their checks, and any other kind (`intoto`, `rekord`, `helm`, ...) gives the new `VerificationError::UnsupportedEntryKind`. An `intoto` v0.0.2 body keeps its signature under `spec.content.envelope`, so the `dsse` layout never applied to it. The `intoto` entry in `public_good_set` only feeds `verify_set` and is unchanged. Tests: `body_agreement_accepts_a_dsse_entry`, `body_agreement_refuses_entry_kinds_it_has_no_schema_for`.
+
 ## 2026-09-30 - Track A B4 (C1-b): the bundle open and the leftover copy
 
 `verify_release` (`crates/detent-platform/src/privsep/monitor.rs`) read `<tag>.sigstore.json` by path, so a bundle the worker had planted as a symlink was followed, and a FIFO blocked the monitor. It now opens the bundle with `open_staged_input` (the same `openat` walk, `O_NOFOLLOW`, directory owner check, `O_NONBLOCK`, regular-file check as the binary) and `read_bounded_file` reads it from that descriptor, capped by `MAX_BUNDLE_BYTES`. Any refusal answers `VerificationFailed`, and the reason is logged. The digest-named copy in the monitor staging directory was left behind after a failed verify or swap: `replace_binary` now holds a `StagedCopy` guard that removes it on every path (the swap already removes it on success), and `materialize_staged` removes a copy whose write or sync failed. Tests: `replace_binary_refuses_a_symlinked_bundle`, `replace_binary_refuses_a_fifo_bundle_without_blocking`, `replace_binary_leaves_no_copy_after_a_failed_verification`, `replace_binary_leaves_no_copy_after_a_failed_swap`. Not done: a file-owner check on the bundle (`open_staged_input` checks directory owners only, as for the binary); a test needs `chown`, which unprivileged CI cannot run.
+
 
 ## 2026-09-30 - Track A B6 (H1): a monitor without the state lock changes nothing
 

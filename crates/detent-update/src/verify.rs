@@ -73,6 +73,9 @@ pub enum VerificationError {
     /// The signing certificate has no parseable embedded SCT list.
     #[error("signing certificate has no valid embedded SCT list")]
     SctInvalid,
+    /// Step 6: the Rekor entry kind is not `hashedrekord` or `dsse`.
+    #[error("Rekor entry kind is not supported by the verifier")]
+    UnsupportedEntryKind,
 }
 
 /// Verifies a parsed bundle end-to-end (ADR-014 steps 2–6; step 1 is
@@ -406,28 +409,43 @@ fn has_embedded_sct(cert: &X509Certificate<'_>) -> bool {
 fn verify_body_agreement(decoded: &Decoded, leaf_point: &[u8]) -> Result<(), VerificationError> {
     let body: serde_json::Value =
         serde_json::from_slice(&decoded.body).map_err(|_| VerificationError::SetInvalid)?;
-    if matches!(decoded.kind.as_str(), "dsse" | "intoto") {
-        let signature = body
-            .pointer("/spec/signatures/0/signature")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(VerificationError::SetInvalid)?;
-        if BASE64
-            .decode(signature.as_bytes())
-            .map_err(|_| VerificationError::SetInvalid)?
-            != decoded.dsse_signature
-        {
-            return Err(VerificationError::SetInvalid);
-        }
-        let payload_hash = body
-            .pointer("/spec/payloadHash/value")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(VerificationError::SetInvalid)?;
-        let want = Sha256::digest(&decoded.dsse_payload);
-        if payload_hash != hex_lower(&want) {
-            return Err(VerificationError::SetInvalid);
-        }
-        return Ok(());
+    match decoded.kind.as_str() {
+        "dsse" => verify_dsse_body(decoded, &body),
+        "hashedrekord" => verify_hashedrekord_body(decoded, &body, leaf_point),
+        _ => Err(VerificationError::UnsupportedEntryKind),
     }
+}
+
+/// The `dsse` entry body: signature and payload hash under `spec`.
+fn verify_dsse_body(decoded: &Decoded, body: &serde_json::Value) -> Result<(), VerificationError> {
+    let signature = body
+        .pointer("/spec/signatures/0/signature")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(VerificationError::SetInvalid)?;
+    if BASE64
+        .decode(signature.as_bytes())
+        .map_err(|_| VerificationError::SetInvalid)?
+        != decoded.dsse_signature
+    {
+        return Err(VerificationError::SetInvalid);
+    }
+    let payload_hash = body
+        .pointer("/spec/payloadHash/value")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(VerificationError::SetInvalid)?;
+    let want = Sha256::digest(&decoded.dsse_payload);
+    if payload_hash != hex_lower(&want) {
+        return Err(VerificationError::SetInvalid);
+    }
+    Ok(())
+}
+
+/// The `hashedrekord` entry body: signature content and leaf public key.
+fn verify_hashedrekord_body(
+    decoded: &Decoded,
+    body: &serde_json::Value,
+    leaf_point: &[u8],
+) -> Result<(), VerificationError> {
     let content = body
         .pointer("/spec/signature/content")
         .and_then(serde_json::Value::as_str)
@@ -558,6 +576,70 @@ mod tests {
             signed_entry_timestamp: b64("/entry/inclusionPromise/signedEntryTimestamp"),
         };
         (decoded, key)
+    }
+
+    /// A `Decoded` whose body agrees with its DSSE signature and payload, in
+    /// the given entry kind. Only `body_agreement_*` tests use it.
+    fn agreeing_entry(kind: &str) -> Decoded {
+        let payload = br#"{"_type":"https://in-toto.io/Statement/v1"}"#.to_vec();
+        let dsse_signature = vec![0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01];
+        Decoded {
+            integrated_time: 1,
+            certs: Vec::new(),
+            statement: bundle::Statement {
+                statement_type: bundle::STATEMENT_TYPE.to_owned(),
+                subject: Vec::new(),
+            },
+            dsse_payload: payload,
+            dsse_payload_type: bundle::DSSE_PAYLOAD_TYPE.to_owned(),
+            dsse_signature,
+            log_index: 0,
+            log_key_id: Vec::new(),
+            kind: kind.to_owned(),
+            kind_version: "0.0.1".to_owned(),
+            body: Vec::new(),
+            tree_size: 0,
+            proof_log_index: 0,
+            path_hashes: Vec::new(),
+            checkpoint: String::new(),
+            signed_entry_timestamp: Vec::new(),
+        }
+    }
+
+    fn dsse_body(decoded: &Decoded, kind: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "0.0.1",
+            "kind": kind,
+            "spec": {
+                "payloadHash": {
+                    "algorithm": "sha256",
+                    "value": hex_lower(&Sha256::digest(&decoded.dsse_payload))
+                },
+                "signatures": [{ "signature": BASE64.encode(&decoded.dsse_signature) }]
+            }
+        })
+    }
+
+    #[test]
+    fn body_agreement_accepts_a_dsse_entry() {
+        let mut decoded = agreeing_entry("dsse");
+        decoded.body = dsse_body(&decoded, "dsse").to_string().into_bytes();
+        assert_eq!(verify_body_agreement(&decoded, &[]), Ok(()));
+    }
+
+    #[test]
+    fn body_agreement_refuses_entry_kinds_it_has_no_schema_for() {
+        // `intoto` stores its signature under spec.content.envelope, not
+        // spec.signatures, so a dsse-shaped body must not pass as `intoto`.
+        for kind in ["intoto", "rekord", "helm", ""] {
+            let mut decoded = agreeing_entry(kind);
+            decoded.body = dsse_body(&decoded, kind).to_string().into_bytes();
+            assert_eq!(
+                verify_body_agreement(&decoded, &[]),
+                Err(VerificationError::UnsupportedEntryKind),
+                "{kind:?}"
+            );
+        }
     }
 
     #[test]
