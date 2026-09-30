@@ -233,6 +233,12 @@ deferred by the owner.
    HTTPS login, `plan` and `apply` with a real validator, a service restart,
    commit-confirm expiry and rollback, shutdown on `SIGTERM`. Each failure
    becomes its own item here.
+   Run 2026-09-30 on testhost (`PROGRESS.md`): passes end to end with a
+   test-only drop-in `NoNewPrivileges=no`. Fixed on the way: optional
+   `ReadWritePaths`, staging in `RuntimeDirectory=`, `CAP_SETPCAP`, no
+   `StateDirectory=`, `ConfigurationDirectoryMode=0750`, and error causes in
+   the journal. Open (§4): A2-a `NoNewPrivileges`, A2-b `detent setup` as
+   root.
 3. **A3 — negative checks never run.** In a throwaway worktree with its own
    target dir, remove each fix, run its pinning test, and quote the failure.
    A test that does not fail is vacuous: write a real one first.
@@ -345,6 +351,18 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   stage the candidate in a path the distro profiles already allow. — owner
   answer (2026-09-30): the latter; real config locations stay as they are
   (detent supplements the host's binaries, it does not replace them).
+- A2-a: with `NoNewPrivileges=yes` the unit's process on testhost (Ubuntu,
+  systemd) has `CapPrm`/`CapEff` 0x16b: no `CAP_SETUID`, though the
+  bounding set (0x1eb) has it, so `setuid(999)` for the worker fails with
+  `EPERM` and `serve` cannot start. With `NoNewPrivileges=no` it has 0x1eb
+  and runs. detent sets `no_new_privs` itself in every child and before
+  its seccomp filter. — proposed: `NoNewPrivileges=no` in the unit with a
+  comment; re-measure `systemd-analyze security` — owner answer:
+- A2-b: `sudo detent setup` (what the installer and README suggest)
+  writes `/var/lib/detent/state/users.json` as root, and the worker
+  (`detent`) cannot read it, so `serve` fails. — proposed: when run as
+  root, `setup`/`user`/`token` refuse and say `sudo -u detent detent
+  setup`; the installer prints that — owner answer:
 - Track G: defer `hickory-client`, the TPM attestor and the LE staging run past
   v1, so Phase 6 can close? — proposed: defer the TPM attestor; keep the other
   two for v1 — owner answer:
