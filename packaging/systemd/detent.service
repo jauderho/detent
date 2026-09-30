@@ -30,7 +30,9 @@ Environment=RUST_LOG=info
 # User=root: root-confined mode (ADR-001 default). The capability-user
 # drop-in overrides this to User=detent for Phase 12's hardened mode.
 User=root
-CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER CAP_SETUID CAP_SETGID CAP_KILL
+# CAP_SETPCAP lets the monitor drop SETUID/SETGID/KILL (and SETPCAP itself)
+# from the bounding set after it forks the worker; PR_CAPBSET_DROP needs it.
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER CAP_SETUID CAP_SETGID CAP_KILL CAP_SETPCAP
 NoNewPrivileges=yes
 
 ProtectSystem=strict

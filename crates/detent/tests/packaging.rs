@@ -62,3 +62,27 @@ fn every_run_path_is_a_runtime_directory() {
         .collect();
     assert!(missing.is_empty(), "not made on restart: {missing:?}");
 }
+
+/// What `Policy::monitor` keeps (`crates/detent-platform/src/sandbox/mod.rs`).
+const MONITOR_KEEPS: &[&str] = &["CAP_DAC_OVERRIDE", "CAP_CHOWN", "CAP_FOWNER"];
+
+/// `PR_CAPBSET_DROP` needs `CAP_SETPCAP`. When the unit's bounding set holds
+/// more than the monitor keeps, the monitor must drop the rest, so the unit
+/// must grant `CAP_SETPCAP` too; without it `serve` fails with
+/// `PR_CAPBSET_DROP failure: Operation not permitted` (Track C A2).
+#[test]
+fn the_bounding_set_lets_the_monitor_drop_what_it_does_not_keep() {
+    let caps: Vec<&str> = UNIT
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("CapabilityBoundingSet="))
+        .flat_map(str::split_whitespace)
+        .collect();
+    let extra: Vec<&&str> = caps
+        .iter()
+        .filter(|cap| !MONITOR_KEEPS.contains(cap) && **cap != "CAP_SETPCAP")
+        .collect();
+    assert!(
+        extra.is_empty() || caps.contains(&"CAP_SETPCAP"),
+        "the monitor cannot drop {extra:?} without CAP_SETPCAP"
+    );
+}
