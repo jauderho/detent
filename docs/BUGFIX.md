@@ -173,9 +173,7 @@ B3 (real Fulcio/Rekor trust roots) moved to Track E, item 2.
 
 ### Track B — close Phase 6 (any dev machine)
 
-1. **Log-capture test** (Phase 6 task 2): run the acme loop with each
-   provider against fixtures and assert that no secret (API token, TSIG key)
-   reaches the log output.
+1. ~~**Log-capture test**~~ Done 2026-09-30 (`PROGRESS.md`).
 2. **Order-flow seam** (`detent-acme` `order.rs`) so fixtures can drive the
    order flow; raise the `detent-acme` coverage floor from 87 toward 100.
    Then **M18**: a real test of `present_challenges`.
