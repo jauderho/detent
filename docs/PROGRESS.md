@@ -5,6 +5,14 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-30 - Owner decisions applied: musl stat forms, aarch64 probe, `mcp` implies `web`
+
+- `MONITOR` allows `stat` and `lstat`, `WORKER` allows `stat` (x86_64 only; `lstat` row 6 read from `<asm/unistd_64.h>` in `debian:bookworm`; aarch64 has neither, so its filter is unchanged). Test `the_monitor_and_worker_tables_carry_the_musl_stat_forms`. a010 (x86_64 musl, Enforce mode): 18 of 18 `enforce_mode_*` pass (before: 11 failed, 10 by `SIGSYS`). Not traced: a real x86_64 musl `serve` (a010 has no Pebble or BIND).
+- `scripts/acme-serve-check.sh` tolerates `faccessat` in the acme process (aarch64 form of mimalloc's `access` probe). OrbStack aarch64 musl run: all checks PASS, exit 0.
+- `mcp` implies `web` (`crates/detent/Cargo.toml`); the `web` gates in `mcp.rs` and on the two MCP cert tests are gone. Before, an `mcp`-only binary had no `detent token` command and no cert hook.
+- The parity test pairs `cert_renew` with REST `renew_cert` (no input on either side); the "MCP-only" exception and the stale `docs/API.md` line are gone.
+- Track B is done except the owner's Track G choice. Next: Track C (a010), then Track E.
+
 ## 2026-09-30 - Track B 6 and the `MONITOR` follow-up: syscall traces on aarch64 and x86_64 musl
 
 Report only; no table, code or script changed. Venues: aarch64 = the owner's M2 Mac, OrbStack native aarch64 kernel 7.0.14 (Landlock, seccomp), `--privileged` container (Docker's seccomp profile off); x86_64 = a010 (kernel 7.3), binaries built on the Mac with `cargo zigbuild`, copied to `~/detent-test/943415e/`. A set-difference script compared every call made after the process's own `seccomp(SECCOMP_SET_MODE_FILTER)` (and in its later threads and children) with the role table, using the per-arch `SYSCALL_NUMBERS` column.
