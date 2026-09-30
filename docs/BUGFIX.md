@@ -148,10 +148,6 @@ Owner decisions that block or change items are in §4.
 
 In this order (highest risk first):
 
-8. **B11 — small follow-ups.** (a) `docs/openapi.json`: add `503` to `POST
-   /api/v1/auth/login` and regenerate. (b) An existing `<state>/audit`
-   directory is not tightened to `0700`; tighten it when the process owns it,
-   and test.
 9. **B10 (L-BIN18) — the last plain `String` of the typed password**
    (`detent/src/webadmin.rs`): keep it in `Zeroizing<String>`. Evidence: the
    type change and an `rg` in the commit body.

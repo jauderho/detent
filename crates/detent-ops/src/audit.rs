@@ -371,7 +371,7 @@ impl FileAudit {
         }
     }
 
-    /// Create the log's directory `0700` and open the log for appending.
+    /// Create the log's directory `0700`, tighten an existing one, and open the log for appending.
     ///
     /// When the log is new, the directories that now hold it are fsynced so
     /// the new entries survive a crash.
@@ -382,6 +382,7 @@ impl FileAudit {
                 .recursive(true)
                 .mode(AUDIT_DIR_MODE)
                 .create(parent)?;
+            detent_platform::fs::private_dir::ensure_private(parent)?;
         }
         let file = OpenOptions::new()
             .create(true)
@@ -1207,6 +1208,49 @@ mod tests {
         let parent = sink.path().parent().ok_or("the log has a parent")?;
         let mode = std::fs::metadata(parent)?.permissions().mode() & 0o777;
         assert_eq!(mode, 0o700, "audit directory mode is {mode:o}");
+        Ok(())
+    }
+
+    #[test]
+    fn an_existing_wide_audit_directory_becomes_private() -> R {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::TempDir::new()?;
+        let sink = FileAudit::under_state_root(dir.path());
+        let parent = sink.path().parent().ok_or("the log has a parent")?;
+        std::fs::create_dir(parent)?;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755))?;
+        sink.record(&record("root", None, AuditResult::Ok))?;
+        let mode = std::fs::metadata(parent)?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "audit directory mode is {mode:o}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_symlinked_audit_directory_is_refused() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let target = dir.path().join("elsewhere");
+        std::fs::create_dir(&target)?;
+        let sink = FileAudit::under_state_root(dir.path());
+        let parent = sink.path().parent().ok_or("the log has a parent")?;
+        std::os::unix::fs::symlink(&target, parent)?;
+        assert!(sink.record(&record("root", None, AuditResult::Ok)).is_err());
+        assert!(std::fs::read_dir(&target)?.next().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn an_audit_directory_owned_by_another_user_is_refused() -> R {
+        assert!(
+            detent_platform::privsep::spawn::is_root(),
+            "this test needs root to give a directory to another user"
+        );
+        let dir = tempfile::TempDir::new()?;
+        let sink = FileAudit::under_state_root(dir.path());
+        let parent = sink.path().parent().ok_or("the log has a parent")?;
+        std::fs::create_dir(parent)?;
+        std::os::unix::fs::chown(parent, Some(4242), None)?;
+        assert!(sink.record(&record("root", None, AuditResult::Ok)).is_err());
+        assert!(!sink.path().exists());
         Ok(())
     }
 
