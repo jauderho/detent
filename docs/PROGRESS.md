@@ -5,6 +5,10 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-30 - Track A B9 (L-PLAT7): the monitor staging directory is checked before use
+
+The monitor made its staging directory with `create_dir_all` and used it unchecked for `RunCheck` and validator candidates. Only `materialize_staged` (`ReplaceBinary`) had a check, by path. `ensure_staging_dir` (`crates/detent-platform/src/privsep/monitor.rs`) is now the one helper for all three: it creates the last component `0700` if missing (parents as before), opens it with `O_DIRECTORY|O_NOFOLLOW`, and requires a directory owned by the monitor euid with no group or other write bit, from `fstat` on that descriptor. An existing directory that fails is refused with `monitor staging directory is not trusted`; it is never chmodded or chowned. Tests: `run_check_refuses_a_world_writable_staging_directory`, `run_check_refuses_a_symlinked_staging_directory`, `run_check_refuses_a_staging_directory_owned_by_another_user`, `run_check_creates_a_missing_staging_directory_private`. The path is still used by name after the check; the directory is monitor-only under a private systemd runtime directory.
+
 ## 2026-09-30 - Track A B2 (H17 step 6): unknown Rekor entry kinds are refused
 
 `verify_body_agreement` (`crates/detent-update/src/verify.rs`) took `intoto` as `dsse` and sent every other kind to the `hashedrekord` body check. It now branches on `decoded.kind`: `hashedrekord` and `dsse` keep their checks, and any other kind (`intoto`, `rekord`, `helm`, ...) gives the new `VerificationError::UnsupportedEntryKind`. An `intoto` v0.0.2 body keeps its signature under `spec.content.envelope`, so the `dsse` layout never applied to it. The `intoto` entry in `public_good_set` only feeds `verify_set` and is unchanged. Tests: `body_agreement_accepts_a_dsse_entry`, `body_agreement_refuses_entry_kinds_it_has_no_schema_for`.

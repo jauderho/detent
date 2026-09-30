@@ -844,13 +844,7 @@ impl<'a> Monitor<'a> {
         if descriptor.checks.is_empty() {
             return Ok(());
         }
-        let dir = self.staging_dir.clone();
-        if let Err(err) = std::fs::create_dir_all(&dir) {
-            return Err(Response::Error(ProtoError::Io(format!(
-                "cannot create the candidate directory: {}",
-                err.kind()
-            ))));
-        }
+        let dir = ensure_staging_dir(&self.staging_dir).map_err(Response::Error)?;
         let candidate = tempfile::Builder::new()
             .prefix("detent-validate-")
             .tempfile_in(&dir)
@@ -922,13 +916,10 @@ impl<'a> Monitor<'a> {
         let Some(entry) = self.allow.check(id) else {
             return unknown(IdKind::Check, u32::from(id.get()));
         };
-        let dir = self.staging_dir.clone();
-        if let Err(err) = std::fs::create_dir_all(&dir) {
-            return Response::Error(ProtoError::Io(format!(
-                "cannot create the candidate directory: {}",
-                err.kind()
-            )));
-        }
+        let dir = match ensure_staging_dir(&self.staging_dir) {
+            Ok(dir) => dir,
+            Err(err) => return Response::Error(err),
+        };
         let candidate = match tempfile::Builder::new()
             .prefix("detent-candidate-")
             .tempfile_in(&dir)
@@ -1491,20 +1482,51 @@ fn open_staged_input(state_root: &Path, name: &str) -> Result<std::fs::File, Pro
     Ok(fd.into())
 }
 
+/// Create the monitor staging directory `0700` if it is missing (parents as
+/// before), then require that it is a real directory, not a symlink, owned by
+/// the monitor's euid, with no group or other write bit. An existing
+/// directory that fails the check is refused, never repaired.
 fn ensure_staging_dir(monitor_staging_dir: &Path) -> Result<PathBuf, ProtoError> {
-    use std::os::unix::fs::MetadataExt as _;
-    std::fs::create_dir_all(monitor_staging_dir).map_err(|err| {
-        ProtoError::Io(format!("create monitor staging directory: {}", err.kind()))
-    })?;
-    let meta = std::fs::symlink_metadata(monitor_staging_dir)
-        .map_err(|err| ProtoError::Io(format!("stat monitor staging directory: {}", err.kind())))?;
-    if !meta.is_dir()
-        || meta.uid() != rustix::process::geteuid().as_raw()
-        || meta.mode() & 0o022 != 0
+    use rustix::fs::{FileType, Mode, OFlags, fstat};
+    use std::os::unix::fs::DirBuilderExt as _;
+    if let Some(parent) = monitor_staging_dir
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
     {
-        return Err(ProtoError::Io(
-            "monitor staging directory is not trusted".to_owned(),
-        ));
+        std::fs::create_dir_all(parent).map_err(|err| {
+            ProtoError::Io(format!("create monitor staging directory: {}", err.kind()))
+        })?;
+    }
+    match std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(monitor_staging_dir)
+    {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(err) => {
+            return Err(ProtoError::Io(format!(
+                "create monitor staging directory: {}",
+                err.kind()
+            )));
+        }
+    }
+    let untrusted = || ProtoError::Io("monitor staging directory is not trusted".to_owned());
+    let fd = rustix::fs::open(
+        monitor_staging_dir,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|err| match err {
+        rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR => untrusted(),
+        err => ProtoError::Io(format!("open monitor staging directory: {err}")),
+    })?;
+    let stat = fstat(&fd)
+        .map_err(|err| ProtoError::Io(format!("stat monitor staging directory: {err}")))?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::Directory
+        || stat.st_uid != rustix::process::geteuid().as_raw()
+        || stat.st_mode & 0o022 != 0
+    {
+        return Err(untrusted());
     }
     Ok(monitor_staging_dir.to_path_buf())
 }
@@ -2322,6 +2344,93 @@ mod tests {
         })?;
         assert!(std::fs::set_permissions(&tmp_dir, std::fs::Permissions::from_mode(0o700)).is_ok());
         assert!(matches!(response, Response::Error(ProtoError::Io(_))));
+        Ok(())
+    }
+
+    fn run_check_in(staging_dir: PathBuf) -> Result<Response, Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let checks = CandidateChecks(staging_dir.clone());
+        let hooks = Hooks {
+            checks: &checks,
+            services: &super::NoServices,
+        };
+        let mut monitor = greeted(fx.allow()?, hooks);
+        monitor.set_staging_dir(staging_dir);
+        Ok(monitor.dispatch(Request::RunCheck {
+            check: CheckId(0),
+            bytes: b"candidate".to_vec(),
+        })?)
+    }
+
+    fn assert_staging_refused(response: &Response) {
+        assert!(
+            matches!(response, Response::Error(ProtoError::Io(message)) if message == "monitor staging directory is not trusted"),
+            "expected the staging directory to be refused, got {response:?}"
+        );
+    }
+
+    #[test]
+    fn run_check_refuses_a_world_writable_staging_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let staging_dir = work.path().join("staging");
+        std::fs::create_dir(&staging_dir)?;
+        std::fs::set_permissions(&staging_dir, std::fs::Permissions::from_mode(0o777))?;
+        assert_staging_refused(&run_check_in(staging_dir.clone())?);
+        let mode = std::fs::metadata(&staging_dir)?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o777, "an existing directory must not be chmodded");
+        Ok(())
+    }
+
+    #[test]
+    fn run_check_refuses_a_symlinked_staging_directory() -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let real = work.path().join("real");
+        std::fs::create_dir(&real)?;
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o700))?;
+        let staging_dir = work.path().join("staging");
+        std::os::unix::fs::symlink(&real, &staging_dir)?;
+        assert_staging_refused(&run_check_in(staging_dir)?);
+        assert_eq!(std::fs::read_dir(&real)?.count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn run_check_refuses_a_staging_directory_owned_by_another_user()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let staging_dir = if rustix::process::geteuid().is_root() {
+            let dir = work.path().join("staging");
+            std::fs::create_dir(&dir)?;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+            rustix::fs::chown(
+                &dir,
+                Some(rustix::fs::Uid::from_raw(65534)),
+                Some(rustix::fs::Gid::from_raw(65534)),
+            )?;
+            dir
+        } else {
+            // Unprivileged: an existing root-owned, non-writable directory.
+            PathBuf::from("/usr")
+        };
+        assert_staging_refused(&run_check_in(staging_dir)?);
+        Ok(())
+    }
+
+    #[test]
+    fn run_check_creates_a_missing_staging_directory_private()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let staging_dir = work.path().join("nested").join("staging");
+        let response = run_check_in(staging_dir.clone())?;
+        assert!(
+            !matches!(&response, Response::Error(ProtoError::Io(message)) if message.contains("not trusted")),
+            "a fresh staging directory must be accepted, got {response:?}"
+        );
+        assert_eq!(
+            std::fs::metadata(&staging_dir)?.permissions().mode() & 0o777,
+            0o700
+        );
         Ok(())
     }
 
@@ -3765,7 +3874,7 @@ mod tests {
         let response = write_v2(&mut monitor)?;
         assert!(
             io_message(&response)
-                .is_some_and(|message| message.starts_with("cannot create the candidate directory")),
+                .is_some_and(|message| message.starts_with("create monitor staging directory")),
             "unexpected response {response:?}"
         );
         assert_eq!(std::fs::read(&fx.target)?, b"v1");
