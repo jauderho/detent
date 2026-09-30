@@ -212,6 +212,7 @@ impl FileAuthAudit {
                 .recursive(true)
                 .mode(AUDIT_DIR_MODE)
                 .create(parent)?;
+            detent_platform::fs::private_dir::ensure_private(parent)?;
         }
         // Rotate to `.1` above 16 MiB (M10): best-effort, metadata only on
         // the fast path, keeps the same `0600` discipline.
@@ -422,6 +423,52 @@ mod tests {
         ));
         let dir = sink.path().parent().ok_or("no parent")?;
         assert_eq!(std::fs::metadata(dir)?.permissions().mode() & 0o777, 0o700);
+        Ok(())
+    }
+
+    fn sample() -> AuthRecord {
+        AuthRecord::new(AuthEvent::LoginSucceeded, "alice", AuditResult::Ok)
+    }
+
+    #[test]
+    fn an_existing_wide_audit_directory_becomes_private() -> R {
+        let root = tempfile::tempdir()?;
+        let sink = FileAuthAudit::under_state_root(root.path());
+        let dir = sink.path().parent().ok_or("no parent")?;
+        std::fs::create_dir(dir)?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))?;
+        sink.record(&sample());
+        assert_eq!(std::fs::metadata(dir)?.permissions().mode() & 0o777, 0o700);
+        assert_eq!(sink.query(None).len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn a_symlinked_audit_directory_is_refused() -> R {
+        let root = tempfile::tempdir()?;
+        let target = root.path().join("elsewhere");
+        std::fs::create_dir(&target)?;
+        let sink = FileAuthAudit::under_state_root(root.path());
+        let dir = sink.path().parent().ok_or("no parent")?;
+        std::os::unix::fs::symlink(&target, dir)?;
+        sink.record(&sample());
+        assert!(std::fs::read_dir(&target)?.next().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn an_audit_directory_owned_by_another_user_is_refused() -> R {
+        assert!(
+            detent_platform::privsep::spawn::is_root(),
+            "this test needs root to give a directory to another user"
+        );
+        let root = tempfile::tempdir()?;
+        let sink = FileAuthAudit::under_state_root(root.path());
+        let dir = sink.path().parent().ok_or("no parent")?;
+        std::fs::create_dir(dir)?;
+        std::os::unix::fs::chown(dir, Some(4242), None)?;
+        sink.record(&sample());
+        assert!(!sink.path().exists());
         Ok(())
     }
 
