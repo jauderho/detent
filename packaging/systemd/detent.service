@@ -80,10 +80,10 @@ UMask=0077
 # `detent install --systemd` (Phase 3) will regenerate this list from the
 # modules actually enabled in /etc/detent/detent.toml; this file ships the
 # superset for every tier-1 module so a manual install.sh works out of the box.
-ReadWritePaths=/etc/hosts /etc/resolv.conf /etc/fstab /etc/exports /etc/samba \
+ReadWritePaths=/etc/hosts /etc/resolv.conf /etc/fstab -/etc/exports -/etc/samba \
   -/etc/exports.d \
   -/etc/systemd/resolved.conf.d -/etc/unbound \
-  /etc/chrony.conf -/etc/chrony \
+  -/etc/chrony.conf -/etc/chrony \
   -/etc/systemd/network -/etc/NetworkManager/system-connections -/etc/network -/etc/netplan \
   -/etc/dnsmasq.conf -/etc/dnsmasq.d -/etc/kea \
   /var/lib/detent /run/detent/staging
