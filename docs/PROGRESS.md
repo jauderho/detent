@@ -5,6 +5,10 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-30 - B11b follow-up: the worker may call `geteuid`
+
+`ensure_private` (both audit writers, before each append) asks for the effective uid. `WORKER` did not list `geteuid`, so the confined worker got `geteuid() = -1 EPERM`; rustix treats the call as infallible and panicked, which killed the request thread in `FileAuthAudit::append` (the acme-serve `--forced-renew` step then failed with `curl: (92)`). The owner approved `geteuid` in `WORKER` only (numbers 107 and 175, read from the container headers). `MONITOR` and `ACME` are unchanged. Tests: `enforce_mode_worker_can_tighten_an_audit_directory` (root) and `the_worker_table_allows_geteuid_on_both_arches`. The live proof is the CI `acme-serve` job; the local script run was skipped by orchestrator decision. `SECURITY_HARDENING.md` seccomp row updated.
+
 ## 2026-09-30 - Track A B5 (C1-f): capability-user mode documented; Track A closed
 
 ADR-001 (Consequences) and `SECURITY_HARDENING.md` Gaps item 14 now say that in capability-user mode (`User=detent`) the monitor and the worker share one uid, so the owner checks on staged inputs, the monitor staging directory and the audit directories separate nothing; the barriers left are Landlock, seccomp, the worker's capability drop and Sigstore verification. No code change. With B5, all ten Track A items of `BUGFIX.md` are landed; two review follow-ups are listed there.
