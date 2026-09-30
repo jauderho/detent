@@ -5,6 +5,10 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-30 - Track A B8 (H12): MCP HTTP transport refused when the process holds capabilities
+
+`mcp --transport http` was refused only for euid 0, so a non-root process with `CAP_DAC_OVERRIDE` (ambient or file capabilities) still ran the network parser with root-like power. `http_transport_allowed(euid_is_root, holds_caps)` (`crates/detent/src/mcp.rs`) now also refuses when `detent_platform::sandbox::holds_capabilities()` is true: the effective or permitted set is not empty, or the read failed (fail closed); non-Linux reports `false`. The refusal keeps `cli-mcp-http-needs-privsep` and `Exit::Privilege`; the English text now says "as root or with capabilities". Tests: `http_transport_refused_for_a_non_root_caller_holding_capabilities` (detent), `capability_read_fails_closed_and_reports_any_non_empty_set`, `root_in_the_container_holds_capabilities` (detent-platform).
+
 ## 2026-09-30 - Track A B7 (H2): a failed commit-confirm arming restores the write
 
 `OpsEngine::apply` (`crates/detent-ops/src/engine.rs`) wrote the target, then returned at once with `?` when `start_confirm_timer` failed, leaving the new contents on disk with no window and no rollback. It now calls `undo_write`: it lists the module's backups, picks the newest one of that target whose digest equals the write's `prev_digest`, and asks the monitor to `Restore` it (existing messages only; no wire change). The error is the new `OpsError::ArmFailed { arming, restore_error }`, with Fluent ids `ops-arm-failed-restored` and `ops-arm-failed-unrestored` (core.ftl, web.ftl, `web/src/api/messages.ts`). A write with no backup cannot be undone and reports `NoBackup` as the restore error. The `NoBackup` refusal and the service-failure `discard_commit` path are unchanged. Tests (`crates/detent-ops/tests/engine.rs`, a proxy between the engine and the real monitor plants the errors): `a_failed_arming_restores_the_previous_contents`, `a_failed_arming_reports_a_failed_restore_too`.

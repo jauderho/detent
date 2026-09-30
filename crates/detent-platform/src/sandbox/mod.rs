@@ -372,6 +372,21 @@ pub fn confine(role: Role, policy: &Policy) -> Result<Confinement, SandboxError>
     })
 }
 
+/// Whether this process holds any Linux capability in its effective or
+/// permitted set. A failed read counts as holding (fail closed).
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn holds_capabilities() -> bool {
+    linux::holds_capabilities()
+}
+
+/// Non-Linux platforms have no capability sets, so this is always `false`.
+#[cfg(not(target_os = "linux"))]
+#[must_use]
+pub const fn holds_capabilities() -> bool {
+    false
+}
+
 /// Wires [`confine`] into [`crate::privsep::spawn::spawn_pair`] via
 /// [`SandboxHooks`]. Captures the resulting [`Confinement`] for each side —
 /// the trait's `Result<(), SandboxError>` return type would otherwise

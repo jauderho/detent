@@ -66,7 +66,10 @@ pub fn run(
 ) -> std::io::Result<Exit> {
     crate::run::init_tracing();
     if matches!(args.transport, McpTransport::Http)
-        && !http_transport_allowed(rustix::process::geteuid().is_root())
+        && !http_transport_allowed(
+            rustix::process::geteuid().is_root(),
+            detent_platform::sandbox::holds_capabilities(),
+        )
     {
         renderer.line(
             streams.notes,
@@ -472,10 +475,11 @@ fn scope_name(scopes: detent_web::authz::Scopes) -> &'static str {
 fn check_bind(bind: std::net::SocketAddr) -> bool {
     bind.ip().is_loopback()
 }
-/// Whether `--transport http` may start: never as root, where the network
-/// parser would run in the same process as the root monitor (STAGE3 H12).
-fn http_transport_allowed(euid_is_root: bool) -> bool {
-    !euid_is_root
+/// Whether `--transport http` may start: never as root, and never with a
+/// non-empty effective or permitted capability set, where the network parser
+/// would run with root-like power (STAGE3 H12).
+fn http_transport_allowed(euid_is_root: bool, holds_caps: bool) -> bool {
+    !euid_is_root && !holds_caps
 }
 /// Streamable-HTTP config: default loopback hosts plus enforced `Origin`
 /// validation (STAGE3 M11). Empty allow-list + enforced flag rejects every
@@ -603,8 +607,13 @@ mod tests {
     }
     #[test]
     fn http_transport_refused_for_root() {
-        assert!(http_transport_allowed(false));
-        assert!(!http_transport_allowed(true));
+        assert!(http_transport_allowed(false, false));
+        assert!(!http_transport_allowed(true, false));
+        assert!(!http_transport_allowed(true, true));
+    }
+    #[test]
+    fn http_transport_refused_for_a_non_root_caller_holding_capabilities() {
+        assert!(!http_transport_allowed(false, true));
     }
     #[test]
     fn bind_table_keeps_bearer_on_loopback() -> Result<(), std::net::AddrParseError> {
