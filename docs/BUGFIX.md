@@ -177,13 +177,8 @@ B3 (real Fulcio/Rekor trust roots) moved to Track E, item 2.
 2. ~~**Order-flow seam** and **M18**~~ — done 2026-09-30 (`PROGRESS.md`):
    a scripted `instant_acme::HttpClient` drives `present_challenges`,
    `wait_ready` and `finalize`; `detent-acme` floor 87 → 93.
-   The wildcard name is fixed (2026-09-30, `PROGRESS.md`). Open follow-up: an
-   order for `example.com` and `*.example.com` needs two TXT values at
-   `_acme-challenge.example.com`, but `Rfc2136Provider` (deletes every TXT at
-   the name, then adds), `DeSecProvider` (`PUT` replaces the `RRset`) and
-   `HookProvider` (one file per name) keep only the last value, and their
-   `delete` removes all of them. Cloudflare matches by value and is safe;
-   acme-dns keeps two values per subdomain.
+   The wildcard name and the two-values-at-one-name follow-up are fixed
+   (2026-09-30, `PROGRESS.md`).
 3. **`detent cert renew`**: it must authenticate to the running server (a
    token, not a local bypass). Also wire `Operation::CertRenew` and
    `CertStatus` in the engine so the MCP tools stop answering `Unsupported`.

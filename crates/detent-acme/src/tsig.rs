@@ -569,8 +569,10 @@ mod tests {
     const T: u64 = 1_700_000_000;
     const ID: u16 = 0x1234;
 
-    /// The UPDATE `update_message` builds for `_acme-challenge.example.com`
-    /// in `example.com` with value `digest-value-42`, id 0x1234.
+    /// A fixed UPDATE for `_acme-challenge.example.com` in `example.com`
+    /// with value `digest-value-42`, id 0x1234: a class-ANY delete, then the
+    /// add. `update_message` no longer builds this exact form; the fixture
+    /// stays because dnspython signed and verified these bytes.
     const UNSIGNED: &str = "123428000001000000020000076578616d706c6503636f6d00000600010f5f61636d652d6368616c6c656e6765076578616d706c6503636f6d00001000ff0000000000000f5f61636d652d6368616c6c656e6765076578616d706c6503636f6d00001000010000003c00100f6469676573742d76616c75652d3432";
     /// `UNSIGNED` signed by this module at `T`. dnspython 2.8.0 verifies it
     /// and reports this MAC: `uv run testdata/tsig_fixture.py`.

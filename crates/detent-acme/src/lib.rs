@@ -210,11 +210,20 @@ pub trait DnsProvider: Send + Sync {
 /// A [`DnsProvider`] that hands each challenge to an external responder
 /// through the filesystem.
 ///
-/// [`DnsProvider::present`] writes the TXT value to `<state_dir>/<fqdn>.txt`
+/// [`DnsProvider::present`] writes the TXT values to `<state_dir>/<fqdn>.txt`
 /// (file `0600`, directory `0700`); an external script — challtestsrv in
 /// development, a real hook provider later — reads that directory to serve
-/// the challenge. [`DnsProvider::delete`] removes the file. No process is
-/// spawned: the hook contract is a directory, not an exec.
+/// the challenge. The file holds every current value at the name, one per
+/// line with no trailing newline, so a file with one value is just that
+/// value. An apex plus wildcard order needs two values at one name at the
+/// same time (RFC 8555 §8.4): `present` adds its value beside the others
+/// and [`DnsProvider::delete`] removes only its own, removing the file when
+/// none is left. No process is spawned: the hook contract is a directory,
+/// not an exec.
+///
+/// A crash between `present` and `delete` can leave a value behind. That is
+/// harmless: an ACME server accepts a challenge when any value at the name
+/// matches, and the next run's `present` and `delete` leave it alone.
 #[derive(Debug, Clone)]
 pub struct HookProvider {
     state_dir: PathBuf,
@@ -248,8 +257,22 @@ impl HookProvider {
     }
 }
 
-impl DnsProvider for HookProvider {
-    fn present(&self, record: &DnsRecord) -> Result<(), AcmeError> {
+impl HookProvider {
+    /// The values now in the challenge file at `path`; none when it is absent.
+    fn read_values(path: &std::path::Path) -> Result<Vec<String>, AcmeError> {
+        match fs::read_to_string(path) {
+            Ok(text) => Ok(text
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned)
+                .collect()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Replaces the challenge file for `record` with `values`, one per line.
+    fn write_values(&self, record: &DnsRecord, values: &[String]) -> Result<(), AcmeError> {
         use std::io::Write as _;
         use std::os::unix::fs::OpenOptionsExt as _;
         self.confine_dir()?;
@@ -273,7 +296,7 @@ impl DnsProvider for HookProvider {
                 .create_new(true)
                 .mode(HOOK_MODE)
                 .open(&tmp)?;
-            f.write_all(record.value().as_bytes())?;
+            f.write_all(values.join("\n").as_bytes())?;
             f.sync_all()?;
             fs::rename(&tmp, &path)?;
             sync_dir(&self.state_dir)
@@ -284,14 +307,33 @@ impl DnsProvider for HookProvider {
         }
         Ok(())
     }
+}
+
+impl DnsProvider for HookProvider {
+    fn present(&self, record: &DnsRecord) -> Result<(), AcmeError> {
+        let mut values = Self::read_values(&self.challenge_path(record))?;
+        if !values.iter().any(|v| v == record.value()) {
+            values.push(record.value().to_owned());
+        }
+        self.write_values(record, &values)
+    }
 
     fn delete(&self, record: &DnsRecord) -> Result<(), AcmeError> {
         let path = self.challenge_path(record);
-        match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            // Already gone is the success `delete` promises.
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.into()),
+        let mut values = Self::read_values(&path)?;
+        let before = values.len();
+        values.retain(|v| v != record.value());
+        if values.len() == before {
+            return Ok(()); // already gone is the success `delete` promises
+        }
+        if values.is_empty() {
+            match fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e.into()),
+            }
+        } else {
+            self.write_values(record, &values)
         }
     }
 }
@@ -404,16 +446,42 @@ mod tests {
     }
 
     #[test]
-    fn present_overwrites_a_stale_value() -> R {
+    fn present_adds_a_value_beside_an_earlier_one() -> R {
         let dir = TempDir::new()?;
         let hook = provider(&dir);
         hook.present(&record()?)?;
-        let rotated = DnsRecord::new(record()?.fqdn(), "rotated-digest")?;
-        hook.present(&rotated)?;
+        let second = DnsRecord::new(record()?.fqdn(), "second-digest")?;
+        hook.present(&second)?;
         assert_eq!(
-            std::fs::read_to_string(hook.challenge_path(&rotated))?,
-            "rotated-digest"
+            std::fs::read_to_string(hook.challenge_path(&second))?,
+            "digest-value-42\nsecond-digest"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn two_values_at_one_name_share_one_file() -> R {
+        // An apex plus wildcard order holds two values at one name (RFC 8555
+        // §8.4). `present` adds; `delete` removes only its own value.
+        let dir = TempDir::new()?;
+        let hook = provider(&dir);
+        let a = DnsRecord::new("_acme-challenge.example.com", "digest-a")?;
+        let b = DnsRecord::new("_acme-challenge.example.com", "digest-b")?;
+        let path = hook.challenge_path(&a);
+        hook.present(&a)?;
+        hook.present(&b)?;
+        hook.present(&a)?; // a refresh must not add a second line
+        assert_eq!(std::fs::read_to_string(&path)?, "digest-a\ndigest-b");
+        assert_eq!(
+            std::fs::metadata(&path)?.permissions().mode() & 0o777,
+            0o600
+        );
+        hook.delete(&a)?;
+        assert_eq!(std::fs::read_to_string(&path)?, "digest-b");
+        hook.delete(&a)?; // an already-gone value is not a failure
+        assert_eq!(std::fs::read_to_string(&path)?, "digest-b");
+        hook.delete(&b)?;
+        assert!(!path.exists());
         Ok(())
     }
 
