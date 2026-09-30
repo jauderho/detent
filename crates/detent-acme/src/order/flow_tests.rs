@@ -575,3 +575,325 @@ async fn present_attest_challenges_refuses_without_a_device_attest_challenge() -
     );
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// present_challenges (M18)
+// ---------------------------------------------------------------------------
+
+/// Where a [`RecordingProvider`] (or the `publish` callback) refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refuse {
+    Nothing,
+    Present,
+    Propagation,
+}
+
+/// A provider that records what it was asked to do, and refuses `refuse`
+/// for `refuse_fqdn` only.
+struct RecordingProvider {
+    presented: Mutex<Vec<DnsRecord>>,
+    deleted: Mutex<Vec<DnsRecord>>,
+    refuse: Refuse,
+    refuse_fqdn: &'static str,
+}
+
+impl RecordingProvider {
+    fn new(refuse: Refuse, refuse_fqdn: &'static str) -> Self {
+        Self {
+            presented: Mutex::new(Vec::new()),
+            deleted: Mutex::new(Vec::new()),
+            refuse,
+            refuse_fqdn,
+        }
+    }
+
+    fn presented(&self) -> Vec<DnsRecord> {
+        self.presented
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The deleted record names, sorted: cleanup order is not the contract.
+    fn deleted_fqdns(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .deleted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|r| r.fqdn().to_owned())
+            .collect();
+        names.sort();
+        names
+    }
+}
+
+impl DnsProvider for RecordingProvider {
+    fn present(&self, record: &DnsRecord) -> Result<(), AcmeError> {
+        if self.refuse == Refuse::Present && record.fqdn() == self.refuse_fqdn {
+            return Err(AcmeError::Config("present refused".to_owned()));
+        }
+        self.presented
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(record.clone());
+        Ok(())
+    }
+
+    fn delete(&self, record: &DnsRecord) -> Result<(), AcmeError> {
+        self.deleted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(record.clone());
+        Ok(())
+    }
+
+    fn wait_propagated(&self, record: &DnsRecord) -> Result<(), AcmeError> {
+        if self.refuse == Refuse::Propagation && record.fqdn() == self.refuse_fqdn {
+            return Err(AcmeError::NotPropagated("not yet".to_owned()));
+        }
+        Ok(())
+    }
+}
+
+/// The dns-01 record for authorization `n`, computed independently of
+/// `present_challenges` (RFC 8555 §8.4): the TXT value is
+/// base64url(SHA-256(token "." thumbprint)) under `_acme-challenge.<domain>`.
+fn expected_record(account: &Account, n: usize, domain: &str) -> Result<DnsRecord, AcmeError> {
+    use base64::Engine as _;
+    let key_authorization = format!("{}.{}", token(n), account.key_thumbprint());
+    let digest =
+        aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, key_authorization.as_bytes());
+    DnsRecord::new(
+        format!("_acme-challenge.{domain}"),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest.as_ref()),
+    )
+}
+
+#[tokio::test]
+async fn present_challenges_publishes_each_dns01_record() -> TestResult {
+    let fake = FakeAcme::default();
+    let authz = [authz_url(1), authz_url(2), authz_url(3)];
+    fake.on(
+        &authz_url(1),
+        [Reply::ok(authz_json(
+            1,
+            "a.example",
+            "pending",
+            &["http-01", "dns-01", "tls-alpn-01"],
+        ))],
+    );
+    fake.on(
+        &authz_url(2),
+        [Reply::ok(authz_json(
+            2,
+            "b.example",
+            "pending",
+            &["dns-01"],
+        ))],
+    );
+    fake.on(
+        &authz_url(3),
+        [Reply::ok(authz_json(3, "c.example", "valid", &["dns-01"]))],
+    );
+    fake.on(&chall_url(1, "dns-01"), [challenge_processing(1, "dns-01")]);
+    fake.on(&chall_url(2, "dns-01"), [challenge_processing(2, "dns-01")]);
+    let (account, mut order) = fake
+        .account_and_order(&["a.example", "b.example", "c.example"], &authz)
+        .await?;
+    let provider = RecordingProvider::new(Refuse::Nothing, "");
+    let published: Mutex<Vec<DnsRecord>> = Mutex::new(Vec::new());
+    let publish = |record: &DnsRecord| -> Result<(), AcmeError> {
+        published
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(record.clone());
+        Ok(())
+    };
+
+    let records = present_challenges(&mut order, &provider, &publish).await?;
+
+    let expected = vec![
+        expected_record(&account, 1, "a.example")?,
+        expected_record(&account, 2, "b.example")?,
+    ];
+    assert_eq!(records, expected, "one record per pending identifier");
+    assert_eq!(
+        *published.lock().unwrap_or_else(PoisonError::into_inner),
+        expected,
+        "publish saw each record, with the right name and value"
+    );
+    assert_eq!(provider.presented(), expected);
+    assert!(provider.deleted_fqdns().is_empty(), "nothing withdrawn");
+    assert_eq!(fake.posts_to(&chall_url(1, "dns-01")), 1);
+    assert_eq!(fake.posts_to(&chall_url(2, "dns-01")), 1);
+    assert_eq!(
+        fake.posts_to(&chall_url(3, "dns-01")),
+        0,
+        "a valid authorization is skipped"
+    );
+    assert_eq!(fake.posts_to(&chall_url(1, "http-01")), 0);
+    assert_eq!(fake.posts_to(&chall_url(1, "tls-alpn-01")), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn present_challenges_refuses_an_authorization_without_dns01() -> TestResult {
+    let fake = FakeAcme::default();
+    let authz = [authz_url(1), authz_url(2)];
+    fake.on(
+        &authz_url(1),
+        [Reply::ok(authz_json(
+            1,
+            "a.example",
+            "pending",
+            &["dns-01"],
+        ))],
+    );
+    fake.on(
+        &authz_url(2),
+        [Reply::ok(authz_json(
+            2,
+            "b.example",
+            "pending",
+            &["http-01", "tls-alpn-01"],
+        ))],
+    );
+    fake.on(&chall_url(1, "dns-01"), [challenge_processing(1, "dns-01")]);
+    let (_account, mut order) = fake
+        .account_and_order(&["a.example", "b.example"], &authz)
+        .await?;
+    let provider = RecordingProvider::new(Refuse::Nothing, "");
+
+    let err = present_challenges(&mut order, &provider, &|_| Ok(()))
+        .await
+        .err()
+        .ok_or("an authorization without dns-01 must fail")?;
+
+    assert!(matches!(err, AcmeError::NoDns01Challenge), "got {err:?}");
+    assert_eq!(
+        provider.deleted_fqdns(),
+        ["_acme-challenge.a.example"],
+        "the record already presented is withdrawn"
+    );
+    assert_eq!(fake.posts_to(&chall_url(2, "http-01")), 0);
+    assert_eq!(fake.posts_to(&chall_url(2, "tls-alpn-01")), 0);
+    Ok(())
+}
+
+/// Where the second of three authorizations fails.
+#[derive(Clone, Copy, Debug)]
+enum Stage {
+    FetchAuthorization,
+    Present,
+    Publish,
+    Propagation,
+    SetReady,
+}
+
+#[tokio::test]
+async fn present_challenges_stops_at_the_first_error_and_withdraws_its_records() -> TestResult {
+    const B: &str = "_acme-challenge.b.example";
+    for stage in [
+        Stage::FetchAuthorization,
+        Stage::Present,
+        Stage::Publish,
+        Stage::Propagation,
+        Stage::SetReady,
+    ] {
+        let fake = FakeAcme::default();
+        let authz = [authz_url(1), authz_url(2), authz_url(3)];
+        fake.on(
+            &authz_url(1),
+            [Reply::ok(authz_json(
+                1,
+                "a.example",
+                "pending",
+                &["dns-01"],
+            ))],
+        );
+        fake.on(
+            &authz_url(2),
+            [match stage {
+                Stage::FetchAuthorization => Reply::problem(500, "serverInternal", "authz lost"),
+                _ => Reply::ok(authz_json(2, "b.example", "pending", &["dns-01"])),
+            }],
+        );
+        fake.on(
+            &authz_url(3),
+            [Reply::ok(authz_json(
+                3,
+                "c.example",
+                "pending",
+                &["dns-01"],
+            ))],
+        );
+        fake.on(&chall_url(1, "dns-01"), [challenge_processing(1, "dns-01")]);
+        fake.on(
+            &chall_url(2, "dns-01"),
+            [match stage {
+                Stage::SetReady => Reply::problem(403, "unauthorized", "challenge refused"),
+                _ => challenge_processing(2, "dns-01"),
+            }],
+        );
+        let (_account, mut order) = fake
+            .account_and_order(&["a.example", "b.example", "c.example"], &authz)
+            .await?;
+        let provider = RecordingProvider::new(
+            match stage {
+                Stage::Present => Refuse::Present,
+                Stage::Propagation => Refuse::Propagation,
+                _ => Refuse::Nothing,
+            },
+            B,
+        );
+        let publish = |record: &DnsRecord| -> Result<(), AcmeError> {
+            if matches!(stage, Stage::Publish) && record.fqdn() == B {
+                return Err(AcmeError::Config("publish refused".to_owned()));
+            }
+            Ok(())
+        };
+
+        let err = present_challenges(&mut order, &provider, &publish)
+            .await
+            .err()
+            .ok_or_else(|| format!("{stage:?}: the flow must fail"))?;
+
+        // The error is the one the failing step returned, unchanged.
+        let expected = match stage {
+            Stage::FetchAuthorization => {
+                "API error: authz lost (urn:ietf:params:acme:error:serverInternal)"
+            }
+            Stage::Present => "dns provider error: present refused",
+            Stage::Publish => "dns provider error: publish refused",
+            Stage::Propagation => "dns-01 record not yet propagated: not yet",
+            Stage::SetReady => {
+                "API error: challenge refused (urn:ietf:params:acme:error:unauthorized)"
+            }
+        };
+        assert_eq!(err.to_string(), expected, "{stage:?}");
+        // Every record that was presented is withdrawn again.
+        let mut withdrawn: Vec<String> = provider
+            .presented()
+            .iter()
+            .map(|r| r.fqdn().to_owned())
+            .collect();
+        withdrawn.sort();
+        assert_eq!(provider.deleted_fqdns(), withdrawn, "{stage:?}");
+        assert!(
+            withdrawn.iter().any(|f| f == "_acme-challenge.a.example"),
+            "{stage:?}: the first record was presented, then withdrawn"
+        );
+        // The flow stopped: b's challenge was answered only where answering
+        // it was the failing step, and the third authorization was never
+        // fetched.
+        let answered_b = usize::from(matches!(stage, Stage::SetReady));
+        assert_eq!(
+            fake.posts_to(&chall_url(2, "dns-01")),
+            answered_b,
+            "{stage:?}"
+        );
+        assert_eq!(fake.posts_to(&authz_url(3)), 0, "{stage:?}");
+    }
+    Ok(())
+}
