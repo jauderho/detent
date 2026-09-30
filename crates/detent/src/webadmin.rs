@@ -664,26 +664,30 @@ fn read_secret_line(reader: &mut dyn Read) -> std::io::Result<Zeroizing<String>>
             break;
         }
     }
-    let line = std::str::from_utf8(&bytes)
-        .map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "password is not valid UTF-8",
-            )
-        })?
-        .to_owned();
-    Ok(Zeroizing::new(trim_newline(line)))
+    // Wrapped at once, so the plaintext is never held in a plain `String`
+    // (L-BIN18).
+    let mut line = Zeroizing::new(
+        std::str::from_utf8(&bytes)
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "password is not valid UTF-8",
+                )
+            })?
+            .to_owned(),
+    );
+    trim_newline(&mut line);
+    Ok(line)
 }
 
-/// Strips a trailing `\n` and, if present, the `\r` before it.
-fn trim_newline(mut line: String) -> String {
+/// Strips a trailing `\n` and, if present, the `\r` before it, in place.
+fn trim_newline(line: &mut String) {
     if line.ends_with('\n') {
         line.pop();
         if line.ends_with('\r') {
             line.pop();
         }
     }
-    line
 }
 
 /// Refuses an empty password.
@@ -735,10 +739,11 @@ mod tests {
 
     #[test]
     fn trim_newline_strips_lf_and_crlf() {
-        assert_eq!(trim_newline("hi\n".to_owned()), "hi");
-        assert_eq!(trim_newline("hi\r\n".to_owned()), "hi");
-        assert_eq!(trim_newline("hi".to_owned()), "hi");
-        assert_eq!(trim_newline(String::new()), "");
+        for (input, want) in [("hi\n", "hi"), ("hi\r\n", "hi"), ("hi", "hi"), ("", "")] {
+            let mut line = input.to_owned();
+            trim_newline(&mut line);
+            assert_eq!(line, want);
+        }
     }
 
     #[test]

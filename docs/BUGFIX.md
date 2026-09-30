@@ -148,9 +148,6 @@ Owner decisions that block or change items are in §4.
 
 In this order (highest risk first):
 
-9. **B10 (L-BIN18) — the last plain `String` of the typed password**
-   (`detent/src/webadmin.rs`): keep it in `Zeroizing<String>`. Evidence: the
-   type change and an `rg` in the commit body.
 10. **B5 (C1-f) — document capability-user mode** in ADR-001 and
     `SECURITY_HARDENING.md` Gaps: monitor and worker share uid `detent`, so
     staging ownership checks separate nothing. No code change.
