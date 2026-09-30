@@ -229,7 +229,7 @@ fn start_pair(
             renderer.line(
                 streams.notes,
                 MessageId::new("cli-serve-failed"),
-                &[("reason", &err.to_string())],
+                &[("reason", &spawn_reason(&err))],
             )?;
             Ok(Err(exit_for_spawn(&err)))
         }
@@ -249,7 +249,7 @@ fn start_runner(
             renderer.line(
                 streams.notes,
                 MessageId::new("cli-serve-failed"),
-                &[("reason", &err.to_string())],
+                &[("reason", &spawn_reason(&err))],
             )?;
             Ok(Err(exit_for_spawn(&err)))
         }
@@ -343,7 +343,7 @@ fn start_acme(
             renderer.line(
                 streams.notes,
                 MessageId::new("cli-serve-failed"),
-                &[("reason", &err.to_string())],
+                &[("reason", &spawn_reason(&err))],
             )?;
             Ok(Err(exit_for_spawn(&err)))
         }
@@ -1220,6 +1220,19 @@ async fn shutdown_signal() {
     }
 }
 
+/// `error` and each of its sources, joined by ": ", so the journal shows why a
+/// spawn failed (a `SpawnError::Sandbox` names only the stage in its own text).
+fn spawn_reason(error: &dyn std::error::Error) -> String {
+    let mut reason = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        reason.push_str(": ");
+        reason.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    reason
+}
+
 /// A spawn failure that is about credentials is a privilege problem; anything
 /// else is an operational failure.
 fn exit_for_spawn(error: &SpawnError) -> Exit {
@@ -1233,7 +1246,7 @@ fn exit_for_spawn(error: &SpawnError) -> Exit {
 mod tests {
     use super::{
         Confinement, Exit, LandlockOutcome, LandlockStatus, Outcome, degradation_notes,
-        exit_for_spawn, record_confinement, report_recovery, run,
+        exit_for_spawn, record_confinement, report_recovery, run, spawn_reason,
     };
     use crate::i18n::Messages;
     use crate::output::Renderer;
@@ -1546,6 +1559,20 @@ mod tests {
                 std::io::ErrorKind::WouldBlock
             ))),
             Exit::Failed
+        );
+    }
+
+    /// Track C A2: a sandbox refusal reached the journal as only "sandbox
+    /// refused to start"; the reason must carry the cause.
+    #[test]
+    fn a_spawn_failure_names_its_cause() {
+        let err = SpawnError::Sandbox(detent_platform::privsep::spawn::SandboxError(
+            "capabilities are required by policy but the drop failed".to_owned(),
+        ));
+        assert_eq!(
+            spawn_reason(&err),
+            "sandbox refused to start: sandbox setup failed: capabilities are required by \
+             policy but the drop failed"
         );
     }
 }
