@@ -827,7 +827,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::future::Future;
     use std::ops::ControlFlow;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::Duration;
 
     use detent_acme::{AcmeError, Issued, RetryPolicy};
@@ -837,6 +837,8 @@ mod tests {
     };
     use detent_platform::privsep::transport::{Channel, ChannelError};
     use detent_web::CertifiedKeyPair;
+
+    use crate::tests_support::{assert_clean, base64, capture};
 
     use super::{
         AcmeIssuer, CHECK_INTERVAL, DnsProvider, DnsRecord, FIRST_RETRY, Held, Installer, Issuer,
@@ -1054,43 +1056,6 @@ mod tests {
             current.is::<tracing::subscriber::NoSubscriber>()
         });
         if unset { capture(body).0 } else { body() }
-    }
-
-    /// A log sink the tests can read back.
-    #[derive(Clone, Default)]
-    struct Logs(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Logs {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .lock()
-                .map_err(|_| std::io::Error::other("log sink poisoned"))?
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// Runs `body` with a subscriber that records every event, and returns
-    /// what it recorded.
-    fn capture<T>(body: impl FnOnce() -> T) -> (T, String) {
-        let logs = Logs::default();
-        let sink = logs.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(move || sink.clone())
-            .with_ansi(false)
-            .with_max_level(tracing::Level::TRACE)
-            .finish();
-        let out = tracing::subscriber::with_default(subscriber, body);
-        let text = logs
-            .0
-            .lock()
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-            .unwrap_or_default();
-        (out, text)
     }
 
     #[test]
@@ -1692,90 +1657,6 @@ mod tests {
     const TSIG_RAW: &str = "SECRET-tsig-c04d7e12b9a35f68";
     /// The text of an ACME account file: a private key the log must not show.
     const ACCOUNT_KEY: &str = "SECRET-account-key-91be44d07c3a5f28";
-
-    /// Base64 of `bytes` (`urlsafe` picks the URL alphabet, no padding).
-    fn base64(bytes: &[u8], urlsafe: bool) -> String {
-        let alphabet: &[u8] = if urlsafe {
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-        } else {
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-        };
-        let mut out = String::new();
-        for chunk in bytes.chunks(3) {
-            let mut group = [0_u8; 3];
-            for (slot, byte) in group.iter_mut().zip(chunk) {
-                *slot = *byte;
-            }
-            let word = u32::from_be_bytes([0, group[0], group[1], group[2]]);
-            for shift in [18_u32, 12, 6, 0]
-                .into_iter()
-                .take(chunk.len().saturating_add(1))
-            {
-                let sextet = word.checked_shr(shift).map_or(0, |bits| bits & 0x3f);
-                out.push(char::from(
-                    alphabet.get(sextet as usize).copied().unwrap_or(b'?'),
-                ));
-            }
-            if !urlsafe {
-                for _ in chunk.len()..3 {
-                    out.push('=');
-                }
-            }
-        }
-        out
-    }
-
-    /// Every form in which `secret` could reach a log: as written, its
-    /// random tail, base64 (both alphabets) and hex.
-    fn forms(secret: &str) -> Vec<String> {
-        let tail = secret.rsplit('-').next().unwrap_or(secret);
-        vec![
-            secret.to_owned(),
-            tail.to_owned(),
-            base64(secret.as_bytes(), false),
-            base64(secret.as_bytes(), true),
-            secret
-                .bytes()
-                .flat_map(|byte| [byte >> 4, byte & 0x0f])
-                .filter_map(|nibble| char::from_digit(u32::from(nibble), 16))
-                .collect(),
-        ]
-    }
-
-    /// Fails when `text` holds any form of any of `secrets`, in any casing.
-    fn assert_clean(what: &str, text: &str, secrets: &[&str]) {
-        let lowered = text.to_lowercase();
-        for secret in secrets {
-            for form in forms(secret) {
-                assert!(
-                    !lowered.contains(&form.to_lowercase()),
-                    "{what} holds {form:?}: {text}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn the_secret_finder_sees_every_form() {
-        // The finder itself must fail on a leak, or the checks below prove
-        // nothing.
-        assert_eq!(
-            base64(b"any carnal pleas", false),
-            "YW55IGNhcm5hbCBwbGVhcw=="
-        );
-        assert_eq!(base64(b"any carnal pleas", true), "YW55IGNhcm5hbCBwbGVhcw");
-        assert_eq!(base64(b"ab", false), "YWI=");
-        for form in forms(CF_SECRET) {
-            let leaked = std::panic::catch_unwind(|| {
-                assert_clean(
-                    "a line",
-                    &format!("token={}", form.to_uppercase()),
-                    &[CF_SECRET],
-                );
-            });
-            assert!(leaked.is_err(), "{form} was not found");
-        }
-    }
 
     /// An issuer that publishes and withdraws a challenge record through a
     /// real provider, as the order flow does, and orders no certificate: it

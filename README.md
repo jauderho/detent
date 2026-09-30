@@ -99,6 +99,15 @@ detent token create ci-readonly
 detent token list
 ```
 
+Ask the running server to renew its ACME certificate now, with a write token
+from a file (`0600`, not a symlink) or `DETENT_TOKEN`, never argv. The server
+starts at most one forced order per hour:
+
+```bash
+(umask 077; detent --json token create renew-bot --write | jq -r .token > ~/.detent-token)
+detent cert renew --token-file ~/.detent-token
+```
+
 The API is documented in [`docs/API.md`](docs/API.md); the machine-readable
 spec is [`docs/openapi.json`](docs/openapi.json), also served at
 `/api/v1/openapi.json`. Every `/api/v1` route needs a credential — only

@@ -85,6 +85,7 @@ cli-dryrun-apply = dry run: this is what would be written to {$path} for {$modul
 cli-dryrun-operation = dry run: {$operation} would run for {$module}.
 cli-dryrun-nothing = dry run: nothing was changed.
 cli-dryrun-serve = dry run: the monitor and worker would start with {$modules} modules and {$targets} targets, rooted at {$state}.
+cli-dryrun-cert-renew = dry run: would ask the server at {$address} (as {$name}) to renew its certificate now; nothing was sent.
 
 ## serve
 cli-serve-monitor = the worker started as pid {$pid}; privileges dropped: {$dropped}
@@ -137,6 +138,17 @@ cli-cert-lifetime-no-warning = lifetime used: {$percent} (no warning).
 cli-cert-lifetime-unknown = lifetime used: unknown (the certificate did not parse).
 cli-cert-missing = no certificate is stored in {$path}; start the server once so it writes one.
 cli-cert-unreadable = the certificate in {$path} could not be read: {$reason}
+
+## cert renew
+cli-cert-renew-requested = renewal requested: the server asked its ACME client to renew now. Check the result with `detent cert status`.
+cli-cert-renew-token-refused = the token was refused (HTTP {$status}); it needs write scope: `detent token create <name> --write`.
+cli-cert-renew-not-acme = the server runs no ACME process (`tls.bootstrap` is not `acme`), so there is nothing to renew.
+cli-cert-renew-server-error = the server answered HTTP {$status}: {$message_id}
+cli-cert-renew-server-error-bare = the server answered HTTP {$status}.
+cli-cert-renew-unreachable = could not talk to the server at {$address}: {$reason}
+cli-cert-renew-no-token = no API token: pass --token-file <path> or set {$var}. Mint a write token with `detent token create <name> --write`.
+cli-cert-renew-bad-token = the token from {$source} was refused: {$reason}
+cli-cert-renew-ca-unreadable = the CA file {$path} could not be read: {$reason}
 
 ## password entry (setup, user add, user passwd)
 cli-password-prompt = password:

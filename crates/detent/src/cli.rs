@@ -142,7 +142,7 @@ pub enum Command {
         #[command(subcommand)]
         action: TokenAction,
     },
-    /// Show the served TLS certificate.
+    /// Show the served TLS certificate, or ask the server to renew it.
     #[cfg(feature = "web")]
     Cert {
         /// What to do with it.
@@ -247,6 +247,129 @@ pub enum TokenAction {
 pub enum CertAction {
     /// Show the served certificate: source, fingerprint, expiry.
     Status,
+    /// Ask the running server to renew its ACME certificate now.
+    #[command(after_help = RENEW_AFTER_HELP)]
+    Renew(RenewArgs),
+}
+
+/// Text appended to `detent cert renew --help`.
+#[cfg(feature = "web")]
+pub const RENEW_AFTER_HELP: &str = "\
+The request goes to the running server as POST /api/v1/system/cert/renew,
+with the same checks, audit record and rate limit as the web console's
+button. The token needs write scope; mint one with:
+  detent token create <name> --write
+The server starts at most one forced order per hour: a request within an
+hour of the last order is accepted, but the server skips the order and logs
+it. Check the result with `detent cert status`.
+
+The server is trusted by the certificate it serves, read from tls.cert_dir,
+or with --url by --ca-file. Verification cannot be turned off.";
+
+/// `detent cert renew`.
+#[cfg(feature = "web")]
+#[derive(Debug, Args)]
+pub struct RenewArgs {
+    /// A file holding a write-scope API token: a regular file, not a
+    /// symlink, owned by this user, with no group or other access. Without
+    /// it, the token is read from `DETENT_TOKEN`.
+    #[arg(long, value_name = "PATH")]
+    pub token_file: Option<PathBuf>,
+
+    /// The server, `https://host[:port]` (default: `[listen]` in
+    /// detent.toml; a wildcard address is reached on loopback).
+    #[arg(long, value_name = "URL", value_parser = parse_https_url)]
+    pub url: Option<HttpsUrl>,
+
+    /// With --url: a PEM CA certificate to trust in place of the certificate
+    /// in `tls.cert_dir`.
+    #[arg(long, value_name = "PATH", requires = "url")]
+    pub ca_file: Option<PathBuf>,
+}
+
+/// An `https://host[:port]` origin: no user, path, query or fragment.
+#[cfg(feature = "web")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpsUrl {
+    /// The host: a DNS name, or an IP address without brackets.
+    pub host: String,
+    /// The port, 443 when the URL names none.
+    pub port: u16,
+}
+
+#[cfg(feature = "web")]
+impl HttpsUrl {
+    /// `host:port`, with an IPv6 host in brackets.
+    #[must_use]
+    pub fn authority(&self) -> String {
+        if self.host.contains(':') {
+            format!("[{}]:{}", self.host, self.port)
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
+}
+
+/// Parses `--url`: `https://` only, then a host and an optional port.
+///
+/// # Errors
+///
+/// A message naming what is wrong with `raw`.
+#[cfg(feature = "web")]
+pub fn parse_https_url(raw: &str) -> Result<HttpsUrl, String> {
+    let bad = |why: &str| format!("`{raw}` is not an https://host[:port] URL: {why}");
+    let rest = raw
+        .get(..8)
+        .filter(|scheme| scheme.eq_ignore_ascii_case("https://"))
+        .and_then(|_| raw.get(8..))
+        .ok_or_else(|| bad("the scheme must be https"))?;
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    if rest.contains(['/', '?', '#', '@']) {
+        return Err(bad("a path, query, fragment or user is not allowed"));
+    }
+    let (host, port) = match rest.strip_prefix('[') {
+        Some(bracketed) => {
+            let (host, after) = bracketed
+                .split_once(']')
+                .ok_or_else(|| bad("an IPv6 address needs a closing `]`"))?;
+            host.parse::<std::net::Ipv6Addr>()
+                .map_err(|_| bad("the bracketed host is not an IPv6 address"))?;
+            let port = match after {
+                "" => None,
+                _ => Some(
+                    after
+                        .strip_prefix(':')
+                        .ok_or_else(|| bad("only a port may follow the host"))?,
+                ),
+            };
+            (host, port)
+        }
+        None => match rest.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (rest, None),
+        },
+    };
+    let valid_name = |name: &str| {
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-')
+    };
+    if !host.contains(':') && !valid_name(host) {
+        return Err(bad("the host is not a DNS name or an IP address"));
+    }
+    let port = match port {
+        None => 443,
+        Some(port) => port
+            .parse::<u16>()
+            .ok()
+            .filter(|port| *port != 0)
+            .ok_or_else(|| bad("the port must be 1 to 65535"))?,
+    };
+    Ok(HttpsUrl {
+        host: host.to_owned(),
+        port,
+    })
 }
 
 /// `detent config <module> …`.
@@ -440,14 +563,16 @@ pub fn parse_duration(raw: &str) -> Result<Duration, String> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "web")]
-    use super::CertAction;
     use super::{
         AFTER_HELP, Cli, Command, CommitAction, ConfigAction, ServiceOption, ServiceSubcommand,
         Shell, parse_duration,
     };
+    #[cfg(feature = "web")]
+    use super::{CertAction, parse_https_url};
     use clap::{CommandFactory as _, Parser as _};
     use detent_ops::ServiceCommand;
+    #[cfg(feature = "web")]
+    use std::path::Path;
     use std::time::Duration;
 
     type R = Result<(), Box<dyn std::error::Error>>;
@@ -489,6 +614,85 @@ mod tests {
                 include_str!("../tests/snapshots/help.txt").trim_end(),
                 "help changed; regenerate crates/detent/tests/snapshots/help.txt"
             );
+        }
+        Ok(())
+    }
+
+    /// `cert renew` takes its token from a file or the environment, never
+    /// argv, and `--url` is https only.
+    #[cfg(feature = "web")]
+    #[test]
+    fn cert_renew_parses_and_refuses_plain_http() -> R {
+        let cli = Cli::try_parse_from([
+            "detent",
+            "cert",
+            "renew",
+            "--token-file",
+            "/run/t",
+            "--url",
+            "https://box.example:3333/",
+            "--ca-file",
+            "/etc/ca.pem",
+        ])?;
+        let Some(Command::Cert {
+            action: CertAction::Renew(args),
+        }) = cli.command
+        else {
+            return Err("cert renew did not parse as CertAction::Renew".into());
+        };
+        assert_eq!(args.token_file.as_deref(), Some(Path::new("/run/t")));
+        assert_eq!(args.ca_file.as_deref(), Some(Path::new("/etc/ca.pem")));
+        let url = args.url.ok_or("--url was dropped")?;
+        assert_eq!((url.host.as_str(), url.port), ("box.example", 3333));
+
+        assert!(Cli::try_parse_from(["detent", "cert", "renew", "--url", "http://x:1"]).is_err());
+        // `--ca-file` only means something for a `--url` server.
+        assert!(Cli::try_parse_from(["detent", "cert", "renew", "--ca-file", "/c"]).is_err());
+        // There is no way to hand the token over on argv.
+        assert!(Cli::try_parse_from(["detent", "cert", "renew", "--token", "x"]).is_err());
+        Ok(())
+    }
+
+    #[cfg(feature = "web")]
+    #[test]
+    fn https_urls_parse_and_everything_else_is_refused() -> R {
+        for (raw, host, port) in [
+            ("https://box.example", "box.example", 443),
+            ("https://box.example:3333", "box.example", 3333),
+            ("HTTPS://Box.Example:3333/", "Box.Example", 3333),
+            ("https://127.0.0.1:3333", "127.0.0.1", 3333),
+            ("https://[::1]:3333", "::1", 3333),
+            ("https://[::1]", "::1", 443),
+        ] {
+            let url = parse_https_url(raw)?;
+            assert_eq!((url.host.as_str(), url.port), (host, port), "{raw}");
+        }
+        assert_eq!(
+            parse_https_url("https://[::1]:3333")?.authority(),
+            "[::1]:3333"
+        );
+        assert_eq!(
+            parse_https_url("https://box.example")?.authority(),
+            "box.example:443"
+        );
+        for raw in [
+            "http://box.example:3333",
+            "box.example:3333",
+            "https://",
+            "https://:3333",
+            "https://box.example:0",
+            "https://box.example:99999",
+            "https://box.example:x",
+            "https://box.example/api",
+            "https://box.example?x=1",
+            "https://box.example#x",
+            "https://user:pw@box.example",
+            "https://[::1",
+            "https://[not-v6]:1",
+            "https://[::1]x",
+            "https://bad_host!:1",
+        ] {
+            assert!(parse_https_url(raw).is_err(), "{raw} was accepted");
         }
         Ok(())
     }

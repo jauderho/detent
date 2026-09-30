@@ -273,7 +273,9 @@ fn dispatch(
             crate::webadmin::token(action, cli.dryrun, &settings, renderer, streams)
         }
         #[cfg(feature = "web")]
-        Some(Command::Cert { action }) => crate::cert::status(action, &settings, renderer, streams),
+        Some(Command::Cert { action }) => {
+            crate::cert::status(action, cli.dryrun, &settings, renderer, streams)
+        }
         #[cfg(feature = "mcp")]
         Some(Command::Mcp(args)) => crate::mcp::run(args, cli.dryrun, &settings, renderer, streams),
         #[cfg(feature = "update")]

@@ -179,11 +179,14 @@ B3 (real Fulcio/Rekor trust roots) moved to Track E, item 2.
    `wait_ready` and `finalize`; `detent-acme` floor 87 → 93.
    The wildcard name and the two-values-at-one-name follow-up are fixed
    (2026-09-30, `PROGRESS.md`).
-3. **`detent cert renew`**: it must authenticate to the running server (a
-   token, not a local bypass). Also wire `Operation::CertRenew` and
-   `CertStatus` in the engine so the MCP tools stop answering `Unsupported`.
-4. **Journal warnings** at 50 % and 25 % of lifetime from the acme process
-   (the CLI and UI already warn).
+3. ~~**`detent cert renew`**~~ — done 2026-09-30 (`PROGRESS.md`): it asks
+   the running server over HTTPS with an API token (owner decision
+   2026-09-30). Still open: wire `Operation::CertRenew` and `CertStatus` in
+   the engine so the MCP tools stop answering `Unsupported`.
+4. ~~**Journal warnings**~~ — done: `renew_once` calls `warn_expiry`, which
+   logs a `tracing::warn!` at half and at a quarter of the lifetime to
+   stderr, and systemd sends stderr to the journal (test
+   `expiry_warnings_go_to_the_log_at_half_and_a_quarter`, `acme.rs`).
 6. **aarch64 syscall trace** of the acme process (C4 was x86_64 only). Needs
    an aarch64 host or runner; until then keep "aarch64 runtime unverified".
 
