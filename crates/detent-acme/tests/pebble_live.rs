@@ -136,7 +136,7 @@ fn pebble_dns01_issuance() -> Result<(), Box<dyn std::error::Error>> {
         let policy = RetryPolicy::new()
             .initial_delay(Duration::from_millis(200))
             .timeout(Duration::from_secs(30));
-        let (issued, account) = issue(&req, &hook, &bridge, &policy).await?;
+        let (issued, account, _) = issue(&req, &hook, &bridge, &policy).await?;
         println!("account: {}", account.id());
         println!(
             "chain:   {} PEM block(s)",

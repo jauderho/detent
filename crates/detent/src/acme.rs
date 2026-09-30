@@ -265,7 +265,7 @@ impl Issuer for AcmeIssuer {
             contacts: &contacts,
             eab: None,
         };
-        let (issued, account) = detent_acme::issue(
+        let (issued, account, profile) = detent_acme::issue(
             &request,
             self.provider.as_ref(),
             // The provider alone publishes the record: nothing to push.
@@ -273,6 +273,10 @@ impl Issuer for AcmeIssuer {
             &self.policy,
         )
         .await?;
+        tracing::info!(
+            profile = profile.as_deref().unwrap_or("none"),
+            "the order requested a CA profile"
+        );
         self.account = Some(account);
         Ok(issued)
     }
