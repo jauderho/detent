@@ -190,6 +190,15 @@ B3 (real Fulcio/Rekor trust roots) moved to Track E, item 2.
 6. **aarch64 syscall trace** of the acme process (C4 was x86_64 only). Needs
    an aarch64 host or runner; until then keep "aarch64 runtime unverified".
 
+Follow-ups found in item 3 (not yet scheduled):
+- **`mcp` without `web` has no certificate hook.** `crates/detent/Cargo.toml`
+  `mcp` names `dep:detent-web` but not the `web` feature, so an `mcp`-only
+  build answers `ops-unsupported` for both cert tools. Owner choice: make
+  `mcp` imply `web`, or document the gap.
+- **Stale lines in `docs/API.md`.** It says `mcp` implies `web` (not true,
+  see above) and that `cert_renew` is MCP-only (`POST
+  /api/v1/system/cert/renew` exists).
+
 Phase 6 is done (`[x]` in PLAN) when 1–5 land and Track G is either done or
 deferred by the owner.
 
