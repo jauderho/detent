@@ -110,7 +110,6 @@ pub fn run(
 
     let store = Arc::new(StoreVerifier::new(settings.state_root.clone()));
     let authz: Arc<dyn detent_mcp::Authz> = Arc::new(EngineDecides);
-    #[cfg(feature = "web")]
     session.set_cert_front_end(cert_front_end(settings, &presented));
     let executor: Arc<dyn EngineExecutor> = Arc::new(SessionExecutor::new(session, who, scopes));
     let server = McpServer::new(
@@ -281,13 +280,11 @@ impl detent_mcp::Authz for EngineDecides {
 ///
 /// The token stays in [`Zeroizing`](zeroize::Zeroizing) and is not `Debug`: no
 /// error, log line or tool answer built here can quote it.
-#[cfg(feature = "web")]
 struct ServerCert {
     settings: Settings,
     token: zeroize::Zeroizing<String>,
 }
 
-#[cfg(feature = "web")]
 impl ServerCert {
     /// `detent.toml`, as `serve` reads it.
     fn config(&self) -> Result<detent_web::Config, OpsError> {
@@ -303,7 +300,6 @@ impl ServerCert {
     }
 }
 
-#[cfg(feature = "web")]
 impl detent_ops::CertFrontEnd for ServerCert {
     fn status(&self) -> Result<detent_ops::CertReport, OpsError> {
         let config = self.config()?;
@@ -321,7 +317,6 @@ impl detent_ops::CertFrontEnd for ServerCert {
 
 /// The certificate hook for a session that reads `settings` and presents
 /// `token` to the running server.
-#[cfg(feature = "web")]
 pub(crate) fn cert_front_end(
     settings: &Settings,
     token: &str,

@@ -202,10 +202,9 @@ B3 (real Fulcio/Rekor trust roots) moved to Track E, item 2.
    waits for the owner (§4, "Legacy stat forms").
 
 Follow-ups found in item 3 (not yet scheduled):
-- **`mcp` without `web` has no certificate hook.** `crates/detent/Cargo.toml`
-  `mcp` names `dep:detent-web` but not the `web` feature, so an `mcp`-only
-  build answers `ops-unsupported` for both cert tools. Owner choice: make
-  `mcp` imply `web`, or document the gap.
+- ~~**`mcp` without `web` has no certificate hook.**~~ Done 2026-09-30:
+  `mcp` implies `web` (owner decision). An `mcp`-only build also had no
+  `detent token` command to mint its own token.
 - **Stale lines in `docs/API.md`.** It says `mcp` implies `web` (not true,
   see above) and that `cert_renew` is MCP-only (`POST
   /api/v1/system/cert/renew` exists).
