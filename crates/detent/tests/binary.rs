@@ -289,7 +289,7 @@ fn run_mcp(
 
 /// The JSON-RPC message with `id` from `lines`, read from the child's
 /// stdout; every line gets 30 s to arrive.
-#[cfg(all(feature = "mcp", feature = "web"))]
+#[cfg(feature = "mcp")]
 fn reply_with_id(
     lines: &std::sync::mpsc::Receiver<String>,
     id: u64,
@@ -311,7 +311,7 @@ fn reply_with_id(
 /// the certificate in `tls.cert_dir`, and `cert_renew` against a port where
 /// nothing listens is a tool error that names the address. Neither stdout
 /// nor the TRACE log on stderr holds the bearer token.
-#[cfg(all(feature = "mcp", feature = "web"))]
+#[cfg(feature = "mcp")]
 #[test]
 fn mcp_cert_tools_answer_over_stdio_without_leaking_the_token() -> TestResult {
     use std::io::{BufRead as _, BufReader, Read as _};
