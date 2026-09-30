@@ -190,7 +190,7 @@ More bugs are caught in this reread than by the test suite.
 | **Typing** | Use the strongest static typing the language supports. No untyped escape hatches. |
 | **Testing** | Test extensively. Cover edge cases, error paths, and boundary conditions. |
 | **Script headers** | Every script opens with a comment block: intended usage + all CLI switches documented. |
-| **Commits** | Sign commits (`git commit -S -s`). One logical change per commit. Imperative present tense. |
+| **Commits** | Sign commits (`git commit -S -s`). One logical change per commit. Imperative present tense. No `Claude-Session:` trailer in commit messages or PR bodies. |
 
 ---
 
