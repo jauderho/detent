@@ -229,6 +229,45 @@ pub enum MonitorError {
     /// The crash-recovery marker exists but cannot be parsed.
     #[error("pending-commit marker is corrupt")]
     CorruptMarker,
+    /// The caller needs to change state, but the state lock cannot be taken
+    /// (the state directory is not writable for this user).
+    #[error("the state lock cannot be taken, so this monitor cannot change state")]
+    LockUnavailable,
+}
+
+/// The monitor's hold on the state root.
+///
+/// Only [`StateLock::Held`] gives the mutual exclusion that state changes
+/// need. [`StateLock::Unavailable`] exists so read-only commands (for example
+/// `detent host`, run by a user who cannot create `/var/lib/detent`) can still
+/// serve reads; a monitor in that state refuses every request that changes
+/// state ([`ProtoError::StateLockUnavailable`]).
+#[derive(Debug)]
+pub enum StateLock {
+    /// The exclusive lock on [`MONITOR_LOCK`]; released when dropped.
+    Held(std::fs::File),
+    /// The state directory or lock file is not accessible to this user.
+    Unavailable,
+}
+
+impl StateLock {
+    /// True when the exclusive lock is held.
+    #[must_use]
+    pub const fn is_held(&self) -> bool {
+        matches!(self, Self::Held(_))
+    }
+
+    /// Fail with [`MonitorError::LockUnavailable`] unless the lock is held.
+    ///
+    /// # Errors
+    ///
+    /// [`MonitorError::LockUnavailable`] for [`StateLock::Unavailable`].
+    pub fn require_held(self) -> Result<Self, MonitorError> {
+        match self {
+            Self::Held(_) => Ok(self),
+            Self::Unavailable => Err(MonitorError::LockUnavailable),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -404,12 +443,18 @@ impl<'a> Monitor<'a> {
     /// directory cannot be maintained.
     pub fn serve(&mut self, channel: &mut Channel) -> Result<ExitReason, MonitorError> {
         let state_lock = Self::lock(self.allow.state_root())?;
-        self.recover_pending()?;
+        if state_lock.is_held() {
+            self.recover_pending()?;
+        }
         self.serve_locked(channel, state_lock)
     }
 
     /// Serve after the caller has taken [`MONITOR_LOCK`] and recovered any
     /// leftover marker. The guard is held until every return path completes.
+    ///
+    /// With [`StateLock::Unavailable`] the monitor still answers reads but
+    /// refuses every request that changes state
+    /// ([`Request::changes_state`]).
     ///
     /// # Errors
     ///
@@ -417,9 +462,12 @@ impl<'a> Monitor<'a> {
     pub fn serve_locked(
         &mut self,
         channel: &mut Channel,
-        _state_lock: std::fs::File,
+        state_lock: StateLock,
     ) -> Result<ExitReason, MonitorError> {
-        let result = self.serve_loop(channel);
+        let lock_held = state_lock.is_held();
+        // Kept until every return path completes.
+        let _state_lock = state_lock;
+        let result = self.serve_loop(channel, lock_held);
         let cleanup = self.rollback_pending_on_exit();
         match (result, cleanup) {
             (Ok(reason), Ok(())) => Ok(reason),
@@ -430,15 +478,35 @@ impl<'a> Monitor<'a> {
 
     /// Take the exclusive monitor lock without running recovery.
     ///
+    /// Returns [`StateLock::Unavailable`] when the state directory or lock
+    /// file is not accessible to this user. A monitor served with that value
+    /// refuses every state change; use [`Monitor::lock_exclusive`] on a path
+    /// that must write.
+    ///
     /// # Errors
     ///
     /// Returns [`MonitorError::Busy`] when another monitor owns the lock, or
     /// a state error when the lock cannot be opened.
-    pub fn lock(state_root: &Path) -> Result<std::fs::File, MonitorError> {
+    pub fn lock(state_root: &Path) -> Result<StateLock, MonitorError> {
         lock_state(state_root)
     }
 
-    fn serve_loop(&mut self, channel: &mut Channel) -> Result<ExitReason, MonitorError> {
+    /// As [`Monitor::lock`], but the lock must be held: `detent serve` and
+    /// every one-shot command that writes call this and stop at startup.
+    ///
+    /// # Errors
+    ///
+    /// [`MonitorError::LockUnavailable`] when the state directory or lock
+    /// file is not accessible, plus the errors of [`Monitor::lock`].
+    pub fn lock_exclusive(state_root: &Path) -> Result<StateLock, MonitorError> {
+        lock_state(state_root)?.require_held()
+    }
+
+    fn serve_loop(
+        &mut self,
+        channel: &mut Channel,
+        state_lock_held: bool,
+    ) -> Result<ExitReason, MonitorError> {
         let idle_timeout = channel.read_timeout();
         loop {
             let want = if self.pending.is_some() {
@@ -458,7 +526,14 @@ impl<'a> Monitor<'a> {
                 Ok(None) => {}
                 Ok(Some(request)) => {
                     let stop = matches!(request, Request::Shutdown);
-                    let response = self.dispatch(request)?;
+                    // Without the state lock nothing excludes a second
+                    // monitor, so no state change may run. Before the
+                    // handshake `dispatch` decides, so its errors stay the same.
+                    let response = if !state_lock_held && self.greeted && request.changes_state() {
+                        Response::Error(ProtoError::StateLockUnavailable)
+                    } else {
+                        self.dispatch(request)?
+                    };
                     let fatal = matches!(
                         response,
                         Response::Error(
@@ -1218,26 +1293,11 @@ impl<'a> Monitor<'a> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn lock_state(state_dir: &Path) -> Result<std::fs::File, MonitorError> {
+fn lock_state(state_dir: &Path) -> Result<StateLock, MonitorError> {
     use std::os::unix::fs::OpenOptionsExt as _;
 
     if let Err(source) = std::fs::create_dir_all(state_dir) {
-        if source.kind() == std::io::ErrorKind::PermissionDenied {
-            // `host` and other read-only commands run with the default
-            // `state_root` (/var/lib/detent) even when the caller is not root.
-            // Creating that directory would require privilege and must not turn
-            // a read-only command into a startup failure. Fall back to a dummy
-            // lock so the monitor can still serve; mutual exclusion for the
-            // real state directory is only needed when it is actually writable.
-            return std::fs::File::open("/dev/null").map_err(|source| MonitorError::State {
-                op: "open lock",
-                source,
-            });
-        }
-        return Err(MonitorError::State {
-            op: "create_dir_all",
-            source,
-        });
+        return unavailable_when_denied("create_dir_all", source);
     }
     let file = match std::fs::OpenOptions::new()
         .read(true)
@@ -1248,25 +1308,30 @@ fn lock_state(state_dir: &Path) -> Result<std::fs::File, MonitorError> {
         .open(state_dir.join(MONITOR_LOCK))
     {
         Ok(file) => file,
-        Err(source) if source.kind() == std::io::ErrorKind::PermissionDenied => {
-            return std::fs::File::open("/dev/null").map_err(|source| MonitorError::State {
-                op: "open lock",
-                source,
-            });
-        }
-        Err(source) => {
-            return Err(MonitorError::State {
-                op: "open lock",
-                source,
-            });
-        }
+        Err(source) => return unavailable_when_denied("open lock", source),
     };
     if rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_err() {
-        // A dummy /dev/null fd never contends, so this only fires for the
-        // real lock file. A second live monitor is the intended error.
+        // A second live monitor is the intended error.
         return Err(MonitorError::Busy);
     }
-    Ok(file)
+    Ok(StateLock::Held(file))
+}
+
+/// `host` and other read-only commands run with the default `state_root`
+/// (/var/lib/detent) even when the caller is not root. Creating that
+/// directory would require privilege and must not turn a read-only command
+/// into a startup failure, so `PermissionDenied` becomes
+/// [`StateLock::Unavailable`]. That value excludes nothing: the monitor that
+/// carries it refuses every state change. Any other error stays an error.
+fn unavailable_when_denied(
+    op: &'static str,
+    source: std::io::Error,
+) -> Result<StateLock, MonitorError> {
+    if source.kind() == std::io::ErrorKind::PermissionDenied {
+        Ok(StateLock::Unavailable)
+    } else {
+        Err(MonitorError::State { op, source })
+    }
 }
 
 /// Restore the recorded backups, newest write first. Failures are logged and
@@ -1797,7 +1862,7 @@ mod tests {
     use super::{
         CheckRunner, ExitReason, HookError, Hooks, MAX_CONFIRM_TIMEOUT_S, MONITOR_LOCK, Monitor,
         PENDING_COMMIT_MARKER, PREVIOUS_SUFFIX, PendingCommitMarker, STAGED_DIR, ServiceControl,
-        finish_send_error, materialize_staged, read_staged_verified, staged_path,
+        StateLock, finish_send_error, materialize_staged, read_staged_verified, staged_path,
         swap_running_binary, write_temp_and_swap,
     };
     use crate::fs::atomic::{AtomicError, Sha256Digest};
@@ -4346,6 +4411,249 @@ mod tests {
                 op: "open lock",
                 ..
             })
+        ));
+        Ok(())
+    }
+
+    // -- the state lock: a monitor without it changes nothing (B6 / H1) --------
+
+    /// Every request that changes state, one of each kind. Service `Status`
+    /// is not in this list: it changes nothing.
+    fn state_changing_requests() -> Vec<Request> {
+        vec![
+            Request::WriteTarget {
+                target: TargetId(0),
+                expected_prev: None,
+                bytes: b"v2".to_vec(),
+                journal: true,
+            },
+            Request::Restore {
+                module: ModuleId(0),
+                backup: BackupId(0),
+            },
+            Request::StartConfirmTimer {
+                commit: CommitId(1),
+                timeout_s: 60,
+                service: None,
+            },
+            Request::ConfirmCommit {
+                commit: CommitId(1),
+            },
+            Request::RollbackCommit {
+                commit: CommitId(1),
+            },
+            Request::Service {
+                binding: BindingId(0),
+                action: ServiceAction::Restart,
+            },
+            Request::Service {
+                binding: BindingId(0),
+                action: ServiceAction::Reload,
+            },
+            Request::Service {
+                binding: BindingId(0),
+                action: ServiceAction::Start,
+            },
+            Request::Service {
+                binding: BindingId(0),
+                action: ServiceAction::Stop,
+            },
+            Request::Mount {
+                target: TargetId(0),
+            },
+            Request::ReplaceBinary {
+                tag: "v9.9.9".to_owned(),
+                len: 5,
+                sha256: Sha256Digest::of(b"image"),
+            },
+        ]
+    }
+
+    /// Serve `requests` after a handshake and a trailing `Shutdown`, with the
+    /// given lock, and return the responses to `requests` in order.
+    fn serve_queued(
+        fx: &Fixture,
+        lock: StateLock,
+        requests: &[Request],
+    ) -> Result<Vec<Response>, Box<dyn std::error::Error>> {
+        let (mut monitor_end, mut worker_end) = Channel::pair()?;
+        worker_end.send(&Request::Hello {
+            proto: PROTO_VERSION,
+        })?;
+        let count = requests.len();
+        for request in requests {
+            worker_end.send(request)?;
+        }
+        worker_end.send(&Request::Shutdown)?;
+        let allow = fx.allow()?;
+        let descriptor = allow
+            .module(ModuleId(0))
+            .ok_or("the fixture has module 0")?;
+        let mut monitor = Monitor::new(allow, Hooks::default());
+        monitor.set_module_registry(vec![Box::new(SyntheticModule { descriptor })]);
+        assert_eq!(
+            monitor.serve_locked(&mut monitor_end, lock)?,
+            ExitReason::Shutdown
+        );
+        assert!(matches!(
+            worker_end.recv::<Response>()?,
+            Response::HelloAck(_)
+        ));
+        let mut responses = Vec::with_capacity(count);
+        for _ in 0..count {
+            responses.push(worker_end.recv::<Response>()?);
+        }
+        assert!(matches!(
+            worker_end.recv::<Response>()?,
+            Response::ShuttingDown
+        ));
+        Ok(responses)
+    }
+
+    #[test]
+    fn a_monitor_without_the_state_lock_refuses_every_state_change()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let requests = state_changing_requests();
+        let responses = serve_queued(&fx, StateLock::Unavailable, &requests)?;
+        for (request, response) in requests.iter().zip(&responses) {
+            assert!(
+                matches!(response, Response::Error(ProtoError::StateLockUnavailable)),
+                "{request:?} was answered {response:?}"
+            );
+        }
+        assert_eq!(std::fs::read(&fx.target)?, b"v1", "the target is untouched");
+        assert!(
+            !fx.state_root.exists(),
+            "no backup, marker or lock file is created"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_monitor_without_the_state_lock_still_answers_reads()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let responses = serve_queued(
+            &fx,
+            StateLock::Unavailable,
+            &[
+                Request::ReadTarget {
+                    target: TargetId(0),
+                },
+                Request::PendingCommit,
+                Request::Service {
+                    binding: BindingId(0),
+                    action: ServiceAction::Status,
+                },
+            ],
+        )?;
+        let [read, pending, status] = responses.as_slice() else {
+            return Err("three responses expected".into());
+        };
+        assert!(
+            matches!(read, Response::Target(t) if t.bytes == b"v1"),
+            "{read:?}"
+        );
+        assert!(matches!(pending, Response::Pending(None)), "{pending:?}");
+        // `Status` reaches the service hook (absent here); it is not refused
+        // for the lock.
+        assert!(
+            !matches!(status, Response::Error(ProtoError::StateLockUnavailable)),
+            "{status:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_monitor_with_the_state_lock_writes() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let lock = Monitor::lock(&fx.state_root)?;
+        assert!(lock.is_held());
+        let responses = serve_queued(
+            &fx,
+            lock,
+            &[Request::WriteTarget {
+                target: TargetId(0),
+                expected_prev: None,
+                bytes: b"v2".to_vec(),
+                journal: false,
+            }],
+        )?;
+        let [written] = responses.as_slice() else {
+            return Err("one response expected".into());
+        };
+        assert!(matches!(written, Response::Written(_)), "{written:?}");
+        assert_eq!(std::fs::read(&fx.target)?, b"v2");
+        Ok(())
+    }
+
+    #[test]
+    fn the_classifier_lists_exactly_the_state_changing_requests() {
+        for request in state_changing_requests() {
+            assert!(request.changes_state(), "{request:?}");
+        }
+        for request in [
+            Request::Hello { proto: 1 },
+            Request::ReadTarget {
+                target: TargetId(0),
+            },
+            Request::RunCheck {
+                check: CheckId(0),
+                bytes: Vec::new(),
+            },
+            Request::ListBackups {
+                module: ModuleId(0),
+            },
+            Request::Service {
+                binding: BindingId(0),
+                action: ServiceAction::Status,
+            },
+            Request::PendingCommit,
+            Request::Shutdown,
+        ] {
+            assert!(!request.changes_state(), "{request:?}");
+        }
+    }
+
+    #[test]
+    fn a_denied_state_directory_is_an_unavailable_lock_not_an_error() {
+        let denied = || std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        for op in ["create_dir_all", "open lock"] {
+            assert!(
+                matches!(
+                    super::unavailable_when_denied(op, denied()),
+                    Ok(StateLock::Unavailable)
+                ),
+                "{op}"
+            );
+        }
+        assert!(matches!(
+            super::unavailable_when_denied(
+                "open lock",
+                std::io::Error::from(std::io::ErrorKind::NotFound)
+            ),
+            Err(super::MonitorError::State {
+                op: "open lock",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn lock_exclusive_refuses_an_unavailable_lock_and_keeps_a_held_one()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert!(matches!(
+            StateLock::Unavailable.require_held(),
+            Err(super::MonitorError::LockUnavailable)
+        ));
+        let fx = fixture()?;
+        let held = Monitor::lock_exclusive(&fx.state_root)?;
+        assert!(held.is_held());
+        // A second monitor on the same root is still `Busy`.
+        assert!(matches!(
+            Monitor::lock_exclusive(&fx.state_root),
+            Err(super::MonitorError::Busy)
         ));
         Ok(())
     }

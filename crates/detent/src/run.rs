@@ -43,7 +43,7 @@ use detent_ops::{
 use detent_platform::fs::atomic::Sha256Digest;
 use detent_platform::host::Detected;
 use detent_platform::privsep::allowlist::{Allowlist, Config, DEFAULT_STATE_ROOT};
-use detent_platform::privsep::monitor::{ExitReason, Hooks, Monitor, MonitorError};
+use detent_platform::privsep::monitor::{ExitReason, Hooks, Monitor, MonitorError, StateLock};
 use detent_platform::privsep::proto::{BackupId, CommitId};
 use detent_platform::privsep::transport::Channel;
 use detent_platform::privsep::worker::Client;
@@ -335,6 +335,31 @@ fn defaults(
     }
 }
 
+/// True when running an operation of this kind can write to the state root or
+/// the host. Such a command must hold the real state lock. The match is
+/// exhaustive so a new kind has to be classified.
+const fn changes_state(kind: OpKind) -> bool {
+    match kind {
+        OpKind::Apply
+        | OpKind::ConfirmCommit
+        | OpKind::RollbackCommit
+        | OpKind::Restore
+        | OpKind::ServiceAction
+        | OpKind::UpdateApply => true,
+        OpKind::ListModules
+        | OpKind::GetModule
+        | OpKind::Validate
+        | OpKind::Plan
+        | OpKind::ListBackups
+        | OpKind::ServiceStatus
+        | OpKind::HostProfile
+        | OpKind::AuditQuery
+        | OpKind::UpdateStatus
+        | OpKind::CertStatus
+        | OpKind::CertRenew => false,
+    }
+}
+
 /// Everything that goes through the operations layer.
 fn operate(
     cli: &Cli,
@@ -377,10 +402,23 @@ fn operate(
         return Ok(Exit::Failed);
     }
 
-    let mut session = match Session::start(settings, host, registry, &descriptors, cli.dryrun) {
+    let started = if !cli.dryrun && changes_state(kind) {
+        Session::start_writing(settings, host, registry, &descriptors, false)
+    } else {
+        Session::start(settings, host, registry, &descriptors, cli.dryrun)
+    };
+    let mut session = match started {
         Ok(session) => session,
         Err(SessionStartError::Busy) => {
             renderer.line(streams.notes, MessageId::new("cli-monitor-busy"), &[])?;
+            return Ok(Exit::Failed);
+        }
+        Err(SessionStartError::LockUnavailable) => {
+            renderer.line(
+                streams.notes,
+                MessageId::new("cli-monitor-lock-unavailable"),
+                &[("path", &settings.state_root.display().to_string())],
+            )?;
             return Ok(Exit::Failed);
         }
         Err(err) => {
@@ -1135,6 +1173,9 @@ pub struct Session {
 pub enum SessionStartError {
     /// The state root is owned by a live monitor.
     Busy,
+    /// The command writes, and the state lock cannot be taken (the state
+    /// directory is not writable for this user).
+    LockUnavailable,
     /// Any other startup failure.
     Other(String),
 }
@@ -1143,6 +1184,7 @@ impl std::fmt::Display for SessionStartError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Busy => f.write_str("monitor is busy"),
+            Self::LockUnavailable => f.write_str("the state lock cannot be taken"),
             Self::Other(message) => f.write_str(message),
         }
     }
@@ -1154,6 +1196,7 @@ impl From<MonitorError> for SessionStartError {
     fn from(err: MonitorError) -> Self {
         match err {
             MonitorError::Busy => Self::Busy,
+            MonitorError::LockUnavailable => Self::LockUnavailable,
             other => Self::Other(other.to_string()),
         }
     }
@@ -1174,6 +1217,10 @@ impl Session {
     ///
     /// A short untranslated reason (for `{$reason}` of `cli-start-failed`) when
     /// the allow-list, the socket pair, or the handshake fails.
+    ///
+    /// Without the real state lock (a state directory this user cannot
+    /// write) the session serves reads only: its monitor refuses every state
+    /// change. Use [`Session::start_writing`] for a command that writes.
     pub fn start(
         settings: &Settings,
         host: Detected,
@@ -1182,6 +1229,36 @@ impl Session {
         dryrun: bool,
     ) -> Result<Self, SessionStartError> {
         let state_lock = Monitor::lock(&settings.state_root)?;
+        Self::start_locked(settings, host, registry, descriptors, dryrun, state_lock)
+    }
+
+    /// As [`Session::start`], for a command that changes state: it stops with
+    /// [`SessionStartError::LockUnavailable`] when the real state lock cannot
+    /// be taken, instead of failing on the first write.
+    ///
+    /// # Errors
+    ///
+    /// As [`Session::start`], plus [`SessionStartError::LockUnavailable`].
+    pub fn start_writing(
+        settings: &Settings,
+        host: Detected,
+        registry: Vec<Box<dyn DynModule>>,
+        descriptors: &[&'static ModuleDescriptor],
+        dryrun: bool,
+    ) -> Result<Self, SessionStartError> {
+        let state_lock = Monitor::lock_exclusive(&settings.state_root)?;
+        Self::start_locked(settings, host, registry, descriptors, dryrun, state_lock)
+    }
+
+    fn start_locked(
+        settings: &Settings,
+        host: Detected,
+        registry: Vec<Box<dyn DynModule>>,
+        descriptors: &[&'static ModuleDescriptor],
+        dryrun: bool,
+        state_lock: StateLock,
+    ) -> Result<Self, SessionStartError> {
+        let lock_held = state_lock.is_held();
         let (recovery_tx, recovery_rx) = std::sync::mpsc::sync_channel(1);
         let config = Config::with_state_root(&settings.state_root);
         let allow = Allowlist::from_modules(descriptors, &config)
@@ -1208,7 +1285,12 @@ impl Session {
             );
             monitor.set_module_registry(monitor_registry);
             monitor.set_host_profile(profile);
-            let recovered = monitor.recover_pending();
+            // Recovery restores files, so it needs the lock like any write.
+            let recovered = if lock_held {
+                monitor.recover_pending()
+            } else {
+                Ok(None)
+            };
             let report = recovered.as_ref().map_err(ToString::to_string).cloned();
             let _ = recovery_tx.send(report);
             recovered.and_then(|_| monitor.serve_locked(&mut channel, state_lock))
@@ -1334,7 +1416,8 @@ fn caller() -> Identity {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_CONFIG_PATH, Session, Settings, Streams, caller, operation_for, run, target_path,
+        DEFAULT_CONFIG_PATH, MonitorError, Session, Settings, Streams, caller, operation_for, run,
+        target_path,
     };
     use crate::cli::Cli;
     use crate::output::Exit;
@@ -3481,6 +3564,38 @@ mod tests {
             "monitor is busy"
         );
         Ok(())
+    }
+
+    /// A command that writes must not start without the real state lock; a
+    /// read-only command may.
+    #[test]
+    fn a_missing_state_lock_stops_writing_commands_at_startup() {
+        assert!(matches!(
+            super::SessionStartError::from(MonitorError::LockUnavailable),
+            super::SessionStartError::LockUnavailable
+        ));
+        for kind in [
+            OpKind::Apply,
+            OpKind::ConfirmCommit,
+            OpKind::RollbackCommit,
+            OpKind::Restore,
+            OpKind::ServiceAction,
+            OpKind::UpdateApply,
+        ] {
+            assert!(super::changes_state(kind), "{kind:?}");
+        }
+        for kind in [
+            OpKind::ListModules,
+            OpKind::GetModule,
+            OpKind::Validate,
+            OpKind::Plan,
+            OpKind::ListBackups,
+            OpKind::ServiceStatus,
+            OpKind::HostProfile,
+            OpKind::AuditQuery,
+        ] {
+            assert!(!super::changes_state(kind), "{kind:?}");
+        }
     }
 
     /// A commit left pending by a crashed monitor is rolled back before a

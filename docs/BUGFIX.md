@@ -148,10 +148,6 @@ Owner decisions that block or change items are in §4.
 
 In this order (highest risk first):
 
-2. **B6 (H1) — the state lock fallback.** `privsep/monitor.rs` `lock_state`
-   falls back to a `/dev/null` lock on `EACCES`, so two monitors share no
-   mutual exclusion. Refuse to start with a clear error. Test: a lock file
-   that cannot be created refuses the lock.
 3. **B4 (C1-b) — the bundle open and the leftover copy.** In the
    `ReplaceBinary` path, open `<tag>.sigstore.json` the way
    `open_staged_input` opens the binary (per-component `O_NOFOLLOW`, owner
