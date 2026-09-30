@@ -5,6 +5,10 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-09-30 - Track A B10 (L-BIN18): the typed password is never a plain `String`
+
+`read_secret_line` (`crates/detent/src/webadmin.rs`) turned the typed bytes into a plain `String` and wrapped it in `Zeroizing` only after `trim_newline` returned, so an early return in between left the plaintext in an unwiped buffer. It now wraps the `String` at once and `trim_newline` trims in place (`&mut String`). No other plain `String` of the password remains in `webadmin.rs` (`rg`).
+
 ## 2026-09-30 - Track A B11: login documents 503; an existing audit directory is tightened
 
 (a) `POST /api/v1/auth/login` can answer `503` (`web-auth-busy`, `web-auth-session-limit`) but `docs/openapi.json` did not list it. The annotation, `docs/openapi.json` and `web/src/api/schema.d.ts` now list it; `login_documents_the_503_answer` guards it. (b) `DirBuilder::mode` applies only to a directory it creates, so an older `0755` `<state>/audit` stayed `0755`. New `detent_platform::fs::private_dir::ensure_private` opens the directory `O_DIRECTORY | O_NOFOLLOW`, refuses one owned by another uid, and `fchmod`s the descriptor to `0700`. `FileAudit` (`detent-ops`) and `FileAuthAudit` (`detent-web`) call it after they create the directory. Tests: `an_existing_wide_audit_directory_becomes_private`, `a_symlinked_audit_directory_is_refused`, `an_audit_directory_owned_by_another_user_is_refused` in both writers (the owner test asserts root, as the `privsep` tests do), and the helper's own tests.
