@@ -22,7 +22,6 @@ use std::fmt;
 use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{Duration, SystemTime};
@@ -736,8 +735,11 @@ fn ensure_backup_dir(backup_dir: &Path) -> Result<(), AtomicError> {
         return Ok(());
     }
     std::fs::create_dir_all(backup_dir).map_err(|err| io_error("mkdir", backup_dir, err))?;
-    std::fs::set_permissions(backup_dir, std::fs::Permissions::from_mode(BACKUP_DIR_MODE))
-        .map_err(|err| io_error("chmod", backup_dir, err))
+    // `fchmod` on the open directory, not `std::fs::set_permissions`: that
+    // issues the legacy `chmod` on x86_64, which the confined monitor's
+    // seccomp table (`MONITOR`) does not allow.
+    let dir_fd = open_dir(backup_dir)?;
+    fchmod(&dir_fd, to_mode(BACKUP_DIR_MODE)).map_err(|err| io_error("fchmod", backup_dir, err))
 }
 
 /// Write `contents` into a fresh `0600` backup file and return its path.
@@ -856,6 +858,26 @@ mod tests {
         assert!(!xattr_unsupported(&Error::from_raw_os_error(
             rustix::io::Errno::NOSPC.raw_os_error()
         )));
+    }
+
+    /// The first backup of a target creates its backup directory, and the
+    /// directory is `0700` whatever the mode `mkdir` gave it.
+    #[test]
+    fn first_backup_makes_a_private_backup_directory() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::TempDir::new()?;
+        let backups = dir.path().join("backups/module/0");
+        write_backup(
+            &backups,
+            b"old",
+            Sha256Digest::of(b"old"),
+            SystemTime::now(),
+        )?;
+        assert_eq!(
+            std::fs::metadata(&backups)?.permissions().mode() & 0o7777,
+            0o700
+        );
+        Ok(())
     }
 
     /// An armed guard unlinks the temp file when it is dropped; that is what

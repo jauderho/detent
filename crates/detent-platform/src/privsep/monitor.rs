@@ -1553,6 +1553,36 @@ fn unlink(path: &Path) -> std::io::Result<()> {
         .map_err(std::io::Error::from)
 }
 
+/// Rename `from` over `to` with `renameat(2)`.
+///
+/// `std::fs::rename` issues the legacy `rename` on `x86_64`, which `MONITOR`
+/// lacks (see [`unlink`]).
+fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    rustix::fs::renameat(rustix::fs::CWD, from, rustix::fs::CWD, to).map_err(std::io::Error::from)
+}
+
+/// Copy the contents and the mode of `from` to a new file `to`.
+///
+/// `std::fs::copy` calls `copy_file_range(2)`, which `MONITOR` lacks, so this
+/// reads and writes instead. `to` must not exist (`O_EXCL`). The mode is set
+/// with `fchmod`, so the process umask does not change it, as in
+/// `std::fs::copy`.
+pub(crate) fn copy_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    let mut source = std::fs::File::open(from)?;
+    let permissions = source.metadata()?.permissions();
+    let mut bytes = Vec::new();
+    source.read_to_end(&mut bytes)?;
+    let mut copy = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(permissions.mode())
+        .open(to)?;
+    copy.set_permissions(permissions)?;
+    copy.write_all(&bytes)
+}
+
 /// Removes a file the monitor owns when dropped, so no failure path leaves a
 /// candidate or an unauthenticated image behind; a missing file (already
 /// swapped in) is not an error.
@@ -1808,7 +1838,7 @@ fn swap_running_binary(bytes: &[u8], staged: &Path, target: &Path) -> Result<(),
         )));
     }
     if let Err(err) = std::fs::hard_link(target, &previous)
-        && let Err(copy_err) = std::fs::copy(target, &previous)
+        && let Err(copy_err) = copy_file(target, &previous)
     {
         return Err(ProtoError::Io(format!(
             "keep previous binary: {} (fallback copy: {})",
@@ -1898,7 +1928,7 @@ fn write_temp_and_swap(
         )));
     }
     drop(tmp_file);
-    if let Err(err) = std::fs::rename(tmp, target) {
+    if let Err(err) = rename(tmp, target) {
         let _ = unlink(tmp);
         return Err(ProtoError::Io(format!(
             "rename staged binary over target: {}",
@@ -5376,6 +5406,42 @@ mod tests {
             Err(ProtoError::Io(message)) if message.starts_with("stage binary in target dir")
         ));
         assert_eq!(std::fs::read(&target)?, b"old-binary");
+        Ok(())
+    }
+
+    #[test]
+    fn copy_file_copies_the_contents_and_the_mode() -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let source = swap_target(work.path(), "detent-src", b"old-binary")?;
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o750))?;
+        let copy = work.path().join("detent-src.prev");
+        super::copy_file(&source, &copy)?;
+        assert_eq!(std::fs::read(&copy)?, b"old-binary");
+        assert_eq!(
+            std::fs::metadata(&copy)?.permissions().mode() & 0o7777,
+            0o750
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn copy_file_refuses_an_existing_destination_and_a_missing_source()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let source = swap_target(work.path(), "detent-src", b"new")?;
+        let taken = work.path().join("taken");
+        std::fs::write(&taken, b"mine")?;
+        assert_eq!(
+            super::copy_file(&source, &taken).map_err(|err| err.kind()),
+            Err(std::io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(std::fs::read(&taken)?, b"mine");
+        assert_eq!(
+            super::copy_file(&work.path().join("absent"), &work.path().join("copy"))
+                .map_err(|err| err.kind()),
+            Err(std::io::ErrorKind::NotFound)
+        );
+        assert!(!work.path().join("copy").exists());
         Ok(())
     }
 
