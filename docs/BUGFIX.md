@@ -255,6 +255,17 @@ deferred by the owner.
    Test on testhost as root: compare `/proc/self/status` `CapBnd` with the
    reported outcome.
 
+5. **A5 (new, found in A1, 2026-09-30) — AppArmor blocks validators that
+   read the candidate.** On testhost (Ubuntu) the `chrony` check ran in the
+   runner and failed: `chronyd: Could not open
+   /run/detent/staging/detent-candidate-V2VU39 : Permission denied`; the
+   kernel log shows `apparmor="DENIED" operation="open"
+   profile="/usr/sbin/chronyd" name="/run/detent/staging/detent-candidate-…"`.
+   `kea-dhcp4` also has an enforcing profile on testhost (not yet run); so a
+   `plan`/`apply` of these modules always reports the check as failed on
+   Ubuntu. Owner choice (§4, "AppArmor validators"). Not a seccomp or
+   Landlock refusal.
+
 ### Track D — Phase 7/8 gaps
 
 1. **mounts:** apply runs `daemon-reload` (and the optional mount) through
@@ -324,6 +335,12 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   `scripts/acme-serve-check.sh` (the aarch64 form of `access`). —
   proposed: yes (same operation as the allowed `newfstatat`) — owner answer:
   yes, all (2026-09-30).
+- AppArmor validators (Track C A5): ship an AppArmor local include per
+  confined validator (e.g. `/etc/apparmor.d/local/usr.sbin.chronyd`:
+  `/run/detent/staging/detent-candidate-* r,`) in `packaging/`, or stage
+  the candidate in a path the distro profiles already allow. — proposed:
+  packaged local includes (no change to where the candidate lives) — owner
+  answer:
 - Track G: defer `hickory-client`, the TPM attestor and the LE staging run past
   v1, so Phase 6 can close? — proposed: defer the TPM attestor; keep the other
   two for v1 — owner answer:
