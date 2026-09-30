@@ -918,7 +918,7 @@ mod tools {
             "cert_renew".into()
         }
         fn description() -> Option<Cow<'static, str>> {
-            Some("Check whether the serving certificate should renew, and renew it.".into())
+            Some("Ask the running server to renew the serving certificate now; the server allows one forced order per hour.".into())
         }
     }
     impl SyncTool<McpServer> for CertRenew {

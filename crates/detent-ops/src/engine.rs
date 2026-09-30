@@ -51,9 +51,32 @@ use crate::error::OpsError;
 use crate::identity::Identity;
 use crate::op::{DEFAULT_CONFIRM, Operation, ServiceCommand};
 use crate::report::{
-    AffectedService, ApplyReport, CheckReport, HostReport, ModuleView, OpOutcome, PendingCommit,
-    PlanReport, ServiceReport,
+    AffectedService, ApplyReport, CertReport, CheckReport, HostReport, ModuleView, OpOutcome,
+    PendingCommit, PlanReport, ServiceReport,
 };
+
+/// The certificate answers only a front end can give.
+///
+/// The serving certificate and the ACME client belong to the process that
+/// owns the TLS listener, and `detent-ops` has no TLS types. A front end that
+/// can reach them installs this hook with [`OpsEngine::set_cert_front_end`];
+/// without one the engine answers [`OpsError::Unsupported`]. The engine
+/// authorizes and audits first, so a denied caller never reaches the hook.
+pub trait CertFrontEnd: Send {
+    /// Read the serving certificate.
+    ///
+    /// # Errors
+    ///
+    /// [`OpsError::Cert`] when it cannot be read.
+    fn status(&self) -> Result<CertReport, OpsError>;
+
+    /// Ask the server to renew the serving certificate now.
+    ///
+    /// # Errors
+    ///
+    /// [`OpsError::Cert`] when the server was not asked or did not accept.
+    fn renew(&self) -> Result<(), OpsError>;
+}
 
 /// The digests one mutating operation observed, for the audit record.
 #[derive(Debug, Clone, Copy, Default)]
@@ -89,6 +112,8 @@ pub struct OpsEngine {
     /// Last commit-confirm window armed by this engine, used to rehydrate its
     /// full report without inventing fields from the protocol's id-only query.
     pending_commit: Option<PendingCommit>,
+    /// Answers `CertStatus` and `CertRenew`; see [`CertFrontEnd`].
+    cert: Option<Box<dyn CertFrontEnd>>,
 }
 
 impl std::fmt::Debug for OpsEngine {
@@ -123,7 +148,13 @@ impl OpsEngine {
             state_root: None,
             next_commit: 1,
             pending_commit: None,
+            cert: None,
         }
+    }
+
+    /// Let `hook` answer [`Operation::CertStatus`] and [`Operation::CertRenew`].
+    pub fn set_cert_front_end(&mut self, hook: Box<dyn CertFrontEnd>) {
+        self.cert = Some(hook);
     }
 
     /// Tell the engine where the monitor's state directory lives.
@@ -326,20 +357,28 @@ impl OpsEngine {
             Operation::AuditQuery(query) => Ok(OpOutcome::Audit(
                 self.audit.query(&query).map_err(OpsError::from)?,
             )),
-            // The front end that owns the TLS listener answers `CertStatus`
-            // from its own resolver, and `CertRenew` by asking the acme
-            // process (ADR-015) to renew now (`POST
-            // /api/v1/system/cert/renew`). The engine holds neither the
-            // certificate nor the acme channel. Either reaches the engine
-            // only if something routes it here by mistake, and then it must
-            // fail loudly (`ops-unsupported`).
-            Operation::CertStatus => Err(OpsError::Unsupported {
-                what: "cert_status",
-            }),
+            // The engine holds neither the serving certificate nor the ACME
+            // channel (ADR-015). The web front end answers both from its own
+            // state and never installs a hook. `detent mcp` installs one that
+            // reads the certificate and asks the running server to renew
+            // (`CertFrontEnd`). With no hook either operation reaches the
+            // engine only if something routes it here by mistake, and then it
+            // must fail loudly (`ops-unsupported`).
+            Operation::CertStatus => match self.cert.as_deref() {
+                Some(hook) => hook
+                    .status()
+                    .map(|report| OpOutcome::CertStatus(Box::new(report))),
+                None => Err(OpsError::Unsupported {
+                    what: "cert_status",
+                }),
+            },
             Operation::UpdateStatus => Err(OpsError::Unsupported {
                 what: "update_status",
             }),
-            Operation::CertRenew => Err(OpsError::Unsupported { what: "cert_renew" }),
+            Operation::CertRenew => match self.cert.as_deref() {
+                Some(hook) => hook.renew().map(|()| OpOutcome::CertRenewRequested),
+                None => Err(OpsError::Unsupported { what: "cert_renew" }),
+            },
             // The worker cannot swap a binary it does not own, so this goes
             // through the monitor's `ReplaceBinary` (`ops-unsupported` when
             // the staged file is missing or refused, like `CertRenew`).

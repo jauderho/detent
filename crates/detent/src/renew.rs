@@ -24,10 +24,12 @@ use std::ffi::OsString;
 use std::io::Read as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs as _};
 use std::os::unix::fs::MetadataExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use detent_core::diag::MessageId;
+#[cfg(feature = "mcp")]
+use detent_ops::OpsError;
 use detent_update::listener::{self, Anchor, Answer};
 use zeroize::Zeroizing;
 
@@ -127,71 +129,243 @@ pub fn run(
         Ok(config) => config,
         Err(err) => return report_web_config_error(&err, settings, renderer, streams),
     };
-    // The one trust anchor: `--ca-file`, else the certificate the server
-    // serves from `tls.cert_dir`.
-    let trust: Vec<u8>;
-    let anchor = if let Some(path) = args.ca_file.as_deref() {
-        trust = match read_ca_file(path) {
-            Ok(pem) => pem,
-            Err(reason) => {
-                renderer.line(
-                    streams.notes,
-                    MessageId::new("cli-cert-renew-ca-unreadable"),
-                    &[("path", &path.display().to_string()), ("reason", &reason)],
-                )?;
-                return Ok(Exit::Failed);
-            }
-        };
-        Anchor::CaPem(&trust)
-    } else {
-        let cert_dir = &config.tls.cert_dir;
-        trust = match detent_web::serving_pair(cert_dir) {
-            Ok(Some(pair)) => pair.cert_der().to_vec(),
-            Ok(None) => {
-                renderer.line(
-                    streams.notes,
-                    MessageId::new("cli-cert-missing"),
-                    &[("path", &cert_dir.display().to_string())],
-                )?;
-                return Ok(Exit::Failed);
-            }
-            Err(err) => {
-                return crate::cert::cert_unreadable(cert_dir, &err.to_string(), renderer, streams);
-            }
-        };
-        Anchor::Served(&trust)
+    let prepared = match prepare(&config, args.url.as_ref(), args.ca_file.as_deref()) {
+        Ok(prepared) => prepared,
+        Err(err) => return report_unreached(&err, renderer, streams),
     };
-    let served = match anchor {
-        Anchor::Served(der) => Some(der),
-        Anchor::CaPem(_) => None,
-    };
-    let listen = config.listen.addr;
-    let target = match resolve(args.url.as_ref(), listen, served) {
-        Ok(target) => target,
-        Err(reason) => {
-            let shown = args
-                .url
-                .as_ref()
-                .map_or_else(|| loopback_for(listen).to_string(), HttpsUrl::authority);
-            return unreachable(&shown, &reason, renderer, streams);
-        }
-    };
-    let address = target.addr.to_string();
+    let address = prepared.target.addr.to_string();
 
     if dryrun {
         renderer.line(
             streams.out,
             MessageId::new("cli-dryrun-cert-renew"),
-            &[("address", &address), ("name", &target.name)],
+            &[("address", &address), ("name", &prepared.target.name)],
         )?;
         return Ok(Exit::Ok);
     }
 
-    let request = renew_request(&target.host, &token);
-    drop(token);
-    match listener::exchange(target.addr, &target.name, anchor, &request, TIMEOUT) {
+    match ask(&prepared, &token) {
         Ok(answer) => report(&answer, &address, renderer, streams),
-        Err(err) => unreachable(&address, &err.to_string(), renderer, streams),
+        Err(err) => report_unreached(&err, renderer, streams),
+    }
+}
+
+/// Why the server was not asked.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Unreached {
+    /// The `--ca-file` cannot be read.
+    CaUnreadable { path: PathBuf, reason: String },
+    /// `tls.cert_dir` holds no certificate.
+    CertMissing { path: PathBuf },
+    /// `tls.cert_dir` cannot be read.
+    CertUnreadable { path: PathBuf, reason: String },
+    /// No connection: the name did not resolve, or the connect, the
+    /// handshake or the exchange failed. `address` is the one shown.
+    Connect { address: String, reason: String },
+}
+
+/// Where to connect and what to trust, resolved and ready to ask.
+#[derive(Debug)]
+pub(crate) struct Prepared {
+    target: Target,
+    /// The CA PEM (`--ca-file`) when `ca`, else the served certificate's DER.
+    trust: Vec<u8>,
+    ca: bool,
+}
+
+impl Prepared {
+    /// The one trust anchor.
+    fn anchor(&self) -> Anchor<'_> {
+        if self.ca {
+            Anchor::CaPem(&self.trust)
+        } else {
+            Anchor::Served(&self.trust)
+        }
+    }
+}
+
+/// The certificate the server serves from `cert_dir`.
+///
+/// # Errors
+///
+/// [`Unreached::CertMissing`] or [`Unreached::CertUnreadable`].
+pub(crate) fn served_pair(cert_dir: &Path) -> Result<detent_web::CertifiedKeyPair, Unreached> {
+    match detent_web::serving_pair(cert_dir) {
+        Ok(Some(pair)) => Ok(pair),
+        Ok(None) => Err(Unreached::CertMissing {
+            path: cert_dir.to_path_buf(),
+        }),
+        Err(err) => Err(Unreached::CertUnreadable {
+            path: cert_dir.to_path_buf(),
+            reason: err.to_string(),
+        }),
+    }
+}
+
+/// Resolve the address and the trust anchor from `config`: `ca_file`, else
+/// the certificate the server serves from `tls.cert_dir`; `url`, else the
+/// configured `listen` address.
+///
+/// # Errors
+///
+/// An [`Unreached`] that names what is missing.
+pub(crate) fn prepare(
+    config: &detent_web::Config,
+    url: Option<&HttpsUrl>,
+    ca_file: Option<&Path>,
+) -> Result<Prepared, Unreached> {
+    let (trust, ca) = if let Some(path) = ca_file {
+        let pem = read_ca_file(path).map_err(|reason| Unreached::CaUnreadable {
+            path: path.to_path_buf(),
+            reason,
+        })?;
+        (pem, true)
+    } else {
+        let pair = served_pair(&config.tls.cert_dir)?;
+        (pair.cert_der().to_vec(), false)
+    };
+    let listen = config.listen.addr;
+    let served = (!ca).then_some(trust.as_slice());
+    let target = resolve(url, listen, served).map_err(|reason| Unreached::Connect {
+        address: url.map_or_else(|| loopback_for(listen).to_string(), HttpsUrl::authority),
+        reason,
+    })?;
+    Ok(Prepared { target, trust, ca })
+}
+
+/// Send the renewal request with `token` and read the answer. The request
+/// lives in a zeroed buffer that is dropped before this returns; no error
+/// quotes it.
+///
+/// # Errors
+///
+/// [`Unreached::Connect`].
+pub(crate) fn ask(prepared: &Prepared, token: &str) -> Result<Answer, Unreached> {
+    let request = renew_request(&prepared.target.host, token);
+    listener::exchange(
+        prepared.target.addr,
+        &prepared.target.name,
+        prepared.anchor(),
+        &request,
+        TIMEOUT,
+    )
+    .map_err(|err| Unreached::Connect {
+        address: prepared.target.addr.to_string(),
+        reason: err.to_string(),
+    })
+}
+
+/// Ask the server that `config` describes to renew now, as the holder of
+/// `token`: what `detent cert renew` does, for a caller that has no
+/// streams. Only `202` is `Ok`.
+///
+/// # Errors
+///
+/// [`OpsError::Cert`], whose message id is the one `detent cert renew` prints
+/// for the same failure, and whose text names the address.
+#[cfg(feature = "mcp")]
+pub(crate) fn request(config: &detent_web::Config, token: &str) -> Result<(), OpsError> {
+    let prepared = prepare(config, None, None).map_err(into_ops)?;
+    let answer = ask(&prepared, token).map_err(into_ops)?;
+    accepted(&answer, &prepared.target.addr.to_string())
+}
+
+/// `Ok` for `202`; else the [`OpsError::Cert`] for what the server at
+/// `address` answered.
+#[cfg(feature = "mcp")]
+fn accepted(answer: &Answer, address: &str) -> Result<(), OpsError> {
+    let (id, reason) = match outcome(answer) {
+        Outcome::Requested => return Ok(()),
+        Outcome::TokenRefused => (
+            "cli-cert-renew-token-refused",
+            format!(
+                "the server at {address} refused the token (HTTP {}); it needs write scope",
+                answer.status
+            ),
+        ),
+        Outcome::NotAcme => (
+            "cli-cert-renew-not-acme",
+            format!("the server at {address} runs no ACME process (`tls.bootstrap` is not `acme`)"),
+        ),
+        Outcome::ServerError(Some(server_id)) => (
+            "cli-cert-renew-server-error",
+            format!(
+                "the server at {address} answered HTTP {}: {server_id}",
+                answer.status
+            ),
+        ),
+        Outcome::ServerError(None) => (
+            "cli-cert-renew-server-error-bare",
+            format!("the server at {address} answered HTTP {}", answer.status),
+        ),
+    };
+    Err(OpsError::Cert {
+        id: MessageId::new(id),
+        reason,
+    })
+}
+
+/// `err` as the operation layer's error, with the id the CLI prints.
+#[cfg(feature = "mcp")]
+pub(crate) fn into_ops(err: Unreached) -> OpsError {
+    let (id, reason) = match err {
+        Unreached::CaUnreadable { path, reason } => (
+            "cli-cert-renew-ca-unreadable",
+            format!("the CA file {} could not be read: {reason}", path.display()),
+        ),
+        Unreached::CertMissing { path } => (
+            "cli-cert-missing",
+            format!("no certificate is stored in {}", path.display()),
+        ),
+        Unreached::CertUnreadable { path, reason } => (
+            "cli-cert-unreadable",
+            format!(
+                "the certificate in {} could not be read: {reason}",
+                path.display()
+            ),
+        ),
+        Unreached::Connect { address, reason } => (
+            "cli-cert-renew-unreachable",
+            format!("could not talk to the server at {address}: {reason}"),
+        ),
+    };
+    OpsError::Cert {
+        id: MessageId::new(id),
+        reason,
+    }
+}
+
+/// Prints why the server was not asked.
+///
+/// # Errors
+///
+/// Whatever the streams report.
+fn report_unreached(
+    err: &Unreached,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Exit> {
+    match err {
+        Unreached::CaUnreadable { path, reason } => {
+            renderer.line(
+                streams.notes,
+                MessageId::new("cli-cert-renew-ca-unreadable"),
+                &[("path", &path.display().to_string()), ("reason", reason)],
+            )?;
+            Ok(Exit::Failed)
+        }
+        Unreached::CertMissing { path } => {
+            renderer.line(
+                streams.notes,
+                MessageId::new("cli-cert-missing"),
+                &[("path", &path.display().to_string())],
+            )?;
+            Ok(Exit::Failed)
+        }
+        Unreached::CertUnreadable { path, reason } => {
+            crate::cert::cert_unreadable(path, reason, renderer, streams)
+        }
+        Unreached::Connect { address, reason } => unreachable(address, reason, renderer, streams),
     }
 }
 
@@ -756,6 +930,102 @@ mod tests {
         ] {
             assert_eq!(outcome(&answer(status, &body)), expected, "{status} {body}");
         }
+    }
+
+    /// The operation layer's error for each answer: one id per outcome, and
+    /// text that names the address, the status and the server's own id.
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn each_answer_maps_to_an_ops_error_with_its_own_id() -> R {
+        let error = |id: &str| format!("{{\"code\":\"x\",\"message_id\":\"{id}\"}}");
+        assert!(accepted(&answer(202, "{\"requested\":true}"), "127.0.0.1:3333").is_ok());
+        for (status, body, id, text) in [
+            (
+                401,
+                error("web-auth-invalid-credentials"),
+                "cli-cert-renew-token-refused",
+                "refused the token (HTTP 401)",
+            ),
+            (
+                403,
+                error("web-denied-scope"),
+                "cli-cert-renew-token-refused",
+                "refused the token (HTTP 403)",
+            ),
+            (
+                409,
+                error("web-cert-renew-not-acme"),
+                "cli-cert-renew-not-acme",
+                "runs no ACME process",
+            ),
+            (
+                503,
+                error("web-cert-renew-unavailable"),
+                "cli-cert-renew-server-error",
+                "answered HTTP 503: web-cert-renew-unavailable",
+            ),
+            (
+                500,
+                String::new(),
+                "cli-cert-renew-server-error-bare",
+                "answered HTTP 500",
+            ),
+        ] {
+            match accepted(&answer(status, &body), "127.0.0.1:3333") {
+                Err(OpsError::Cert { id: got, reason }) => {
+                    assert_eq!(got.as_str(), id, "{status}");
+                    assert!(reason.contains("127.0.0.1:3333"), "{reason}");
+                    assert!(reason.contains(text), "{reason}");
+                }
+                other => return Err(format!("{status}: {other:?}").into()),
+            }
+        }
+        Ok(())
+    }
+
+    /// Every way the server is not asked keeps the id the CLI prints for it.
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn each_failure_to_ask_maps_to_an_ops_error_with_its_own_id() -> R {
+        let path = PathBuf::from("/var/lib/detent/certs");
+        for (why, id, text) in [
+            (
+                Unreached::CaUnreadable {
+                    path: PathBuf::from("/ca.pem"),
+                    reason: "gone".to_owned(),
+                },
+                "cli-cert-renew-ca-unreadable",
+                "/ca.pem could not be read: gone",
+            ),
+            (
+                Unreached::CertMissing { path: path.clone() },
+                "cli-cert-missing",
+                "no certificate is stored in /var/lib/detent/certs",
+            ),
+            (
+                Unreached::CertUnreadable {
+                    path,
+                    reason: "denied".to_owned(),
+                },
+                "cli-cert-unreadable",
+                "could not be read: denied",
+            ),
+            (
+                Unreached::Connect {
+                    address: "127.0.0.1:1".to_owned(),
+                    reason: "refused".to_owned(),
+                },
+                "cli-cert-renew-unreachable",
+                "the server at 127.0.0.1:1: refused",
+            ),
+        ] {
+            let OpsError::Cert { id: got, reason } = into_ops(why) else {
+                return Err("not a certificate error".into());
+            };
+            assert_eq!(got.as_str(), id);
+            assert!(reason.contains(text), "{reason}");
+        }
+        Ok(())
     }
 
     fn renderer(messages: &Messages, json: bool) -> Renderer<'_> {

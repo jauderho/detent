@@ -110,6 +110,8 @@ pub fn run(
 
     let store = Arc::new(StoreVerifier::new(settings.state_root.clone()));
     let authz: Arc<dyn detent_mcp::Authz> = Arc::new(EngineDecides);
+    #[cfg(feature = "web")]
+    session.set_cert_front_end(cert_front_end(settings, &presented));
     let executor: Arc<dyn EngineExecutor> = Arc::new(SessionExecutor::new(session, who, scopes));
     let server = McpServer::new(
         executor.clone(),
@@ -265,6 +267,69 @@ impl detent_mcp::Authz for EngineDecides {
     fn permit(&self, _who: &Identity, _op: &Operation) -> Result<(), detent_mcp::AuthError> {
         Ok(())
     }
+}
+
+/// Answers `cert_status` and `cert_renew` for `detent mcp`.
+///
+/// `detent mcp` runs the engine in its own process, where nothing holds the
+/// serving certificate or the channel to the acme process. So `status` reads
+/// `tls.cert_dir`, as `detent cert status` does, and `renew` asks the running
+/// server over TLS 1.3 with the MCP bearer, as `detent cert renew` does
+/// ([`crate::renew`]). The server checks the `write` scope again. The
+/// configuration is read on every call, so a server restarted with another
+/// address or certificate directory is found without restarting `detent mcp`.
+///
+/// The token stays in [`Zeroizing`](zeroize::Zeroizing) and is not `Debug`: no
+/// error, log line or tool answer built here can quote it.
+#[cfg(feature = "web")]
+struct ServerCert {
+    settings: Settings,
+    token: zeroize::Zeroizing<String>,
+}
+
+#[cfg(feature = "web")]
+impl ServerCert {
+    /// `detent.toml`, as `serve` reads it.
+    fn config(&self) -> Result<detent_web::Config, OpsError> {
+        self.settings
+            .load_web_config()
+            .map_err(|err| OpsError::Cert {
+                id: MessageId::new("cli-config-load-failed"),
+                reason: format!(
+                    "{} could not be loaded: {err}",
+                    self.settings.config_path.display()
+                ),
+            })
+    }
+}
+
+#[cfg(feature = "web")]
+impl detent_ops::CertFrontEnd for ServerCert {
+    fn status(&self) -> Result<detent_ops::CertReport, OpsError> {
+        let config = self.config()?;
+        let pair =
+            crate::renew::served_pair(&config.tls.cert_dir).map_err(crate::renew::into_ops)?;
+        Ok(detent_web::api::system::cert_report_for_der(
+            pair.cert_der(),
+        ))
+    }
+
+    fn renew(&self) -> Result<(), OpsError> {
+        crate::renew::request(&self.config()?, &self.token)
+    }
+}
+
+/// The certificate hook for a session that reads `settings` and presents
+/// `token` to the running server.
+#[cfg(feature = "web")]
+pub(crate) fn cert_front_end(
+    settings: &Settings,
+    token: &str,
+) -> Box<dyn detent_ops::CertFrontEnd> {
+    Box::new(ServerCert {
+        settings: settings.clone(),
+        token: zeroize::Zeroizing::new(token.to_owned()),
+    })
 }
 
 /// Runs one [`Operation`] through the [`Session`] the CLI already uses for

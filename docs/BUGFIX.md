@@ -181,8 +181,8 @@ B3 (real Fulcio/Rekor trust roots) moved to Track E, item 2.
    (2026-09-30, `PROGRESS.md`).
 3. ~~**`detent cert renew`**~~ — done 2026-09-30 (`PROGRESS.md`): it asks
    the running server over HTTPS with an API token (owner decision
-   2026-09-30). Still open: wire `Operation::CertRenew` and `CertStatus` in
-   the engine so the MCP tools stop answering `Unsupported`.
+   2026-09-30). The MCP tools `cert_status` and `cert_renew` are wired too
+   (engine hook `CertFrontEnd`, installed by `detent mcp`).
 4. ~~**Journal warnings**~~ — done: `renew_once` calls `warn_expiry`, which
    logs a `tracing::warn!` at half and at a quarter of the lifetime to
    stderr, and systemd sends stderr to the journal (test

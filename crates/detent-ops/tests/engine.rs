@@ -30,8 +30,9 @@ use detent_core::diag::{Diagnostic, Diagnostics, MessageId, Severity};
 use detent_core::module::{DynError, DynModule, ModelError, ParseError};
 use detent_ops::audit::{AuditError, AuditRecord, AuditSink};
 use detent_ops::{
-    AllowAll, AuditQuery, AuditResult, Authz, CaptureAudit, Denied, FileAudit, Identity,
-    IdentityKind, OpKind, OpOutcome, Operation, OpsEngine, OpsError, ServiceCommand,
+    AllowAll, AuditQuery, AuditResult, Authz, CaptureAudit, CertFrontEnd, CertReport, Denied,
+    FileAudit, Identity, IdentityKind, OpKind, OpOutcome, Operation, OpsEngine, OpsError,
+    ServiceCommand,
 };
 use detent_platform::fs::atomic::Sha256Digest;
 use detent_platform::host::{Detected, Distro, HostFacts, NetworkBackend};
@@ -2140,6 +2141,162 @@ fn cert_renew_is_unsupported_until_acme_lands_and_writes_one_audit_record() -> T
     assert_eq!(first.op, OpKind::CertRenew);
     assert_eq!(first.result, AuditResult::Error);
     assert_eq!(first.error_id.as_deref(), Some("ops-unsupported"));
+    fx.finish()
+}
+
+/// A certificate hook that counts its calls and fails each one when `fail`.
+struct FakeCert {
+    status_calls: Arc<AtomicUsize>,
+    renew_calls: Arc<AtomicUsize>,
+    fail: bool,
+}
+
+/// The id a failing [`FakeCert`] reports.
+const CERT_FAILED: &str = "cli-cert-renew-unreachable";
+
+impl FakeCert {
+    /// A hook and the two counters it shares with the test.
+    fn new(fail: bool) -> (Box<Self>, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let status_calls = Arc::new(AtomicUsize::new(0));
+        let renew_calls = Arc::new(AtomicUsize::new(0));
+        let hook = Box::new(Self {
+            status_calls: Arc::clone(&status_calls),
+            renew_calls: Arc::clone(&renew_calls),
+            fail,
+        });
+        (hook, status_calls, renew_calls)
+    }
+
+    fn outcome(&self) -> Result<(), OpsError> {
+        if self.fail {
+            return Err(OpsError::Cert {
+                id: MessageId::new(CERT_FAILED),
+                reason: "could not talk to the server at 127.0.0.1:1".to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl CertFrontEnd for FakeCert {
+    fn status(&self) -> Result<CertReport, OpsError> {
+        self.status_calls.fetch_add(1, Ordering::SeqCst);
+        self.outcome()?;
+        Ok(CertReport {
+            fingerprint: "AA:BB".to_owned(),
+            not_after_unix: Some(1_900_000_000),
+            lifetime_used_percent: Some(40),
+            renewal_due: Some(false),
+            expiry_warning: None,
+        })
+    }
+
+    fn renew(&self) -> Result<(), OpsError> {
+        self.renew_calls.fetch_add(1, Ordering::SeqCst);
+        self.outcome()
+    }
+}
+
+#[test]
+fn cert_status_answers_from_the_hook_and_writes_no_audit_record() -> TestResult {
+    let mut fx = harness(b"v1\n", Setup::default())?;
+    let (hook, status_calls, renew_calls) = FakeCert::new(false);
+    fx.engine.set_cert_front_end(hook);
+    let OpOutcome::CertStatus(report) = fx.run(Operation::CertStatus)? else {
+        return Err("CertStatus must answer with a certificate report".into());
+    };
+    assert_eq!(report.fingerprint, "AA:BB");
+    assert_eq!(report.not_after_unix, Some(1_900_000_000));
+    assert_eq!(status_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(renew_calls.load(Ordering::SeqCst), 0);
+    // Read-only: no record, exactly as for `HostProfile`.
+    assert!(fx.records().is_empty());
+    fx.finish()
+}
+
+#[test]
+fn cert_renew_calls_the_hook_once_and_audits_started_then_ok() -> TestResult {
+    let mut fx = harness(b"v1\n", Setup::default())?;
+    let (hook, status_calls, renew_calls) = FakeCert::new(false);
+    fx.engine.set_cert_front_end(hook);
+    let outcome = fx.run(Operation::CertRenew)?;
+    assert!(
+        matches!(outcome, OpOutcome::CertRenewRequested),
+        "{outcome:?}"
+    );
+    assert_eq!(renew_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(status_calls.load(Ordering::SeqCst), 0);
+    let records = fx.records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records.first().map(|r| (r.op, r.result)),
+        Some((OpKind::CertRenew, AuditResult::Started))
+    );
+    let last = records.get(1).ok_or("the outcome was audited")?;
+    assert_eq!((last.op, last.result), (OpKind::CertRenew, AuditResult::Ok));
+    assert_eq!(last.error_id, None);
+    fx.finish()
+}
+
+#[test]
+fn a_failing_cert_hook_keeps_its_message_id_in_the_answer_and_the_audit_record() -> TestResult {
+    let mut fx = harness(b"v1\n", Setup::default())?;
+    let (hook, _, renew_calls) = FakeCert::new(true);
+    fx.engine.set_cert_front_end(hook);
+
+    let err = fx.run(Operation::CertRenew);
+    let Err(OpsError::Cert { id, reason }) = err else {
+        return Err(format!("CertRenew must pass the hook's error on: {err:?}").into());
+    };
+    assert_eq!(id.as_str(), CERT_FAILED);
+    assert!(reason.contains("127.0.0.1:1"), "{reason}");
+    assert_eq!(renew_calls.load(Ordering::SeqCst), 1);
+    let records = fx.records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records.first().map(|r| r.result),
+        Some(AuditResult::Started)
+    );
+    let last = records.get(1).ok_or("the failure was audited")?;
+    assert_eq!(last.result, AuditResult::Error);
+    assert_eq!(last.error_id.as_deref(), Some(CERT_FAILED));
+
+    // A failed read is returned as it is, and is not audited.
+    let err = fx.run(Operation::CertStatus);
+    assert!(
+        matches!(&err, Err(OpsError::Cert { id, .. }) if id.as_str() == CERT_FAILED),
+        "{err:?}"
+    );
+    assert_eq!(fx.records().len(), 2);
+    fx.finish()
+}
+
+#[test]
+fn a_denied_cert_caller_never_reaches_the_hook() -> TestResult {
+    let mut fx = harness(
+        b"v1\n",
+        Setup {
+            deny: true,
+            ..Setup::default()
+        },
+    )?;
+    let (hook, status_calls, renew_calls) = FakeCert::new(false);
+    fx.engine.set_cert_front_end(hook);
+    assert!(matches!(
+        fx.run(Operation::CertRenew),
+        Err(OpsError::Denied(_))
+    ));
+    assert!(matches!(
+        fx.run(Operation::CertStatus),
+        Err(OpsError::Denied(_))
+    ));
+    assert_eq!(status_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(renew_calls.load(Ordering::SeqCst), 0);
+    let records = fx.records();
+    assert_eq!(records.len(), 2);
+    assert!(records.iter().all(|r| r.result == AuditResult::Denied));
+    assert_eq!(records.first().map(|r| r.op), Some(OpKind::CertRenew));
+    assert_eq!(records.get(1).map(|r| r.op), Some(OpKind::CertStatus));
     fx.finish()
 }
 

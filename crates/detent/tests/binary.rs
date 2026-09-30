@@ -287,6 +287,139 @@ fn run_mcp(
     Ok(command.output()?)
 }
 
+/// The JSON-RPC message with `id` from `lines`, read from the child's
+/// stdout; every line gets 30 s to arrive.
+#[cfg(all(feature = "mcp", feature = "web"))]
+fn reply_with_id(
+    lines: &std::sync::mpsc::Receiver<String>,
+    id: u64,
+    seen: &mut String,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    loop {
+        let line = lines
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .map_err(|_| format!("no reply with id {id} within 30 s; stdout so far: {seen}"))?;
+        seen.push_str(&line);
+        let value: serde_json::Value = serde_json::from_str(line.trim())?;
+        if value.get("id").and_then(serde_json::Value::as_u64) == Some(id) {
+            return Ok(value);
+        }
+    }
+}
+
+/// `detent mcp` over stdio, as a client runs it: `cert_status` answers with
+/// the certificate in `tls.cert_dir`, and `cert_renew` against a port where
+/// nothing listens is a tool error that names the address. Neither stdout
+/// nor the TRACE log on stderr holds the bearer token.
+#[cfg(all(feature = "mcp", feature = "web"))]
+#[test]
+fn mcp_cert_tools_answer_over_stdio_without_leaking_the_token() -> TestResult {
+    use std::io::{BufRead as _, BufReader, Read as _};
+
+    let tmp = tempfile::tempdir()?;
+    let state = tmp.path().join("state-root");
+    let state_arg = state.to_string_lossy().to_string();
+    let token = mint_token(&state_arg, true)?;
+    let cert_dir = tmp.path().join("certs");
+    let pair = detent_web::load_or_bootstrap(&cert_dir, &["box.example".to_owned()], false)?;
+    let closed = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?;
+    let config = tmp.path().join("detent.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[listen]\naddr = \"{closed}\"\n[tls]\ncert_dir = {:?}\n",
+            cert_dir.display().to_string()
+        ),
+    )?;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_detent"))
+        .args(["--locale", "en-US", "--state-root", &state_arg, "--config"])
+        .arg(&config)
+        .arg("mcp")
+        .env("DETENT_MCP_TOKEN", &token)
+        .env("RUST_LOG", "trace")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stdin = child.stdin.take().ok_or("no stdin")?;
+    let stdout = child.stdout.take().ok_or("no stdout")?;
+    let mut stderr = child.stderr.take().ok_or("no stderr")?;
+    let (tx, lines) = std::sync::mpsc::channel::<String>();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let logs = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        text
+    });
+
+    let request = |id: u64, method: &str, params: serde_json::Value| serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+    let call = |id: u64, tool: &str| {
+        request(
+            id,
+            "tools/call",
+            serde_json::json!({"name": tool, "arguments": {}}),
+        )
+    };
+    let mut stdout_text = String::new();
+    let mut exchange =
+        || -> Result<(serde_json::Value, serde_json::Value), Box<dyn std::error::Error>> {
+            let init = request(
+                1,
+                "initialize",
+                serde_json::json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "0.0"}
+                }),
+            );
+            writeln!(stdin, "{init}")?;
+            reply_with_id(&lines, 1, &mut stdout_text)?;
+            writeln!(
+                stdin,
+                "{}",
+                serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            )?;
+            writeln!(stdin, "{}", call(2, "cert_status"))?;
+            let status = reply_with_id(&lines, 2, &mut stdout_text)?;
+            writeln!(stdin, "{}", call(3, "cert_renew"))?;
+            let renew = reply_with_id(&lines, 3, &mut stdout_text)?;
+            Ok((status, renew))
+        };
+    let answers = exchange();
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = reader.join();
+    let stderr_text = logs.join().map_err(|_| "the stderr reader panicked")?;
+    let (status, renew) = answers?;
+
+    let status_text = status.to_string();
+    assert!(status_text.contains(&pair.fingerprint()), "{status_text}");
+    let renew_text = renew.to_string();
+    assert!(renew_text.contains("error"), "{renew_text}");
+    assert!(renew_text.contains(&closed.to_string()), "{renew_text}");
+
+    // The renewal was audited, and the audit line reached the log being
+    // checked below.
+    assert!(stderr_text.contains("detent audit"), "{stderr_text}");
+    let tail = token.rsplit('-').next().unwrap_or(&token).to_lowercase();
+    for (what, text) in [("stdout", &stdout_text), ("stderr", &stderr_text)] {
+        let lowered = text.to_lowercase();
+        assert!(
+            !lowered.contains(&token.to_lowercase()),
+            "{what} holds the token"
+        );
+        assert!(!lowered.contains(&tail), "{what} holds the token's tail");
+    }
+    Ok(())
+}
+
 /// A pending-commit marker a crashed monitor could have left under `state`:
 /// commit 7, which rolls `target` back to `backup`.
 #[cfg(feature = "mcp")]

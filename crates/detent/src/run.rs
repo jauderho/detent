@@ -1322,6 +1322,12 @@ impl Session {
         })
     }
 
+    /// Let `hook` answer `CertStatus` and `CertRenew` (`detent mcp`).
+    #[cfg(all(feature = "mcp", feature = "web"))]
+    pub(crate) fn set_cert_front_end(&mut self, hook: Box<dyn detent_ops::CertFrontEnd>) {
+        self.engine.set_cert_front_end(hook);
+    }
+
     /// Take the startup recovery report, if one was produced.
     pub fn take_recovery(&mut self) -> Option<detent_platform::privsep::monitor::Recovered> {
         self.recovered.take()

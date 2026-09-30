@@ -153,7 +153,8 @@ certificate once the worker installs it. Without an acme process
 (it stopped), `503` `web-cert-renew-unavailable`. Each answer after
 authorization writes one `cert_renew_requested` record to the auth log
 (`detent-auth.jsonl`); a refusal for scope writes `scope_denied`. The MCP tool
-`cert_renew` still goes to the engine and answers `ops-unsupported`.
+`cert_renew` reaches the same endpoint through `detent mcp` (see "MCP
+surface").
 
 `detent cert renew` sends this same request with a bearer token (from
 `--token-file` or `DETENT_TOKEN`; mint one with `detent token create <name>
@@ -218,6 +219,27 @@ axum bearer gate returning 401 before MCP runs. A missing or unknown
 token, or an unreadable store, refuses startup with exit 1 before
 anything listens. `--dryrun` reports the resolved shape and starts
 nothing.
+
+`cert_status` and `cert_renew` are answered by a hook that `detent mcp`
+installs in its engine (`CertFrontEnd`, `detent-ops`); the engine
+authorizes and audits first, so a caller without `write` scope never reaches
+it (`cert_renew` writes `started` and then `ok` or `error` with the failure's
+message id; `cert_status` writes nothing). `cert_status` reads the
+certificate from `tls.cert_dir` in `detent.toml`, like `detent cert status`,
+and answers the fields of `GET /api/v1/system/cert` under a `cert_status` key.
+`cert_renew` sends `POST /api/v1/system/cert/renew` to the running `serve`
+over TLS 1.3, pinned to the served certificate, with the MCP bearer token as
+`Authorization: Bearer`; the server checks the `write` scope again and keeps
+its one-forced-order-per-hour limit. It answers `cert_renew_requested` for
+`202`, and a tool error that names the address for a refusal or an
+unreachable server. The message id tells the cases apart
+(`cli-cert-renew-token-refused`, `cli-cert-renew-not-acme`,
+`cli-cert-renew-server-error`, `cli-cert-renew-unreachable`,
+`cli-cert-missing`, `cli-cert-unreadable`, `cli-config-load-failed`). The
+token stays in zeroizing memory and appears in no answer, error or log line.
+`detent mcp` must run as a user that can read `tls.cert_dir` (the `detent`
+service user, or root for stdio). Without the `web` feature no hook is
+installed and both tools answer `ops-unsupported`.
 
 ## OpenAPI <-> MCP schema parity
 
