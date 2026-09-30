@@ -1091,12 +1091,21 @@ mod tests {
     /// An exchange that plays the primary server: it checks the signed
     /// UPDATE, then answers with `rcode`, signed with the same key.
     fn tsig_server(rcode: u8, seen: Arc<Mutex<Vec<Sent>>>) -> Box<DnsExchange> {
+        tsig_server_keyed(TSIG_B64.to_owned(), rcode, seen)
+    }
+
+    /// [`tsig_server`] answering with the TSIG key `key_b64`.
+    fn tsig_server_keyed(
+        key_b64: String,
+        rcode: u8,
+        seen: Arc<Mutex<Vec<Sent>>>,
+    ) -> Box<DnsExchange> {
         Box::new(move |server: &str, signed: &[u8]| {
             seen.lock()
                 .map_err(|p| AcmeError::Io(io::Error::other(p.to_string())))?
                 .push((server.to_owned(), signed.to_vec()));
             let key =
-                crate::tsig::Key::new("k.example.com", crate::tsig::Algorithm::Sha256, TSIG_B64)?;
+                crate::tsig::Key::new("k.example.com", crate::tsig::Algorithm::Sha256, &key_b64)?;
             // hmac-sha256: the MAC is the 32 bytes before id, error, other len.
             let end = signed.len().saturating_sub(6);
             let mac = signed.get(end.saturating_sub(32)..end).unwrap_or_default();
@@ -1468,5 +1477,350 @@ mod tests {
             AcmeDnsProvider::new("http://dns.example", "user", "pass"),
             Err(AcmeError::Config(message)) if message.contains("https://")
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // No secret in any text a caller can log
+    //
+    // `detent-acme` logs nothing itself; `detent` logs the `Display` of what
+    // it returns. So every error and every `Debug` the providers can produce
+    // is checked here, and `detent/src/acme.rs` checks the log itself.
+    // -----------------------------------------------------------------------
+
+    const CF_SECRET: &str = "SECRET-cf-7f3a91c2d4e60b58";
+    const ACME_DNS_SECRET: &str = "SECRET-acmedns-3b9e0d17a6c2c9f4";
+    const DESEC_SECRET: &str = "SECRET-desec-5a17c8e9b302d6e1";
+    /// The raw TSIG key. The config carries it base64-encoded.
+    const TSIG_RAW: &str = "SECRET-tsig-c04d7e12b9a35f68";
+
+    /// Every form in which `secret` could reach a log: as written, its tail
+    /// (the part that is random), base64 (both alphabets), and hex.
+    fn forms(secret: &str) -> Vec<String> {
+        use base64::Engine as _;
+        let tail = secret.rsplit('-').next().unwrap_or(secret);
+        let mut forms = vec![
+            secret.to_owned(),
+            tail.to_owned(),
+            base64::engine::general_purpose::STANDARD.encode(secret),
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret),
+        ];
+        forms.push(
+            secret
+                .bytes()
+                .flat_map(|byte| [byte >> 4, byte & 0x0f])
+                .filter_map(|nibble| char::from_digit(u32::from(nibble), 16))
+                .collect::<String>(),
+        );
+        forms
+    }
+
+    /// Fails when `text` holds any form of any secret, in any casing.
+    fn assert_clean(what: &str, text: &str, secrets: &[&str]) {
+        let lowered = text.to_lowercase();
+        for secret in secrets {
+            for form in forms(secret) {
+                assert!(
+                    !lowered.contains(&form.to_lowercase()),
+                    "{what} holds {form:?}: {text}"
+                );
+            }
+        }
+    }
+
+    /// The `Display` and `Debug` of `err`, as a caller could log them.
+    fn texts(err: &AcmeError) -> [String; 2] {
+        [err.to_string(), format!("{err:?}")]
+    }
+
+    /// A provider answer that echoes the credential back, as a hostile or
+    /// misconfigured server can.
+    fn echo(secret: &str) -> String {
+        format!(r#"{{"detail":"bad credential {secret}","Authorization":"Bearer {secret}"}}"#)
+    }
+
+    type Build = fn(Box<HttpTransport>) -> Result<Box<dyn DnsProvider>, AcmeError>;
+
+    fn build_cloudflare(send: Box<HttpTransport>) -> Result<Box<dyn DnsProvider>, AcmeError> {
+        Ok(Box::new(
+            CloudflareProvider::new(CF_SECRET, "a".repeat(32))?.with_transport(send),
+        ))
+    }
+
+    fn build_acme_dns(send: Box<HttpTransport>) -> Result<Box<dyn DnsProvider>, AcmeError> {
+        Ok(Box::new(
+            AcmeDnsProvider::new("https://dns.example", "sub-8e21c4", ACME_DNS_SECRET)?
+                .with_transport(send),
+        ))
+    }
+
+    fn build_desec(send: Box<HttpTransport>) -> Result<Box<dyn DnsProvider>, AcmeError> {
+        Ok(Box::new(
+            DeSecProvider::new(DESEC_SECRET, "example.com")?.with_transport(send),
+        ))
+    }
+
+    /// Runs `present`, `delete` and `wait_propagated` of a provider over
+    /// every failure a server can answer with, and returns every error text.
+    fn http_failures(
+        build: Build,
+        secret: &str,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let record = record()?;
+        let hostile = echo(secret);
+        let listing = format!(
+            r#"{{"result":[{{"id":"id-1","content":"digest-value-42"}}],"detail":"{secret}"}}"#
+        );
+        let mut errors = Vec::new();
+        for status in [400_u16, 401, 403, 404, 429, 500, 502] {
+            for body in ["", "not json", hostile.as_str()] {
+                // Each script: fail at once; pass the list call, fail the
+                // write; find our record, fail the write.
+                for script in [
+                    vec![(status, body); 3],
+                    vec![(200, r#"{"result":[]}"#), (status, body), (status, body)],
+                    vec![(200, listing.as_str()), (status, body), (status, body)],
+                    vec![(200, hostile.as_str()), (200, hostile.as_str())],
+                ] {
+                    for action in 0..3_u8 {
+                        let (send, _) = scripted(&script);
+                        let provider = build(send)?;
+                        let outcome = match action {
+                            0 => provider.present(&record),
+                            1 => provider.delete(&record),
+                            _ => provider.wait_propagated(&record),
+                        };
+                        if let Err(err) = outcome {
+                            errors.extend(texts(&err));
+                        }
+                    }
+                }
+            }
+        }
+        // A transport that fails: the real one names the method and URL.
+        let send: Box<HttpTransport> = Box::new(|request: &HttpRequest| {
+            Err(AcmeError::Config(format!(
+                "{} {}: connection refused",
+                request.method, request.url
+            )))
+        });
+        let provider = build(send)?;
+        for outcome in [
+            provider.present(&record),
+            provider.delete(&record),
+            provider.wait_propagated(&record),
+        ] {
+            if let Err(err) = outcome {
+                errors.extend(texts(&err));
+            }
+        }
+        Ok(errors)
+    }
+
+    #[test]
+    fn no_http_provider_error_holds_the_credential() -> R {
+        for (build, secret) in [
+            (build_cloudflare as Build, CF_SECRET),
+            (build_acme_dns, ACME_DNS_SECRET),
+            (build_desec, DESEC_SECRET),
+        ] {
+            let errors = http_failures(build, secret)?;
+            assert!(
+                errors.len() >= 40,
+                "the fixtures did not fail: {}",
+                errors.len()
+            );
+            for text in &errors {
+                assert_clean("a provider error", text, &[secret]);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_refused_tsig_update_holds_no_key_material() -> R {
+        use base64::Engine as _;
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(TSIG_RAW);
+        let secrets = [TSIG_RAW, key_b64.as_str()];
+        let record = record()?;
+        let mut errors = Vec::new();
+        let mut collect = |outcome: Result<(), AcmeError>| {
+            if let Err(err) = outcome {
+                errors.extend(texts(&err));
+            }
+        };
+        let rfc2136 = |exchange: Box<DnsExchange>| {
+            Rfc2136Provider::new(
+                "ns1.example.com:53",
+                "example.com",
+                "k.example.com",
+                key_b64.as_str(),
+                "hmac-sha256",
+            )
+            .map(|provider| provider.with_exchange(exchange))
+        };
+        // Every RCODE, the two verbs, and a signed answer.
+        for rcode in 0..=16_u8 {
+            let provider = rfc2136(tsig_server_keyed(
+                key_b64.clone(),
+                rcode,
+                Arc::new(Mutex::new(Vec::new())),
+            ))?;
+            collect(provider.present(&record));
+            collect(provider.delete(&record));
+        }
+        // An answer signed with another key: the MAC does not verify.
+        let provider = rfc2136(tsig_server(0, Arc::new(Mutex::new(Vec::new()))))?;
+        collect(provider.present(&record));
+        // Answers that are not a signed answer at all.
+        let junk: [&[u8]; 4] = [b"", b"\x00", &[0_u8; 12], &[0xff_u8; 64]];
+        for answer in junk {
+            let answer = answer.to_vec();
+            let provider = rfc2136(Box::new(move |_: &str, _: &[u8]| Ok(answer.clone())))?;
+            collect(provider.present(&record));
+            collect(provider.delete(&record));
+        }
+        // A transport that fails.
+        let provider = rfc2136(Box::new(|server: &str, _: &[u8]| {
+            Err(AcmeError::Config(format!(
+                "rfc2136: {server}: cannot connect"
+            )))
+        }))?;
+        collect(provider.present(&record));
+        // A record outside the zone: refused before it is signed.
+        let outside = DnsRecord::new("_acme-challenge.example.org", "digest-value-42")?;
+        collect(provider.present(&outside));
+        assert!(
+            errors.len() >= 30,
+            "the fixtures did not fail: {}",
+            errors.len()
+        );
+        for text in &errors {
+            assert_clean("an RFC 2136 error", text, &secrets);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_rejected_credential_is_not_quoted_by_its_constructor() {
+        use base64::Engine as _;
+        let bad = |secret: &str| format!("{secret}\u{7}");
+        let mut errors = Vec::new();
+        let mut collect = |built: Result<(), AcmeError>| {
+            if let Err(err) = built {
+                errors.extend(texts(&err));
+            }
+        };
+        // A credential the constructor rejects itself.
+        collect(CloudflareProvider::new(bad(CF_SECRET), "a".repeat(32)).map(drop));
+        collect(
+            AcmeDnsProvider::new("https://dns.example", "user", bad(ACME_DNS_SECRET)).map(drop),
+        );
+        collect(DeSecProvider::new(bad(DESEC_SECRET), "example.com").map(drop));
+        // A good credential next to a setting the constructor rejects.
+        collect(CloudflareProvider::new(CF_SECRET, "short").map(drop));
+        collect(AcmeDnsProvider::new("http://dns.example", "user", ACME_DNS_SECRET).map(drop));
+        collect(AcmeDnsProvider::new("https://dns.example", "", ACME_DNS_SECRET).map(drop));
+        collect(DeSecProvider::new(DESEC_SECRET, "..").map(drop));
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(TSIG_RAW);
+        for (zone, name, algorithm) in [
+            ("bad zone!", "k.example.com", "hmac-sha256"),
+            ("example.com", "bad name!", "hmac-sha256"),
+            ("example.com", "k.example.com", "hmac-md5"),
+            ("example.com", "k.example.com", "hmac-sha1"),
+            ("example.com", "k.example.com", "no-such-mac"),
+        ] {
+            collect(
+                Rfc2136Provider::new(
+                    "ns1.example.com:53",
+                    zone,
+                    name,
+                    key_b64.as_str(),
+                    algorithm,
+                )
+                .map(drop),
+            );
+        }
+        // A key value that is not base64, and one that decodes to nothing.
+        for value in [bad(TSIG_RAW), String::new(), "====".to_owned()] {
+            collect(
+                Rfc2136Provider::new(
+                    "ns1.example.com:53",
+                    "example.com",
+                    "k.example.com",
+                    value,
+                    "hmac-sha256",
+                )
+                .map(drop),
+            );
+        }
+        assert!(
+            errors.len() >= 30,
+            "the constructors accepted: {}",
+            errors.len()
+        );
+        let secrets = [CF_SECRET, ACME_DNS_SECRET, DESEC_SECRET, TSIG_RAW];
+        for text in &errors {
+            assert_clean("a constructor error", text, &secrets);
+            assert_clean("a constructor error", text, &[key_b64.as_str()]);
+        }
+    }
+
+    #[test]
+    fn debug_of_every_secret_holder_holds_no_secret() -> R {
+        use base64::Engine as _;
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(TSIG_RAW);
+        let mut dumps = vec![
+            format!("{:?}", CloudflareProvider::new(CF_SECRET, "a".repeat(32))?),
+            format!(
+                "{:?}",
+                AcmeDnsProvider::new("https://dns.example", "sub-8e21c4", ACME_DNS_SECRET)?
+            ),
+            format!("{:?}", DeSecProvider::new(DESEC_SECRET, "example.com")?),
+            format!(
+                "{:?}",
+                Rfc2136Provider::new(
+                    "ns1.example.com:53",
+                    "example.com",
+                    "k.example.com",
+                    key_b64.as_str(),
+                    "hmac-sha256",
+                )?
+            ),
+        ];
+        // The request a provider builds keeps its credential in a header.
+        let request = HttpRequest {
+            method: "GET",
+            url: "https://example.test".to_owned(),
+            headers: vec![
+                ("Authorization", format!("Bearer {CF_SECRET}")),
+                ("X-API-Key", ACME_DNS_SECRET.to_owned()),
+                ("Authorization", format!("Token {DESEC_SECRET}")),
+            ],
+            body: String::new(),
+        };
+        dumps.push(format!("{request:?}"));
+        dumps.push(format!("{request:#?}"));
+        // The ACME account binding key and the issued private key.
+        let eab = crate::EabCredentials {
+            kid: "kid-1".to_owned(),
+            key_b64: key_b64.clone(),
+        };
+        dumps.push(format!("{eab:?}"));
+        dumps.push(format!("{eab:#?}"));
+        let issued = crate::Issued {
+            chain_pem: "chain".to_owned(),
+            key_pem: format!("-----BEGIN PRIVATE KEY-----\n{TSIG_RAW}\n-----END PRIVATE KEY-----"),
+        };
+        dumps.push(format!("{issued:?}"));
+        dumps.push(format!("{issued:#?}"));
+        for dump in &dumps {
+            assert_clean(
+                "a Debug dump",
+                dump,
+                &[CF_SECRET, ACME_DNS_SECRET, DESEC_SECRET, TSIG_RAW],
+            );
+            assert_clean("a Debug dump", dump, &[key_b64.as_str()]);
+        }
+        Ok(())
     }
 }

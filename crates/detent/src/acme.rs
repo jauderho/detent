@@ -835,9 +835,10 @@ mod tests {
     use detent_web::CertifiedKeyPair;
 
     use super::{
-        AcmeIssuer, CHECK_INTERVAL, FIRST_RETRY, Held, Installer, Issuer, MAX_RETRY,
-        MIN_CHECK_INTERVAL, MIN_FORCED_INTERVAL, Outcome, RenewError, acme_main, check_and_install,
-        next_check, renew_once, round, run_loop, serve_installs, spawn_installs, wait_or_peer,
+        AcmeIssuer, CHECK_INTERVAL, DnsProvider, DnsRecord, FIRST_RETRY, Held, Installer, Issuer,
+        MAX_RETRY, MIN_CHECK_INTERVAL, MIN_FORCED_INTERVAL, Outcome, RenewError, acme_main,
+        check_and_install, next_check, renew_once, round, run_loop, serve_installs, spawn_installs,
+        wait_or_peer,
     };
 
     type R = Result<(), Box<dyn std::error::Error>>;
@@ -1674,6 +1675,357 @@ mod tests {
         assert!(installer.installed.is_empty());
         assert!(logs.contains("a local file operation failed"), "{logs}");
         assert!(!logs.contains(SECRET), "{logs}");
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Log capture (PLAN Phase 6 task 2): no secret reaches the log.
+    // -----------------------------------------------------------------------
+
+    const CF_SECRET: &str = "SECRET-cf-7f3a91c2d4e60b58";
+    const ACME_DNS_SECRET: &str = "SECRET-acmedns-3b9e0d17a6c2c9f4";
+    /// The raw TSIG key. The provider is given it base64-encoded.
+    const TSIG_RAW: &str = "SECRET-tsig-c04d7e12b9a35f68";
+    /// The text of an ACME account file: a private key the log must not show.
+    const ACCOUNT_KEY: &str = "SECRET-account-key-91be44d07c3a5f28";
+
+    /// Base64 of `bytes` (`urlsafe` picks the URL alphabet, no padding).
+    fn base64(bytes: &[u8], urlsafe: bool) -> String {
+        let alphabet: &[u8] = if urlsafe {
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        } else {
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        };
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let mut group = [0_u8; 3];
+            for (slot, byte) in group.iter_mut().zip(chunk) {
+                *slot = *byte;
+            }
+            let word = u32::from_be_bytes([0, group[0], group[1], group[2]]);
+            for shift in [18_u32, 12, 6, 0]
+                .into_iter()
+                .take(chunk.len().saturating_add(1))
+            {
+                let sextet = word.checked_shr(shift).map_or(0, |bits| bits & 0x3f);
+                out.push(char::from(
+                    alphabet.get(sextet as usize).copied().unwrap_or(b'?'),
+                ));
+            }
+            if !urlsafe {
+                for _ in chunk.len()..3 {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    }
+
+    /// Every form in which `secret` could reach a log: as written, its
+    /// random tail, base64 (both alphabets) and hex.
+    fn forms(secret: &str) -> Vec<String> {
+        let tail = secret.rsplit('-').next().unwrap_or(secret);
+        vec![
+            secret.to_owned(),
+            tail.to_owned(),
+            base64(secret.as_bytes(), false),
+            base64(secret.as_bytes(), true),
+            secret
+                .bytes()
+                .flat_map(|byte| [byte >> 4, byte & 0x0f])
+                .filter_map(|nibble| char::from_digit(u32::from(nibble), 16))
+                .collect(),
+        ]
+    }
+
+    /// Fails when `text` holds any form of any of `secrets`, in any casing.
+    fn assert_clean(what: &str, text: &str, secrets: &[&str]) {
+        let lowered = text.to_lowercase();
+        for secret in secrets {
+            for form in forms(secret) {
+                assert!(
+                    !lowered.contains(&form.to_lowercase()),
+                    "{what} holds {form:?}: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_secret_finder_sees_every_form() {
+        // The finder itself must fail on a leak, or the checks below prove
+        // nothing.
+        assert_eq!(
+            base64(b"any carnal pleas", false),
+            "YW55IGNhcm5hbCBwbGVhcw=="
+        );
+        assert_eq!(base64(b"any carnal pleas", true), "YW55IGNhcm5hbCBwbGVhcw");
+        assert_eq!(base64(b"ab", false), "YWI=");
+        for form in forms(CF_SECRET) {
+            let leaked = std::panic::catch_unwind(|| {
+                assert_clean(
+                    "a line",
+                    &format!("token={}", form.to_uppercase()),
+                    &[CF_SECRET],
+                );
+            });
+            assert!(leaked.is_err(), "{form} was not found");
+        }
+    }
+
+    /// An issuer that publishes and withdraws a challenge record through a
+    /// real provider, as the order flow does, and orders no certificate: it
+    /// fails with the provider's error, or answers `then` once `providers`
+    /// is empty. The errors it saw are kept for the checks.
+    struct ProviderIssuer {
+        providers: VecDeque<Box<dyn DnsProvider>>,
+        then: Option<Issued>,
+        errors: Vec<String>,
+    }
+
+    impl Issuer for ProviderIssuer {
+        fn issue(&mut self) -> impl Future<Output = Result<Issued, AcmeError>> {
+            let outcome = match self.providers.pop_front() {
+                Some(provider) => DnsRecord::new("_acme-challenge.box.example", "digest-value-42")
+                    .and_then(|record| {
+                        provider.present(&record)?;
+                        provider.delete(&record)
+                    })
+                    .and_then(|()| Err(AcmeError::Config("the provider did not fail".to_owned()))),
+                None => self
+                    .then
+                    .take()
+                    .ok_or_else(|| AcmeError::Config("script ended".to_owned())),
+            };
+            if let Err(err) = &outcome {
+                self.errors.push(err.to_string());
+                self.errors.push(format!("{err:?}"));
+            }
+            std::future::ready(outcome)
+        }
+
+        fn renewal_window(&mut self, _leaf_der: &[u8]) -> impl Future<Output = Option<(i64, i64)>> {
+            std::future::ready(None)
+        }
+    }
+
+    /// The loop over the providers that reach the network in this build's
+    /// tests: their errors come from the real transports (a refused
+    /// connection), not from a fixture.
+    #[test]
+    fn a_failed_present_through_a_real_provider_leaves_no_secret_in_the_log() -> R {
+        let cert = Cert::new(&["a.example"])?;
+        let dir = tempfile::TempDir::new()?;
+        let tsig_b64 = base64(TSIG_RAW.as_bytes(), false);
+        let providers: VecDeque<Box<dyn DnsProvider>> = VecDeque::from([
+            Box::new(detent_acme::AcmeDnsProvider::new(
+                "https://127.0.0.1:1",
+                "sub-8e21c4",
+                ACME_DNS_SECRET,
+            )?) as Box<dyn DnsProvider>,
+            Box::new(detent_acme::Rfc2136Provider::new(
+                "127.0.0.1:1",
+                "box.example",
+                "k.box.example",
+                tsig_b64.as_str(),
+                "hmac-sha256",
+            )?),
+        ]);
+        let mut issuer = ProviderIssuer {
+            providers,
+            then: Some(cert.issued()),
+            errors: Vec::new(),
+        };
+        let mut installer = FakeInstaller::default();
+        let mut waits = 0_u32;
+        let (done, logs) = capture(|| {
+            block_on(run_loop(
+                &mut issuer,
+                &mut installer,
+                dir.path(),
+                || 0,
+                |_| {
+                    // Two failed rounds and the success, then stop.
+                    waits = waits.saturating_add(1);
+                    std::future::ready(if waits < 3 {
+                        ControlFlow::Continue(())
+                    } else {
+                        ControlFlow::Break(())
+                    })
+                },
+            ))
+        });
+        done?;
+        assert_eq!(installer.installed.len(), 1);
+        // The failures were real: each names its server.
+        assert_eq!(issuer.errors.len(), 4, "{:?}", issuer.errors);
+        assert!(
+            issuer
+                .errors
+                .iter()
+                .all(|text| text.contains("127.0.0.1:1")),
+            "{:?}",
+            issuer.errors
+        );
+        let secrets = [ACME_DNS_SECRET, TSIG_RAW, tsig_b64.as_str()];
+        for text in &issuer.errors {
+            assert_clean("a provider error", text, &secrets);
+        }
+        // The loop logged the failures, the refusal and the success.
+        assert_eq!(logs.matches("renewal failed").count(), 2, "{logs}");
+        assert!(logs.contains("the dns-01 provider failed"), "{logs}");
+        assert!(logs.contains("serves a new ACME certificate"), "{logs}");
+        assert_clean("the log", &logs, &secrets);
+        assert!(!logs.contains("BEGIN"), "{logs}");
+        assert!(!logs.contains(cert.key_pem.trim()), "{logs}");
+        Ok(())
+    }
+
+    /// The types the acme process holds print without their secret, and
+    /// `secrets.toml` errors quote no line of the file.
+    #[test]
+    fn the_debug_of_every_type_that_holds_a_secret_is_redacted() -> R {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::TempDir::new()?;
+        let write = |name: &str, text: &str| -> Result<std::path::PathBuf, std::io::Error> {
+            let path = dir.path().join(name);
+            std::fs::write(&path, text)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            Ok(path)
+        };
+        let mut dumps = Vec::new();
+        // The secrets file, loaded and printed.
+        let secrets = detent_web::secrets::load(&write(
+            "good.toml",
+            &format!("[acme]\ndns_provider = \"{CF_SECRET}\"\n"),
+        )?)?;
+        dumps.push(format!("{secrets:?}"));
+        dumps.push(format!("{secrets:#?}"));
+        dumps.push(format!("{:?}", secrets.dns_provider()));
+        // Files the loader refuses, each holding the secret on a line.
+        for (name, text) in [
+            (
+                "bad-type.toml",
+                format!("[acme]\ndns_provider = 7 # {CF_SECRET}\n"),
+            ),
+            ("bad-key.toml", format!("[acme]\n{CF_SECRET} = \"x\"\n")),
+            (
+                "bad-table.toml",
+                format!("[{CF_SECRET}]\ndns_provider = \"x\"\n"),
+            ),
+            (
+                "bad-syntax.toml",
+                format!("[acme\ndns_provider = \"{CF_SECRET}\"\n"),
+            ),
+            (
+                "bad-utf8.toml",
+                format!("[acme]\ndns_provider = \"{CF_SECRET}\u{1}\"\n"),
+            ),
+        ] {
+            let err = detent_web::secrets::load(&write(name, &text)?)
+                .err()
+                .ok_or_else(|| format!("{name} was accepted"))?;
+            dumps.push(err.to_string());
+            dumps.push(format!("{err:?}"));
+        }
+        // The pair the acme process installs, and what it holds meanwhile.
+        let cert = Cert::new(&["a.example"])?;
+        let key = KeyPem::new(cert.key_pem.clone());
+        let held = Held {
+            chain_pem: cert.chain_pem.clone(),
+            key: key.clone(),
+            not_before: cert.not_before,
+            not_after: cert.not_after,
+        };
+        for text in [
+            format!("{key:?}"),
+            format!("{held:?}"),
+            format!("{held:#?}"),
+        ] {
+            assert!(!text.contains("PRIVATE KEY"), "{text}");
+            assert!(!text.contains(cert.key_pem.trim()), "{text}");
+        }
+        dumps.push(format!("{:?}", cert.issued()));
+        // `[acme]` and its provider hold no secret; they print as they are.
+        dumps.push(format!(
+            "{:?}",
+            detent_web::AcmeConfig {
+                provider: Some(detent_web::DnsProviderConfig::Cloudflare {
+                    zone_id: "0123456789abcdef0123456789abcdef".to_owned(),
+                }),
+                ..acme_config(dir.path())
+            }
+        ));
+        // An error that carries a provider's text prints as the loop logs it.
+        for err in [
+            RenewError::Issue(AcmeError::Config(format!("said {CF_SECRET}"))),
+            RenewError::Issue(AcmeError::Credentials(ACCOUNT_KEY.to_owned())),
+            RenewError::Chain,
+        ] {
+            dumps.push(err.reason());
+        }
+        for dump in &dumps {
+            assert_clean("a dump", dump, &[CF_SECRET, ACCOUNT_KEY]);
+        }
+        assert!(dumps.iter().any(|dump| dump.contains("[redacted]")));
+        Ok(())
+    }
+
+    /// Account files with a private key in them that the client refuses
+    /// (a wrong shape, and a key that is not a key): neither the error nor
+    /// the log quotes the file.
+    #[test]
+    fn an_unusable_account_file_is_never_logged() -> R {
+        for (text, logged) in [
+            (
+                // Not the shape of an account: the parser rejects it.
+                format!(
+                    r#"{{"id":"{ACCOUNT_KEY}","key_pkcs8":{{"k":"{ACCOUNT_KEY}"}},"directory":7}}"#
+                ),
+                "the ACME account credentials could not be read",
+            ),
+            (
+                // The shape of an account, with a key the client rejects.
+                format!(r#"{{"id":"{ACCOUNT_KEY}","key_pkcs8":"{ACCOUNT_KEY}","directory":"x"}}"#),
+                "the ACME server or client failed",
+            ),
+            (
+                // Not JSON at all.
+                format!("{ACCOUNT_KEY} {{"),
+                "the ACME account credentials could not be read",
+            ),
+        ] {
+            let dir = tempfile::TempDir::new()?;
+            let account = dir.path().join("account.json");
+            std::fs::write(&account, &text)?;
+            let mut issuer =
+                AcmeIssuer::new(&acme_config(&account), provider()?, RetryPolicy::new())?;
+            let mut installer = FakeInstaller::default();
+            let mut failure = None;
+            let (done, logs) = capture(|| {
+                block_on(async {
+                    failure = issuer.issue().await.err();
+                    tokio::time::timeout(
+                        Duration::from_secs(1),
+                        run_loop(
+                            &mut issuer,
+                            &mut installer,
+                            dir.path(),
+                            || 0,
+                            |_| std::future::pending::<ControlFlow<()>>(),
+                        ),
+                    )
+                    .await
+                })
+            });
+            assert!(done?.is_err(), "the loop ended on its own: {text}");
+            let failure = failure.ok_or("the account file was accepted")?;
+            let secrets = [ACCOUNT_KEY, CF_SECRET];
+            assert_clean("the error", &failure.to_string(), &secrets);
+            assert_clean("the error", &format!("{failure:?}"), &secrets);
+            assert!(logs.contains(logged), "{logs}");
+            assert_clean("the log", &logs, &secrets);
+        }
         Ok(())
     }
 
