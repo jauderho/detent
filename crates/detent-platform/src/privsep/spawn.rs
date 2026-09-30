@@ -267,8 +267,9 @@ pub fn spawn_pair(config: &SpawnConfig, sandbox: &dyn SandboxHooks) -> Result<Sp
             if worker_end.socket().read_exact(&mut started).is_err() {
                 abort_child(1);
             }
-            let Ok(dropped) = become_worker(credentials, sandbox) else {
-                abort_child(1);
+            let dropped = match become_worker(credentials, sandbox) {
+                Ok(dropped) => dropped,
+                Err(err) => report_and_abort("worker", &err),
             };
             Ok(Spawned {
                 role: Role::Worker(Box::new(Client::new(worker_end))),
@@ -424,8 +425,8 @@ where
         }
         Side::Child => {
             drop(worker_end);
-            if drop_and_confine(credentials, || sandbox.confine_acme()).is_err() {
-                abort_child(1);
+            if let Err(err) = drop_and_confine(credentials, || sandbox.confine_acme()) {
+                report_and_abort("acme process", &err);
             }
             // A panic must not unwind into the caller's stack in the child.
             let status = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -442,6 +443,31 @@ pub fn reap_child(child_pid: i32) {
     if let Some(pid) = rustix::process::Pid::from_raw(child_pid) {
         let _ = rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::empty());
     }
+}
+
+/// The line a forked child writes to stderr before it exits because it could
+/// not become its role: `error` and each of its sources, joined by ": ".
+fn child_failure(role: &str, error: &SpawnError) -> String {
+    let mut line = format!("the {role} could not start: {error}");
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        line.push_str(": ");
+        line.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    line.push('\n');
+    line
+}
+
+/// Write [`child_failure`] to stderr, then [`abort_child`]. The child is
+/// single-threaded (it forked before any runtime started), so the write
+/// cannot block on a lock another thread held.
+fn report_and_abort(role: &str, error: &SpawnError) -> ! {
+    let _ = std::io::Write::write_all(
+        &mut std::io::stderr(),
+        child_failure(role, error).as_bytes(),
+    );
+    abort_child(1)
 }
 
 /// Terminate a forked child that cannot continue, without running the parent's
@@ -527,8 +553,8 @@ fn harden() -> Result<(), SpawnError> {
 mod tests {
     use super::{
         DEFAULT_WORKER_USER, MonitorHandle, NoSandbox, Role, SandboxError, SandboxHooks,
-        SpawnConfig, SpawnError, become_worker, harden, is_root, resolve_worker_account,
-        spawn_acme, spawn_pair,
+        SpawnConfig, SpawnError, become_worker, child_failure, harden, is_root,
+        resolve_worker_account, spawn_acme, spawn_pair,
     };
     use crate::privsep::acme::{ACME_PROTO_VERSION, ACME_TIMEOUT, AcmeMessage};
     use crate::privsep::allowlist::{Allowlist, Config};
@@ -848,5 +874,18 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    /// Track C A2: under systemd a worker that could not start exited 1 and
+    /// wrote nothing, so the journal showed only "the pair stopped
+    /// unexpectedly". The line the child writes must name the cause.
+    #[test]
+    fn a_child_that_cannot_start_names_its_cause() {
+        let err = SpawnError::Sandbox(SandboxError("landlock rule for /x".to_owned()));
+        assert_eq!(
+            child_failure("worker", &err),
+            "the worker could not start: sandbox refused to start: sandbox setup failed: \
+             landlock rule for /x\n"
+        );
     }
 }
