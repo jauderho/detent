@@ -205,9 +205,8 @@ Follow-ups found in item 3 (not yet scheduled):
 - ~~**`mcp` without `web` has no certificate hook.**~~ Done 2026-09-30:
   `mcp` implies `web` (owner decision). An `mcp`-only build also had no
   `detent token` command to mint its own token.
-- **Stale lines in `docs/API.md`.** It says `mcp` implies `web` (not true,
-  see above) and that `cert_renew` is MCP-only (`POST
-  /api/v1/system/cert/renew` exists).
+- ~~**Stale lines in `docs/API.md`.**~~ Done 2026-09-30: `mcp` now implies
+  `web`; `cert_renew` is a normal parity pair with `renew_cert`.
 
 Phase 6 is done (`[x]` in PLAN) when 1–5 land and Track G is either done or
 deferred by the owner.
