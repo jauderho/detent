@@ -187,15 +187,15 @@ fn bundle_for(material: &Material, digest_hex: &str, mutate: &str) -> Value {
     let mut path_hashes = vec![sibling.to_vec()];
     let proof_log_index = 0_i64;
 
-    // The checkpoint: origin, tree size, base64(sha256(root)), signed by the
-    // Rekor key over the body lines including the trailing newline.
-    let checkpoint_body = format!(
-        "detent-fixture 2\n{}\n",
-        BASE64.encode(Sha256::digest(root))
-    );
+    // The checkpoint, a signed note: origin, tree size and base64(root) on
+    // separate lines, a blank line, then `\u{2014} <name> <b64(hint || DER)>`.
+    // The Rekor key signs the body lines including the trailing newline; the
+    // hint is the first four bytes of the SHA-256 of the key's SPKI DER.
+    let checkpoint_body = format!("detent-fixture - 1\n2\n{}\n", BASE64.encode(root));
     let checkpoint_sig: p256::ecdsa::Signature =
         material.rekor_key.sign(checkpoint_body.as_bytes());
-    let mut checkpoint_sig_text = BASE64.encode(encode_sig(&checkpoint_sig));
+    let mut checkpoint_sig_raw = log_key_digest[..4].to_vec();
+    checkpoint_sig_raw.extend_from_slice(&encode_sig(&checkpoint_sig));
 
     // Per-fixture mutations after the valid construction.
     match mutate {
@@ -205,14 +205,9 @@ fn bundle_for(material: &Material, digest_hex: &str, mutate: &str) -> Value {
             path_hashes[0][0] ^= 0xff;
         }
         "bad-checkpoint-sig" => {
-            // Corrupt the checkpoint signature.
-            checkpoint_sig_text = format!(
-                "u{}",
-                checkpoint_sig_text
-                    .get(1..)
-                    .map(str::to_owned)
-                    .unwrap_or_default()
-            );
+            // Flip one byte of the DER signature, after the key hint: the
+            // hint still names the Rekor key, so the signature is what fails.
+            checkpoint_sig_raw[10] ^= 0x01;
         }
         "wrong-identity" | "expired-leaf" | "valid" | "bad-signature" | "bad-body-sig"
         | "bad-body-key" | "bad-set" => {}
@@ -235,7 +230,7 @@ fn bundle_for(material: &Material, digest_hex: &str, mutate: &str) -> Value {
                 "inclusionProof": {
                     "logIndex": proof_log_index,
                     "treeSize": 2_u64,
-                    "checkpoint": { "envelope": format!("{checkpoint_body}\n{checkpoint_sig_text}\n") },
+                    "checkpoint": { "envelope": format!("{checkpoint_body}\n\u{2014} detent-fixture {}\n", BASE64.encode(&checkpoint_sig_raw)) },
                     "hashes": path_hashes.iter().map(|h| BASE64.encode(h)).collect::<Vec<_>>(),
                 }
             }]

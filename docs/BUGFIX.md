@@ -148,10 +148,6 @@ Owner decisions that block or change items are in §4.
 
 In this order (highest risk first):
 
-7. **B1 (H17 step 5) — parse the Rekor checkpoint as a signed note.** Size
-   **equal** to the proof's `tree_size`, root equal to the computed root,
-   signature verified (key hint per the note spec). Tests: the real staging
-   checkpoint verifies; wrong size, root or signature each refuse.
 8. **B11 — small follow-ups.** (a) `docs/openapi.json`: add `503` to `POST
    /api/v1/auth/login` and regenerate. (b) An existing `<state>/audit`
    directory is not tightened to `0700`; tighten it when the process owns it,
