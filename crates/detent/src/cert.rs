@@ -264,21 +264,54 @@ mod tests {
         now_unix: i64,
         percent: i64,
     ) -> Result<detent_web::CertifiedKeyPair, Box<dyn std::error::Error>> {
-        use time::OffsetDateTime;
         let lifetime = 10_i64 * 24 * 60 * 60;
         let used = lifetime.saturating_mul(percent).div_euclid(100);
-        let to_ymd = |at: i64| {
-            let date = OffsetDateTime::from_unix_timestamp(at)?.date();
-            Ok::<(i32, u8, u8), Box<dyn std::error::Error>>((
-                date.year(),
-                date.month() as u8,
-                date.day(),
-            ))
-        };
         dated_pair(
-            to_ymd(now_unix.saturating_sub(used))?,
-            to_ymd(now_unix.saturating_sub(used).saturating_add(lifetime))?,
+            civil_from_unix(now_unix.saturating_sub(used))?,
+            civil_from_unix(now_unix.saturating_sub(used).saturating_add(lifetime))?,
         )
+    }
+
+    /// Unix seconds to a UTC (year, month, day), by Howard Hinnant's
+    /// `civil_from_days` algorithm.
+    fn civil_from_unix(at: i64) -> Result<(i32, u8, u8), Box<dyn std::error::Error>> {
+        let z = at.div_euclid(86_400).saturating_add(719_468);
+        let era = z.div_euclid(146_097);
+        let doe = z.rem_euclid(146_097);
+        let yoe = doe
+            .saturating_sub(doe / 1_460)
+            .saturating_add(doe / 36_524)
+            .saturating_sub(doe / 146_096)
+            / 365;
+        let doy = doe.saturating_sub(
+            yoe.saturating_mul(365)
+                .saturating_add(yoe / 4)
+                .saturating_sub(yoe / 100),
+        );
+        let mp = doy.saturating_mul(5).saturating_add(2) / 153;
+        let day = u8::try_from(
+            doy.saturating_sub(mp.saturating_mul(153).saturating_add(2) / 5)
+                .saturating_add(1),
+        )?;
+        let month = u8::try_from(if mp < 10 {
+            mp.saturating_add(3)
+        } else {
+            mp.saturating_sub(9)
+        })?;
+        let year = i32::try_from(
+            yoe.saturating_add(era.saturating_mul(400))
+                .saturating_add(i64::from(month <= 2)),
+        )?;
+        Ok((year, month, day))
+    }
+
+    #[test]
+    fn civil_from_unix_matches_known_dates() -> R {
+        assert_eq!(civil_from_unix(0)?, (1970, 1, 1));
+        assert_eq!(civil_from_unix(951_782_400)?, (2000, 2, 29));
+        assert_eq!(civil_from_unix(1_790_726_400)?, (2026, 9, 30));
+        assert_eq!(civil_from_unix(1_790_726_399)?, (2026, 9, 29));
+        Ok(())
     }
 
     fn now_unix() -> i64 {
