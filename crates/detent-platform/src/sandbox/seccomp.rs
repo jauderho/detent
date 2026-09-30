@@ -19,12 +19,12 @@
 //!    `x86_64` under `--platform linux/amd64` emulation) and cross-checking the
 //!    observed syscall names against (1) to separate real monitor/worker
 //!    behaviour from test-harness noise. `execve`/`clone` from the initial
-//!    process launch stay excluded for that reason — but `clone`/`execve`
-//!    *after* confinement were allow-listed so the monitor could spawn
-//!    validators and service commands (STAGE3 H6). A child inherits this
-//!    filter, so under `serve` those programs now run in the unconfined
-//!    runner (`privsep::runner`); the entries stay until a traced run shows
-//!    the monitor no longer needs them.
+//!    process launch stay excluded for that reason. STAGE3 H6 once
+//!    allow-listed process creation *after* confinement so the monitor could
+//!    spawn validators and service commands; those programs now run in the
+//!    unconfined runner (`privsep::runner`), and a010 traces (`x86_64` musl,
+//!    2026-09-30) showed the confined monitor makes no process-creation
+//!    call, so Track C A1 removed those entries from `MONITOR`.
 //!
 //! `SYSCALL_NUMBERS` itself is not from memory either: both columns were
 //! read out of `<asm/unistd.h>` (via `gcc -E -dM -xc - < <(echo '#include
@@ -238,47 +238,9 @@ const MONITOR: &[&str] = &[
     // Reap the worker (`MonitorHandle::wait`, called from the same process
     // that ran `confine_monitor`).
     "wait4",
-    // Process creation (`service::exec::run_confined`, called live for every
-    // `RunCheck` and `Service` request): `Command::spawn` is `clone`/`clone3`
-    // + `execve`/`execveat` in the child, `pipe2`/`dup3` for the piped
-    // stdio, `kill`/`tgkill` for the timeout kill, `clock_nanosleep` for the
-    // `try_wait` poll loop's sleep (glibc routes it there; `nanosleep` stays
-    // as the fallback), `prlimit64` (Rust `std` queries `RLIMIT_NOFILE`
-    // while wiring stdio), `faccessat` (the dynamic loader's first call in
-    // the exec'd child, `/etc/ld.so.preload`), and `rseq`/`set_robust_list`/
-    // `set_tid_address` for the two `spawn_capped_reader` threads glibc
-    // starts per child. Traced live in a privileged `debian:bookworm`
-    // container: first a fork + pipe + dup2 + exec + nanosleep + kill probe,
-    // then the real confined-monitor child spawning `/bin/true` under
-    // `strace -f`. That trace killed the child at `prlimit64` (the Rust
-    // stdio wiring) and, after allowing it, at the loader's `faccessat` —
-    // both fixed here and re-traced green (`NO_SIGSYS`). `sched_getaffinity`
-    // stays (glibc thread startup consults it). Remaining H6 work is the
-    // a009/k001 pass per STAGE3 H6 steps 1 and 4 before closing the item.
-    "clone",
-    "clone3",
-    "execve",
-    "execveat",
-    "pipe2",
-    "dup3",
-    "dup2",
-    "kill",
-    "tgkill",
-    "nanosleep",
-    "clock_nanosleep", // glibc routes `thread::sleep` here, not `nanosleep`.
-    "prlimit64",       // Rust `std` queries `RLIMIT_NOFILE` while wiring stdio.
-    "faccessat",       // dynamic loader probes `/etc/ld.so.preload` after `execve`.
-    "open", // musl `File::open_c` (null stdio, `PathFd::new`); Trap oracle named `__NR_open` on x86_64.
-    "access", // loader fallback probe (`/etc/ld.so.preload`, SELinux config).
-    "readlink", // `current_exe` in `Policy::monitor` resolves `/proc/self/exe`.
-    "readlinkat", // loader/exe-path resolution variant.
-    "ppoll", // loader wait in the `poll`/`ppoll` family.
-    "poll", // `coreutils true` (a010) issues `poll`; number 7, x86_64-only.
-    "set_tid_address", // glibc thread startup for the reader threads.
-    "arch_prctl",
-    "rseq",
-    "set_robust_list",
-    "sched_getaffinity",
+    // musl `File::open_c` on x86_64 (null stdio, `PathFd::new`); seen in the
+    // a010 `serve` trace (x86_64 musl, 2026-09-30).
+    "open",
     // musl's `stat`/`lstat` on x86_64, where glibc issues `newfstatat`
     // (above): `create_dir_all` after `mkdir` answers `EEXIST`, and
     // `symlink_metadata` (`lstat`). Traced on a010 (x86_64 musl, 2026-09-30); without
@@ -622,8 +584,9 @@ pub const fn syscalls_for(role: Role) -> &'static [&'static str] {
 /// this architecture". See the module docs: both columns were read from
 /// `<asm/unistd.h>` inside `debian:bookworm`, not typed from memory (the rows
 /// the `ACME` table added were read from the `x86_64` `<asm/unistd_64.h>` and
-/// the aarch64 `<asm-generic/unistd.h>` of the build container). Every row is
-/// used by [`MONITOR`], [`WORKER`] or [`ACME`]. `aarch64` never had `poll`,
+/// the aarch64 `<asm-generic/unistd.h>` of the build container). Some rows
+/// are no longer used by [`MONITOR`], [`WORKER`] or [`ACME`] (the monitor's
+/// process-creation entries, removed in Track C A1). `aarch64` never had `poll`,
 /// `open`, `rename`, `epoll_wait`, `mkdir`, `unlink`, `stat` or `chmod`,
 /// only their `ppoll`/`openat`/`renameat`/`epoll_pwait`/`mkdirat`/
 /// `unlinkat`/`newfstatat`/`fchmodat` forms. The C4 rows (`flock` and
@@ -1035,34 +998,32 @@ mod tests {
         assert!(super::number("poll", Arch::X86_64).is_some());
     }
 
+    /// Track C A1: validators and `systemctl` run in the runner, so the
+    /// monitor filter allows no process creation. `open` stays (musl
+    /// `File::open_c` on `x86_64`) and `wait4` stays (reaps the worker).
     #[test]
-    fn monitor_table_allows_process_creation_on_both_arches() {
+    fn the_monitor_table_has_no_process_creation_calls() {
+        let monitor = syscalls_for(Role::Monitor);
         for name in [
-            "clone", "clone3", "execve", "execveat", "pipe2", "dup3", "kill", "tgkill",
+            "clone",
+            "clone3",
+            "execve",
+            "execveat",
+            "fork",
+            "vfork",
+            "pipe2",
+            "dup2",
+            "dup3",
+            "kill",
+            "tgkill",
+            "prlimit64",
         ] {
-            assert!(
-                syscalls_for(Role::Monitor).contains(&name),
-                "monitor table is missing {name}"
-            );
-            assert!(
-                super::number(name, Arch::X86_64).is_some(),
-                "{name} has no x86_64 number"
-            );
-            assert!(
-                super::number(name, Arch::Aarch64).is_some(),
-                "{name} has no aarch64 number"
-            );
+            assert!(!monitor.contains(&name), "monitor table has {name}");
         }
-        for name in ["dup2", "arch_prctl", "access", "readlink", "poll", "open"] {
-            assert!(syscalls_for(Role::Monitor).contains(&name));
-            assert!(super::number(name, Arch::X86_64).is_some());
-            assert!(super::number(name, Arch::Aarch64).is_none());
-        }
-        for name in ["readlinkat", "ppoll"] {
-            assert!(syscalls_for(Role::Monitor).contains(&name));
-            assert!(super::number(name, Arch::X86_64).is_some());
-            assert!(super::number(name, Arch::Aarch64).is_some());
-        }
+        assert!(monitor.contains(&"open"));
+        assert!(super::number("open", Arch::X86_64).is_some());
+        assert!(super::number("open", Arch::Aarch64).is_none());
+        assert!(monitor.contains(&"wait4"));
     }
 
     #[test]
