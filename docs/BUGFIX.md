@@ -123,6 +123,11 @@ daemons and root sandbox runs.
 - **Local ACME runs:** pass Pebble's static `test/certs/pebble.minica.pem` as
   the CA (not the per-run root), keep files the `detent` account reads on a
   path it can traverse, and use `curl --noproxy '*'` for loopback requests.
+- **Stale cherry-pick sequence.** An old `.git/sequencer` (from an unfinished
+  multi-commit cherry-pick) makes `git cherry-pick --continue` resume it and
+  apply old commits. Check `ls .git/sequencer` first. Clear it with
+  `git cherry-pick --quit` after restoring the touched files; **never**
+  `--abort`, which resets HEAD to the sequence's old start.
 - **Codespell:** smb.conf words (e.g. `browseable`) go in `.codespellignore`.
 
 ---
@@ -146,11 +151,18 @@ Owner decisions that block or change items are in §4.
 
 ### Track A — security fixes (any dev machine)
 
-In this order (highest risk first):
+All ten items landed on 2026-09-30 (`PROGRESS.md`).
 
-10. **B5 (C1-f) — document capability-user mode** in ADR-001 and
-    `SECURITY_HARDENING.md` Gaps: monitor and worker share uid `detent`, so
-    staging ownership checks separate nothing. No code change.
+Follow-ups found while reviewing Track A (not yet scheduled):
+- **Real `hashedrekord` body.** `verify_hashedrekord_body`
+  (`detent-update/src/verify.rs`) expects a bare public key, but a real
+  `hashedrekord` entry embeds the Fulcio certificate. Production bundles use
+  `dsse`, so updates are not blocked; a real `hashedrekord` bundle would
+  fail body agreement. Fix with a captured real fixture (Track E, R1).
+- **Owner of the staged file itself.** `open_staged_input` (used for the
+  update binary and, since B4, its bundle) checks the owner of each
+  directory, not of the file. Consider requiring the file's owner to be the
+  worker uid (root-confined mode) as a second barrier.
 
 B3 (real Fulcio/Rekor trust roots) moved to Track E, item 2.
 

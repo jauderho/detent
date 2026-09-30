@@ -246,3 +246,11 @@ quietly into the tables above.
 13. **Output escaping in the admin UI (React) is not yet applicable** — `web/src`
     has Phase 4's bootstrap only (`index.html`, the theme script, base CSS);
     no application/form code exists yet (Phase 5).
+14. **Capability-user mode: the monitor and the worker share one uid.** With
+    `capability-user.conf` (`User=detent`) both processes run as `detent`, so
+    the owner checks on staged inputs, the monitor staging directory and the
+    audit directories compare `detent` with `detent` and separate nothing.
+    The barriers left are Landlock (absent on some hosts, gap 2), seccomp,
+    the worker's capability drop, and Sigstore verification of an update
+    (ADR-001, ADR-014). The default root-confined mode is not affected: there
+    the monitor is root and the worker is `detent`. (STAGE3 C1-f)

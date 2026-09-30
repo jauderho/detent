@@ -49,6 +49,14 @@ Negative:
   to drop the worker and must be removed from the monitor's bounding set
   afterward (Appendix C).
 - Debugging spans two processes and a serialized protocol instead of one.
+- In capability-user mode (`packaging/systemd/detent.service.d/capability-user.conf`,
+  `User=detent`) the monitor and the worker run as the same uid, `detent`.
+  Every check that a staged file or directory is owned by the monitor's uid
+  (update staging, the monitor staging directory, audit directories) then
+  separates nothing between the two. What still separates them: Landlock
+  (absent on some kernels, see `SECURITY_HARDENING.md` Gaps), seccomp, the
+  capability drop in the worker, and the Sigstore check of an update before
+  it replaces the binary (STAGE3 C1-f).
 
 ## Alternatives considered
 
