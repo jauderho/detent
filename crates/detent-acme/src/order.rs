@@ -122,7 +122,12 @@ pub async fn present_challenges(
             cleanup_challenges(provider, &presented);
             return Err(AcmeError::NoDns01Challenge);
         };
-        let domain = challenge.identifier().to_string();
+        // RFC 8555 §8.4: a wildcard's record sits at the base domain, so use
+        // the bare identifier, not the `*.`-prefixed display form.
+        let domain = match challenge.identifier().identifier {
+            Identifier::Dns(name) => name.clone(),
+            other => other.authorized(false).to_string(),
+        };
         let record = match DnsRecord::new(
             format!("_acme-challenge.{domain}"),
             challenge.key_authorization().dns_value(),
