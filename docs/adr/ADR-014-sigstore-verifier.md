@@ -91,9 +91,15 @@ No partial state, no retries with weaker checks.
    Zero or multiple matching subjects = refuse (ambiguous).
 6. **Rekor inclusion** — verify `inclusionProof`: recompute the Merkle
    root from `hashes` + the leaf hash `SHA-256(0x00 ‖ canonicalizedBody)`
-   (RFC 6962; the leaf covers the body only), verify the `checkpoint`
-   envelope's signature against the **embedded Rekor log public key**, and
-   check the checkpoint's tree size ≥ the proof's tree size. The
+   (RFC 6962; the leaf covers the body only), and parse the `checkpoint`
+   envelope as a signed note (origin, size, base64 root, optional other
+   lines, a blank line, then `— <name> <base64(key hint ‖ DER signature)>`
+   lines). Its size must **equal** the proof's tree size and its root must
+   equal the recomputed root. At least one signature line must carry the
+   hint of the **embedded Rekor log public key** (the first four bytes of
+   SHA-256 over its SPKI DER, as Rekor `pkg/util/signed_note.go` computes
+   it), and that signature must verify over the body including its final
+   newline; lines with another hint are ignored. The
    `canonicalizedBody` must agree with the envelope: for `hashedrekord`, the
    same signature bytes and a public key equal to the leaf certificate's key;
    for `dsse`/`intoto`, the same signature bytes and a payload hash equal to
@@ -105,10 +111,7 @@ No partial state, no retries with weaker checks.
    SET is the only signature over `integratedTime`, the instant step 2 uses.
 
    **Not verified:** embedded SCTs are only checked for presence (a
-   non-empty SCT list), not against CT log keys. The checkpoint is read as
-   `<origin> <size>` / base64(SHA-256(root)), not as Rekor's signed note
-   (origin line, size line, base64 root, key-hint signature), and its size
-   is checked with ≥, not = (STAGE3 H17 step 5). Unknown entry kinds fall
+   non-empty SCT list), not against CT log keys. Unknown entry kinds fall
    through to the `hashedrekord` body check (H17 step 6).
 
 ### Embedded trust root and refresh procedure

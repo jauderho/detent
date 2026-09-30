@@ -275,63 +275,132 @@ fn verify_inclusion(
         &path,
     )?;
 
-    // Checkpoint: `<origin> <treeSize>\n<base64(sha256(root))>\n\n<signature>`.
-    let (body, signature_block) = decoded
-        .checkpoint
-        .split_once("\n\n")
-        .ok_or(VerificationError::SetInvalid)?;
-    let mut lines = body.lines();
-    let header = lines.next().ok_or(VerificationError::SetInvalid)?;
-    let mut header_parts = header.split_whitespace();
-    let origin = header_parts.next().ok_or(VerificationError::SetInvalid)?;
-    let checkpoint_size: u64 = header_parts
-        .next()
-        .and_then(|size| size.parse().ok())
-        .ok_or(VerificationError::SetInvalid)?;
-    if header_parts.next().is_some() || origin.is_empty() {
-        return Err(VerificationError::SetInvalid);
-    }
-    if checkpoint_size < decoded.tree_size {
-        return Err(VerificationError::SetInvalid);
-    }
-    // Checkpoint stores base64(sha256(root)) - the RFC 6962 signed-note root
-    // hash - not the root itself.
-    let checkpoint_root_line = lines.next().ok_or(VerificationError::SetInvalid)?;
-    let checkpoint_root = BASE64
-        .decode(checkpoint_root_line.as_bytes())
-        .map_err(|_| VerificationError::SetInvalid)?;
-    let want = Sha256::digest(root);
-    if checkpoint_root.as_slice() != &want[..] {
-        return Err(VerificationError::SetInvalid);
-    }
-
-    // The signature covers the checkpoint body including its trailing newline.
-    let signature_line = signature_block
-        .lines()
-        .next()
-        .ok_or(VerificationError::SetInvalid)?;
-    let signature_text = signature_line
-        .rsplit(' ')
-        .next()
-        .ok_or(VerificationError::SetInvalid)?;
-    let signature_der = BASE64
-        .decode(signature_text.as_bytes())
-        .map_err(|_| VerificationError::SetInvalid)?;
-    let signature =
-        Signature::from_der(&signature_der).map_err(|_| VerificationError::SetInvalid)?;
-    // The signature covers the body lines including the trailing newline
-    // (RFC 6962 signed notes); `body` lost it to the blank-line split.
-    let mut signed_body = body.to_owned();
-    signed_body.push('\n');
-    trust
-        .rekor_key
-        .verify(signed_body.as_bytes(), &signature)
-        .map_err(|_| VerificationError::SetInvalid)?;
+    verify_checkpoint(
+        &decoded.checkpoint,
+        decoded.tree_size,
+        &root,
+        &trust.rekor_key,
+    )?;
 
     // The hashedrekord body must embed the same signature bytes and the same
     // signing key the envelope carries (ADR-014 step 6).
     verify_body_agreement(decoded, leaf_point)?;
     Ok(())
+}
+
+/// The DER prefix of a `SubjectPublicKeyInfo` for an uncompressed P-256 point:
+/// SEQUENCE { SEQUENCE { id-ecPublicKey, prime256v1 }, BIT STRING } up to the
+/// point itself.
+const P256_SPKI_PREFIX: [u8; 26] = [
+    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a,
+    0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+];
+
+/// The em dash and space that start a signed-note signature line.
+const NOTE_SIGNATURE_PREFIX: &str = "\u{2014} ";
+
+/// The key hint of a Rekor checkpoint signature: the first four bytes of
+/// SHA-256 over the log key's SPKI DER. Rekor computes it this way and does
+/// not add the key name or a signature-type byte that the generic
+/// `golang.org/x/mod/sumdb/note` hint has: `getPublicKeyHash` and
+/// `SignedNote.Sign` in Rekor `pkg/util/signed_note.go`. It is also the
+/// first four bytes of the Rekor `logID`, and the unit test
+/// `a_real_staging_checkpoint_verifies` checks it against a real checkpoint.
+fn checkpoint_key_hint(key: &VerifyingKey) -> [u8; 4] {
+    let mut hasher = Sha256::new();
+    hasher.update(P256_SPKI_PREFIX);
+    hasher.update(key.to_encoded_point(false).as_bytes());
+    let digest: [u8; 32] = hasher.finalize().into();
+    let [a, b, c, d, ..] = digest;
+    [a, b, c, d]
+}
+
+/// Verifies a Rekor checkpoint: a signed note (`golang.org/x/mod/sumdb/note`)
+/// in the transparency-dev checkpoint format,
+///
+/// ```text
+/// <origin>\n<tree size>\n<base64(root hash)>\n[<other lines>\n]\n
+/// \u{2014} <key name> <base64(key hint[4] || DER signature)>\n
+/// ```
+///
+/// The size must equal `tree_size` (the size the inclusion proof was
+/// computed against) and the root must equal `root` (the root that proof
+/// gives). At least one signature line must carry the hint of `key`, and
+/// every line that does must verify over the whole body including its final
+/// newline. Lines with another hint are other signers (witnesses) and are
+/// not checked. Any other shape is refused.
+///
+/// Format: Rekor `pkg/util/checkpoint.go` (`UnmarshalCheckpoint`) and
+/// `pkg/util/signed_note.go` (`UnmarshalText`, `Verify`).
+fn verify_checkpoint(
+    checkpoint: &str,
+    tree_size: u64,
+    root: &[u8; 32],
+    key: &VerifyingKey,
+) -> Result<(), VerificationError> {
+    let (body, signature_lines) = checkpoint
+        .split_once("\n\n")
+        .ok_or(VerificationError::SetInvalid)?;
+    if !signature_lines.ends_with('\n') {
+        return Err(VerificationError::SetInvalid);
+    }
+    let mut lines = body.split('\n');
+    let (Some(origin), Some(size), Some(root_line)) = (lines.next(), lines.next(), lines.next())
+    else {
+        return Err(VerificationError::SetInvalid);
+    };
+    if origin.is_empty()
+        || size.is_empty()
+        || !size.bytes().all(|byte| byte.is_ascii_digit())
+        || size.parse::<u64>() != Ok(tree_size)
+    {
+        return Err(VerificationError::SetInvalid);
+    }
+    let checkpoint_root = BASE64
+        .decode(root_line.as_bytes())
+        .map_err(|_| VerificationError::SetInvalid)?;
+    if checkpoint_root.as_slice() != root.as_slice() {
+        return Err(VerificationError::SetInvalid);
+    }
+
+    // The signatures cover the body lines including the final newline, which
+    // the blank-line split removed.
+    let mut signed_body = body.to_owned();
+    signed_body.push('\n');
+    let hint = checkpoint_key_hint(key);
+    let mut verified = false;
+    for line in signature_lines.split_terminator('\n') {
+        let mut fields = line
+            .strip_prefix(NOTE_SIGNATURE_PREFIX)
+            .ok_or(VerificationError::SetInvalid)?
+            .split(' ');
+        let (Some(name), Some(encoded), None) = (fields.next(), fields.next(), fields.next())
+        else {
+            return Err(VerificationError::SetInvalid);
+        };
+        let raw = BASE64
+            .decode(encoded.as_bytes())
+            .map_err(|_| VerificationError::SetInvalid)?;
+        let Some((line_hint, signature_der)) = raw.split_first_chunk::<4>() else {
+            return Err(VerificationError::SetInvalid);
+        };
+        if name.is_empty() || signature_der.is_empty() {
+            return Err(VerificationError::SetInvalid);
+        }
+        if *line_hint != hint {
+            continue;
+        }
+        let signature =
+            Signature::from_der(signature_der).map_err(|_| VerificationError::SetInvalid)?;
+        key.verify(signed_body.as_bytes(), &signature)
+            .map_err(|_| VerificationError::SetInvalid)?;
+        verified = true;
+    }
+    if verified {
+        Ok(())
+    } else {
+        Err(VerificationError::SetInvalid)
+    }
 }
 
 /// The Rekor Merkle leaf of an entry: `SHA-256(0x00 || canonicalizedBody)`
@@ -764,13 +833,36 @@ mod tests {
         assert_eq!(BASE64.encode(root), text("/entry/inclusionProof/rootHash"));
     }
 
-    /// A hand-built single-leaf log. The checkpoint commits to
-    /// SHA-256(0x00 || body), the RFC 6962 leaf of a Rekor entry, and each
-    /// entry field outside the body is varied: none of them may move the leaf.
-    #[test]
-    fn the_leaf_hash_covers_the_body_only() {
+    /// The SPKI DER of a P-256 key, built here on its own so the tests do not
+    /// lean on the production hint code: the fixed header, then the
+    /// uncompressed point.
+    fn test_spki(key: &VerifyingKey) -> Vec<u8> {
+        let mut spki = vec![
+            0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06,
+            0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+        ];
+        spki.extend_from_slice(key.to_encoded_point(false).as_bytes());
+        spki
+    }
+
+    /// The four key-hint bytes of the signed-note signature line for `key`.
+    fn test_hint(key: &VerifyingKey) -> [u8; 4] {
+        let digest: [u8; 32] = Sha256::digest(test_spki(key)).into();
+        let [a, b, c, d, ..] = digest;
+        [a, b, c, d]
+    }
+
+    /// One signed-note signature line: `\u{2014} <name> <b64(hint || DER)>\n`.
+    fn note_signature_line(name: &str, hint: [u8; 4], signature: &Signature) -> String {
+        let mut raw = hint.to_vec();
+        raw.extend_from_slice(signature.to_der().as_bytes());
+        format!("\u{2014} {name} {}\n", BASE64.encode(raw))
+    }
+
+    /// A hand-built single-leaf log: its body, the trust root holding the
+    /// log key, the log key, and the root hash of the one-leaf tree.
+    fn single_leaf_log() -> (Decoded, TrustRoot, p256::ecdsa::SigningKey, [u8; 32]) {
         use p256::ecdsa::SigningKey;
-        use p256::ecdsa::signature::Signer as _;
 
         let rekor = SigningKey::from_slice(&[0x41; 32]).expect("fixed scalar");
         let trust = TrustRoot {
@@ -790,45 +882,317 @@ mod tests {
         })
         .to_string()
         .into_bytes();
+        let root = rekor_leaf_hash(&body);
+        let decoded = Decoded {
+            integrated_time: 1,
+            certs: Vec::new(),
+            statement: bundle::Statement {
+                statement_type: bundle::STATEMENT_TYPE.to_owned(),
+                subject: Vec::new(),
+            },
+            dsse_payload: payload,
+            dsse_payload_type: bundle::DSSE_PAYLOAD_TYPE.to_owned(),
+            dsse_signature,
+            log_index: 0,
+            log_key_id: Vec::new(),
+            kind: "dsse".to_owned(),
+            kind_version: "0.0.1".to_owned(),
+            body,
+            tree_size: 1,
+            proof_log_index: 0,
+            path_hashes: Vec::new(),
+            checkpoint: String::new(),
+            signed_entry_timestamp: Vec::new(),
+        };
+        (decoded, trust, rekor, root)
+    }
 
-        let mut leaf = Sha256::new();
-        leaf.update([0x00]);
-        leaf.update(&body);
-        let root: [u8; 32] = leaf.finalize().into();
-        let note = format!("test-log 1\n{}\n", BASE64.encode(Sha256::digest(root)));
-        let note_sig: Signature = rekor.sign(note.as_bytes());
-        let checkpoint = format!(
-            "{note}\n\u{2014} test-log {}\n",
-            BASE64.encode(note_sig.to_der().as_bytes())
-        );
+    /// A checkpoint note as Rekor writes it: origin, size, root, then any
+    /// other lines, each ending in a newline.
+    fn note(size: &str, root: &[u8], extra: &[&str]) -> String {
+        let mut note = format!("test-log - 7\n{size}\n{}\n", BASE64.encode(root));
+        for line in extra {
+            note.push_str(line);
+            note.push('\n');
+        }
+        note
+    }
 
+    /// `note` signed by `rekor` with the right key hint, as a full envelope.
+    fn signed(rekor: &p256::ecdsa::SigningKey, note: &str) -> String {
+        use p256::ecdsa::signature::Signer as _;
+
+        let signature: Signature = rekor.sign(note.as_bytes());
+        let line = note_signature_line("test-log", test_hint(rekor.verifying_key()), &signature);
+        format!("{note}\n{line}")
+    }
+
+    fn inclusion_with(checkpoint: String) -> Result<(), VerificationError> {
+        let (mut decoded, trust, _, _) = single_leaf_log();
+        decoded.checkpoint = checkpoint;
+        verify_inclusion(&decoded, &trust, &[])
+    }
+
+    /// The checkpoint commits to the Merkle root and covers the whole body.
+    /// The entry fields outside the body are varied: none may move the leaf.
+    #[test]
+    fn the_leaf_hash_covers_the_body_only() {
+        let (mut decoded, trust, rekor, root) = single_leaf_log();
+        decoded.checkpoint = signed(&rekor, &note("1", &root, &[]));
         for (integrated_time, log_index, log_key_id, kind_version) in [
             (1_786_780_800, 0, vec![1_u8, 2, 3], "0.0.1"),
             (1, 99, vec![9_u8; 32], "0.0.2"),
         ] {
-            let decoded = Decoded {
-                integrated_time,
-                certs: Vec::new(),
-                statement: bundle::Statement {
-                    statement_type: bundle::STATEMENT_TYPE.to_owned(),
-                    subject: Vec::new(),
-                },
-                dsse_payload: payload.clone(),
-                dsse_payload_type: bundle::DSSE_PAYLOAD_TYPE.to_owned(),
-                dsse_signature: dsse_signature.clone(),
-                log_index,
-                log_key_id,
-                kind: "dsse".to_owned(),
-                kind_version: kind_version.to_owned(),
-                body: body.clone(),
-                tree_size: 1,
-                proof_log_index: 0,
-                path_hashes: Vec::new(),
-                checkpoint: checkpoint.clone(),
-                signed_entry_timestamp: Vec::new(),
-            };
+            decoded.integrated_time = integrated_time;
+            decoded.log_index = log_index;
+            decoded.log_key_id = log_key_id;
+            decoded.kind_version = kind_version.to_owned();
             assert_eq!(verify_inclusion(&decoded, &trust, &[]), Ok(()));
         }
+    }
+
+    #[test]
+    fn a_checkpoint_with_other_content_lines_verifies() {
+        let (_, _, rekor, root) = single_leaf_log();
+        let checkpoint = signed(&rekor, &note("1", &root, &["extra one", "extra two"]));
+        assert_eq!(inclusion_with(checkpoint), Ok(()));
+    }
+
+    #[test]
+    fn a_checkpoint_of_another_size_is_refused() {
+        // Signed by the log key, so only the size check can refuse it. The
+        // proof was computed against tree size 1; the checkpoint must say 1.
+        let (_, _, rekor, root) = single_leaf_log();
+        for size in ["0", "2", "18446744073709551615", "+1", "01x", ""] {
+            let checkpoint = signed(&rekor, &note(size, &root, &[]));
+            assert_eq!(
+                inclusion_with(checkpoint),
+                Err(VerificationError::SetInvalid),
+                "size {size:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_checkpoint_of_another_root_is_refused() {
+        // Both are signed by the log key: the sha256(root) the old code
+        // expected, and an unrelated root. Only the computed root passes.
+        let (_, _, rekor, root) = single_leaf_log();
+        let hashed: [u8; 32] = Sha256::digest(root).into();
+        for other in [&hashed[..], &[0_u8; 32][..], &root[..16]] {
+            let checkpoint = signed(&rekor, &note("1", other, &[]));
+            assert_eq!(
+                inclusion_with(checkpoint),
+                Err(VerificationError::SetInvalid)
+            );
+        }
+    }
+
+    #[test]
+    fn a_checkpoint_with_a_wrong_signature_is_refused() {
+        use p256::ecdsa::signature::Signer as _;
+
+        let (_, _, rekor, root) = single_leaf_log();
+        let good = note("1", &root, &[]);
+        let hint = test_hint(rekor.verifying_key());
+        // A valid signature over other text, and over the body without its
+        // final newline.
+        for signed_text in [note("1", &root, &["other"]), good.trim_end().to_owned()] {
+            let signature: Signature = rekor.sign(signed_text.as_bytes());
+            let line = note_signature_line("test-log", hint, &signature);
+            assert_eq!(
+                inclusion_with(format!("{good}\n{line}")),
+                Err(VerificationError::SetInvalid)
+            );
+        }
+        // The signature bytes are not DER.
+        let line = format!(
+            "\u{2014} test-log {}\n",
+            BASE64.encode([hint.as_slice(), &[1; 8]].concat())
+        );
+        assert_eq!(
+            inclusion_with(format!("{good}\n{line}")),
+            Err(VerificationError::SetInvalid)
+        );
+    }
+
+    #[test]
+    fn a_checkpoint_with_a_wrong_key_hint_is_refused() {
+        use p256::ecdsa::signature::Signer as _;
+
+        let (_, _, rekor, root) = single_leaf_log();
+        let good = note("1", &root, &[]);
+        let signature: Signature = rekor.sign(good.as_bytes());
+        let mut hint = test_hint(rekor.verifying_key());
+        hint[0] ^= 1;
+        let line = note_signature_line("test-log", hint, &signature);
+        assert_eq!(
+            inclusion_with(format!("{good}\n{line}")),
+            Err(VerificationError::SetInvalid)
+        );
+    }
+
+    #[test]
+    fn a_checkpoint_without_a_signature_line_is_refused() {
+        let (_, _, _, root) = single_leaf_log();
+        let good = note("1", &root, &[]);
+        for checkpoint in [
+            format!("{good}\n"),
+            good.clone(),
+            format!("{good}\nnot a signature line\n"),
+        ] {
+            assert_eq!(
+                inclusion_with(checkpoint),
+                Err(VerificationError::SetInvalid)
+            );
+        }
+    }
+
+    #[test]
+    fn a_checkpoint_needs_a_matching_line_but_ignores_other_keys() {
+        use p256::ecdsa::SigningKey;
+        use p256::ecdsa::signature::Signer as _;
+
+        let (_, _, rekor, root) = single_leaf_log();
+        let good = note("1", &root, &[]);
+        let witness = SigningKey::from_slice(&[0x42; 32]).expect("fixed scalar");
+        let witness_sig: Signature = witness.sign(good.as_bytes());
+        let witness_line =
+            note_signature_line("witness", test_hint(witness.verifying_key()), &witness_sig);
+        let rekor_sig: Signature = rekor.sign(good.as_bytes());
+        let rekor_line =
+            note_signature_line("test-log", test_hint(rekor.verifying_key()), &rekor_sig);
+        // A witness line beside the log's line is fine, before or after it.
+        for lines in [
+            format!("{witness_line}{rekor_line}"),
+            format!("{rekor_line}{witness_line}"),
+        ] {
+            assert_eq!(inclusion_with(format!("{good}\n{lines}")), Ok(()));
+        }
+        // A witness line alone names no trusted key.
+        assert_eq!(
+            inclusion_with(format!("{good}\n{witness_line}")),
+            Err(VerificationError::SetInvalid)
+        );
+    }
+
+    /// A Rekor staging entry, its inclusion proof and its signed checkpoint,
+    /// copied from sigstore-python `test/assets/bundle_v3.txt.sigstore` (pins
+    /// in `rekor-staging-proof.json`), with the staging log key from
+    /// sigstore's staging trusted root.
+    fn staging_log() -> (Decoded, TrustRoot) {
+        let raw: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/rekor-staging-proof.json"))
+                .expect("vector json");
+        let text = |pointer: &str| {
+            raw.pointer(pointer)
+                .and_then(serde_json::Value::as_str)
+                .expect(pointer)
+        };
+        let b64 = |pointer: &str| BASE64.decode(text(pointer)).expect(pointer);
+        let spki_der = b64("/rekorPublicKey");
+        let (_, spki) = x509_parser::x509::SubjectPublicKeyInfo::from_der(&spki_der).expect("spki");
+        let trust = TrustRoot {
+            fulcio_roots: Vec::new(),
+            rekor_key: VerifyingKey::from_sec1_bytes(spki.subject_public_key.data.as_ref())
+                .expect("P-256 key"),
+            root_windows: Vec::new(),
+        };
+        let decoded = Decoded {
+            integrated_time: 1_712_085_549,
+            certs: Vec::new(),
+            statement: bundle::Statement {
+                statement_type: bundle::STATEMENT_TYPE.to_owned(),
+                subject: Vec::new(),
+            },
+            dsse_payload: Vec::new(),
+            dsse_payload_type: bundle::DSSE_PAYLOAD_TYPE.to_owned(),
+            dsse_signature: Vec::new(),
+            log_index: 25_915_956,
+            log_key_id: Vec::new(),
+            kind: "hashedrekord".to_owned(),
+            kind_version: "0.0.1".to_owned(),
+            body: b64("/entry/canonicalizedBody"),
+            tree_size: text("/entry/inclusionProof/treeSize")
+                .parse()
+                .expect("size"),
+            proof_log_index: text("/entry/inclusionProof/logIndex")
+                .parse()
+                .expect("index"),
+            path_hashes: raw
+                .pointer("/entry/inclusionProof/hashes")
+                .and_then(serde_json::Value::as_array)
+                .expect("hashes")
+                .iter()
+                .map(|hash| BASE64.decode(hash.as_str().expect("hash")).expect("hash"))
+                .collect(),
+            checkpoint: text("/entry/inclusionProof/checkpoint/envelope").to_owned(),
+            signed_entry_timestamp: Vec::new(),
+        };
+        (decoded, trust)
+    }
+
+    /// The staging log's checkpoint check on its own: the root comes from the
+    /// real body and proof, then the real checkpoint is verified against it.
+    /// (The real `hashedrekord` body embeds the Fulcio certificate, not a bare
+    /// key, so `verify_inclusion`'s body check is not the subject here.)
+    fn staging_checkpoint(decoded: &Decoded, trust: &TrustRoot) -> Result<(), VerificationError> {
+        let path: Vec<[u8; 32]> = decoded
+            .path_hashes
+            .iter()
+            .map(|hash| <[u8; 32]>::try_from(hash.as_slice()).expect("32 bytes"))
+            .collect();
+        let root = root_from_path(
+            decoded.proof_log_index.cast_unsigned(),
+            decoded.tree_size,
+            rekor_leaf_hash(&decoded.body),
+            &path,
+        )?;
+        verify_checkpoint(
+            &decoded.checkpoint,
+            decoded.tree_size,
+            &root,
+            &trust.rekor_key,
+        )
+    }
+
+    #[test]
+    fn a_real_staging_checkpoint_verifies() {
+        let (decoded, trust) = staging_log();
+        assert_eq!(staging_checkpoint(&decoded, &trust), Ok(()));
+    }
+
+    #[test]
+    fn a_real_staging_checkpoint_is_bound_to_its_size_root_and_key() {
+        // Each change breaks a different rule; none can be re-signed, so
+        // every one must be refused.
+        type Change = fn(&mut Decoded);
+        let changes: [(&str, Change); 4] = [
+            ("size", |d| d.tree_size += 1),
+            ("root", |d| d.path_hashes[0][0] ^= 1),
+            ("text", |d| {
+                d.checkpoint = d.checkpoint.replace("25901138", "25901139");
+            }),
+            ("hint", |d| {
+                d.checkpoint = d.checkpoint.replace("0y8wozBF", "0y8xozBF");
+            }),
+        ];
+        for (name, change) in changes {
+            let (mut decoded, trust) = staging_log();
+            change(&mut decoded);
+            assert_eq!(
+                staging_checkpoint(&decoded, &trust),
+                Err(VerificationError::SetInvalid),
+                "{name}"
+            );
+        }
+        // Another key: the hint no longer names it.
+        let (decoded, _) = staging_log();
+        let (_, other_trust, _, _) = single_leaf_log();
+        assert_eq!(
+            staging_checkpoint(&decoded, &other_trust),
+            Err(VerificationError::SetInvalid)
+        );
     }
 
     #[test]
