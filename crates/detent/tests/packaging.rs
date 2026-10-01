@@ -133,3 +133,29 @@ fn the_configuration_directory_mode_matches_tmpfiles() -> Result<(), &'static st
     }
     Ok(())
 }
+
+/// systemd 261 (testhost, Ubuntu) removes `CAP_SETUID` from a root service that
+/// has `NoNewPrivileges=yes` and any seccomp-based directive, even when the
+/// bounding set lists it; the monitor then cannot drop the worker to its
+/// account (`setuid` gives `EPERM`). `AmbientCapabilities=` keeps
+/// `CAP_SETUID`/`CAP_SETGID` through that exec (Track C A2).
+#[test]
+fn the_unit_keeps_setuid_for_the_worker_drop() {
+    let bounding: Vec<&str> = UNIT
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("CapabilityBoundingSet="))
+        .flat_map(str::split_whitespace)
+        .collect();
+    if unit_value("NoNewPrivileges") == Some("yes")
+        && unit_value("SystemCallFilter").is_some()
+        && bounding.contains(&"CAP_SETUID")
+    {
+        let ambient: Vec<&str> = unit_value("AmbientCapabilities")
+            .map(|caps| caps.split_whitespace().collect())
+            .unwrap_or_default();
+        assert!(
+            ambient.contains(&"CAP_SETUID") && ambient.contains(&"CAP_SETGID"),
+            "AmbientCapabilities lacks CAP_SETUID/CAP_SETGID: {ambient:?}"
+        );
+    }
+}

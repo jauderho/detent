@@ -33,6 +33,12 @@ User=root
 # CAP_SETPCAP lets the monitor drop SETUID/SETGID/KILL (and SETPCAP itself)
 # from the bounding set after it forks the worker; PR_CAPBSET_DROP needs it.
 CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER CAP_SETUID CAP_SETGID CAP_KILL CAP_SETPCAP
+# systemd removes CAP_SETUID from a root service that combines
+# NoNewPrivileges=yes with seccomp-based directives (seen on systemd 261);
+# ambient keeps SETUID/SETGID through that exec so the monitor can drop the
+# worker to its account. The worker's setuid clears ambient; the monitor
+# drops both from its permitted set when it confines.
+AmbientCapabilities=CAP_SETUID CAP_SETGID
 NoNewPrivileges=yes
 
 ProtectSystem=strict
