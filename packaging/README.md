@@ -44,7 +44,9 @@ what makes packaging testable unprivileged, including on macOS. See
 
 After a real install: `systemd-sysusers`, `systemd-tmpfiles --create`, and
 `systemctl daemon-reload` are run automatically, then the script prints the
-next step (`detent setup`). Enabling/starting the service
+next step (`sudo -u detent detent setup`: `setup`, `user` and `token` refuse
+to run as root, since the service account must own the files they write).
+Enabling/starting the service
 (`systemctl enable --now detent`) is left to the operator, matching
 `install.sh` not assuming the config (`/etc/detent/detent.toml`) exists yet.
 

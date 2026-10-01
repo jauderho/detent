@@ -149,30 +149,7 @@ fn mcp_stdio_answers_initialize() -> TestResult {
     std::fs::create_dir_all(&state_root)?;
     let state_arg = state_root.to_string_lossy().to_string();
 
-    let create = run(
-        &[
-            "--state-root",
-            &state_arg,
-            "token",
-            "create",
-            "test-token",
-            "--json",
-        ],
-        "",
-    )?;
-    if create.status.code() != Some(0) {
-        return Err(format!(
-            "token create failed: {}",
-            String::from_utf8_lossy(&create.stderr)
-        )
-        .into());
-    }
-    let created: serde_json::Value = serde_json::from_slice(&create.stdout)?;
-    let token = created
-        .get("token")
-        .and_then(|v| v.as_str())
-        .ok_or("missing token field")?
-        .to_owned();
+    let token = mint_token(&state_arg, false)?;
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_detent"))
         .args(["--state-root", &state_arg, "mcp"])
@@ -235,8 +212,37 @@ fn mcp_stdio_answers_initialize() -> TestResult {
 
 /// Mints a token in `state` through the binary itself, write-scoped when
 /// `write`, and returns its secret.
+///
+/// As root the binary refuses `token create` (exit 3; it must run as the
+/// service account), which this checks before minting through the token
+/// store directly, so the MCP tests still run when the suite does as root.
 #[cfg(feature = "mcp")]
 fn mint_token(state: &str, write: bool) -> Result<String, Box<dyn std::error::Error>> {
+    if rustix::process::geteuid().is_root() {
+        let refused = run(
+            &[
+                "--locale",
+                "en-US",
+                "--state-root",
+                state,
+                "token",
+                "create",
+                "mcp-test",
+            ],
+            "",
+        )?;
+        assert_eq!(code(&refused), Some(3));
+        let notes = String::from_utf8(refused.stderr)?;
+        assert!(notes.contains("sudo -u detent detent token"), "{notes}");
+        let scope = if write {
+            detent_web::authz::Scope::Write
+        } else {
+            detent_web::authz::Scope::Read
+        };
+        let store = detent_web::auth::TokenStore::load(std::path::Path::new(state))?;
+        let (secret, _) = store.issue("mcp-test", scope, None)?;
+        return Ok(secret.expose().to_owned());
+    }
     let mut args = vec![
         "--state-root",
         state,
@@ -877,6 +883,30 @@ fn setup_prompts_twice_on_the_terminal_without_echo() -> TestResult {
     let state = tmp.path().join("state-root");
     let config = tmp.path().join("detent.toml");
     std::fs::write(&config, "[auth.argon2]\nm_kib = 19456\nt = 1\np = 1\n")?;
+
+    // As root `setup` prompts for nothing: it is refused (exit 3) before the
+    // state root is touched, since it must run as the service account.
+    if rustix::process::geteuid().is_root() {
+        let state_arg = state.to_string_lossy();
+        let config_arg = config.to_string_lossy();
+        let output = run(
+            &[
+                "--locale",
+                "en-US",
+                "--state-root",
+                &state_arg,
+                "--config",
+                &config_arg,
+                "setup",
+            ],
+            "",
+        )?;
+        assert_eq!(code(&output), Some(3));
+        let notes = String::from_utf8(output.stderr)?;
+        assert!(notes.contains("sudo -u detent detent setup"), "{notes}");
+        assert!(!state.exists());
+        return Ok(());
+    }
 
     let (exit, shown, notes) =
         setup_on_a_terminal(&state, &config, &["first-pass", "second-pass"])?;

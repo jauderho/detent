@@ -127,6 +127,7 @@ cli-token-revoked = token {$id} was revoked.
 cli-token-no-tokens = no tokens have been issued.
 cli-token-line = {$id}  {$label}  {$scopes}  {$created}  {$expires}
 cli-credential-failed = the request could not be completed: {$reason}
+cli-state-command-as-root = detent {$command} must not run as root: the files it writes would belong to root, and the service could not read them. Run it as the service account instead: sudo -u {$account} detent {$command}
 
 ## cert status
 cli-cert-source = source: {$source}

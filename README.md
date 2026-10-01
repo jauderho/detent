@@ -87,16 +87,20 @@ detent completions bash
 Create the first account, then start the server. It listens on **:3333**, TLS
 1.3 only, with a self-signed certificate until ACME is configured.
 
+`setup`, `user` and `token` write files the server's `detent` service account
+must read, so on a packaged install run them as that account; they refuse to
+run as root. In an unprivileged dev run, drop the `sudo -u detent` prefix.
+
 ```bash
-detent setup                   # prompts for a password; never takes one on argv
+sudo -u detent detent setup    # prompts for a password; never takes one on argv
 detent serve
 ```
 
 API tokens for scripting, read-only unless `--write`:
 
 ```bash
-detent token create ci-readonly
-detent token list
+sudo -u detent detent token create ci-readonly
+sudo -u detent detent token list
 ```
 
 Ask the running server to renew its ACME certificate now, with a write token
@@ -104,7 +108,7 @@ from a file (`0600`, not a symlink) or `DETENT_TOKEN`, never argv. The server
 starts at most one forced order per hour:
 
 ```bash
-(umask 077; detent --json token create renew-bot --write | jq -r .token > ~/.detent-token)
+(umask 077; sudo -u detent detent --json token create renew-bot --write | jq -r .token > ~/.detent-token)
 detent cert renew --token-file ~/.detent-token
 ```
 

@@ -238,7 +238,7 @@ deferred by the owner.
    `ReadWritePaths`, staging in `RuntimeDirectory=`, `CAP_SETPCAP`, no
    `StateDirectory=`, `ConfigurationDirectoryMode=0750`, and error causes in
    the journal. A2-a fixed 2026-10-01 (ambient capabilities); A2 then
-   passes with the shipped unit. Open (§4): A2-b `detent setup` as root.
+   passes with the shipped unit. A2-b fixed 2026-10-01. A2 is done.
 3. **A3 — negative checks never run.** In a throwaway worktree with its own
    target dir, remove each fix, run its pinning test, and quote the failure.
    A test that does not fail is vacuous: write a real one first.
@@ -355,11 +355,9 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   stay with capabilities. Cause: systemd 261 drops `CAP_SETUID` from a root
   service with `NoNewPrivileges=yes` plus any seccomp-based directive. Fix:
   `AmbientCapabilities=CAP_SETUID CAP_SETGID`; `NoNewPrivileges=yes` stays.
-- A2-b: `sudo detent setup` (what the installer and README suggest)
-  writes `/var/lib/detent/state/users.json` as root, and the worker
-  (`detent`) cannot read it, so `serve` fails. — proposed: when run as
-  root, `setup`/`user`/`token` refuse and say `sudo -u detent detent
-  setup`; the installer prints that — owner answer:
+- A2-b: `sudo detent setup` wrote root-owned state the worker could not
+  read. — owner answer (2026-10-01): refuse as root. Done: `setup`, `user`
+  and `token` exit 3 as root and name `sudo -u detent detent <command>`.
 - Track G: defer `hickory-client`, the TPM attestor and the LE staging run past
   v1, so Phase 6 can close? — proposed: defer the TPM attestor; keep the other
   two for v1 — owner answer:
