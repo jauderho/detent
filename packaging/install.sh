@@ -277,7 +277,7 @@ do_install() {
 
   log_ok "install complete (mode: $MODE)"
   if ((DRYRUN == 0)) && [[ -z "$PREFIX" ]]; then
-    log_info "next: run 'detent setup' to create the admin user and configure listen/ACME"
+    log_info "next: run 'sudo -u detent detent setup' to create the admin user and configure listen/ACME"
   fi
 }
 

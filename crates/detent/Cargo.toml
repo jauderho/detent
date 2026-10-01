@@ -54,6 +54,9 @@ detent-mcp = { path = "../detent-mcp", optional = true }
 # pseudo-terminal, since a test process has no controlling terminal.
 rustix = { workspace = true, features = ["pty", "termios"] }
 tempfile = { workspace = true }
+# The MCP tests mint their token through the store when they run as root,
+# where `detent token create` is refused (it must run as the service account).
+detent-web = { path = "../detent-web" }
 # Certificates with chosen names and validity for the ACME install tests.
 rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
 

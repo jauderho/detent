@@ -45,6 +45,7 @@ use detent_platform::host::Detected;
 use detent_platform::privsep::allowlist::{Allowlist, Config, DEFAULT_STATE_ROOT};
 use detent_platform::privsep::monitor::{ExitReason, Hooks, Monitor, MonitorError, StateLock};
 use detent_platform::privsep::proto::{BackupId, CommitId};
+use detent_platform::privsep::spawn::{DEFAULT_WORKER_USER, is_root};
 use detent_platform::privsep::transport::Channel;
 use detent_platform::privsep::worker::Client;
 use detent_platform::service::checks::ExternalCheckRunner;
@@ -199,13 +200,19 @@ pub(crate) fn init_tracing() {
 /// code, and there is nowhere left to report it.
 #[must_use]
 pub fn run(cli: &Cli, streams: &mut Streams<'_>) -> Exit {
+    run_as(cli, streams, is_root())
+}
+
+/// [`run`], with whether the effective uid is root given rather than read,
+/// so a test can be either without being it.
+fn run_as(cli: &Cli, streams: &mut Streams<'_>, euid_is_root: bool) -> Exit {
     let messages = Messages::new(cli.locale.as_deref());
     let renderer = Renderer {
         messages: &messages,
         json: cli.json,
         verbose: cli.verbose,
     };
-    match dispatch(cli, &renderer, streams) {
+    match dispatch(cli, &renderer, streams, euid_is_root) {
         Ok(exit) => exit,
         // The only errors reaching here are write failures on a stream we
         // would have to use to report them.
@@ -213,11 +220,13 @@ pub fn run(cli: &Cli, streams: &mut Streams<'_>) -> Exit {
     }
 }
 
-/// Dispatches one command.
+/// Dispatches one command; `euid_is_root` is whether the effective uid is
+/// root, which `setup`, `user` and `token` refuse.
 fn dispatch(
     cli: &Cli,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
+    euid_is_root: bool,
 ) -> std::io::Result<Exit> {
     // `detent --self-test` is the whole command (PLAN §2.9 step 5): with a
     // subcommand it is a usage error, never a silently ignored flag.
@@ -239,6 +248,18 @@ fn dispatch(
             ("config", &settings.config_path.display().to_string()),
         ],
     )?;
+
+    // The account and token files these write would be root-owned and
+    // private, and the `serve` worker, which runs as the service account,
+    // could not read them: refused before the state root is touched.
+    if euid_is_root && let Some(command) = state_command(cli.command.as_ref()) {
+        renderer.line(
+            streams.notes,
+            MessageId::new("cli-state-command-as-root"),
+            &[("command", command), ("account", DEFAULT_WORKER_USER)],
+        )?;
+        return Ok(Exit::Privilege);
+    }
 
     match &cli.command {
         // `detent --self-test` (PLAN §2.9 step 5): the updater's health probe.
@@ -292,6 +313,24 @@ fn dispatch(
         ),
         _ => operate(cli, &settings, renderer, streams),
     }
+}
+
+/// The name of `command` when it writes the account and token stores under
+/// the state root (`setup`, `user`, `token`), which must not run as root.
+#[cfg(feature = "web")]
+fn state_command(command: Option<&Command>) -> Option<&'static str> {
+    match command {
+        Some(Command::Setup(_)) => Some("setup"),
+        Some(Command::User { .. }) => Some("user"),
+        Some(Command::Token { .. }) => Some("token"),
+        _ => None,
+    }
+}
+
+/// Without `web` there are no account or token commands.
+#[cfg(not(feature = "web"))]
+fn state_command(_command: Option<&Command>) -> Option<&'static str> {
+    None
 }
 
 /// `config <module> defaults`: the module's own defaults for this host.
@@ -3448,7 +3487,9 @@ mod tests {
 
     /// `setup`, `user add` and `token create` each reach `dispatch`'s own
     /// match arm (not just `webadmin`'s functions, which the module's own
-    /// tests call directly) through the one public entry point, `run`.
+    /// tests call directly) through `run_as`, the body of the one public
+    /// entry point `run`, as a non-root euid: the suite may itself run as
+    /// root, where these commands are refused.
     #[cfg(feature = "web")]
     #[test]
     fn setup_user_and_token_commands_are_wired_through_dispatch() -> R {
@@ -3467,13 +3508,14 @@ mod tests {
         let mut input = b"hunter22\nhunter22\n".as_slice();
         let mut out = Vec::new();
         let mut notes = Vec::new();
-        let exit = run(
+        let exit = super::run_as(
             &cli,
             &mut Streams {
                 input: &mut input,
                 out: &mut out,
                 notes: &mut notes,
             },
+            false,
         );
         assert_eq!(exit, Exit::Ok, "{}", String::from_utf8_lossy(&notes));
 
@@ -3490,13 +3532,14 @@ mod tests {
         let mut input = b"hunter22\nhunter22\n".as_slice();
         let mut out = Vec::new();
         let mut notes = Vec::new();
-        let exit = run(
+        let exit = super::run_as(
             &cli,
             &mut Streams {
                 input: &mut input,
                 out: &mut out,
                 notes: &mut notes,
             },
+            false,
         );
         assert_eq!(exit, Exit::Ok, "{}", String::from_utf8_lossy(&notes));
 
@@ -3513,15 +3556,76 @@ mod tests {
         let mut input = std::io::empty();
         let mut out = Vec::new();
         let mut notes = Vec::new();
-        let exit = run(
+        let exit = super::run_as(
             &cli,
             &mut Streams {
                 input: &mut input,
                 out: &mut out,
                 notes: &mut notes,
             },
+            false,
         );
         assert_eq!(exit, Exit::Ok, "{}", String::from_utf8_lossy(&notes));
+        Ok(())
+    }
+
+    /// As root, `setup`, `user …` and `token …` (dry run included) are
+    /// refused with exit 3 and the service-account form to run instead,
+    /// before the state root is touched or a password is read: files they
+    /// wrote would be root-owned, and the worker (the `detent` account)
+    /// could not read them.
+    #[cfg(feature = "web")]
+    #[test]
+    fn state_commands_are_refused_as_root_and_touch_nothing() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let state_root = dir.path().join("state-root");
+        let state = state_root.display().to_string();
+        let config = dir.path().join("absent.toml").display().to_string();
+
+        for (words, command) in [
+            (&["setup"][..], "setup"),
+            (&["--dryrun", "setup"][..], "setup"),
+            (&["user", "add", "bob"][..], "user"),
+            (&["user", "passwd", "bob"][..], "user"),
+            (&["user", "rm", "bob"][..], "user"),
+            (&["token", "create", "ci"][..], "token"),
+            (&["token", "revoke", "abc"][..], "token"),
+            (&["token", "list"][..], "token"),
+        ] {
+            let mut argv = vec![
+                "detent",
+                "--locale",
+                "en-US",
+                "--state-root",
+                &state,
+                "--config",
+                &config,
+            ];
+            argv.extend_from_slice(words);
+            let cli = parse(&argv)?;
+            let typed = b"hunter22\nhunter22\n";
+            let mut input = typed.as_slice();
+            let mut out = Vec::new();
+            let mut notes = Vec::new();
+            let exit = super::run_as(
+                &cli,
+                &mut Streams {
+                    input: &mut input,
+                    out: &mut out,
+                    notes: &mut notes,
+                },
+                true,
+            );
+            let notes = String::from_utf8(notes)?;
+            assert_eq!(exit, Exit::Privilege, "{argv:?}: {notes}");
+            assert!(
+                notes.contains(&format!("sudo -u detent detent {command}")),
+                "{argv:?}: {notes}"
+            );
+            assert!(out.is_empty(), "{argv:?}");
+            assert_eq!(input, typed, "{argv:?}: a password was read");
+            assert!(!state_root.exists(), "{argv:?}: the state root was created");
+        }
         Ok(())
     }
 
@@ -3867,6 +3971,7 @@ mod tests {
                     out: &mut out,
                     notes: &mut crate::tests_support::FailAfter::new(0),
                 },
+                false,
             );
             Ok(result.is_err())
         };
