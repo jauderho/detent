@@ -24,7 +24,7 @@ members = [
 exclude = ["spikes", "fuzz", "web"]
 
 [workspace.package]
-version = "0.0.1-rc"
+version = "0.0.1-rc.2"
 edition = "2024"
 rust-version = "1.98"
 license = "BSD-3-Clause"

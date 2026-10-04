@@ -7,7 +7,7 @@
       "name": "BSD-3-Clause",
       "identifier": "BSD-3-Clause"
     },
-    "version": "0.0.1-rc"
+    "version": "0.0.1-rc.2"
   },
   "paths": {
     "/api/v1/audit": {
