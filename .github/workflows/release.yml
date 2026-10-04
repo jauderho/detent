@@ -113,6 +113,19 @@ jobs:
         with:
           persist-credentials: false
 
+      # The updater compares release tags with CARGO_PKG_VERSION. A tag
+      # that differs from the crate version makes a binary that reports
+      # another version, and devices would offer the same release again.
+      - name: Tag must equal the crate version
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          crate=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          if [[ "${GITHUB_REF_NAME#v}" != "$crate" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match crate version $crate" >&2
+            exit 1
+          fi
+
       # Reproducible builds: the epoch is the last commit time (not wall
       # clock), and absolute paths are remapped out of the binary, so the
       # same tree + toolchain produces byte-identical artifacts. Written to
