@@ -33,15 +33,36 @@ env:
 jobs:
   build:
     name: Build (${{ matrix.target }})
-    runs-on: ubuntu-26.04
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
+        # PLAN §1.6: Linux musl is cross-built with zigbuild; macOS is built
+        # natively on the macOS runner (the arm64 runner links the x86_64
+        # target with the Xcode toolchain). No macOS signing in v1.
         target:
           - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-musl
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-26.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-26.04
+          # MACOSX_DEPLOYMENT_TARGET is rustc's own default for each triple
+          # (`rustc --print deployment-target --target <triple>`). Set it
+          # so the `cc` crate builds C code (mimalloc, aws-lc) for the same
+          # minimum; unset, `cc` uses the runner's SDK version, so the
+          # binary would depend on the runner image.
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            macos-deployment-target: "11.0"
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            macos-deployment-target: "10.12"
     steps:
       # Block mode. The allow list is what the ci.yml `size` job (same
       # checkout, cache, zig, cargo install and bun steps) reached in audit
@@ -51,6 +72,7 @@ jobs:
       # own domains are also allowed implicitly by harden-runner. Extend the
       # list from the blocked-call annotations; do not fall back to audit.
       - name: Harden Runner
+        if: runner.os == 'Linux'
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: block
@@ -65,6 +87,15 @@ jobs:
             static.crates.io:443
             registry.npmjs.org:443
             ziglang.org:443
+
+      # harden-runner supports GitHub-hosted macOS runners in audit mode
+      # only (its README at this pin), so the macOS legs are monitored but
+      # not blocked.
+      - name: Harden Runner (audit, macOS)
+        if: runner.os == 'macOS'
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
 
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -101,11 +132,13 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Install Zig
+        if: runner.os == 'Linux'
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: "0.16.0"
 
       - name: Install cargo-zigbuild
+        if: runner.os == 'Linux'
         run: cargo install cargo-zigbuild --version 0.23.2 --locked
 
       # cargo auditable wraps any cargo build subcommand (zigbuild included)
@@ -129,13 +162,22 @@ jobs:
           bun run build
 
       - name: Build detent (release, ${{ matrix.target }})
+        if: runner.os == 'Linux'
         run: cargo auditable zigbuild --release --locked -p detent --target ${{ matrix.target }} --features ui
+
+      # Same flags and features as the Linux build; plain `build` because
+      # the macOS targets need no cross linker.
+      - name: Build detent (release, ${{ matrix.target }}, macOS)
+        if: runner.os == 'macOS'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos-deployment-target }}
+        run: cargo auditable build --release --locked -p detent --target ${{ matrix.target }} --features ui
 
       - name: Stage release assets
         run: |
           set -euo pipefail
           # The binary keeps its target triple in the name so the publish job
-          # can merge both matrix artifacts into one directory without
+          # can merge all matrix artifacts into one directory without
           # collisions.
           mkdir -p release/${{ matrix.target }}
           cp target/${{ matrix.target }}/release/detent \
@@ -200,8 +242,8 @@ jobs:
         run: cargo install cargo-cyclonedx --version 0.5.9 --locked
 
       # Emits one bom.json per workspace crate next to its Cargo.toml.
-      # `--target all` so target-specific dependencies of both musl triples
-      # are described, not just the host's.
+      # `--target all` so target-specific dependencies of every release
+      # triple are described, not just the host's.
       - name: cargo cyclonedx (Rust workspace)
         run: cargo cyclonedx --format json --spec-version 1.5 --target all
 
@@ -294,7 +336,7 @@ jobs:
           path: dist
 
       # Contract: SHA256SUMS covers the binaries only. `detent-*` in dist
-      # matches exactly the two binaries: the sigstore bundles are written
+      # matches exactly the four binaries: the sigstore bundles are written
       # to dist/sigstore/ later and the SBOM has a different name.
       - name: Generate SHA256SUMS
         working-directory: dist
@@ -314,8 +356,8 @@ jobs:
           subject-path: dist/detent-*
 
       # The self-updater verifies this DSSE bundle (ADR-014), fetched as
-      # detent-<triple>.sigstore.json. One attestation covers both binaries
-      # as two subjects; the verifier accepts it because it requires exactly
+      # detent-<triple>.sigstore.json. One attestation covers all binaries
+      # as its subjects; the verifier accepts it because it requires exactly
       # one subject with the downloaded file's digest
       # (crates/detent-update/src/verify.rs, step 5), so the same bundle is
       # copied under each binary's name.

@@ -56,8 +56,10 @@ advisories bypass the cooldown. Do not lower these values.
    git tag -s v0.1.0 -m "detent v0.1.0"
    git push origin v0.1.0
    ```
-3. `release.yml` triggers on the `v*` tag: `cargo zigbuild --locked` +
-   `cargo auditable` for both targets with
+3. `release.yml` triggers on the `v*` tag: `cargo auditable` with
+   `--locked` for four targets (`x86_64`/`aarch64-unknown-linux-musl` via
+   `cargo zigbuild` on Linux runners, `aarch64`/`x86_64-apple-darwin` via
+   `cargo build` on a macOS runner, not signed or notarized) with
    `SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)` and
    `RUSTFLAGS="--remap-path-prefix=$PWD=/src --remap-path-prefix=$CARGO_HOME=/cargo"`,
    `bun install --frozen-lockfile` for the SPA, merged CycloneDX SBOM
@@ -66,7 +68,7 @@ advisories bypass the cooldown. Do not lower these values.
    and `SBOM.cyclonedx.json` via `gh release create --verify-tag`. The
    bundles are the `actions/attest` build-provenance bundle (Sigstore bundle
    v0.3, DSSE envelope, SLSA provenance predicate). One attestation names
-   both binaries as subjects, so each `.sigstore.json` file is a copy of
+   all binaries as subjects, so each `.sigstore.json` file is a copy of
    that one bundle. The self-updater verifies it (ADR-014). `SHA256SUMS`
    covers the binaries only.
 4. Watch the run (`gh run watch`); it must finish green before the release is
@@ -76,6 +78,8 @@ advisories bypass the cooldown. Do not lower these values.
    ```
    gh attestation verify detent-x86_64-unknown-linux-musl -R jauderho/detent
    gh attestation verify detent-aarch64-unknown-linux-musl -R jauderho/detent
+   gh attestation verify detent-aarch64-apple-darwin -R jauderho/detent
+   gh attestation verify detent-x86_64-apple-darwin -R jauderho/detent
    gh release verify v0.1.0 -R jauderho/detent
    ```
    Each asset must verify with the workflow identity pinned to
