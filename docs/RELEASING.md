@@ -63,7 +63,12 @@ advisories bypass the cooldown. Do not lower these values.
    `bun install --frozen-lockfile` for the SPA, merged CycloneDX SBOM
    (`cargo cyclonedx` + `cdxgen`), then publishes `detent-<target-triple>`,
    per-asset `detent-<target-triple>.sigstore.json` bundles, `SHA256SUMS`,
-   and `SBOM.cyclonedx.json` via `gh release create --verify-tag`.
+   and `SBOM.cyclonedx.json` via `gh release create --verify-tag`. The
+   bundles are the `actions/attest` build-provenance bundle (Sigstore bundle
+   v0.3, DSSE envelope, SLSA provenance predicate). One attestation names
+   both binaries as subjects, so each `.sigstore.json` file is a copy of
+   that one bundle. The self-updater verifies it (ADR-014). `SHA256SUMS`
+   covers the binaries only.
 4. Watch the run (`gh run watch`); it must finish green before the release is
    announced. Do not retry by re-tagging — the tag is protected; delete the
    draft release and push a new patch tag instead.
