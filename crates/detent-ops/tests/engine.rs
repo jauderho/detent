@@ -1811,6 +1811,8 @@ fn a_commit_confirm_apply_without_a_backup_is_refused() -> TestResult {
         }),
         Err(OpsError::NoBackup)
     ));
+    // The refusal must disarm the window it just armed.
+    assert!(fx.engine.pending_commit()?.is_none());
     fx.finish()
 }
 
