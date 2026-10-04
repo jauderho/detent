@@ -2741,6 +2741,68 @@ mod web_tests {
         Ok(())
     }
 
+    /// `run_monitor` itself must recover a leftover pending-commit marker
+    /// before it serves: the recovery call is not covered by the tests that
+    /// call `report_recovery` directly.
+    #[test]
+    fn run_monitor_recovers_a_leftover_marker_before_serving() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let state = dir.path().join("state");
+        let target = dir.path().join("target.conf");
+        let backup = dir.path().join("target.conf.v1");
+        std::fs::create_dir_all(&state)?;
+        std::fs::write(&target, b"v2")?;
+        std::fs::write(&backup, b"v1")?;
+        std::fs::write(
+            state.join(detent_platform::privsep::monitor::PENDING_COMMIT_MARKER),
+            serde_json::to_vec(&detent_platform::privsep::monitor::PendingCommitMarker {
+                commit: detent_platform::privsep::proto::CommitId(7).get(),
+                deadline_unix_ms: 0,
+                entries: vec![detent_platform::privsep::monitor::RollbackEntry {
+                    target: 0,
+                    path: target.clone(),
+                    backup,
+                    new_digest: None,
+                }],
+                service: None,
+            })?,
+        )?;
+        let allow = Allowlist::from_modules(&[], &AllowConfig::with_state_root(&state))?;
+        let (monitor_end, worker_end) = Channel::pair()?;
+        let worker = std::thread::spawn(move || {
+            let mut client = Client::new(worker_end);
+            let _ = client.hello();
+            let _ = client.shutdown();
+        });
+        let child = std::process::Command::new("true").spawn()?;
+        let handle = MonitorHandle {
+            child_pid: i32::try_from(child.id())?,
+            channel: monitor_end,
+        };
+        let messages = Messages::new(Some("en-US"));
+        let renderer = renderer(&messages);
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let mut input = std::io::empty();
+        let exit = run_monitor(
+            &Detected::default(),
+            allow,
+            handle,
+            idle_runner()?,
+            true,
+            &renderer,
+            &mut crate::run::Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        assert_eq!(exit, Exit::Ok, "{}", String::from_utf8_lossy(&notes));
+        worker.join().map_err(|_| "worker thread panicked")?;
+        assert_eq!(std::fs::read(&target)?, b"v1");
+        Ok(())
+    }
+
     /// `run` itself, called with a malformed `detent.toml`, reports the
     /// failure and returns before `spawn_pair` is ever called — the `Err`
     /// arm of `run`'s own `preflight_web_config` match, which
