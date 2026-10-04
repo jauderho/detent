@@ -117,15 +117,19 @@ No partial state, no retries with weaker checks.
 ### Embedded trust root and refresh procedure
 
 Trust material is embedded at build time (PLAN §2.9 step 4) in
-`crates/detent-update/trust/`: Fulcio root certificate(s) and the Rekor log
-public key, extracted from the current Sigstore TUF root.
+`crates/detent-update/trust/`: the Fulcio intermediate and root certificates
+(each an anchor; v0.3 bundles carry only the leaf) and the Rekor log public
+key, extracted from Sigstore's `trusted_root.json` (2026-10-03: root-signing
+commit 5888f35, recorded in `trust::TRUST_MANIFEST`).
 
 Refresh procedure (per release, and out-of-band when Sigstore rotates roots):
 1. Fetch the current Sigstore TUF snapshot with the TUF client and verify the
    metadata chain up to the pinned TUF root (the only pinned secret).
 2. Extract the active Fulcio root CA(s) and Rekor log key.
-3. Write them to `crates/detent-update/trust/` as constants with their
-   validity windows, plus a manifest recording the TUF snapshot version.
+3. Write them to `crates/detent-update/trust/` as PEM files, and set
+   `TRUST_MANIFEST` to the source commit and `trusted_root.json` SHA-256.
+   Do not copy a retired CA: the verifier honours the certificate's own
+   validity, not `trusted_root.json` `validFor`.
 4. Commit in the release PR; the release binary then carries the refreshed
    root. Multiple roots with overlapping validity windows are accepted, so a
    device updating across a rotation never hits a gap. A device that cannot
