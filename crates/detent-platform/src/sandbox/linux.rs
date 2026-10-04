@@ -117,7 +117,7 @@ fn already_unprivileged(
     if leftover.is_empty() {
         return Some(Outcome::Applied);
     }
-    leftover.sort_by_key(|cap| cap.index());
+    leftover.sort_by_key(CapsCapability::index);
     let names: Vec<String> = leftover.iter().map(ToString::to_string).collect();
     Some(Outcome::Unavailable {
         reason: format!(
