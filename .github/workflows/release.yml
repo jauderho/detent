@@ -80,14 +80,15 @@ jobs:
       # ziglang.org; the tarball is minisign-verified either way). GitHub's
       # own domains are also allowed implicitly by harden-runner. Extend the
       # list from the blocked-call annotations; do not fall back to audit.
-      # Keep wildcard entries last in every list: this harden-runner pin
-      # refused the entries after one (release dry run 37173368384).
+      # Give every list as a folded (`>`) scalar: this harden-runner pin
+      # takes a space-separated list, and with a `|` list it allowed none
+      # of the entries (release dry runs 37173368384 and 37173751335).
       - name: Harden Runner
         if: runner.os == 'Linux'
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: block
-          allowed-endpoints: |
+          allowed-endpoints: >
             github.com:443
             api.github.com:443
             release-assets.githubusercontent.com:443
@@ -216,7 +217,7 @@ jobs:
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: block
-          allowed-endpoints: |
+          allowed-endpoints: >
             api.github.com:443
             results-receiver.actions.githubusercontent.com:443
             productionresultssa*.blob.core.windows.net:443
@@ -255,7 +256,7 @@ jobs:
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: block
-          allowed-endpoints: |
+          allowed-endpoints: >
             github.com:443
             api.github.com:443
             release-assets.githubusercontent.com:443
@@ -366,7 +367,7 @@ jobs:
           # audit output on the first release run will call out anything
           # missing — extend the list, do not fall back to audit.
           egress-policy: block
-          allowed-endpoints: |
+          allowed-endpoints: >
             api.github.com:443
             github.com:443
             fulcio.sigstore.dev:443
