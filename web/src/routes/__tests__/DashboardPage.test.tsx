@@ -10,7 +10,8 @@
  */
 
 import { describe, expect, it } from 'bun:test'
-import { screen } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import type { SessionView } from '@/api/auth'
 import type { ModuleDescriptor } from '@/api/modules'
 import type { AuditRecord, CertReport, HostReport, UpdateReport } from '@/api/system'
@@ -288,5 +289,106 @@ describe('DashboardPage — update status', () => {
     expect(await screen.findByText(/modules are compiled into this build\.$/)).toHaveTextContent(
       '2',
     )
+  })
+})
+
+describe('DashboardPage — install update', () => {
+  const READ_ONLY: SessionView = { ...SESSION, scopes: ['read'] }
+
+  function installHandlers(session: SessionView, respond: () => Response): UrlRule[] {
+    return [
+      ['/auth/session', () => jsonResponse(session)],
+      ['POST /system/update', respond],
+      ...allHandlers().filter(([pattern]) => pattern !== '/auth/session'),
+    ]
+  }
+
+  function posts(stub: ReturnType<typeof stubFetchByUrl>) {
+    return stub.calls.filter(
+      (call) => call.url.includes('/system/update') && call.init.method === 'POST',
+    )
+  }
+
+  it('shows the install button for a write session with an update available', async () => {
+    const stub = stubFetchByUrl(installHandlers(SESSION, () => jsonResponse({ version: 'v0.0.2' })))
+    renderWithProviders(<DashboardPage />, { fetch: stub.fetch })
+
+    expect(await screen.findByRole('button', { name: /install.*v0\.0\.2/ })).toBeEnabled()
+  })
+
+  it('hides the button for a read-only session', async () => {
+    const stub = stubFetchByUrl(
+      installHandlers(READ_ONLY, () => jsonResponse({ version: 'v0.0.2' })),
+    )
+    renderWithProviders(<DashboardPage />, { fetch: stub.fetch })
+
+    expect(await screen.findByText(/release .*v0\.0\.2.* is available/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /install/ })).not.toBeInTheDocument()
+  })
+
+  it('hides the button when no update is available', async () => {
+    const stub = stubFetchByUrl([
+      ['/system/update', () => jsonResponse({ ...UPDATE_REPORT, update_available: false })],
+      ...installHandlers(SESSION, () => jsonResponse({ version: 'v0.0.2' })),
+    ])
+    renderWithProviders(<DashboardPage />, { fetch: stub.fetch })
+
+    expect(
+      await screen.findByText('no newer release is offered for this build.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /install/ })).not.toBeInTheDocument()
+  })
+
+  it('asks first, naming the restart, and sends nothing until confirmed', async () => {
+    const user = userEvent.setup()
+    const stub = stubFetchByUrl(installHandlers(SESSION, () => jsonResponse({ version: 'v0.0.2' })))
+    renderWithProviders(<DashboardPage />, { fetch: stub.fetch })
+
+    await user.click(await screen.findByRole('button', { name: /install.*v0\.0\.2/ }))
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog).toHaveTextContent(/restarts/)
+    expect(dialog).toHaveTextContent(/reconnect/)
+    expect(posts(stub)).toHaveLength(0)
+
+    await user.click(screen.getByRole('button', { name: 'cancel' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(posts(stub)).toHaveLength(0)
+  })
+
+  it('posts the tag on confirm and shows the success banner', async () => {
+    const user = userEvent.setup()
+    const stub = stubFetchByUrl(installHandlers(SESSION, () => jsonResponse({ version: 'v0.0.2' })))
+    renderWithProviders(<DashboardPage />, { fetch: stub.fetch })
+
+    await user.click(await screen.findByRole('button', { name: /install.*v0\.0\.2/ }))
+    await user.click(await screen.findByRole('button', { name: 'install' }))
+
+    expect(await screen.findByText(/v0\.0\.2.* is installed/)).toBeInTheDocument()
+    await waitFor(() => {
+      expect(posts(stub)).toHaveLength(1)
+    })
+    expect(JSON.parse(String(posts(stub)[0]?.init.body))).toEqual({ version: 'v0.0.2' })
+    // The mutation refetches the update status.
+    const gets = stub.calls.filter(
+      (call) => call.url.includes('/system/update') && call.init.method !== 'POST',
+    )
+    expect(gets.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('shows the mapped server message when the install fails', async () => {
+    const user = userEvent.setup()
+    const stub = stubFetchByUrl(
+      installHandlers(SESSION, () => errorResponse(503, 'web-update-check-failed')),
+    )
+    renderWithProviders(<DashboardPage />, { fetch: stub.fetch })
+
+    await user.click(await screen.findByRole('button', { name: /install.*v0\.0\.2/ }))
+    await user.click(await screen.findByRole('button', { name: 'install' }))
+
+    expect(
+      await screen.findByText(
+        'the update check could not reach the release server; try again later.',
+      ),
+    ).toBeInTheDocument()
   })
 })

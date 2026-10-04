@@ -74,6 +74,13 @@ export function requestCertRenew(client: ApiClient): Promise<ApiResult<RenewRequ
   return client.post('/api/v1/system/cert/renew', {})
 }
 
+export type UpdateApplied = components['schemas']['UpdateAppliedView']
+
+/** `POST /api/v1/system/update`. Needs `write`. Installs `version`, e.g. `v1.2.3`. */
+export function applyUpdate(client: ApiClient, version: string): Promise<ApiResult<UpdateApplied>> {
+  return client.post('/api/v1/system/update', { body: { version } })
+}
+
 // ── hooks ───────────────────────────────────────────────────────────────────
 
 export function useHostProfile(): UseQueryResult<HostReport, ApiRequestError> {
@@ -93,9 +100,8 @@ export function useCert(): UseQueryResult<CertReport, ApiRequestError> {
 }
 
 /**
- * The update status. Read-only by design: this build reports what the update
- * policy says is available, and installs nothing — there is no apply control
- * until the privileged swap lands (PLAN §2.9).
+ * The update status. Read-only: it reports what the update policy says is
+ * available. Installing is `useApplyUpdate`.
  */
 export function useUpdate(): UseQueryResult<UpdateReport, ApiRequestError> {
   const client = useApiClient()
@@ -125,6 +131,22 @@ export function useRequestCertRenew(): UseMutationResult<RenewRequested, ApiRequ
     mutationFn: () => unwrap(requestCertRenew(client)),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: CERT_QUERY_KEY })
+    },
+  })
+}
+
+/**
+ * Install the named update. The server restarts the service after the swap,
+ * so the update status is invalidated on success and the page may lose its
+ * connection until the new process answers.
+ */
+export function useApplyUpdate(): UseMutationResult<UpdateApplied, ApiRequestError, string> {
+  const client = useApiClient()
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (version: string) => unwrap(applyUpdate(client, version)),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: UPDATE_QUERY_KEY })
     },
   })
 }

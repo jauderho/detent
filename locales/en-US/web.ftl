@@ -177,6 +177,12 @@ dashboard-update-published = published
 dashboard-update-up-to-date = no newer release is offered for this build.
 dashboard-update-available = release {$tag} is available for this build.
 dashboard-update-security = this release is flagged as a security update; it bypasses the age gate.
+dashboard-update-install = install {$tag}
+dashboard-update-confirm-title = install this update?
+dashboard-update-confirm-body = this installs {$tag} and restarts the detent service. the page may disconnect and reconnect while it restarts.
+dashboard-update-confirm-action = install
+dashboard-update-confirm-cancel = cancel
+dashboard-update-installed = release {$version} is installed. the service restarts; the page may reconnect.
 
 ## Modules
 modules-panel-label = installed modules

@@ -10,15 +10,19 @@
  */
 
 import { Localized, type ReactLocalization, useLocalization } from '@fluent/react'
+import { useState } from 'react'
 import { Link } from 'react-router'
 import { useModules } from '@/api/modules'
 import { useApiErrorMessage } from '@/api/query'
 import type { AuditRecord, CertReport, HostReport, UpdateReport } from '@/api/system'
-import { useAudit, useCert, useHostProfile, useUpdate } from '@/api/system'
-import { Banner } from '@/components/Banner'
+import { useApplyUpdate, useAudit, useCert, useHostProfile, useUpdate } from '@/api/system'
+import { useWriteGate } from '@/auth/ScopeGate'
+import { Banner, type BannerTone } from '@/components/Banner'
+import { Button, ButtonGroup } from '@/components/Button'
 import { DataTable, type DataTableColumn } from '@/components/DataTable'
 import { GridCell, HairlineGrid } from '@/components/HairlineGrid'
 import { Label } from '@/components/Label'
+import { Modal } from '@/components/Modal'
 import { Panel } from '@/components/Panel'
 import { Readout, Screen } from '@/components/Screen'
 import { certExpired, certGridItems, certTone, certWarning } from '@/lib/cert'
@@ -54,6 +58,8 @@ const PANEL_ACTIONS_STYLE = {
   gap: 12,
   flexWrap: 'wrap',
 } as const
+
+const INSTALL_STYLE = { display: 'grid', gap: 12, marginTop: 12 } as const
 
 const VIEW_ALL_ROW_STYLE = { marginTop: 12 } as const
 
@@ -203,10 +209,8 @@ function CertGrid({ report }: { report: CertReport }) {
 }
 
 /**
- * The update panel. Read-only by design: this build *reports* what the update
- * policy says is available. There is no apply control until the privileged
- * swap lands (PLAN §2.9 steps 5b–5c); when it does, the control goes here —
- * `write`-scoped, CSRF-checked, behind its own endpoint.
+ * The update panel: what the update policy says is available, and — for a
+ * `write` session — a confirmed install control (`InstallUpdate`).
  */
 function UpdatePanel() {
   const { l10n } = useLocalization()
@@ -264,9 +268,84 @@ function UpdateGrid({ report, l10n }: { report: UpdateReport; l10n: ReactLocaliz
           {report.security ? (
             <Banner tone="amber">{l10n.getString('dashboard-update-security')}</Banner>
           ) : null}
+          <InstallUpdate tag={report.tag} l10n={l10n} />
         </>
       )}
     </>
+  )
+}
+
+type InstallBanner = { tone: BannerTone; text: string }
+
+/**
+ * Install the offered release. Hidden for a read-only session. The service
+ * restarts after the swap, so the confirmation says so before anything is
+ * sent. The result sits in a live region so it is announced.
+ */
+function InstallUpdate({ tag, l10n }: { tag: string; l10n: ReactLocalization }) {
+  const gate = useWriteGate()
+  const errorMessage = useApiErrorMessage()
+  const apply = useApplyUpdate()
+  const [confirming, setConfirming] = useState(false)
+  const [banner, setBanner] = useState<InstallBanner | null>(null)
+
+  if (!gate.canWrite) return null
+
+  function install(): void {
+    setConfirming(false)
+    apply.mutate(tag, {
+      onSuccess: (applied) => {
+        setBanner({
+          tone: 'blue',
+          text: l10n.getString('dashboard-update-installed', { version: applied.version }),
+        })
+      },
+      onError: (error) => {
+        setBanner({ tone: 'amber', text: errorMessage(error) })
+      },
+    })
+  }
+
+  return (
+    <div style={INSTALL_STYLE}>
+      <div aria-live="polite">
+        {banner === null ? null : <Banner tone={banner.tone}>{banner.text}</Banner>}
+      </div>
+      <div>
+        <Button
+          variant="primary"
+          disabled={apply.isPending}
+          onClick={() => {
+            setConfirming(true)
+          }}
+        >
+          {l10n.getString('dashboard-update-install', { tag })}
+        </Button>
+      </div>
+      <Modal
+        open={confirming}
+        onClose={() => {
+          setConfirming(false)
+        }}
+        title={l10n.getString('dashboard-update-confirm-title')}
+        footer={
+          <ButtonGroup>
+            <Button variant="primary" onClick={install}>
+              {l10n.getString('dashboard-update-confirm-action')}
+            </Button>
+            <Button
+              onClick={() => {
+                setConfirming(false)
+              }}
+            >
+              {l10n.getString('dashboard-update-confirm-cancel')}
+            </Button>
+          </ButtonGroup>
+        }
+      >
+        {l10n.getString('dashboard-update-confirm-body', { tag })}
+      </Modal>
+    </div>
   )
 }
 
