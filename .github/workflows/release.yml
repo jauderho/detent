@@ -1,5 +1,6 @@
-# Release pipeline for `v*` tags. `workflow_dispatch` runs the build and SBOM
-# jobs as a dry run; the publish job only runs for tag refs.
+# Release pipeline for `v*` tags. `workflow_dispatch` runs the build,
+# reproducibility and SBOM jobs as a dry run; the publish job only runs for
+# tag refs.
 on:
   push:
     tags:
@@ -32,7 +33,7 @@ env:
 
 jobs:
   build:
-    name: Build (${{ matrix.target }})
+    name: Build (${{ matrix.target }}, ${{ matrix.leg }})
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -47,6 +48,14 @@ jobs:
           - aarch64-unknown-linux-musl
           - aarch64-apple-darwin
           - x86_64-apple-darwin
+        # Reproducibility gate (PLAN M3): every target is built twice, on
+        # two fresh runners. `release` is the published build; `rebuild`
+        # runs without the cargo cache, so a poisoned cache or a
+        # non-deterministic build gives a different SHA-256 and the
+        # `reproducible` job stops the release.
+        leg:
+          - release
+          - rebuild
         include:
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-26.04
@@ -125,6 +134,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache cargo
+        if: matrix.leg == 'release'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           # One cache per target; the matrix job would otherwise thrash a
@@ -183,12 +193,55 @@ jobs:
           cp target/${{ matrix.target }}/release/detent \
             release/${{ matrix.target }}/detent-${{ matrix.target }}
 
+      # The publish job downloads `release-*` only; `rebuild-*` is for the
+      # reproducibility gate.
       - name: Upload build artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-${{ matrix.target }}
+          name: ${{ matrix.leg }}-${{ matrix.target }}
           path: release/${{ matrix.target }}/
           retention-days: 14
+
+  reproducible:
+    name: Reproducibility gate (two builds, SHA-256)
+    needs: build
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    steps:
+      # Block mode; this job only downloads artifacts.
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: block
+          allowed-endpoints: |
+            api.github.com:443
+            results-receiver.actions.githubusercontent.com:443
+            productionresultssa*.blob.core.windows.net:443
+
+      - name: Download release builds
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release
+
+      - name: Download rebuilds
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: rebuild-*
+          merge-multiple: true
+          path: rebuild
+
+      # diff exits non-zero if a target is missing from one side or its
+      # two builds have different SHA-256s.
+      - name: Compare SHA-256 of both builds
+        run: |
+          set -euo pipefail
+          (cd release && sha256sum detent-*) | LC_ALL=C sort > release.sums
+          (cd rebuild && sha256sum detent-*) | LC_ALL=C sort > rebuild.sums
+          cat release.sums
+          diff -u release.sums rebuild.sums
 
   sbom:
     name: SBOM (cargo + web, merged CycloneDX)
@@ -292,8 +345,8 @@ jobs:
 
   publish:
     name: Publish release (SHA256SUMS, attestations, GitHub Release)
-    needs: [build, sbom]
-    # workflow_dispatch from a branch is a dry run: build + SBOM only.
+    needs: [build, reproducible, sbom]
+    # workflow_dispatch from a branch is a dry run: build, gate and SBOM only.
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
     runs-on: ubuntu-26.04
     permissions:

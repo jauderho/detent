@@ -70,7 +70,9 @@ advisories bypass the cooldown. Do not lower these values.
    v0.3, DSSE envelope, SLSA provenance predicate). One attestation names
    all binaries as subjects, so each `.sigstore.json` file is a copy of
    that one bundle. The self-updater verifies it (ADR-014). `SHA256SUMS`
-   covers the binaries only.
+   covers the binaries only. Each target is built twice, on two runners
+   (the second build without the cargo cache); the `reproducible` job
+   stops the release unless both builds have the same SHA-256.
 4. Watch the run (`gh run watch`); it must finish green before the release is
    announced. Do not retry by re-tagging — the tag is protected; delete the
    draft release and push a new patch tag instead.
