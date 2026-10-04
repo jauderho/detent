@@ -49,10 +49,9 @@ jobs:
           - aarch64-apple-darwin
           - x86_64-apple-darwin
         # Reproducibility gate (PLAN M3): every target is built twice, on
-        # two fresh runners. `release` is the published build; `rebuild`
-        # runs without the cargo cache, so a poisoned cache or a
-        # non-deterministic build gives a different SHA-256 and the
-        # `reproducible` job stops the release.
+        # two fresh runners without the cargo cache. `release` is the
+        # published build; a non-deterministic build gives a different
+        # SHA-256 and the `reproducible` job stops the release.
         leg:
           - release
           - rebuild
