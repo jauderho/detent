@@ -32,7 +32,7 @@ impl Transport for FixtureFeed {
         let asset = detent_update::fetch::asset_name();
         let bytes = if url == detent_update::fetch::RELEASES_URL {
             serde_json::to_vec(&serde_json::json!([{
-                "tag_name": "v0.0.2",
+                "tag_name": "v99.0.0",
                 "draft": false,
                 "prerelease": false,
                 "published_at": "2020-01-01T00:00:00Z",

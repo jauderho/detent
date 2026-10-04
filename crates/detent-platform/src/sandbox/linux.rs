@@ -1445,7 +1445,7 @@ mod tests {
 
     /// The tag and the Sigstore fixtures of a release the verifier accepts.
     #[cfg(feature = "update")]
-    const FIXTURE_TAG: &str = "v0.0.2";
+    const FIXTURE_TAG: &str = "v99.0.0";
 
     #[cfg(feature = "update")]
     fn fixture_dir() -> std::path::PathBuf {

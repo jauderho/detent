@@ -1917,7 +1917,7 @@ mod tests {
         let young = fixed_now()? - time::Duration::days(1);
         let when = young.format(&time::format_description::well_known::Rfc3339)?;
         let young_feed = VerifiableFeed {
-            tag: "v0.0.2".to_owned(),
+            tag: "v99.0.0".to_owned(),
             body: String::new(),
             when: when.clone(),
             binary: binary_fixture()?,
@@ -1963,7 +1963,7 @@ mod tests {
         )?;
         assert_eq!(run.exit, Exit::Ok);
         assert!(
-            run.out.contains("installed v0.0.2"),
+            run.out.contains("installed v99.0.0"),
             "the bypassed release must reach the probe and the swap: {}",
             run.out
         );
@@ -2083,7 +2083,7 @@ mod tests {
         )?;
         assert_eq!(run.exit, Exit::Ok);
         assert!(run.notes.is_empty(), "{}", run.notes);
-        assert!(run.out.contains("installed v0.0.2"), "{}", run.out);
+        assert!(run.out.contains("installed v99.0.0"), "{}", run.out);
         let previous = target.with_file_name("detent.prev");
         assert!(
             run.out.contains(&previous.display().to_string()),
@@ -2163,7 +2163,7 @@ mod tests {
         );
         assert_eq!(
             detent_update::update::read_bad(&detent_update::update::bad_path(run.dir.path())),
-            vec!["v0.0.2".to_owned()],
+            vec!["v99.0.0".to_owned()],
             "the rolled-back tag must be marked bad"
         );
         Ok(())
@@ -2218,7 +2218,7 @@ mod tests {
             false,
         )?;
         assert_eq!(run.exit, Exit::Ok);
-        assert!(run.out.contains("installed v0.0.2"), "{}", run.out);
+        assert!(run.out.contains("installed v99.0.0"), "{}", run.out);
         assert!(run.notes.contains("not restarted"), "{}", run.notes);
         assert_eq!(
             std::fs::read(&target)?,
@@ -2373,7 +2373,7 @@ mod tests {
     #[cfg(feature = "update")]
     fn verified_feed() -> Result<VerifiableFeed, Box<dyn std::error::Error>> {
         Ok(VerifiableFeed {
-            tag: "v0.0.2".to_owned(),
+            tag: "v99.0.0".to_owned(),
             body: String::new(),
             when: "2020-01-01T00:00:00Z".to_owned(),
             binary: binary_fixture()?,

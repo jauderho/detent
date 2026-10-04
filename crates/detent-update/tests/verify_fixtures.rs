@@ -32,7 +32,7 @@ use p256::ecdsa::signature::Signer;
 use sha2::Digest as _;
 use sha2::Sha256;
 
-const FIXTURE_TAG: &str = "v0.0.2";
+const FIXTURE_TAG: &str = "v99.0.0";
 
 fn fixtures() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
@@ -371,6 +371,6 @@ fn a_bundle_for_another_tag_is_refused() {
 fn the_pinned_identity_matches_the_fixture_tag() {
     assert_eq!(
         pinned_identity(FIXTURE_TAG),
-        "https://github.com/jauderho/detent/.github/workflows/release.yml@refs/tags/v0.0.2"
+        "https://github.com/jauderho/detent/.github/workflows/release.yml@refs/tags/v99.0.0"
     );
 }

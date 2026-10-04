@@ -32,8 +32,9 @@ use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use time::OffsetDateTime;
 
-/// The tag the fixtures attest.
-const TAG: &str = "v0.0.2";
+/// The tag the fixtures attest. It stays above any real `CARGO_PKG_VERSION`
+/// because the real monitor refuses a downgrade.
+const TAG: &str = "v99.0.0";
 /// The integratedTime baked into every fixture (2026-09-18, fixture mint day).
 const INTEGRATED_TIME: i64 = 1_786_780_800;
 /// The "binary" the valid bundle attests.
@@ -312,7 +313,7 @@ fn main() {
     let valid = mint(&pinned, 1_700_000_000, 1_900_000_000);
     // Wrong-identity leaf: same validity, a different SAN.
     let wrong = mint(
-        "https://github.com/other/repo/.github/workflows/release.yml@refs/tags/v0.0.2",
+        &format!("https://github.com/other/repo/.github/workflows/release.yml@refs/tags/{TAG}"),
         1_700_000_000,
         1_900_000_000,
     );

@@ -620,7 +620,7 @@ fn proxy(mut engine: Channel, mut monitor: Channel, fail_arm: bool, fail_restore
 /// a mismatch.
 const MODULE: &str = "fake";
 
-const UPDATE_FIXTURE_TAG: &str = "v0.0.2";
+const UPDATE_FIXTURE_TAG: &str = "v99.0.0";
 
 fn update_fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../detent-update/tests/fixtures")

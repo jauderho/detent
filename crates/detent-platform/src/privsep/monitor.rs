@@ -3805,7 +3805,7 @@ mod tests {
         Ok(path)
     }
 
-    const FIXTURE_TAG: &str = "v0.0.2";
+    const FIXTURE_TAG: &str = "v99.0.0";
 
     fn fixture_dir() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../detent-update/tests/fixtures")

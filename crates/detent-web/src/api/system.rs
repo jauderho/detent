@@ -757,11 +757,11 @@ mod tests {
 
     #[test]
     fn update_report_maps_a_qualifying_release() -> R {
-        let feed = feed("v0.0.2", "", r#""2026-01-01T00:00:00Z""#);
+        let feed = feed("v99.0.0", "", r#""2026-01-01T00:00:00Z""#);
         let report = update_report(&Feed(feed), &Policy::default(), &[])
             .map_err(|_| "a newer, old-enough release should qualify")?;
         assert!(report.update_available);
-        assert_eq!(report.tag.as_deref(), Some("v0.0.2"));
+        assert_eq!(report.tag.as_deref(), Some("v99.0.0"));
         assert_eq!(report.current, env!("CARGO_PKG_VERSION"));
         assert!(report.published.is_some());
         assert!(!report.security);
@@ -795,7 +795,7 @@ mod tests {
     fn update_report_carries_the_security_flag() -> R {
         // `detent-security: true` bypasses the age gate, so an unpublished
         // release still qualifies — and is reported as a security one.
-        let feed = feed("v0.0.2", "detent-security: true", "null");
+        let feed = feed("v99.0.0", "detent-security: true", "null");
         let report = update_report(&Feed(feed), &Policy::default(), &[])
             .map_err(|_| "a security release should qualify")?;
         assert!(report.update_available);
@@ -892,8 +892,8 @@ mod tests {
 
     #[test]
     fn update_report_skips_a_bad_tag() -> R {
-        let feed = feed("v0.0.2", "", r#""2026-01-01T00:00:00Z""#);
-        let bad = vec!["v0.0.2".to_owned()];
+        let feed = feed("v99.0.0", "", r#""2026-01-01T00:00:00Z""#);
+        let bad = vec!["v99.0.0".to_owned()];
         let report = update_report(&Feed(feed), &Policy::default(), &bad)
             .map_err(|_| "a bad tag must not be offered")?;
         assert!(

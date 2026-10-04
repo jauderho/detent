@@ -404,7 +404,7 @@ fn replace_binary_rejects_a_missing_staged_file() -> TestResult {
     let (mut client, handle) = spawn_client(fx.allow()?)?;
 
     client.channel_mut().send(&Request::ReplaceBinary {
-        tag: "v0.0.2".to_owned(),
+        tag: "v99.0.0".to_owned(),
         len: 8,
         sha256: Sha256Digest::of(b"binary"),
     })?;
@@ -756,7 +756,7 @@ fn every_request_gets_exactly_one_response() -> TestResult {
         },
         Request::Mount { target },
         Request::ReplaceBinary {
-            tag: "v0.0.2".to_owned(),
+            tag: "v99.0.0".to_owned(),
             len: 1,
             sha256: Sha256Digest::of(b"x"),
         },
