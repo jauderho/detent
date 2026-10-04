@@ -464,7 +464,9 @@ jobs:
           set -euo pipefail
           # --verify-tag refuses to publish if the tag is not on the remote,
           # so a mistagged dry run can never create a phantom release.
+          # The job has no checkout, so gh needs the repository named.
           gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --generate-notes \
             --title "$GITHUB_REF_NAME" \
