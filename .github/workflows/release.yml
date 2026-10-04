@@ -136,13 +136,10 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
 
-      - name: Cache cargo
-        if: matrix.leg == 'release'
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          # One cache per target; the matrix job would otherwise thrash a
-          # single shared cache with two different target dirs.
-          key: ${{ matrix.target }}
+      # No cargo cache: cargo does not rebuild a C dependency when
+      # SOURCE_DATE_EPOCH changes, so a cached mimalloc object kept an older
+      # commit's __TIME__ and the two builds differed (release dry run
+      # 37173945079).
 
       - name: Install Zig
         if: runner.os == 'Linux'
