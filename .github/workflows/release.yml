@@ -334,7 +334,7 @@ jobs:
               "serialNumber": .[0].serialNumber,
               "version": 1,
               "metadata": .[0].metadata,
-              "components": ([.[].components[]] | unique_by(.bom-ref // .name)),
+              "components": ([.[].components[]] | unique_by(.["bom-ref"] // .name)),
               "dependencies": ([.[].dependencies[]?] | unique_by(.ref))
             }' sboms/*.json > SBOM.cyclonedx.json
           jq -e '.bomFormat == "CycloneDX" and (.components | length > 0)' SBOM.cyclonedx.json
