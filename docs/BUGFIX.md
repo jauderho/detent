@@ -301,21 +301,31 @@ deferred by the owner.
 
 ### Track E — Milestone M3 (release path)
 
-1. **R1 (H17 steps 1 and 8):** `release.yml` publishes the `actions/attest`
-   DSSE bundle as `detent-<triple>.sigstore.json` (E1, done). After the first
-   real release, commit one captured bundle as a fixture and add
-   `real_attest_bundle_verifies`.
+1. ~~**R1 (H17 steps 1 and 8).**~~ Done (`8b70304`): the real `v0.0.1-rc.2`
+   bundle is a fixture; `real_attest_bundle_verifies` passes with the
+   embedded trust root, and another tag or digest is refused.
 2. ~~**B3 (H17 step 7) — real trust roots.**~~ Done (`26beff9`, `e7bd3ba`):
    the public-good Fulcio intermediate and root and the Rekor key, from
    `trusted_root.json`; P-384 chain signatures. Refresh from TUF stays a
    manual release step (ADR-014).
 3. ~~`release.yml`: macOS targets, the two-build SHA-256 gate, harden-runner
-   egress `block`.~~ Done. Release dry run 37174273098 (`b1f7a05`) proved the builds, the gate
-   and the SBOM; the `publish` job's egress list runs first on a tag.
+   egress `block`.~~ Done. Release dry run 37174273098 (`b1f7a05`) proved
+   the builds, the gate and the SBOM; release run 37186433604
+   (`v0.0.1-rc.2`) proved the `publish` job under `block`.
 4. ~~**UI update apply control.**~~ Done (`8a99a38`).
-5. **Owner:** tag `v0.0.1-rc`, then `v0.1.0`; run the M3 acceptance (a device
-   updates and rolls back from a broken `v0.1.1-test`); set immutable
-   releases and the rulesets in `docs/RELEASING.md`.
+5. **M3 acceptance (in progress).** Released: `v0.0.1-rc.2` and `v0.1.0`
+   (`v0.0.1-rc` is a tag only; its publish step failed, fixed in `85657f9`).
+   `v0.1.1-test` is built from branch `m3/broken-v0.1.1-test` (never on
+   `main`; `serve` exits 1) and is marked pre-release, so no updater takes
+   it. testhost runs `v0.0.1-rc.2` under the packaged unit; `update --check`
+   holds `v0.1.0` (age gate, 2 days). From 2026-10-06 08:05 UTC:
+   `sudo detent update` on testhost (expect `v0.1.0`, `/healthz` ok); then
+   `gh release edit v0.1.1-test --prerelease=false --latest=false`,
+   `sudo detent update` (expect the swap, `/healthz` failure and the
+   rollback to `v0.1.0`), then set `--prerelease` again. Then remove detent
+   from testhost (`packaging/install.sh --uninstall`). **Owner, after M3:** turn on
+   immutable releases (the pre-release toggles above come first) and the
+   rulesets in `docs/RELEASING.md`.
 6. **SCT signatures** (H17): embedded SCTs are checked for presence only.
    Verify them against the CT log keys in `trusted_root.json`.
 7. **Rekor v2** (log2025-1): the verifier supports Rekor v1 entries only.
@@ -331,6 +341,11 @@ deferred by the owner.
     macOS targets.
 11. **`ci.yml` `rust-macos`:** the comment says harden-runner supports Linux
     only; it supports macOS in audit mode (as `release.yml` uses it).
+12. **`update --check` text:** a newer release held by the age gate prints
+    "no update available"; the JSON has the tag. Name the held tag and the
+    reason.
+13. **`release.yml` publish egress list:** `tuf-rekor-cdn.sigstore.dev` does
+    not resolve (harden-runner log); remove it.
 
 ### Track F — Phase 12 / M4 (v1.0)
 

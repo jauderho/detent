@@ -5,6 +5,12 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-04 - First releases: v0.0.1-rc.2, v0.1.0; M3 started
+
+Released from `main` with signed tags: `v0.0.1-rc.2` (`6f07f0d`) and `v0.1.0` (`8b70304`). Each: 8 builds, the two-build gate (all four targets equal), SBOM, attestations, publish under egress `block`; `SHA256SUMS` matches every asset and `gh attestation verify --signer-workflow …/release.yml --source-ref refs/tags/<tag>` passes for all four binaries. `gh release verify` finds no release attestation until immutable releases are on. Found and fixed on the way: `release.yml` now refuses a tag that differs from the crate version (`d5d8ae4`; a `v0.1.0` tag on a `0.0.1` tree makes a binary that offers itself again); `gh release create` needs `--repo` (no checkout; `v0.0.1-rc` stopped there, `85657f9`, so that tag has no release); the update fixtures were minted for `v0.0.2` and the real monitor refused them as a downgrade once the crate passed it, now `v99.0.0` (`1ab5672`, bugfix-high implementor, reviewed). R1 (`8b70304`): the real `v0.0.1-rc.2` bundle verifies with the embedded trust root (`real_attest_bundle_verifies`; another tag gives `IdentityMismatch`, another digest `DigestMismatch`).
+
+M3: `v0.1.1-test` (branch `m3/broken-v0.1.1-test`, `serve` exits 1, `--self-test` passes) is published and marked pre-release. testhost runs the released `v0.0.1-rc.2` x86_64 musl binary under the packaged unit (`/healthz` ok); `update --check` holds `v0.1.0` for the 2-day age gate. Remaining steps and dates: BUGFIX Track E 5.
+
 ## 2026-10-04 - Track E: E1, B3, E3, E4
 
 E4 (`8a99a38`, `d77ddda`): the Dashboard has an install control for an available update (write session only), with a confirm dialog that names the restart; web coverage 100%. E1 (`41096a1`): `release.yml` publishes the `actions/attest` bundle as `detent-<triple>.sigstore.json`; cosign removed. B3 (`26beff9`, `e7bd3ba`, `d5fff99`): real public-good Fulcio intermediate and root and the Rekor key from `trusted_root.json` (root-signing `5888f35`, digest in `TRUST_MANIFEST`; TUF signatures not verified, the TUF CDN target digest matched); the verifier accepts P-384 chain signatures (`real_fulcio_leaf_chains_to_the_embedded_roots`). E3: macOS targets on macOS runners (`22ded64`), two-build SHA-256 gate (`a047ad8`), harden-runner egress `block` on the Linux jobs (`f66ea6f`, macOS legs audit only).
