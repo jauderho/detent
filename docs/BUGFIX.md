@@ -257,7 +257,13 @@ deferred by the owner.
    | L-BIN16 | the two `spawn.rs` child-abort tests | no |
 
    The rows marked "no" can run on any dev machine and may go with Track A.
-4. **A4 (M1) — the worker's capability report after `setuid`.**
+   Run 2026-10-03 (`PROGRESS.md`): every pinning test fails with its fix
+   removed, M1 included. Two guards had no test (vacuous): A3-a, the
+   `report_recovery` call in `serve.rs` `run_monitor`; A3-b, the
+   `discard_commit` in `apply`'s no-backup branch (`detent-ops`). Both get a
+   test next. C1-a has no dispatch-level test yet.
+4. ~~**A4 (M1) — the worker's capability report after `setuid`.**~~ Done
+   2026-10-03: bounding set emptied before the uid change; report honest.
    `drop_capabilities` reports `Applied` while the bounding set is still full.
    Report the real state (or drop the bounding set before the uid change).
    Test on testhost as root: compare `/proc/self/status` `CapBnd` with the

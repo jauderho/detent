@@ -93,25 +93,60 @@ fn sets_hold_capabilities(
     !matches!((effective, permitted), (Ok(e), Ok(p)) if e.is_empty() && p.is_empty())
 }
 
-fn drop_capabilities(policy: &Policy) -> Outcome {
-    // An unprivileged worker can reach this hook after `setuid`. Its
-    // effective and permitted sets are then already empty, so attempting to
-    // drop the still-full bounding set would return EPERM. Treat that state as
-    // the worker's required outcome; the monitor keeps the strict path.
-    if !policy.require_caps
-        && let Ok(effective) = caps::read(None, CapSet::Effective)
-        && effective.is_empty()
-        && let Ok(permitted) = caps::read(None, CapSet::Permitted)
-        && permitted.is_empty()
-    {
-        return Outcome::Applied;
+/// What `drop_capabilities` reports for a process that is already
+/// unprivileged, or `None` when the sets must still be dropped.
+///
+/// An unprivileged worker can reach the hook after `setuid`. Its effective and
+/// permitted sets are then empty, and it cannot shrink the bounding set any
+/// more (`PR_CAPBSET_DROP` needs `CAP_SETPCAP` in the effective set). The
+/// caller dropped the bounding set before the uid change, so that state is
+/// `Applied` only when the bounding set holds nothing beyond `retained`;
+/// otherwise the leftovers are reported. The monitor (`require_caps`) keeps
+/// the strict path.
+fn already_unprivileged(
+    effective: &CapsHashSet,
+    permitted: &CapsHashSet,
+    bounding: &CapsHashSet,
+    retained: &HashSet<CapsCapability>,
+    require_caps: bool,
+) -> Option<Outcome> {
+    if require_caps || !effective.is_empty() || !permitted.is_empty() {
+        return None;
     }
+    let mut leftover: Vec<CapsCapability> = bounding.difference(retained).copied().collect();
+    if leftover.is_empty() {
+        return Some(Outcome::Applied);
+    }
+    leftover.sort_by_key(|cap| cap.index());
+    let names: Vec<String> = leftover.iter().map(ToString::to_string).collect();
+    Some(Outcome::Unavailable {
+        reason: format!(
+            "the bounding set still holds {} and cannot be dropped without CAP_SETPCAP",
+            names.join(", ")
+        ),
+    })
+}
+
+fn drop_capabilities(policy: &Policy) -> Outcome {
     let retain: HashSet<CapsCapability> = policy
         .retained_caps
         .iter()
         .copied()
         .map(to_caps_capability)
         .collect();
+    if let (Ok(effective), Ok(permitted), Ok(bounding)) = (
+        caps::read(None, CapSet::Effective),
+        caps::read(None, CapSet::Permitted),
+        caps::read(None, CapSet::Bounding),
+    ) && let Some(outcome) = already_unprivileged(
+        &effective,
+        &permitted,
+        &bounding,
+        &retain,
+        policy.require_caps,
+    ) {
+        return outcome;
+    }
     match drop_capabilities_inner(&retain) {
         Ok(()) => Outcome::Applied,
         Err(reason) => Outcome::Unavailable { reason },
@@ -126,16 +161,32 @@ fn drop_capabilities(policy: &Policy) -> Outcome {
 /// failure never leaves the process with a *larger* effective set than the
 /// bounding set it just tried to shrink.
 fn drop_capabilities_inner(retain: &HashSet<CapsCapability>) -> Result<(), String> {
+    drop_bounding_to(retain)?;
+    let retained: CapsHashSet = retain.iter().copied().collect();
+    caps::set(None, CapSet::Effective, &retained).map_err(|err| err.to_string())?;
+    caps::set(None, CapSet::Permitted, &retained).map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+/// Drop every capability not in `retain` from the bounding set. Needs
+/// `CAP_SETPCAP` in the effective set, so a process that will change uid must
+/// call it first.
+fn drop_bounding_to(retain: &HashSet<CapsCapability>) -> Result<(), String> {
     let bounding = caps::read(None, CapSet::Bounding).map_err(|err| err.to_string())?;
     for cap in bounding {
         if !retain.contains(&cap) {
             caps::drop(None, CapSet::Bounding, cap).map_err(|err| err.to_string())?;
         }
     }
-    let retained: CapsHashSet = retain.iter().copied().collect();
-    caps::set(None, CapSet::Effective, &retained).map_err(|err| err.to_string())?;
-    caps::set(None, CapSet::Permitted, &retained).map_err(|err| err.to_string())?;
     Ok(())
+}
+
+/// Empty the bounding set of a process that is about to drop to an account
+/// holding no capability (the worker and the acme process). A refusal is not
+/// fatal: [`drop_capabilities`] reads the bounding set again afterwards and
+/// reports what is left.
+pub(super) fn drop_bounding_set() {
+    let _ = drop_bounding_to(&HashSet::new());
 }
 
 fn install_landlock(policy: &Policy) -> Result<LandlockOutcome, SandboxError> {
@@ -271,6 +322,56 @@ mod tests {
         assert!(sets_hold_capabilities(empty(), full()));
         assert!(sets_hold_capabilities(failed(), empty()));
         assert!(sets_hold_capabilities(empty(), failed()));
+    }
+
+    /// A worker that dropped its uid holds nothing in its effective and
+    /// permitted sets, and cannot shrink the bounding set any more. It must
+    /// not be reported as confined while the bounding set still holds
+    /// capabilities (Track C A4).
+    #[test]
+    fn an_unprivileged_process_is_applied_only_with_an_empty_bounding_set() {
+        use super::{CapsHashSet, HashSet, already_unprivileged};
+        use caps::Capability as C;
+        let empty = CapsHashSet::new;
+        let some = |caps: &[C]| -> CapsHashSet { caps.iter().copied().collect() };
+        let none = HashSet::new();
+
+        let leftover = already_unprivileged(
+            &empty(),
+            &empty(),
+            &some(&[C::CAP_SETUID, C::CAP_CHOWN]),
+            &none,
+            false,
+        );
+        assert!(
+            matches!(&leftover, Some(Outcome::Unavailable { reason })
+                if reason.contains("CAP_CHOWN") && reason.contains("CAP_SETUID")),
+            "{leftover:?}"
+        );
+        assert_eq!(
+            already_unprivileged(&empty(), &empty(), &empty(), &none, false),
+            Some(Outcome::Applied)
+        );
+        // The bounding set may hold exactly what the policy retains.
+        let kept: HashSet<C> = [C::CAP_CHOWN].into_iter().collect();
+        assert_eq!(
+            already_unprivileged(&empty(), &empty(), &some(&[C::CAP_CHOWN]), &kept, false),
+            Some(Outcome::Applied)
+        );
+        // A required drop never takes the shortcut, and neither does a
+        // process that still holds an effective or permitted capability.
+        assert_eq!(
+            already_unprivileged(&empty(), &empty(), &empty(), &none, true),
+            None
+        );
+        assert_eq!(
+            already_unprivileged(&some(&[C::CAP_CHOWN]), &empty(), &empty(), &none, false),
+            None
+        );
+        assert_eq!(
+            already_unprivileged(&empty(), &some(&[C::CAP_CHOWN]), &empty(), &none, false),
+            None
+        );
     }
 
     /// The container runs the tests as root, so the effective set is full.
@@ -635,6 +736,81 @@ mod tests {
             crate::fs::private_dir::ensure_private(&audit).is_ok()
                 && std::fs::metadata(&audit)
                     .is_ok_and(|meta| meta.permissions().mode() & 0o7777 == 0o700)
+        })
+    }
+
+    /// Confines the worker with the real `confine`, after checking what the
+    /// privilege drop left behind. The check runs first because the worker's
+    /// seccomp table has no `openat`: `/proc/self/status` cannot be read
+    /// afterwards.
+    struct ConfineDroppedWorker(Policy);
+
+    impl SandboxHooks for ConfineDroppedWorker {
+        fn confine_worker(&self) -> Result<(), crate::privsep::spawn::SandboxError> {
+            let refuse = |why: &str| crate::privsep::spawn::SandboxError(why.to_owned());
+            if rustix::process::geteuid().is_root() {
+                return Err(refuse("still root"));
+            }
+            let status = std::fs::read_to_string("/proc/self/status")
+                .map_err(|err| crate::privsep::spawn::SandboxError(err.to_string()))?;
+            let mask = status
+                .lines()
+                .find_map(|line| line.strip_prefix("CapBnd:"))
+                .and_then(|hex| u64::from_str_radix(hex.trim(), 16).ok());
+            if mask != Some(0) {
+                return Err(crate::privsep::spawn::SandboxError(format!(
+                    "bounding set not empty: {mask:x?}"
+                )));
+            }
+            match confine(Role::Worker, &self.0) {
+                Ok(confinement) if matches!(confinement.caps, Outcome::Applied) => Ok(()),
+                Ok(confinement) => Err(crate::privsep::spawn::SandboxError(format!(
+                    "caps not applied: {:?}",
+                    confinement.caps
+                ))),
+                Err(err) => Err(crate::privsep::spawn::SandboxError(err.to_string())),
+            }
+        }
+    }
+
+    /// Track C A4: the worker cannot shrink the bounding set after `setuid`
+    /// (`PR_CAPBSET_DROP` needs `CAP_SETPCAP` in the effective set), so
+    /// `spawn_pair` must empty it while the process is still root. Before the
+    /// fix `CapBnd` was still full here, and `confine` reported `Applied`
+    /// anyway. Skips when not root or when the `detent` account is missing,
+    /// as `spawn_pair_drops_to_the_worker_account_when_root` does.
+    #[test]
+    fn enforce_mode_worker_drops_the_bounding_set_before_its_uid_change()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::privsep::spawn::{
+            DEFAULT_WORKER_USER, Role as SpawnRole, SpawnConfig, is_root, spawn_pair,
+        };
+        if !is_root() || crate::privsep::users::lookup_user(DEFAULT_WORKER_USER).is_err() {
+            return Ok(());
+        }
+        in_forked_child(|| {
+            let dir = std::env::temp_dir()
+                .join(format!("detent-sandbox-worker-bnd-{}", std::process::id()));
+            if std::fs::create_dir_all(&dir).is_err() {
+                return false;
+            }
+            let Ok(allow) = fixture_allowlist(&dir) else {
+                return false;
+            };
+            let hooks = ConfineDroppedWorker(Policy::worker(&allow));
+            let config = SpawnConfig {
+                worker_user: Some(DEFAULT_WORKER_USER.to_owned()),
+                ..SpawnConfig::default()
+            };
+            let Ok(spawned) = spawn_pair(&config, &hooks) else {
+                return false;
+            };
+            match spawned.role {
+                SpawnRole::Worker(_client) => fork::exit_immediately_unflushed(0),
+                SpawnRole::Monitor(handle) => {
+                    spawned.dropped_privileges && matches!(handle.wait(), Ok(Some(0)))
+                }
+            }
         })
     }
 

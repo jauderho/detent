@@ -14,11 +14,11 @@
 //! 2. Linux: `PR_SET_NO_NEW_PRIVS`, so no later `execve` can regain privilege.
 //! 3. Linux: `PR_SET_DUMPABLE = 0`, so the process is not core-dumpable and
 //!    `/proc/self` becomes root-owned.
-//! 4. If `geteuid() == 0` and a worker account is configured: `setgroups([])`,
-//!    `setgid`, `setuid`. When not root, this is skipped and reported in
-//!    [`Spawned::dropped_privileges`] rather than failing — an unprivileged
-//!    developer run is a supported mode (spike 02 showed the sandbox works
-//!    unprivileged).
+//! 4. If `geteuid() == 0` and a worker account is configured: empty the
+//!    capability bounding set, then `setgroups([])`, `setgid`, `setuid`. When
+//!    not root, this is skipped and reported in [`Spawned::dropped_privileges`]
+//!    rather than failing — an unprivileged developer run is a supported mode
+//!    (spike 02 showed the sandbox works unprivileged).
 //! 5. [`SandboxHooks::confine_worker`].
 //!
 //! The parent calls [`SandboxHooks::confine_monitor`] and keeps its end.
@@ -507,7 +507,8 @@ fn become_worker(
 }
 
 /// Harden, drop to `credentials` when given, then `confine`. True when the
-/// uid changed.
+/// uid changed. The bounding set is emptied before the uid change: the worker
+/// and the acme process keep no capability.
 fn drop_and_confine(
     credentials: Option<(u32, u32)>,
     confine: impl FnOnce() -> Result<(), SandboxError>,
@@ -515,6 +516,8 @@ fn drop_and_confine(
     harden()?;
     let dropped = match credentials {
         Some((uid, gid)) => {
+            // Still root: after `setuid` the bounding set cannot shrink.
+            crate::sandbox::drop_bounding_set();
             sys::drop_to(uid, gid).map_err(|source| SpawnError::DropPrivileges { uid, source })?;
             true
         }

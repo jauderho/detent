@@ -212,7 +212,9 @@ pub struct Policy {
     /// (STAGE3 M1; mirrors `require_seccomp` below). Default `true` for
     /// [`Policy::monitor`], `false` for [`Policy::worker`] (the worker
     /// drops to an unprivileged uid first, where the drop is expected to
-    /// fail).
+    /// fail). `spawn_pair` and `spawn_acme` empty the bounding set before that
+    /// uid change; if it is not empty afterwards, [`Outcome::Unavailable`]
+    /// names what is left.
     pub require_caps: bool,
     /// When true, a seccomp filter that does not install makes [`confine`]
     /// return `Err` instead of reporting [`Outcome::Unavailable`] and
@@ -386,6 +388,19 @@ pub fn holds_capabilities() -> bool {
 pub const fn holds_capabilities() -> bool {
     false
 }
+
+/// Empty the capability bounding set while the process still has
+/// `CAP_SETPCAP`, before a worker or acme child drops its uid: after
+/// `setuid` it can no longer do so. A refusal is ignored here; [`confine`]
+/// reports whatever the bounding set still holds.
+#[cfg(target_os = "linux")]
+pub(crate) fn drop_bounding_set() {
+    linux::drop_bounding_set();
+}
+
+/// Non-Linux platforms have no bounding set.
+#[cfg(not(target_os = "linux"))]
+pub(crate) const fn drop_bounding_set() {}
 
 /// Wires [`confine`] into [`crate::privsep::spawn::spawn_pair`] via
 /// [`SandboxHooks`]. Captures the resulting [`Confinement`] for each side —
