@@ -239,7 +239,7 @@ deferred by the owner.
    `StateDirectory=`, `ConfigurationDirectoryMode=0750`, and error causes in
    the journal. A2-a fixed 2026-10-01 (ambient capabilities); A2 then
    passes with the shipped unit. A2-b fixed 2026-10-01. A2 is done.
-3. **A3 — negative checks never run.** In a throwaway worktree with its own
+3. ~~**A3 — negative checks never run.**~~ In a throwaway worktree with its own
    target dir, remove each fix, run its pinning test, and quote the failure.
    A test that does not fail is vacuous: write a real one first.
 
@@ -261,7 +261,11 @@ deferred by the owner.
    removed, M1 included. Two guards had no test (vacuous): A3-a, the
    `report_recovery` call in `serve.rs` `run_monitor`; A3-b, the
    `discard_commit` in `apply`'s no-backup branch (`detent-ops`). Both get a
-   test next. C1-a has no dispatch-level test yet.
+   test next. Done 2026-10-03: both have tests that fail with the guard
+   removed. C1-a: no dispatch-level test is possible without a race (the
+   guard checks the monitor's own `O_EXCL` copy, nlink 1 by construction; a
+   hard link on the worker's input is harmless because the copy is
+   signature-verified), so the unit test is the coverage. A3 is done.
 4. ~~**A4 (M1) — the worker's capability report after `setuid`.**~~ Done
    2026-10-03: bounding set emptied before the uid change; report honest.
    `drop_capabilities` reports `Applied` while the bounding set is still full.
