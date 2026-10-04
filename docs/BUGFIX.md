@@ -302,20 +302,35 @@ deferred by the owner.
 ### Track E — Milestone M3 (release path)
 
 1. **R1 (H17 steps 1 and 8):** `release.yml` publishes the `actions/attest`
-   DSSE bundle as `detent-<triple>.sigstore.json` (not the cosign
-   message-signature bundle). After the first real release, commit one
-   captured bundle as a fixture and add `real_attest_bundle_verifies`.
-2. **B3 (H17 step 7) — real trust roots:** embed the real Fulcio root and
-   intermediate and the real Rekor key (paste source and digests in the commit
-   body); later from TUF (PLAN §2.9, `trust.rs`). Test: a real Fulcio leaf
-   chains to the embedded root.
-3. `release.yml`: macOS targets, the two-build SHA-256 gate, harden-runner
-   egress `block`.
-4. **UI update apply control** (the install POST exists; the web UI has no
-   control for it).
+   DSSE bundle as `detent-<triple>.sigstore.json` (E1, done). After the first
+   real release, commit one captured bundle as a fixture and add
+   `real_attest_bundle_verifies`.
+2. ~~**B3 (H17 step 7) — real trust roots.**~~ Done (`26beff9`, `e7bd3ba`):
+   the public-good Fulcio intermediate and root and the Rekor key, from
+   `trusted_root.json`; P-384 chain signatures. Refresh from TUF stays a
+   manual release step (ADR-014).
+3. ~~`release.yml`: macOS targets, the two-build SHA-256 gate, harden-runner
+   egress `block`.~~ Done. Release dry run 37174273098 (`b1f7a05`) proved the builds, the gate
+   and the SBOM; the `publish` job's egress list runs first on a tag.
+4. ~~**UI update apply control.**~~ Done (`8a99a38`).
 5. **Owner:** tag `v0.0.1-rc`, then `v0.1.0`; run the M3 acceptance (a device
    updates and rolls back from a broken `v0.1.1-test`); set immutable
    releases and the rulesets in `docs/RELEASING.md`.
+6. **SCT signatures** (H17): embedded SCTs are checked for presence only.
+   Verify them against the CT log keys in `trusted_root.json`.
+7. **Rekor v2** (log2025-1): the verifier supports Rekor v1 entries only.
+   Decide before Sigstore moves public-good signing to v2.
+8. **`run_update` coverage:** B3 removed the two placeholder-root tests in
+   `run.rs`; `run_update` past the trust load has no test now. Restore
+   coverage (crate floor 95%) with a fixture signed by a test root.
+9. **Build-signer extension** (`verify.rs`, `extension_uri`): it compares the
+   raw extension value with the pinned URI. OID 1.3.6.1.4.1.57264.1.9 holds
+   a DER UTF8String, so this branch can never match; the SAN branch carries
+   the check today. Decode the value, with a test on a real leaf.
+10. **`rebuild-verify.yml`** rebuilds the Linux targets only; add the two
+    macOS targets.
+11. **`ci.yml` `rust-macos`:** the comment says harden-runner supports Linux
+    only; it supports macOS in audit mode (as `release.yml` uses it).
 
 ### Track F — Phase 12 / M4 (v1.0)
 
