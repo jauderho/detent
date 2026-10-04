@@ -16,9 +16,9 @@
 //!   I/O and refuses closed: every [`VerificationError`] aborts the update,
 //!   never an unverified install;
 //! * [`trust`] embeds the Fulcio roots and Rekor log key at build time from
-//!   the `trust/` files — placeholders until the first tagged release, so
-//!   this build refuses every update with
-//!   [`VerificationError::TrustRootUnavailable`];
+//!   the `trust/` files (Sigstore public-good; provenance in
+//!   [`trust::TRUST_MANIFEST`]); material that does not parse refuses every
+//!   update with [`VerificationError::TrustRootUnavailable`];
 //! * [`update`] is the flow: [`update::check`] for `detent update --check`,
 //!   [`update::prepare`] through the verified candidate and
 //!   [`update::confirm_features`] through its self-test;

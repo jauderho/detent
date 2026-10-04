@@ -2267,8 +2267,9 @@ mod tests {
         Ok(std::fs::read(update_fixtures().join("binary.bin"))?)
     }
 
-    /// The fixture trust root: the embedded one is still a placeholder, so
-    /// hermetic verification runs through the fixture PEMs instead.
+    /// The fixture trust root: the fixture bundles chain to it, not to the
+    /// embedded public-good root, so hermetic verification runs through the
+    /// fixture PEMs.
     #[cfg(feature = "update")]
     fn fixture_trust() -> Result<detent_update::TrustRoot, Box<dyn std::error::Error>> {
         let dir = update_fixtures();
@@ -2818,17 +2819,6 @@ mod tests {
             Operation::ListModules
         ));
         Ok(())
-    }
-
-    #[cfg(feature = "update")]
-    #[test]
-    fn the_embedded_trust_root_refuses_until_the_first_release() {
-        // A placeholder trust root must refuse closed (run_update resolves it
-        // before anything is fetched), never degrade to system CAs.
-        assert!(matches!(
-            detent_update::trust::embedded(),
-            Err(detent_update::VerificationError::TrustRootUnavailable)
-        ));
     }
 
     #[cfg(feature = "update")]
@@ -3768,45 +3758,6 @@ mod tests {
             "{notes}"
         );
         assert_eq!(std::fs::read(&marker)?, b"{");
-        Ok(())
-    }
-
-    /// Until the first release embeds a trust root, `detent update` refuses
-    /// closed before it fetches anything: exit 1 with the reason, and no
-    /// check stamp written.
-    #[cfg(feature = "update")]
-    #[test]
-    fn update_refuses_closed_without_an_embedded_trust_root() -> R {
-        let dir = tempfile::TempDir::new()?;
-        let state = dir.path().display().to_string();
-        for argv in [
-            vec![
-                "detent",
-                "update",
-                "--check",
-                "--locale",
-                "en-US",
-                "--state-root",
-                &state,
-            ],
-            vec![
-                "detent",
-                "update",
-                "--locale",
-                "en-US",
-                "--state-root",
-                &state,
-            ],
-        ] {
-            let (exit, out, notes) = run_with(&argv)?;
-            assert_eq!(exit, Exit::Failed, "{argv:?}");
-            assert!(out.is_empty(), "{argv:?}: {out}");
-            assert!(
-                notes.contains("update failed: embedded trust material is unavailable"),
-                "{argv:?}: {notes}"
-            );
-        }
-        assert!(!detent_update::update::stamp_path(dir.path()).exists());
         Ok(())
     }
 

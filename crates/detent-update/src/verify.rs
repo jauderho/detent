@@ -719,6 +719,13 @@ mod tests {
     }
 
     #[test]
+    fn the_embedded_rekor_key_verifies_a_real_public_good_set() {
+        let (decoded, _) = public_good_set();
+        let trust = crate::trust::embedded().expect("embedded trust root");
+        assert_eq!(verify_set(&decoded, &trust.rekor_key), Ok(()));
+    }
+
+    #[test]
     fn a_real_set_does_not_cover_a_changed_field() {
         type Change = fn(&mut Decoded);
         let changes: [(&str, Change); 4] = [

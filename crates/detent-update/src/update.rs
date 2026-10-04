@@ -54,7 +54,7 @@ pub enum UpdateError {
     /// The bundle failed step-1 parsing (ADR-014's `BundleMalformed`).
     #[error(transparent)]
     Bundle(#[from] crate::bundle::BundleError),
-    /// The trust root is unusable (placeholder, or expired at integratedTime).
+    /// The trust root is unusable (unparsable, or expired at integratedTime).
     #[error("embedded trust root is unusable")]
     TrustRoot,
     /// The release names no matching assets.
