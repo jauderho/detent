@@ -126,7 +126,10 @@ pub fn verify(
         decoded.integrated_time.max(0).cast_unsigned(),
     ));
     leaf.verify_for_usage(
-        &[webpki::aws_lc_rs::ECDSA_P256_SHA256],
+        &[
+            webpki::aws_lc_rs::ECDSA_P256_SHA256,
+            webpki::aws_lc_rs::ECDSA_P384_SHA384,
+        ],
         &anchors,
         &intermediates,
         integrated,
@@ -645,6 +648,27 @@ mod tests {
             signed_entry_timestamp: b64("/entry/inclusionPromise/signedEntryTimestamp"),
         };
         (decoded, key)
+    }
+
+    /// A real public-good Fulcio leaf (P-384/SHA-384 CA signature) must chain
+    /// to the embedded roots. `verify` runs step 2 (chain) before step 3
+    /// (identity); this leaf is for another repository, so reaching
+    /// `IdentityMismatch` proves the chain check passed.
+    #[test]
+    fn real_fulcio_leaf_chains_to_the_embedded_roots() {
+        let (mut decoded, _) = public_good_set();
+        let body: serde_json::Value = serde_json::from_slice(&decoded.body).expect("body json");
+        let pem = body
+            .pointer("/spec/content/envelope/signatures/0/publicKey")
+            .and_then(serde_json::Value::as_str)
+            .expect("publicKey");
+        let pem = BASE64.decode(pem).expect("pem base64");
+        decoded.certs = vec![crate::trust::pem_body(&pem, "CERTIFICATE").expect("leaf cert")];
+        let trust = crate::trust::embedded().expect("embedded trust");
+        assert_eq!(
+            verify(&decoded, &[0; 32], "v0.0.0", &trust),
+            Err(VerificationError::IdentityMismatch)
+        );
     }
 
     /// A `Decoded` whose body agrees with its DSSE signature and payload, in
