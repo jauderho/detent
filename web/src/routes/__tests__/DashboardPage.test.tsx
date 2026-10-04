@@ -355,6 +355,18 @@ describe('DashboardPage — install update', () => {
     expect(posts(stub)).toHaveLength(0)
   })
 
+  it('closes the dialog on Escape and sends nothing', async () => {
+    const user = userEvent.setup()
+    const stub = stubFetchByUrl(installHandlers(SESSION, () => jsonResponse({ version: 'v0.0.2' })))
+    renderWithProviders(<DashboardPage />, { fetch: stub.fetch })
+
+    await user.click(await screen.findByRole('button', { name: /install.*v0\.0\.2/ }))
+    await screen.findByRole('dialog')
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(posts(stub)).toHaveLength(0)
+  })
+
   it('posts the tag on confirm and shows the success banner', async () => {
     const user = userEvent.setup()
     const stub = stubFetchByUrl(installHandlers(SESSION, () => jsonResponse({ version: 'v0.0.2' })))
