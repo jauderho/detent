@@ -700,7 +700,6 @@ fn run_update(
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
-    use detent_update::Policy;
     use detent_update::fetch::RealTransport;
     let current = match semver::Version::parse(env!("CARGO_PKG_VERSION")) {
         Ok(version) => version,
@@ -730,6 +729,12 @@ fn run_update(
         }
     };
     let settings = Settings::from_cli(cli);
+    let policy = match update_policy(&settings, args.allow_downgrade) {
+        Ok(policy) => policy,
+        Err(err) => {
+            return failed(renderer, streams, &err.to_string());
+        }
+    };
     let config_path = settings.config_path.clone();
     let staging_parent = target
         .parent()
@@ -741,10 +746,7 @@ fn run_update(
     run_update_on(
         &transport,
         &current,
-        &Policy {
-            min_age_days: Policy::default().min_age_days,
-            allow_downgrade: args.allow_downgrade,
-        },
+        &policy,
         time::OffsetDateTime::now_utc(),
         &trust,
         check_only,
@@ -760,6 +762,21 @@ fn run_update(
         renderer,
         streams,
     )
+}
+
+/// The release policy for `detent update`: the age gate from
+/// `[update] min_age_days` in `detent.toml` (PLAN §2.10), the same value
+/// the web update check uses.
+#[cfg(feature = "update")]
+fn update_policy(
+    settings: &Settings,
+    allow_downgrade: bool,
+) -> Result<detent_update::Policy, detent_web::ConfigError> {
+    let config = settings.load_web_config()?;
+    Ok(detent_update::Policy {
+        min_age_days: u64::from(config.update.min_age_days),
+        allow_downgrade,
+    })
 }
 
 /// The systemd/OpenRC names detent's own service may carry. `packaging/`
@@ -1499,6 +1516,32 @@ mod tests {
         assert_eq!(settings.secrets_path(), PathBuf::from("/tmp/secrets.toml"));
         let settings = Settings::from_cli(&parse(&["detent", "serve", "--config", "c.toml"])?);
         assert_eq!(settings.secrets_path(), PathBuf::from("secrets.toml"));
+        Ok(())
+    }
+
+    /// `detent update` takes the age gate from `[update] min_age_days`; it
+    /// used the built-in 2 days whatever the file said.
+    #[cfg(feature = "update")]
+    #[test]
+    fn update_takes_min_age_days_from_the_config() -> R {
+        let dir = tempfile::tempdir()?;
+        let config = dir.path().join("detent.toml");
+        let settings = Settings::from_cli(&parse(&[
+            "detent",
+            "--config",
+            config.to_str().ok_or("path")?,
+            "update",
+        ])?);
+        let policy = super::update_policy(&settings, false)?;
+        assert_eq!(
+            policy.min_age_days,
+            detent_update::Policy::default().min_age_days
+        );
+
+        std::fs::write(&config, "[update]\nmin_age_days = 1\n")?;
+        let policy = super::update_policy(&settings, true)?;
+        assert_eq!(policy.min_age_days, 1);
+        assert!(policy.allow_downgrade);
         Ok(())
     }
 
