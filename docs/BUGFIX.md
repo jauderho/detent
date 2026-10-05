@@ -313,19 +313,9 @@ deferred by the owner.
    the builds, the gate and the SBOM; release run 37186433604
    (`v0.0.1-rc.2`) proved the `publish` job under `block`.
 4. ~~**UI update apply control.**~~ Done (`8a99a38`).
-5. **M3 acceptance (in progress).** Released: `v0.0.1-rc.2` and `v0.1.0`
-   (`v0.0.1-rc` is a tag only; its publish step failed, fixed in `85657f9`).
-   `v0.1.1-test` is built from branch `m3/broken-v0.1.1-test` (never on
-   `main`; `serve` exits 1) and is marked pre-release, so no updater takes
-   it. testhost runs `v0.0.1-rc.2` under the packaged unit; `update --check`
-   holds `v0.1.0` (age gate, 2 days). From 2026-10-06 08:05 UTC:
-   `sudo detent update` on testhost (expect `v0.1.0`, `/healthz` ok); then
-   `gh release edit v0.1.1-test --prerelease=false --latest=false`,
-   `sudo detent update` (expect the swap, `/healthz` failure and the
-   rollback to `v0.1.0`), then set `--prerelease` again. Then remove detent
-   from testhost (`packaging/install.sh --uninstall`). **Owner, after M3:** turn on
-   immutable releases (the pre-release toggles above come first) and the
-   rulesets in `docs/RELEASING.md`.
+5. ~~**M3 acceptance.**~~ Passed 2026-10-05 on testhost (see PROGRESS).
+   **Owner:** turn on immutable releases and the rulesets in
+   `docs/RELEASING.md`; then flip PLAN Phase 9 to `[x]`.
 6. **SCT signatures** (H17): embedded SCTs are checked for presence only.
    Verify them against the CT log keys in `trusted_root.json`.
 7. **Rekor v2** (log2025-1): the verifier supports Rekor v1 entries only.
