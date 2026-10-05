@@ -110,22 +110,28 @@ No partial state, no retries with weaker checks.
    (as Rekor `VerifySignedEntryTimestamp` and sigstore-go `VerifySET`). The
    SET is the only signature over `integratedTime`, the instant step 2 uses.
 
-   **Not verified:** embedded SCTs are only checked for presence (a
-   non-empty SCT list), not against CT log keys. Unknown entry kinds fall
+   **Embedded SCTs** (leaves with the current issuer extension
+   1.3.6.1.4.1.57264.1.8): at least one SCT in the leaf must name the log id
+   of an embedded CT log key and carry a valid ECDSA P-256 SHA-256 signature
+   over the RFC 6962 §3.2 `precert_entry` data: the SHA-256 of the issuing
+   CA's SPKI (the embedded or bundled certificate whose key verifies the
+   leaf) and the leaf `TBSCertificate` with the SCT list extension removed.
+   Otherwise `SctInvalid`. Leaves with only the legacy issuer extension
+   (1.3.6.1.4.1.57264.1.1) are not checked for SCTs. Unknown entry kinds fall
    through to the `hashedrekord` body check (H17 step 6).
 
 ### Embedded trust root and refresh procedure
 
 Trust material is embedded at build time (PLAN §2.9 step 4) in
 `crates/detent-update/trust/`: the Fulcio intermediate and root certificates
-(each an anchor; v0.3 bundles carry only the leaf) and the Rekor log public
-key, extracted from Sigstore's `trusted_root.json` (2026-10-03: root-signing
+(each an anchor; v0.3 bundles carry only the leaf), the Rekor log public
+key and the `ctfe.sigstore.dev/2022` CT log public key, extracted from Sigstore's `trusted_root.json` (2026-10-03: root-signing
 commit 5888f35, recorded in `trust::TRUST_MANIFEST`).
 
 Refresh procedure (per release, and out-of-band when Sigstore rotates roots):
 1. Fetch the current Sigstore TUF snapshot with the TUF client and verify the
    metadata chain up to the pinned TUF root (the only pinned secret).
-2. Extract the active Fulcio root CA(s) and Rekor log key.
+2. Extract the active Fulcio root CA(s), Rekor log key and CT log key.
 3. Write them to `crates/detent-update/trust/` as PEM files, and set
    `TRUST_MANIFEST` to the source commit and `trusted_root.json` SHA-256.
    Do not copy a retired CA: the verifier honours the certificate's own

@@ -15,11 +15,11 @@ use rustls_pki_types::{CertificateDer, UnixTime};
 use sha2::{Digest as _, Sha256};
 use webpki::EndEntityCert;
 use x509_parser::certificate::X509Certificate;
-use x509_parser::extensions::ParsedExtension;
+use x509_parser::extensions::{CtVersion, ParsedExtension};
 use x509_parser::prelude::{FromDer as _, GeneralName};
 
 use crate::bundle::{self, Decoded};
-use crate::trust::TrustRoot;
+use crate::trust::{CtLogKey, TrustRoot};
 
 /// The GitHub Actions OIDC issuer every leaf must carry (ADR-005).
 pub const ISSUER: &str = "https://token.actions.githubusercontent.com";
@@ -70,7 +70,8 @@ pub enum VerificationError {
     /// Step 6: the Rekor inclusion proof, checkpoint, or tlog body fails.
     #[error("Rekor inclusion proof or checkpoint does not verify")]
     SetInvalid,
-    /// The signing certificate has no parseable embedded SCT list.
+    /// Step 3: the signing certificate has no embedded SCT that an
+    /// embedded CT log key signed.
     #[error("signing certificate has no valid embedded SCT list")]
     SctInvalid,
     /// Step 6: the Rekor entry kind is not `hashedrekord` or `dsse`.
@@ -186,8 +187,12 @@ pub fn verify(
     if !modern_issuer && !legacy_issuer {
         return Err(VerificationError::IssuerMismatch);
     }
-    if modern_issuer && !has_embedded_sct(&parsed_leaf) {
-        return Err(VerificationError::SctInvalid);
+    if modern_issuer {
+        let candidates: Vec<CertificateDer<'_>> =
+            usable_roots.iter().chain(&intermediates).cloned().collect();
+        let issuer_spki =
+            sct_issuer_spki(&parsed_leaf, &candidates).ok_or(VerificationError::SctInvalid)?;
+        verify_embedded_scts(&parsed_leaf, &issuer_spki, &trust.ct_logs)?;
     }
 
     // Step 4: DSSE signature, ECDSA P-256 over the PAE, with the leaf's key.
@@ -460,18 +465,198 @@ fn verify_set(decoded: &Decoded, rekor_key: &VerifyingKey) -> Result<(), Verific
         .map_err(|_| VerificationError::SetInvalid)
 }
 
-/// Returns true only for a non-empty SCT list parsed by x509-parser.
-///
-/// The DER OCTET STRING tag alone is not evidence of an SCT: malformed or
-/// empty extension contents must not let a modern Fulcio certificate through.
-fn has_embedded_sct(cert: &X509Certificate<'_>) -> bool {
-    cert.extensions().iter().any(|extension| {
-        extension.oid.to_id_string() == SCT_LIST_OID
-            && matches!(
-                extension.parsed_extension(),
-                ParsedExtension::SCT(scts) if !scts.is_empty()
-            )
+/// The SPKI DER of the certificate in `candidates` that issued `leaf`: its
+/// subject is the leaf's issuer and its key verifies the leaf's signature.
+fn sct_issuer_spki(
+    leaf: &X509Certificate<'_>,
+    candidates: &[CertificateDer<'_>],
+) -> Option<Vec<u8>> {
+    candidates.iter().find_map(|der| {
+        let (_, cert) = X509Certificate::from_der(der.as_ref()).ok()?;
+        let key = cert.public_key().subject_public_key.data.as_ref();
+        let signs_leaf = [
+            webpki::aws_lc_rs::ECDSA_P256_SHA256,
+            webpki::aws_lc_rs::ECDSA_P384_SHA384,
+        ]
+        .iter()
+        .any(|algorithm| {
+            algorithm
+                .verify_signature(
+                    key,
+                    leaf.tbs_certificate.as_ref(),
+                    leaf.signature_value.data.as_ref(),
+                )
+                .is_ok()
+        });
+        (cert.subject() == leaf.issuer() && signs_leaf).then(|| cert.public_key().raw.to_vec())
     })
+}
+
+/// Requires one SCT embedded in `leaf` that a CT log in `ct_logs` signed
+/// over the leaf's precertificate (RFC 6962 §3.2, `precert_entry`).
+///
+/// The signed data is
+///
+/// ```text
+/// sct_version(1) = 0 ‖ signature_type(1) = 0 ‖ timestamp(8) ‖
+/// entry_type(2) = 1 ‖ issuer_key_hash(32) ‖ tbs_length(3) ‖ tbs ‖
+/// extensions_length(2) ‖ extensions
+/// ```
+///
+/// `issuer_key_hash` is SHA-256 of `issuer_spki`, the SPKI DER of the CA
+/// that issued the leaf; `tbs` is the leaf's `TBSCertificate` with the SCT
+/// list extension removed ([`precert_tbs`]). The signature must be ECDSA
+/// (3) with SHA-256 (4). SCTs from logs not in `ct_logs`, or of another
+/// version or algorithm, do not count. The unit test
+/// `a_real_embedded_sct_verifies` checks this against a real Fulcio leaf.
+fn verify_embedded_scts(
+    leaf: &X509Certificate<'_>,
+    issuer_spki: &[u8],
+    ct_logs: &[CtLogKey],
+) -> Result<(), VerificationError> {
+    let scts = leaf
+        .extensions()
+        .iter()
+        .find_map(|extension| match extension.parsed_extension() {
+            ParsedExtension::SCT(scts) if extension.oid.to_id_string() == SCT_LIST_OID => {
+                Some(scts)
+            }
+            _ => None,
+        })
+        .ok_or(VerificationError::SctInvalid)?;
+    let tbs = precert_tbs(leaf.tbs_certificate.as_ref()).ok_or(VerificationError::SctInvalid)?;
+    let [0, tbs_len @ ..] = u32::try_from(tbs.len())
+        .map_err(|_| VerificationError::SctInvalid)?
+        .to_be_bytes()
+    else {
+        return Err(VerificationError::SctInvalid);
+    };
+    let issuer_key_hash = Sha256::digest(issuer_spki);
+
+    let verified = scts.iter().any(|sct| {
+        let Some(log) = ct_logs.iter().find(|log| log.log_id == *sct.id.key_id) else {
+            return false;
+        };
+        let Ok(extensions_len) = u16::try_from(sct.extensions.0.len()) else {
+            return false;
+        };
+        if sct.version != CtVersion::V1
+            || sct.signature.hash_alg_id != 4
+            || sct.signature.sign_alg_id != 3
+        {
+            return false;
+        }
+        let Ok(signature) = Signature::from_der(sct.signature.data) else {
+            return false;
+        };
+        let mut signed = Vec::with_capacity(tbs.len().saturating_add(128));
+        signed.extend_from_slice(&[0, 0]);
+        signed.extend_from_slice(&sct.timestamp.to_be_bytes());
+        signed.extend_from_slice(&[0, 1]);
+        signed.extend_from_slice(&issuer_key_hash);
+        signed.extend_from_slice(&tbs_len);
+        signed.extend_from_slice(&tbs);
+        signed.extend_from_slice(&extensions_len.to_be_bytes());
+        signed.extend_from_slice(sct.extensions.0);
+        log.key.verify(&signed, &signature).is_ok()
+    });
+    if verified {
+        Ok(())
+    } else {
+        Err(VerificationError::SctInvalid)
+    }
+}
+
+/// The DER encoding of [`SCT_LIST_OID`], tag and length included.
+const SCT_LIST_OID_DER: [u8; 12] = [
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0xd6, 0x79, 0x02, 0x04, 0x02,
+];
+
+/// The precertificate `TBSCertificate` an SCT signs (RFC 6962 §3.2): the
+/// leaf's DER `TBSCertificate` with exactly one SCT list extension removed
+/// and every enclosing length re-encoded. `None` when the DER does not have
+/// that shape.
+fn precert_tbs(tbs: &[u8]) -> Option<Vec<u8>> {
+    let (0x30, mut fields, []) = der_tlv(tbs)? else {
+        return None;
+    };
+    let mut out_fields = Vec::with_capacity(tbs.len());
+    let mut removed = 0_usize;
+    while !fields.is_empty() {
+        let (tag, content, rest) = der_tlv(fields)?;
+        if tag == 0xa3 {
+            let (0x30, mut extensions, []) = der_tlv(content)? else {
+                return None;
+            };
+            let mut kept = Vec::with_capacity(extensions.len());
+            while !extensions.is_empty() {
+                let (0x30, extension, next) = der_tlv(extensions)? else {
+                    return None;
+                };
+                let whole = extensions.get(..extensions.len().checked_sub(next.len())?)?;
+                if extension.starts_with(&SCT_LIST_OID_DER) {
+                    removed = removed.checked_add(1)?;
+                } else {
+                    kept.extend_from_slice(whole);
+                }
+                extensions = next;
+            }
+            let mut sequence = Vec::with_capacity(kept.len().saturating_add(4));
+            der_push(&mut sequence, 0x30, &kept)?;
+            der_push(&mut out_fields, 0xa3, &sequence)?;
+        } else {
+            out_fields.extend_from_slice(fields.get(..fields.len().checked_sub(rest.len())?)?);
+        }
+        fields = rest;
+    }
+    if removed != 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(out_fields.len().saturating_add(4));
+    der_push(&mut out, 0x30, &out_fields)?;
+    Some(out)
+}
+
+/// Splits one DER TLV with a single-byte tag off `input`: (tag, contents,
+/// rest). Lengths of up to three bytes; indefinite lengths are refused.
+fn der_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let (&tag, input) = input.split_first()?;
+    let (&first, mut input) = input.split_first()?;
+    let len = if first < 0x80 {
+        usize::from(first)
+    } else {
+        let count = usize::from(first & 0x7f);
+        if !(1..=3).contains(&count) {
+            return None;
+        }
+        let (bytes, rest) = input.split_at_checked(count)?;
+        input = rest;
+        bytes
+            .iter()
+            .fold(0_usize, |len, &byte| (len << 8) | usize::from(byte))
+    };
+    let (content, rest) = input.split_at_checked(len)?;
+    Some((tag, content, rest))
+}
+
+/// Appends a DER TLV with a minimal-length encoding.
+fn der_push(out: &mut Vec<u8>, tag: u8, content: &[u8]) -> Option<()> {
+    out.push(tag);
+    let len = content.len();
+    if let Ok(short @ 0..0x80) = u8::try_from(len) {
+        out.push(short);
+    } else {
+        let bytes = len.to_be_bytes();
+        let significant: Vec<u8> = bytes
+            .iter()
+            .copied()
+            .skip_while(|&byte| byte == 0)
+            .collect();
+        out.push(0x80 | u8::try_from(significant.len()).ok()?);
+        out.extend_from_slice(&significant);
+    }
+    out.extend_from_slice(content);
+    Some(())
 }
 
 /// Verify the Rekor body binds the DSSE signature to this bundle. The
@@ -769,6 +954,161 @@ mod tests {
         }
     }
 
+    /// The leaf certificate of the real `v0.0.1-rc.2` release bundle. It
+    /// carries one embedded SCT from the `ctfe.sigstore.dev/2022` log.
+    fn real_leaf() -> Vec<u8> {
+        let raw: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/real-v0.0.1-rc.2.sigstore.json"
+        ))
+        .expect("bundle json");
+        let leaf = raw
+            .pointer("/verificationMaterial/certificate/rawBytes")
+            .and_then(serde_json::Value::as_str)
+            .expect("leaf rawBytes");
+        BASE64.decode(leaf).expect("leaf base64")
+    }
+
+    /// The SPKI of the embedded Fulcio certificate that issued the real leaf.
+    fn real_issuer_spki() -> Vec<u8> {
+        let leaf = real_leaf();
+        let (_, parsed) = X509Certificate::from_der(&leaf).expect("parse leaf");
+        let trust = crate::trust::embedded().expect("embedded trust");
+        sct_issuer_spki(&parsed, &trust.fulcio_roots).expect("issuer of the real leaf")
+    }
+
+    /// Runs the SCT check on `leaf` with the real issuer key and the
+    /// embedded CT log keys.
+    fn check_scts(leaf: &[u8], issuer_spki: &[u8]) -> Result<(), VerificationError> {
+        let (_, parsed) = X509Certificate::from_der(leaf).expect("parse leaf");
+        let trust = crate::trust::embedded().expect("embedded trust");
+        verify_embedded_scts(&parsed, issuer_spki, &trust.ct_logs)
+    }
+
+    /// The offset of the real SCT's log id in the real leaf DER.
+    fn real_log_id_offset(leaf: &[u8]) -> usize {
+        let trust = crate::trust::embedded().expect("embedded trust");
+        let log_id = trust.ct_logs[0].log_id;
+        let offsets: Vec<usize> = leaf
+            .windows(32)
+            .enumerate()
+            .filter(|(_, window)| *window == log_id)
+            .map(|(offset, _)| offset)
+            .collect();
+        assert_eq!(offsets.len(), 1, "the log id occurs once in the leaf");
+        offsets[0]
+    }
+
+    #[test]
+    fn the_real_leaf_issuer_is_the_embedded_intermediate() {
+        let trust = crate::trust::embedded().expect("embedded trust");
+        let (_, intermediate) =
+            X509Certificate::from_der(trust.fulcio_roots[0].as_ref()).expect("intermediate");
+        assert_eq!(real_issuer_spki(), intermediate.public_key().raw);
+    }
+
+    #[test]
+    fn a_real_embedded_sct_verifies() {
+        assert_eq!(check_scts(&real_leaf(), &real_issuer_spki()), Ok(()));
+    }
+
+    #[test]
+    fn a_real_sct_with_a_flipped_signature_bit_is_refused() {
+        let mut leaf = real_leaf();
+        let issuer = real_issuer_spki();
+        // log id (32), timestamp (8), extensions (2-byte length), hash and
+        // signature algorithm (1 each), signature (2-byte length).
+        let extensions = real_log_id_offset(&leaf) + 40;
+        let extensions_len =
+            usize::from(u16::from_be_bytes([leaf[extensions], leaf[extensions + 1]]));
+        let signature = extensions + 2 + extensions_len + 2;
+        let signature_len = usize::from(u16::from_be_bytes([leaf[signature], leaf[signature + 1]]));
+        let last = signature + 2 + signature_len - 1;
+        leaf[last] ^= 0x01;
+        assert_eq!(
+            check_scts(&leaf, &issuer),
+            Err(VerificationError::SctInvalid)
+        );
+    }
+
+    #[test]
+    fn a_real_sct_from_an_unknown_log_is_refused() {
+        let mut leaf = real_leaf();
+        let issuer = real_issuer_spki();
+        let offset = real_log_id_offset(&leaf);
+        leaf[offset] ^= 0x01;
+        assert_eq!(
+            check_scts(&leaf, &issuer),
+            Err(VerificationError::SctInvalid)
+        );
+    }
+
+    #[test]
+    fn a_real_sct_does_not_cover_a_changed_tbs() {
+        let mut leaf = real_leaf();
+        let issuer = real_issuer_spki();
+        // The leaf's subject key identifier, outside the SCT extension.
+        let ski = [0x19, 0x50, 0xfb, 0xd6, 0x99, 0x8f, 0xde, 0x8c];
+        let offset = leaf
+            .windows(ski.len())
+            .position(|window| window == ski)
+            .expect("subject key identifier");
+        leaf[offset] ^= 0x01;
+        assert_eq!(
+            check_scts(&leaf, &issuer),
+            Err(VerificationError::SctInvalid)
+        );
+    }
+
+    #[test]
+    fn a_real_sct_is_bound_to_its_issuer_key() {
+        let trust = crate::trust::embedded().expect("embedded trust");
+        let (_, root) = X509Certificate::from_der(trust.fulcio_roots[1].as_ref()).expect("root");
+        assert_eq!(
+            check_scts(&real_leaf(), root.public_key().raw),
+            Err(VerificationError::SctInvalid)
+        );
+    }
+
+    #[test]
+    fn the_precert_tbs_refuses_malformed_der() {
+        let leaf = real_leaf();
+        let (_, parsed) = X509Certificate::from_der(&leaf).expect("parse leaf");
+        let tbs = parsed.tbs_certificate.as_ref();
+        let precert = precert_tbs(tbs).expect("real precert tbs");
+        // The SCT list extension and nothing else is gone.
+        assert!(precert.len() < tbs.len());
+        assert!(
+            !precert
+                .windows(SCT_LIST_OID_DER.len())
+                .any(|w| w == SCT_LIST_OID_DER)
+        );
+        // A TBS without an SCT list, truncated DER, an indefinite length and
+        // an over-long length are all refused.
+        assert_eq!(precert_tbs(&precert), None);
+        for cut in 0..tbs.len() {
+            assert_eq!(precert_tbs(&tbs[..cut]), None);
+        }
+        assert_eq!(precert_tbs(&[0x30, 0x80, 0x00, 0x00]), None);
+        assert_eq!(precert_tbs(&[0x30, 0x84, 0, 0, 0, 0]), None);
+    }
+
+    #[test]
+    fn der_lengths_are_minimal() {
+        for (len, header) in [
+            (0x7f_usize, vec![0x30, 0x7f]),
+            (0x80, vec![0x30, 0x81, 0x80]),
+            (0x1234, vec![0x30, 0x82, 0x12, 0x34]),
+        ] {
+            let mut out = Vec::new();
+            der_push(&mut out, 0x30, &vec![0; len]).expect("push");
+            assert_eq!(&out[..header.len()], header.as_slice());
+            assert_eq!(
+                der_tlv(&out).map(|(tag, content, rest)| (tag, content.len(), rest.len())),
+                Some((0x30, len, 0))
+            );
+        }
+    }
+
     #[test]
     fn an_sct_octet_string_must_parse_as_a_nonempty_list() {
         use rcgen::{CertificateParams, CustomExtension, KeyPair};
@@ -782,16 +1122,19 @@ mod tests {
         )];
         let key = KeyPair::generate().expect("fixture key");
         let cert = params.self_signed(&key).expect("fixture cert");
-        let (_, parsed) = X509Certificate::from_der(cert.der()).expect("parse fixture cert");
-        assert!(!has_embedded_sct(&parsed));
+        assert_eq!(
+            check_scts(cert.der(), &real_issuer_spki()),
+            Err(VerificationError::SctInvalid)
+        );
     }
 
     #[test]
-    fn a_nonempty_sct_list_is_recognized() {
+    fn an_unsigned_sct_from_the_embedded_log_is_refused() {
         use rcgen::{CertificateParams, CustomExtension, KeyPair};
 
+        let trust = crate::trust::embedded().expect("embedded trust");
         let mut entry = vec![0]; // SCT version v1
-        entry.extend_from_slice(&[0; 32]); // log ID
+        entry.extend_from_slice(&trust.ct_logs[0].log_id); // log ID
         entry.extend_from_slice(&[0; 8]); // timestamp
         entry.extend_from_slice(&[0, 0]); // extensions length
         entry.extend_from_slice(&[4, 3, 0, 0]); // hash, signature, signature length
@@ -805,8 +1148,10 @@ mod tests {
         )];
         let key = KeyPair::generate().expect("fixture key");
         let cert = params.self_signed(&key).expect("fixture cert");
-        let (_, parsed) = X509Certificate::from_der(cert.der()).expect("parse fixture cert");
-        assert!(has_embedded_sct(&parsed));
+        assert_eq!(
+            check_scts(cert.der(), &real_issuer_spki()),
+            Err(VerificationError::SctInvalid)
+        );
     }
 
     #[test]
@@ -900,6 +1245,7 @@ mod tests {
             fulcio_roots: Vec::new(),
             rekor_key: *rekor.verifying_key(),
             root_windows: Vec::new(),
+            ct_logs: Vec::new(),
         };
         let payload = br#"{"_type":"https://in-toto.io/Statement/v1"}"#.to_vec();
         let dsse_signature = vec![0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01];
@@ -1128,6 +1474,7 @@ mod tests {
             rekor_key: VerifyingKey::from_sec1_bytes(spki.subject_public_key.data.as_ref())
                 .expect("P-256 key"),
             root_windows: Vec::new(),
+            ct_logs: Vec::new(),
         };
         let decoded = Decoded {
             integrated_time: 1_712_085_549,

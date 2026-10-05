@@ -1,6 +1,6 @@
 # Trust root (ADR-014, PLAN §2.9 step 4)
 
-`fulcio-root.pem` and `rekor-pub.pem` are embedded into the binary at compile
+`fulcio-root.pem`, `rekor-pub.pem` and `ctfe-pub.pem` are embedded into the binary at compile
 time (`include_str!` from `src/trust.rs`) and are the *only* trust anchors the
 self-update verifier accepts: never the system store, never anything fetched
 at runtime (refuse-closed, ADR-014).
@@ -16,6 +16,7 @@ Material that does not parse fails every verification with
 | --- | --- | --- |
 | `fulcio-root.pem` | The active Fulcio CA chain: intermediate, then root | PEM (`CERTIFICATE`), one after another; every certificate is a trust anchor, used only while its own validity window covers `integratedTime`. The intermediate must be here: a v0.3 bundle carries only the leaf. Multiple CAs with overlapping windows are all honored, so a device updating across a rotation never hits a gap |
 | `rekor-pub.pem` | The Rekor v1 log public key (`rekor.sigstore.dev`) | PEM (`PUBLIC KEY`, PKIX SPKI), ECDSA P-256 |
+| `ctfe-pub.pem` | The CT log public key (`ctfe.sigstore.dev/2022`) that signs the SCTs in Fulcio leaves | PEM (`PUBLIC KEY`, PKIX SPKI), ECDSA P-256; the log id is the SHA-256 of the SPKI |
 
 Text outside the PEM blocks is ignored.
 
@@ -27,10 +28,12 @@ Text outside the PEM blocks is ignored.
 2. From the `trusted_root.json` target, take the `certChain` of each
    `certificateAuthorities` entry for `https://fulcio.sigstore.dev` whose
    `validFor` is still open, and the `publicKey` of the
-   `https://rekor.sigstore.dev` tlog. Each `rawBytes` is base64 DER.
+   `https://rekor.sigstore.dev` tlog, and the `publicKey` of each `ctlogs`
+   entry whose `validFor` is still open. Each `rawBytes` is base64 DER.
 3. Write the certificates as PEM, chain order, into `fulcio-root.pem`; write
-   the Rekor key as PEM into `rekor-pub.pem`. Update the pinned digests and
-   log id in the `src/trust.rs` tests.
+   the Rekor key as PEM into `rekor-pub.pem`; write the CT log key as PEM
+   into `ctfe-pub.pem`. Update the pinned digests and log ids in the
+   `src/trust.rs` tests.
 4. Set `TRUST_MANIFEST` in `src/trust.rs` to the source commit and the
    SHA-256 of `trusted_root.json`, so the provenance of the embedded roots is
    greppable.

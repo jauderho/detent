@@ -1,5 +1,5 @@
-//! The embedded trust root (ADR-014): Fulcio root CAs and the Rekor log key,
-//! baked in at build time from [`crate::trust`]'s PEM files — never the system
+//! The embedded trust root (ADR-014): Fulcio root CAs, the Rekor log key and
+//! the certificate-transparency log key, baked in at build time from [`crate::trust`]'s PEM files — never the system
 //! store, never fetched at runtime.
 //!
 //! The files hold the Sigstore public-good material named in
@@ -9,6 +9,7 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use p256::ecdsa::VerifyingKey;
+use sha2::{Digest as _, Sha256};
 use x509_parser::certificate::X509Certificate;
 use x509_parser::prelude::FromDer as _;
 
@@ -20,6 +21,10 @@ pub const FULCIO_ROOTS_PEM: &str = include_str!("../trust/fulcio-root.pem");
 
 /// The Rekor log public key, PEM PKIX SPKI, ECDSA P-256.
 pub const REKOR_KEY_PEM: &str = include_str!("../trust/rekor-pub.pem");
+
+/// The Sigstore CT log public key (`ctfe.sigstore.dev/2022`), PEM PKIX SPKI,
+/// ECDSA P-256. It signs the SCTs embedded in Fulcio leaves.
+pub const CT_LOG_KEY_PEM: &str = include_str!("../trust/ctfe-pub.pem");
 
 /// One-line provenance of the embedded trust material: the Sigstore
 /// `trusted_root.json` the files were extracted from. Updated with every root
@@ -37,6 +42,17 @@ pub struct TrustRoot {
     /// The root CAs' own validity windows, in Unix seconds — a root is only
     /// used when the window covers the bundle's `integratedTime`.
     pub root_windows: Vec<(i64, i64)>,
+    /// The CT log keys an embedded SCT must be signed by.
+    pub ct_logs: Vec<CtLogKey>,
+}
+
+/// One certificate-transparency log key.
+#[derive(Debug, Clone)]
+pub struct CtLogKey {
+    /// The RFC 6962 log id: SHA-256 of the key's SPKI DER.
+    pub log_id: [u8; 32],
+    /// The log's ECDSA P-256 key.
+    pub key: VerifyingKey,
 }
 
 /// Parses the embedded PEM constants into a [`TrustRoot`].
@@ -50,7 +66,8 @@ pub fn embedded() -> Result<TrustRoot, VerificationError> {
 }
 
 /// Parses trust material from PEM text (the embedded files are the only
-/// production source; tests load their own fixtures through this).
+/// production source; tests load their own fixtures through this). The CT
+/// log keys are always the embedded [`CT_LOG_KEY_PEM`].
 ///
 /// # Errors
 ///
@@ -81,10 +98,24 @@ pub fn from_pems(fulcio_pem: &str, rekor_pem: &str) -> Result<TrustRoot, Verific
         .ok_or(VerificationError::TrustRootUnavailable)?;
     let rekor_key = spki_to_p256(&rekor_spki)?;
 
+    let ct_logs = pems(CT_LOG_KEY_PEM, "PUBLIC KEY")?
+        .iter()
+        .map(|spki| {
+            Ok(CtLogKey {
+                log_id: Sha256::digest(spki).into(),
+                key: spki_to_p256(spki)?,
+            })
+        })
+        .collect::<Result<Vec<_>, VerificationError>>()?;
+    if ct_logs.is_empty() {
+        return Err(VerificationError::TrustRootUnavailable);
+    }
+
     Ok(TrustRoot {
         fulcio_roots,
         rekor_key,
         root_windows,
+        ct_logs,
     })
 }
 
@@ -148,7 +179,6 @@ pub fn pem_body(text: &[u8], label: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::{Digest as _, Sha256};
 
     type R = Result<(), Box<dyn std::error::Error>>;
 
@@ -156,6 +186,10 @@ mod tests {
     /// `tlogs[0].logId.keyId` of `trusted_root.json` in the `TRUST_MANIFEST`
     /// commit.
     const PUBLIC_GOOD_REKOR_LOG_ID: &str = "wNI9atQGlz+VWfO6LRygH4QUfY/8W4RFwiT5i5WRgB0=";
+
+    /// The `ctfe.sigstore.dev/2022` log id, from `ctlogs[1].logId.keyId` of
+    /// `trusted_root.json` in the `TRUST_MANIFEST` commit.
+    const PUBLIC_GOOD_CT_LOG_ID: &str = "3T0wasbHETJjGR4cmWc3AqJKXrjePK3/h4pygC8p7o4=";
 
     #[test]
     fn the_embedded_trust_root_parses() -> R {
@@ -218,6 +252,19 @@ mod tests {
             PUBLIC_GOOD_REKOR_LOG_ID
         );
         embedded()?;
+        Ok(())
+    }
+
+    #[test]
+    fn the_embedded_ct_key_is_the_2022_log_key() -> R {
+        let spki =
+            pem_body(CT_LOG_KEY_PEM.as_bytes(), "PUBLIC KEY").ok_or("no PUBLIC KEY block")?;
+        assert_eq!(BASE64.encode(Sha256::digest(&spki)), PUBLIC_GOOD_CT_LOG_ID);
+        let trust = embedded()?;
+        let [log] = trust.ct_logs.as_slice() else {
+            return Err("expected exactly one CT log key".into());
+        };
+        assert_eq!(BASE64.encode(log.log_id), PUBLIC_GOOD_CT_LOG_ID);
         Ok(())
     }
 }
