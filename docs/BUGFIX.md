@@ -314,8 +314,9 @@ deferred by the owner.
    (`v0.0.1-rc.2`) proved the `publish` job under `block`.
 4. ~~**UI update apply control.**~~ Done (`8a99a38`).
 5. ~~**M3 acceptance.**~~ Passed 2026-10-05 on testhost (see PROGRESS).
-   **Owner:** turn on immutable releases and the rulesets in
-   `docs/RELEASING.md`; then flip PLAN Phase 9 to `[x]`.
+   Immutable releases are on (2026-10-05). **Owner:** the rulesets in
+   `docs/RELEASING.md` (none configured yet); then flip PLAN Phase 9 to
+   `[x]`.
 6. **SCT signatures** (H17): embedded SCTs are checked for presence only.
    Verify them against the CT log keys in `trusted_root.json`.
 7. **Rekor v2** (log2025-1): the verifier supports Rekor v1 entries only.
