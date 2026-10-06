@@ -443,33 +443,41 @@ jobs:
       # verify`, rebuild-verify.yml). Each binary gets its own statement with
       # exactly one subject, its own digest, as the verifier requires
       # (crates/detent-update/src/verify.rs, step 5). The predicate is the
-      # SLSA provenance actions/attest made for this run.
+      # SLSA provenance actions/attest made for this run. The statement is
+      # built here and given with --statement: with --predicate, cosign
+      # writes an in-toto Statement/v0.1, which the verifier refuses
+      # (crates/detent-update/src/bundle.rs, STATEMENT_TYPE is v1).
       - name: Attest binaries for the updater (cosign, Rekor v2)
         env:
           ATTEST_BUNDLE: ${{ steps.attest.outputs.bundle-path }}
           SIGNING_CONFIG: src/.github/sigstore/signing-config-rekor-v2.json
         run: |
           set -euo pipefail
-          statement=$(jq -er '.dsseEnvelope.payload' "$ATTEST_BUNDLE" | base64 -d)
-          predicate_type=$(jq -er '.predicateType' <<<"$statement")
-          predicate="$RUNNER_TEMP/predicate.json"
-          jq -e '.predicate' <<<"$statement" > "$predicate"
+          provenance=$(jq -er '.dsseEnvelope.payload' "$ATTEST_BUNDLE" | base64 -d)
           mkdir -p dist/sigstore
           for b in dist/detent-*; do
+            name=$(basename "$b")
+            statement="$RUNNER_TEMP/$name.statement.json"
+            jq -e \
+              --arg name "$name" \
+              --arg digest "$(sha256sum "$b" | cut -d' ' -f1)" \
+              '{_type: "https://in-toto.io/Statement/v1",
+                subject: [{name: $name, digest: {sha256: $digest}}],
+                predicateType: .predicateType,
+                predicate: .predicate}' <<<"$provenance" > "$statement"
             cosign attest-blob \
               --signing-config "$SIGNING_CONFIG" \
               --new-bundle-format \
-              --type "$predicate_type" \
-              --predicate "$predicate" \
-              --bundle "dist/sigstore/$(basename "$b").sigstore.json" \
-              --yes \
-              "$b"
+              --statement "$statement" \
+              --bundle "dist/sigstore/$name.sigstore.json" \
+              --yes
           done
           ls -l dist/sigstore
 
       # Gate: every updater bundle is a Rekor v2 entry with an RFC 3161
-      # timestamp and one subject, and verifies for this workflow at this
-      # tag. Any failure stops the release before anything is published.
+      # timestamp and one in-toto v1 subject, and verifies for this workflow
+      # at this tag. Any failure stops the release before anything is
+      # published.
       - name: Check updater bundles
         env:
           ATTEST_BUNDLE: ${{ steps.attest.outputs.bundle-path }}
@@ -481,7 +489,7 @@ jobs:
             bundle="dist/sigstore/$(basename "$b").sigstore.json"
             jq -e '.verificationMaterial.tlogEntries[0].kindVersion == {"kind": "hashedrekord", "version": "0.0.2"}' "$bundle" > /dev/null
             jq -e '(.verificationMaterial.timestampVerificationData.rfc3161Timestamps // []) | length >= 1' "$bundle" > /dev/null
-            jq -e '.dsseEnvelope.payload | @base64d | fromjson | .subject | length == 1' "$bundle" > /dev/null
+            jq -e '.dsseEnvelope.payload | @base64d | fromjson | ._type == "https://in-toto.io/Statement/v1" and (.subject | length == 1)' "$bundle" > /dev/null
             cosign verify-blob-attestation \
               --bundle "$bundle" \
               --new-bundle-format \
