@@ -74,7 +74,10 @@ advisories bypass the cooldown. Do not lower these values.
    `log2025-1.rekor.sigstore.dev` with an RFC 3161 timestamp. The
    self-updater verifies it (ADR-014). A gate step stops the release unless
    every bundle is `hashedrekord` 0.0.2 with a timestamp and one subject and
-   passes `cosign verify-blob-attestation` for this workflow and tag.
+   passes `cosign verify-blob-attestation` for this workflow and tag, and
+   passes detent's own verifier: the gate runs `detent verify-bundle --tag
+   <tag> --bundle <bundle> <binary>` from the x86_64 musl build, so a bundle
+   a device would refuse is never published.
    `actions/attest` still runs: its Rekor v1 attestation goes to GitHub's
    attestation store, which `gh attestation verify` (step 5) and
    `rebuild-verify.yml` use. Devices on `v0.1.0` or older verify Rekor v1

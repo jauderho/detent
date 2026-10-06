@@ -373,10 +373,10 @@ deferred by the owner.
     decision: switch at once; devices on `v0.1.0` or older (Rekor v1 only)
     refuse the next release and need a manual reinstall. Proven by the
     `v0.1.1` release run 37419947623.
-14. **Release gate with detent's own verifier:** the publish job checks
-    the updater bundles with `cosign verify-blob-attestation`. Gate them
-    with the verifier devices run (the built x86_64 musl binary, through a
-    small verify command), so a bundle detent would refuse is never published.
+14. ~~**Release gate with detent's own verifier.**~~ Done: `detent
+    verify-bundle` (hidden, `update` feature) runs the device verifier on a
+    binary and its bundle; the publish job calls it from the x86_64 musl
+    build after `cosign verify-blob-attestation`. Unproven until the next tag.
 
 ### Track F — Phase 12 / M4 (v1.0)
 
