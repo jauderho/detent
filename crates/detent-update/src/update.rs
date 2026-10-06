@@ -270,13 +270,14 @@ pub fn check(
             security: false,
             held: Some(Held::TooYoung { min_age_days }),
         },
+        // A tag that is not semver: named, but not a held release.
         Err(policy::PolicyError::BadTag(tag)) => CheckReport {
             update_available: false,
             current: current.to_string(),
             tag: Some(tag),
             published: None,
             security: false,
-            held: Some(Held::Rejected),
+            held: None,
         },
     })
 }
