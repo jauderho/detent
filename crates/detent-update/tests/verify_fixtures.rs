@@ -48,6 +48,32 @@ fn trust() -> TrustRoot {
     detent_update::trust::from_pems_with_ct(&root, &rekor, &ct).expect("fixture trust root")
 }
 
+/// The checkpoint origin of the fixture Rekor v2 log (gen-fixtures).
+const FIXTURE_V2_ORIGIN: &str = "log.fixture.detent.test";
+
+/// [`trust`] plus the fixture Rekor v2 log key and timestamp authority.
+fn trust_v2() -> TrustRoot {
+    let read = |name: &str| std::fs::read_to_string(fixtures().join(name)).expect(name);
+    detent_update::trust::from_pems_with_v2(
+        &read("fulcio-root.pem"),
+        &read("rekor-pub.pem"),
+        &read("ctfe-pub.pem"),
+        &read("rekor-v2-pub.pem"),
+        FIXTURE_V2_ORIGIN,
+        &read("tsa-chain.pem"),
+    )
+    .expect("fixture v2 trust root")
+}
+
+/// Verifies `fixture` against `binary.bin`'s digest with [`trust_v2`].
+fn run_v2(name: &str) -> Result<(), VerificationError> {
+    let bytes = std::fs::read(fixtures().join(name)).expect("fixture");
+    let decoded = detent_update::bundle::parse(&bytes)?;
+    let digest: [u8; 32] =
+        Sha256::digest(std::fs::read(fixtures().join("binary.bin")).expect("binary")).into();
+    verify(&decoded, &digest, FIXTURE_TAG, &trust_v2())
+}
+
 /// Verifies `fixture` against `binary.bin`'s digest.
 fn run(name: &str) -> Result<(), VerificationError> {
     let bytes = std::fs::read(fixtures().join(name)).expect("fixture");
@@ -201,6 +227,58 @@ fn a_legacy_leaf_without_an_sct_is_refused() {
     // no-sct.json is valid.json with a leaf that carries only the legacy
     // OIDC-issuer extension and no SCT list. Every leaf needs a verified SCT.
     assert_eq!(run("no-sct.json"), Err(VerificationError::SctInvalid));
+}
+
+#[test]
+fn a_rekor_v2_bundle_passes_every_step() {
+    let bytes = std::fs::read(fixtures().join("v2-valid.json")).expect("fixture");
+    let decoded = detent_update::bundle::parse(&bytes).expect("v2 bundle parses");
+    assert!(decoded.is_rekor_v2());
+    assert_eq!(decoded.rfc3161_timestamps.len(), 1);
+    assert_eq!(run_v2("v2-valid.json"), Ok(()));
+}
+
+#[test]
+fn a_rekor_v2_bundle_needs_the_fixture_v2_trust() {
+    // The embedded-CT fixture trust has the production v2 key and TSA: the
+    // fixture timestamp is not theirs.
+    assert_eq!(
+        run("v2-valid.json"),
+        Err(VerificationError::TimestampInvalid)
+    );
+}
+
+#[test]
+fn a_rekor_v2_bundle_without_a_timestamp_is_refused() {
+    assert_eq!(
+        run_v2("v2-no-timestamp.json"),
+        Err(VerificationError::TimestampInvalid)
+    );
+}
+
+#[test]
+fn a_rekor_v2_bundle_with_a_bad_timestamp_signature_is_refused() {
+    assert_eq!(
+        run_v2("v2-bad-timestamp.json"),
+        Err(VerificationError::TimestampInvalid)
+    );
+}
+
+#[test]
+fn a_v1_bundle_with_a_valid_timestamp_passes() {
+    assert_eq!(run_v2("valid-with-timestamp.json"), Ok(()));
+    // Without the fixture TSA the same timestamp does not verify.
+    assert_eq!(
+        run("valid-with-timestamp.json"),
+        Err(VerificationError::TimestampInvalid)
+    );
+}
+
+#[test]
+fn every_v1_fixture_keeps_its_result_under_the_v2_trust() {
+    assert_eq!(run_v2("valid.json"), Ok(()));
+    assert_eq!(run_v2("no-sct.json"), Err(VerificationError::SctInvalid));
+    assert_eq!(run_v2("bad-set.json"), Err(VerificationError::SetInvalid));
 }
 
 #[test]

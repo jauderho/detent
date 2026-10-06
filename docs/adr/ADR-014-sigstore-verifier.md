@@ -205,6 +205,10 @@ every one must fail or pass for the stated reason, asserted by test:
 | `valid.json` | passes all six steps |
 | `wrong-identity.json` | step 3 fails: SAN ≠ pinned workflow identity (different repo/workflow ref) |
 | `no-sct.json` | step 3 fails: the leaf has no SCT (`SctInvalid`) |
+| `valid-with-timestamp.json` | `valid.json` plus an RFC 3161 timestamp by the fixture TSA over its DSSE signature: passes with the fixture TSA, `TimestampInvalid` without it |
+| `v2-valid.json` | Rekor v2 (`hashedrekord` 0.0.2, Ed25519 checkpoint by the fixture v2 log key, fixture TSA timestamp): passes every step through the public `verify` with `trust::from_pems_with_v2` |
+| `v2-no-timestamp.json` | Rekor v2 with no RFC 3161 timestamp: `TimestampInvalid` |
+| `v2-bad-timestamp.json` | Rekor v2 whose timestamp has a corrupted CMS signature: `TimestampInvalid` |
 | `wrong-digest.json` | step 5 fails: subject digest ≠ file SHA-256 |
 | `expired-leaf.json` | step 2 fails: leaf validity window excludes `integratedTime` |
 | `bad-checkpoint-sig.json` | step 6 fails: checkpoint signature does not verify against the embedded Rekor key |

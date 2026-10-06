@@ -230,26 +230,56 @@ pub fn from_pems_with_ct(
         rekor_key,
         root_windows,
         ct_logs,
-        rekor_v2_keys: embedded_rekor_v2_keys()?,
-        tsas: embedded_tsas()?,
+        rekor_v2_keys: rekor_v2_keys(
+            REKOR_V2_KEY_PEM,
+            REKOR_V2_ORIGIN,
+            (REKOR_V2_VALID_FROM, i64::MAX),
+        )?,
+        tsas: tsas(TSA_CHAIN_PEM, (TSA_VALID_FROM, i64::MAX))?,
     })
 }
 
-/// The embedded Rekor v2 log key.
-fn embedded_rekor_v2_keys() -> Result<Vec<NoteLogKey>, VerificationError> {
-    let [spki] = pems(REKOR_V2_KEY_PEM, "PUBLIC KEY")?
-        .try_into()
-        .map_err(|_| VerificationError::TrustRootUnavailable)?;
-    Ok(vec![NoteLogKey::from_spki(
-        REKOR_V2_ORIGIN,
-        &spki,
-        (REKOR_V2_VALID_FROM, i64::MAX),
-    )?])
+/// [`from_pems_with_ct`], with the Rekor v2 log key (`rekor_v2_pem`, an
+/// Ed25519 SPKI, under `rekor_v2_origin`) and the timestamp authority chain
+/// (`tsa_pem`, leaf then root) also from PEM text instead of the embedded
+/// files. Both windows are open (`0..=i64::MAX`). For test material only:
+/// production uses [`embedded`].
+///
+/// # Errors
+///
+/// [`VerificationError::TrustRootUnavailable`] when the PEM material does
+/// not parse.
+pub fn from_pems_with_v2(
+    fulcio_pem: &str,
+    rekor_pem: &str,
+    ct_pem: &str,
+    rekor_v2_pem: &str,
+    rekor_v2_origin: &str,
+    tsa_pem: &str,
+) -> Result<TrustRoot, VerificationError> {
+    Ok(TrustRoot {
+        rekor_v2_keys: rekor_v2_keys(rekor_v2_pem, rekor_v2_origin, (0, i64::MAX))?,
+        tsas: tsas(tsa_pem, (0, i64::MAX))?,
+        ..from_pems_with_ct(fulcio_pem, rekor_pem, ct_pem)?
+    })
 }
 
-/// The embedded timestamp authority chain.
-fn embedded_tsas() -> Result<Vec<TsaChain>, VerificationError> {
-    let [leaf, root] = pems(TSA_CHAIN_PEM, "CERTIFICATE")?
+/// One Rekor v2 log key from a PEM with exactly one Ed25519 SPKI.
+fn rekor_v2_keys(
+    pem: &str,
+    origin: &str,
+    window: (i64, i64),
+) -> Result<Vec<NoteLogKey>, VerificationError> {
+    let [spki] = pems(pem, "PUBLIC KEY")?
+        .try_into()
+        .map_err(|_| VerificationError::TrustRootUnavailable)?;
+    Ok(vec![NoteLogKey::from_spki(origin, &spki, window)?])
+}
+
+/// One timestamp authority from a PEM with exactly two certificates: the
+/// TSA leaf, then its root.
+fn tsas(pem: &str, window: (i64, i64)) -> Result<Vec<TsaChain>, VerificationError> {
+    let [leaf, root] = pems(pem, "CERTIFICATE")?
         .try_into()
         .map_err(|_| VerificationError::TrustRootUnavailable)?;
     for der in [&leaf, &root] {
@@ -258,7 +288,7 @@ fn embedded_tsas() -> Result<Vec<TsaChain>, VerificationError> {
     Ok(vec![TsaChain {
         leaf: leaf.into(),
         root: root.into(),
-        window: (TSA_VALID_FROM, i64::MAX),
+        window,
     }])
 }
 

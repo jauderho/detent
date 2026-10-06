@@ -2,8 +2,9 @@
 //! (PLAN Phase 9 task 3; run with `--features fixture-gen`).
 //!
 //! A fixed test CA plays the Fulcio root, a fixed P-256 key plays the Rekor
-//! log, another plays the CT log that signs each leaf's embedded SCT; every
-//! signature is real ECDSA over the real PAE / checkpoint bytes,
+//! log, another plays the CT log that signs each leaf's embedded SCT, a fixed
+//! Ed25519 key plays the Rekor v2 log and a fixed test CA plays the RFC 3161
+//! timestamp authority; every signature is real ECDSA over the real PAE / checkpoint bytes,
 //! so the six verification steps fail for their cryptographic reasons. When
 //! the first real `v0.0.1-rc` bundle is captured, these are replaced (ADR-014
 //! test-vector table).
@@ -375,6 +376,316 @@ fn merged(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// The checkpoint origin of the fixture Rekor v2 log; tests pass it to
+/// `trust::from_pems_with_v2`.
+const V2_ORIGIN: &str = "log.fixture.detent.test";
+
+/// The fixed test Rekor v2 log key: Ed25519, PKCS#8 v1 around a fixed seed.
+fn v2_log_key() -> KeyPair {
+    let mut pkcs8 = vec![
+        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04,
+        0x20,
+    ];
+    pkcs8.extend_from_slice(&[0xa1; 32]);
+    KeyPair::from_pkcs8_der_and_sign_algo(&pkcs8.into(), &rcgen::PKCS_ED25519)
+        .expect("fixed Ed25519 key")
+}
+
+/// The fixture Rekor v2 log id: SHA-256 of `origin ‖ "\n" ‖ 0x01 ‖ key`.
+fn v2_log_id() -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(V2_ORIGIN.as_bytes());
+    hasher.update(b"\n\x01");
+    hasher.update(rcgen::PublicKeyData::der_bytes(&v2_log_key()));
+    hasher.finalize().into()
+}
+
+/// The fixture timestamp authority: a P-256 leaf with a critical
+/// `timeStamping`-only extended key usage, issued by a P-256 root.
+struct Tsa {
+    leaf_der: Vec<u8>,
+    root_der: Vec<u8>,
+    leaf_key: SigningKey,
+}
+
+fn mint_tsa() -> Tsa {
+    let root_key = key("b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0");
+    let root_keypair = leaf_keypair(&root_key);
+    let mut root_params = CertificateParams::default();
+    root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    root_params.not_before = OffsetDateTime::from_unix_timestamp(1_500_000_000).unwrap();
+    root_params.not_after = OffsetDateTime::from_unix_timestamp(2_500_000_000).unwrap();
+    root_params.distinguished_name = rcgen::DistinguishedName::new();
+    root_params
+        .distinguished_name
+        .push(DnType::CommonName, "detent fixture tsa root");
+    let root = root_params.self_signed(&root_keypair).expect("tsa root");
+    let issuer = Issuer::from_params(&root_params, &root_keypair);
+
+    let leaf_key = key("c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0");
+    let mut leaf_params = CertificateParams::default();
+    leaf_params.not_before = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+    leaf_params.not_after = OffsetDateTime::from_unix_timestamp(1_900_000_000).unwrap();
+    leaf_params.is_ca = IsCa::ExplicitNoCa;
+    leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    leaf_params.distinguished_name = rcgen::DistinguishedName::new();
+    leaf_params
+        .distinguished_name
+        .push(DnType::CommonName, "detent fixture tsa");
+    // extKeyUsage, critical, SEQUENCE { id-kp-timeStamping } (RFC 3161 §2.3).
+    let mut eku = CustomExtension::from_oid_content(
+        &[2, 5, 29, 37],
+        vec![
+            0x30, 0x0a, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x08,
+        ],
+    );
+    eku.set_criticality(true);
+    leaf_params.custom_extensions = vec![eku];
+    let leaf = leaf_params
+        .signed_by(&leaf_keypair(&leaf_key), &issuer)
+        .expect("tsa leaf");
+    Tsa {
+        leaf_der: leaf.der().to_vec(),
+        root_der: root.der().to_vec(),
+        leaf_key,
+    }
+}
+
+/// A DER `GeneralizedTime` value, `YYYYMMDDHHMMSSZ`.
+fn generalized_time(unix: i64) -> String {
+    let at = OffsetDateTime::from_unix_timestamp(unix).expect("time");
+    format!(
+        "{:04}{:02}{:02}{:02}{:02}{:02}Z",
+        at.year(),
+        u8::from(at.month()),
+        at.day(),
+        at.hour(),
+        at.minute(),
+        at.second()
+    )
+}
+
+/// One CMS `Attribute` with a single value.
+fn attribute(oid: &[u8], value: &[u8]) -> Vec<u8> {
+    der(0x30, &[der(0x06, oid), der(0x31, value)].concat())
+}
+
+/// An RFC 3161 `TimeStampResp` by `tsa` over `signed_bytes` at `gen_time`,
+/// in the form `tsa::verify_timestamp` checks: one `SignerInfo` naming the
+/// TSA leaf by issuer and serial, content-type, message-digest and
+/// `ESSCertIDv2` signed attributes, ECDSA P-256 SHA-256. `corrupt` flips the
+/// last byte of the CMS signature.
+fn timestamp_token(tsa: &Tsa, signed_bytes: &[u8], gen_time: i64, corrupt: bool) -> Vec<u8> {
+    const SHA256: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01];
+    const TST_INFO: &[u8] = &[
+        0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x10, 0x01, 0x04,
+    ];
+    const SIGNED_DATA: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02];
+    const CONTENT_TYPE: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x03];
+    const MESSAGE_DIGEST: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x04];
+    const SIGNING_CERTIFICATE_V2: &[u8] = &[
+        0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x10, 0x02, 0x2f,
+    ];
+    const ECDSA_SHA256: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02];
+    // 1.3.6.1.4.1.57264.2, the Sigstore TSA policy.
+    const POLICY: &[u8] = &[0x2b, 0x06, 0x01, 0x04, 0x01, 0x83, 0xbf, 0x30, 0x02];
+
+    let sha256 = der(0x30, &[der(0x06, SHA256), vec![0x05, 0x00]].concat());
+    let tst_info = der(
+        0x30,
+        &[
+            der(0x02, &[0x01]),
+            der(0x06, POLICY),
+            der(
+                0x30,
+                &[sha256.clone(), der(0x04, &Sha256::digest(signed_bytes))].concat(),
+            ),
+            der(0x02, &[0x01]),
+            der(0x18, generalized_time(gen_time).as_bytes()),
+        ]
+        .concat(),
+    );
+    let ess_cert_id_v2 = der(
+        0x30,
+        &der(0x30, &der(0x30, &der(0x04, &Sha256::digest(&tsa.leaf_der)))),
+    );
+    let attributes = [
+        attribute(CONTENT_TYPE, &der(0x06, TST_INFO)),
+        attribute(MESSAGE_DIGEST, &der(0x04, &Sha256::digest(&tst_info))),
+        attribute(SIGNING_CERTIFICATE_V2, &ess_cert_id_v2),
+    ]
+    .concat();
+    let signature: p256::ecdsa::Signature = tsa.leaf_key.sign(&der(0x31, &attributes));
+    let mut signature = encode_sig(&signature);
+    if corrupt {
+        *signature.last_mut().expect("signature") ^= 0x01;
+    }
+    let (_, leaf) = x509_parser::parse_x509_certificate(&tsa.leaf_der).expect("tsa leaf");
+    let signer_info = der(
+        0x30,
+        &[
+            der(0x02, &[0x01]),
+            der(
+                0x30,
+                &[
+                    leaf.tbs_certificate.issuer.as_raw().to_vec(),
+                    der(0x02, leaf.tbs_certificate.raw_serial()),
+                ]
+                .concat(),
+            ),
+            sha256.clone(),
+            der(0xa0, &attributes),
+            der(0x30, &der(0x06, ECDSA_SHA256)),
+            der(0x04, &signature),
+        ]
+        .concat(),
+    );
+    let signed_data = der(
+        0x30,
+        &[
+            der(0x02, &[0x03]),
+            der(0x31, &sha256),
+            der(
+                0x30,
+                &[der(0x06, TST_INFO), der(0xa0, &der(0x04, &tst_info))].concat(),
+            ),
+            der(0x31, &signer_info),
+        ]
+        .concat(),
+    );
+    let content_info = der(
+        0x30,
+        &[der(0x06, SIGNED_DATA), der(0xa0, &signed_data)].concat(),
+    );
+    der(
+        0x30,
+        &[der(0x30, &der(0x02, &[0x00])), content_info].concat(),
+    )
+}
+
+/// `timestampVerificationData` with one token, or none.
+fn timestamps(token: Option<Vec<u8>>) -> Value {
+    json!({ "rfc3161Timestamps": token.map(|token| vec![json!({ "signedTimestamp": BASE64.encode(token) })]).unwrap_or_default() })
+}
+
+/// A Rekor v2 bundle around `material`: a `hashedrekord` 0.0.2 entry over the
+/// DSSE PAE, an inclusion proof to a two-leaf root, an Ed25519 checkpoint by
+/// [`v2_log_key`], and an RFC 3161 timestamp by `tsa` over the DSSE
+/// signature. `mutate` is `v2-valid`, `v2-no-timestamp` or
+/// `v2-bad-timestamp`.
+fn bundle_v2(material: &Material, tsa: &Tsa, digest_hex: &str, mutate: &str) -> Value {
+    let payload_json = statement(digest_hex).to_string();
+    let payload_type = detent_update::bundle::DSSE_PAYLOAD_TYPE;
+    let pae = detent_update::verify::dsse_pae(payload_type.as_bytes(), payload_json.as_bytes());
+    let sig: p256::ecdsa::Signature = material.leaf_key.sign(&pae);
+    let dsse_sig = encode_sig(&sig);
+
+    // The canonical (RFC 8785) body `verify` rebuilds and compares.
+    let body = format!(
+        concat!(
+            r#"{{"apiVersion":"0.0.2","kind":"hashedrekord","spec":{{"hashedRekordV002":{{"#,
+            r#""data":{{"algorithm":"SHA2_256","digest":"{}"}},"#,
+            r#""signature":{{"content":"{}","verifier":{{"keyDetails":"PKIX_ECDSA_P256_SHA_256","#,
+            r#""x509Certificate":{{"rawBytes":"{}"}}}}}}}}}}}}"#,
+        ),
+        BASE64.encode(Sha256::digest(&pae)),
+        BASE64.encode(&dsse_sig),
+        BASE64.encode(&material.leaf_der),
+    );
+    let sibling = leaf_hash(b"ABC");
+    let root = merged(leaf_hash(body.as_bytes()), sibling);
+    let log_id = v2_log_id();
+    let checkpoint_body = format!("{V2_ORIGIN}\n2\n{}\n", BASE64.encode(root));
+    let mut note_signature = log_id[..4].to_vec();
+    note_signature.extend_from_slice(
+        &rcgen::SigningKey::sign(&v2_log_key(), checkpoint_body.as_bytes()).expect("sign"),
+    );
+    let token = match mutate {
+        "v2-valid" => Some(timestamp_token(tsa, &dsse_sig, INTEGRATED_TIME, false)),
+        "v2-bad-timestamp" => Some(timestamp_token(tsa, &dsse_sig, INTEGRATED_TIME, true)),
+        "v2-no-timestamp" => None,
+        other => panic!("unknown v2 fixture {other}"),
+    };
+
+    json!({
+        "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+        "verificationMaterial": {
+            "certificate": { "rawBytes": BASE64.encode(&material.leaf_der) },
+            "tlogEntries": [{
+                "logIndex": "0",
+                "logId": { "keyId": BASE64.encode(log_id) },
+                "kindVersion": { "kind": "hashedrekord", "version": "0.0.2" },
+                "canonicalizedBody": BASE64.encode(body.as_bytes()),
+                "inclusionProof": {
+                    "logIndex": "0",
+                    "treeSize": "2",
+                    "checkpoint": { "envelope": format!("{checkpoint_body}\n\u{2014} {V2_ORIGIN} {}\n", BASE64.encode(&note_signature)) },
+                    "hashes": [BASE64.encode(sibling)],
+                }
+            }],
+            "timestampVerificationData": timestamps(token),
+        },
+        "dsseEnvelope": {
+            "payloadType": payload_type,
+            "payload": BASE64.encode(payload_json.as_bytes()),
+            "signatures": [{ "keyid": "", "sig": BASE64.encode(&dsse_sig) }]
+        }
+    })
+}
+
+/// `bundle` (Rekor v1) with an RFC 3161 timestamp by `tsa` over its DSSE
+/// signature.
+fn with_timestamp(mut bundle: Value, tsa: &Tsa) -> Value {
+    let dsse_sig = BASE64
+        .decode(
+            bundle["dsseEnvelope"]["signatures"][0]["sig"]
+                .as_str()
+                .expect("sig"),
+        )
+        .expect("base64");
+    bundle["verificationMaterial"]["timestampVerificationData"] = timestamps(Some(
+        timestamp_token(tsa, &dsse_sig, INTEGRATED_TIME, false),
+    ));
+    bundle
+}
+
+/// The Rekor v2 and RFC 3161 fixtures: the v2 bundles, `valid.json` with a
+/// timestamp, the fixture v2 log key and the fixture TSA chain.
+fn write_rekor_v2_fixtures(dir: &std::path::Path, valid: &Material, digest_hex: &str) {
+    let tsa = mint_tsa();
+    for name in ["v2-valid", "v2-no-timestamp", "v2-bad-timestamp"] {
+        write(
+            dir,
+            &format!("{name}.json"),
+            bundle_v2(valid, &tsa, digest_hex, name),
+        );
+    }
+    write(
+        dir,
+        "valid-with-timestamp.json",
+        with_timestamp(bundle_for(valid, digest_hex, "valid"), &tsa),
+    );
+    write(
+        dir,
+        "rekor-v2-pub.pem",
+        serde_json::to_value(pem(
+            "PUBLIC KEY",
+            &rcgen::PublicKeyData::subject_public_key_info(&v2_log_key()),
+        ))
+        .expect("text"),
+    );
+    write(
+        dir,
+        "tsa-chain.pem",
+        serde_json::to_value(format!(
+            "{}{}",
+            pem("CERTIFICATE", &tsa.leaf_der),
+            pem("CERTIFICATE", &tsa.root_der)
+        ))
+        .expect("text"),
+    );
+}
+
 fn main() {
     let dir = std::path::Path::new("tests/fixtures");
     std::fs::create_dir_all(dir).expect("fixture dir");
@@ -460,6 +771,7 @@ fn main() {
         "older-tag.json",
         bundle_for(&older, &digest_hex, "valid"),
     );
+    write_rekor_v2_fixtures(dir, &valid, &digest_hex);
     std::fs::write(dir.join("binary.bin"), BINARY).expect("write binary");
 
     write(
