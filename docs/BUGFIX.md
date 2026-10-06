@@ -328,12 +328,10 @@ deferred by the owner.
 7. ~~**Rekor v2** (log2025-1).~~ Done (`7bf5c5a` trust material, `63f0af3`
    Ed25519 checkpoints, `4cb46d2` RFC 3161 timestamps, `ca1846a` the v2 path
    in `bundle::parse` and `verify`, `83410de` self-minted v2 and timestamp
-   fixtures, then the `fuzz_bundle_parse` target). Rekor v2 bundles verify;
-   the real-material proof is staging only (no public-good v2 bundle yet),
-   and the production log2025-1 key and TSA are checked against
-   `trusted_root.json`. **Follow-up:** after the next tag, add its
-   `detent-<triple>.sigstore.json` (the first production Rekor v2 bundle) as
-   a fixture with a `real_bundle.rs`-style end-to-end test.
+   fixtures, then the `fuzz_bundle_parse` target). Proven on production
+   material: the `v0.1.1` updater bundle (cosign, `log2025-1`, TSA) verifies
+   with the embedded trust root (`real_rekor_v2_bundle_verifies` and its
+   refusals in `real_bundle.rs`).
 8. ~~**`run_update` coverage.**~~ Done: `update_takes_min_age_days_from_the_config`
    and `update_refuses_a_bad_config_before_any_network_call` drive
    `run_update` itself up to the network; the flow after it is covered by
@@ -358,8 +356,8 @@ deferred by the owner.
     stays for GitHub's store. The egress list gains
     `log2025-1.rekor.sigstore.dev` and `tuf-repo-cdn.sigstore.dev`. Owner
     decision: switch at once; devices on `v0.1.0` or older (Rekor v1 only)
-    refuse the next release and need a manual reinstall. Unproven until the
-    next tag (see PROGRESS 2026-10-05).
+    refuse the next release and need a manual reinstall. Proven by the
+    `v0.1.1` release run 37419947623.
 14. **Release gate with detent's own verifier:** the publish job checks
     the updater bundles with `cosign verify-blob-attestation`. Gate them
     with the verifier devices run (the built x86_64 musl binary, through a

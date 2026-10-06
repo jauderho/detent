@@ -182,6 +182,10 @@ whole v2 path is proven end to end on the staging bundle with a trust root
 built from the staging `trusted_root.json` (`verify.rs`
 `a_real_staging_rekor_v2_bundle_verifies` and its mutation tests); the
 identity is passed in by the test because the staging bundle is not ours.
+The first production Rekor v2 bundle (`v0.1.1`, cosign, `log2025-1`, an
+RFC 3161 timestamp from `timestamp.sigstore.dev`) verifies through the
+public `verify` with the embedded trust root and our pinned identity
+(`tests/real_bundle.rs` `real_rekor_v2_bundle_verifies`).
 
 Refresh procedure (per release, and out-of-band when Sigstore rotates roots):
 1. Fetch the current Sigstore TUF snapshot with the TUF client and verify the
