@@ -288,6 +288,17 @@ impl Allowlist {
         self.modules.iter().any(|module| module.reload_unit_files)
     }
 
+    /// Whether `path` is a target of a module that declares
+    /// `reload_unit_files`.
+    #[must_use]
+    pub fn reloads_unit_files_after(&self, path: &Path) -> bool {
+        self.targets
+            .iter()
+            .filter(|target| target.path == path)
+            .filter_map(|target| self.module(target.module))
+            .any(|module| module.reload_unit_files)
+    }
+
     /// Every target belonging to `module`, in id order.
     pub fn targets_of(&self, module: ModuleId) -> impl Iterator<Item = &TargetEntry> {
         self.targets.iter().filter(move |t| t.module == module)

@@ -586,6 +586,9 @@ impl<'a> Monitor<'a> {
             return Ok(());
         };
         let restored = roll_back(&pending.entries);
+        if let Err(err) = self.replay_reload(&pending.entries) {
+            tracing::error!(error = %err, "unit-file reload after rollback failed");
+        }
         if let Err(err) = self.replay_service(pending.service) {
             tracing::error!(error = %err, "service replay after monitor shutdown failed");
         }
@@ -1183,6 +1186,9 @@ impl<'a> Monitor<'a> {
             return Ok(unknown(IdKind::Commit, commit.get()));
         };
         let restored = roll_back(&pending.entries);
+        if let Err(err) = self.replay_reload(&pending.entries) {
+            tracing::error!(error = %err, "unit-file reload after rollback failed");
+        }
         if let Err(err) = self.replay_service(pending.service) {
             tracing::error!(error = %err, "service replay after rollback failed");
         }
@@ -1212,6 +1218,9 @@ impl<'a> Monitor<'a> {
             return Ok(());
         };
         let restored = roll_back(&pending.entries);
+        if let Err(err) = self.replay_reload(&pending.entries) {
+            tracing::error!(error = %err, "unit-file reload after rollback failed");
+        }
         if let Err(err) = self.replay_service(pending.service) {
             tracing::error!(error = %err, "service replay after rollback failed");
         }
@@ -1252,6 +1261,23 @@ impl<'a> Monitor<'a> {
                 source,
             }),
         }
+    }
+
+    /// Reload the init system's unit files after a rollback of `entries`
+    /// when one of them is a target of a module that declares
+    /// `reload_unit_files`. Matched by path, as the marker records paths,
+    /// not ids. It runs before the service replay, so a restarted service
+    /// sees the regenerated units.
+    fn replay_reload(&self, entries: &[RollbackEntry]) -> Result<(), HookError> {
+        if !entries
+            .iter()
+            .any(|entry| self.allow.reloads_unit_files_after(&entry.path))
+        {
+            return Ok(());
+        }
+        self.hooks.services.reload_unit_files().map(|detail| {
+            tracing::info!(detail, "reloaded unit files after file rollback");
+        })
     }
 
     fn replay_service(&self, service: Option<PendingService>) -> Result<(), HookError> {
@@ -1311,6 +1337,9 @@ impl<'a> Monitor<'a> {
                 Ok(_) => restored = restored.saturating_add(1),
                 Err(err) => failures.push(err.to_string()),
             }
+        }
+        if let Err(err) = self.replay_reload(&marker.entries) {
+            failures.push(err.to_string());
         }
         if let Err(err) = self.replay_service(marker.service) {
             failures.push(err.to_string());
@@ -4785,6 +4814,130 @@ mod tests {
             })?;
             assert_eq!(response, Response::Error(expected));
         }
+        Ok(())
+    }
+
+    /// Every way a pending commit of a reloading module rolls back re-reads
+    /// the unit files once, after the file is back to `v1`.
+    #[test]
+    fn every_rollback_of_a_reloading_module_reloads_unit_files_after_the_restore()
+    -> Result<(), Box<dyn std::error::Error>> {
+        type Roll = fn(&mut Monitor<'_>, &Fixture) -> Result<(), Box<dyn std::error::Error>>;
+        let ways: [(&str, Roll); 3] = [
+            ("deadline", |monitor, _| {
+                if let Some(pending) = monitor.pending.as_mut() {
+                    pending.deadline = std::time::Instant::now();
+                }
+                Ok(monitor.enforce_deadline()?)
+            }),
+            ("request", |monitor, _| {
+                let response = monitor.dispatch(Request::RollbackCommit {
+                    commit: CommitId(1),
+                })?;
+                assert!(
+                    matches!(response, Response::RolledBack { .. }),
+                    "{response:?}"
+                );
+                Ok(())
+            }),
+            ("exit", |monitor, fx| {
+                let (mut monitor_end, worker_end) = Channel::pair()?;
+                drop(worker_end);
+                let lock = Monitor::lock(&fx.state_root)?;
+                assert_eq!(
+                    monitor.serve_locked(&mut monitor_end, lock)?,
+                    ExitReason::PeerClosed
+                );
+                Ok(())
+            }),
+        ];
+        for (way, roll) in ways {
+            let fx = fixture()?;
+            let services = RecordingServices::new(&fx.target);
+            let hooks = Hooks {
+                checks: &super::NoChecks,
+                services: &services,
+            };
+            let mut monitor = greeted(fx.allow_reloading()?, hooks);
+            arm_commit(&mut monitor, None)?;
+            assert!(services.reloads.borrow().is_empty(), "{way}");
+            roll(&mut monitor, &fx)?;
+            assert_eq!(*services.reloads.borrow(), vec![b"v1".to_vec()], "{way}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recover_pending_reloads_unit_files_for_a_reloading_module()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        {
+            let mut monitor = greeted(fx.allow_reloading()?, Hooks::default());
+            arm_commit(&mut monitor, None)?;
+        }
+        let services = RecordingServices::new(&fx.target);
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &services,
+        };
+        let monitor = Monitor::new(fx.allow_reloading()?, hooks);
+        let recovered = monitor
+            .recover_pending()?
+            .ok_or("expected a recovered commit")?;
+        assert!(recovered.failures.is_empty(), "{:?}", recovered.failures);
+        assert_eq!(*services.reloads.borrow(), vec![b"v1".to_vec()]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_rollback_of_a_module_without_the_flag_does_not_reload()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let services = RecordingServices::new(&fx.target);
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &services,
+        };
+        let mut monitor = greeted(fx.allow()?, hooks);
+        arm_commit(&mut monitor, Some(RESTART_BINDING_0))?;
+        monitor.dispatch(Request::RollbackCommit {
+            commit: CommitId(1),
+        })?;
+        services.assert_replayed_after_restore();
+        assert!(services.reloads.borrow().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_reload_after_a_rollback_is_reported_and_the_rollback_still_completes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        install_tracing();
+        let fx = fixture()?;
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &FailingServices,
+        };
+        let mut monitor = greeted(fx.allow_reloading()?, hooks);
+        arm_commit(&mut monitor, None)?;
+        monitor.rollback_pending_on_exit()?;
+        assert!(!monitor.has_pending_commit());
+        assert_eq!(std::fs::read(&fx.target)?, b"v1");
+        assert!(!fx.state_root.join(PENDING_COMMIT_MARKER).exists());
+
+        // After a crash the failure is in the recovery report.
+        {
+            let mut monitor = greeted(fx.allow_reloading()?, Hooks::default());
+            arm_commit(&mut monitor, None)?;
+        }
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &FailingServices,
+        };
+        let monitor = Monitor::new(fx.allow_reloading()?, hooks);
+        let recovered = monitor
+            .recover_pending()?
+            .ok_or("expected a recovered commit")?;
+        assert_eq!(recovered.failures, vec!["reload boom".to_owned()]);
         Ok(())
     }
 
