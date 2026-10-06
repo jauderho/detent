@@ -128,6 +128,22 @@ pub trait ServiceControl {
         binding: &ServiceBinding,
         action: CoreServiceAction,
     ) -> Result<ServiceOutcome, HookError>;
+
+    /// Ask the init system to re-read its unit files, for a module whose
+    /// descriptor sets `reload_unit_files`. Returns a short detail.
+    ///
+    /// The default answers [`HookError::Unavailable`], as [`NoServices`]
+    /// does for every service action.
+    ///
+    /// # Errors
+    ///
+    /// [`HookError::Unavailable`] when no service manager is available,
+    /// [`HookError::Failed`] when the reload failed.
+    fn reload_unit_files(&self) -> Result<String, HookError> {
+        Err(HookError::Unavailable(
+            "service control is not available in this build".to_owned(),
+        ))
+    }
 }
 
 /// A [`CheckRunner`] that always reports the subsystem as absent.

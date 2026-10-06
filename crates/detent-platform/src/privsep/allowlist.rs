@@ -282,6 +282,12 @@ impl Allowlist {
         self.by_name.get(name).copied()
     }
 
+    /// Whether any enabled module declares `reload_unit_files`.
+    #[must_use]
+    pub fn reloads_unit_files(&self) -> bool {
+        self.modules.iter().any(|module| module.reload_unit_files)
+    }
+
     /// Every target belonging to `module`, in id order.
     pub fn targets_of(&self, module: ModuleId) -> impl Iterator<Item = &TargetEntry> {
         self.targets.iter().filter(move |t| t.module == module)

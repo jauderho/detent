@@ -10,7 +10,7 @@
 //!
 //! ```text
 //!   serve ──fork──▶ runner (root, not confined)
-//!     │                ▲ RunnerRequest { check id | binding id + action }
+//!     │                ▲ RunnerRequest { check id | binding id + action | reload }
 //!     └──fork──▶ worker│
 //!   monitor (confined) ┘ RunnerResponse
 //! ```
@@ -24,8 +24,9 @@
 //! target it accepts only a [`CANDIDATE_PREFIX`] file, in a directory that
 //! passes the monitor's own trust check (owned by root or the runner's euid,
 //! no group or other write bit, not a symlink). A compromised monitor
-//! can run only the declared validators on such files and the declared
-//! service actions — nothing it could not already ask for through the
+//! can run only the declared validators on such files, the declared
+//! service actions, and a unit-file reload when an enabled module declares
+//! `reload_unit_files` — nothing it could not already ask for through the
 //! protocol.
 
 use std::path::{Component, Path, PathBuf};
@@ -67,6 +68,9 @@ pub enum RunnerRequest {
         /// The action; it must be one the binding declares.
         action: ServiceAction,
     },
+    /// Ask the init system to re-read its unit files. Allowed only when an
+    /// enabled module declares `reload_unit_files`.
+    ReloadUnitFiles,
 }
 
 /// The runner's answer.
@@ -76,6 +80,8 @@ pub enum RunnerResponse {
     Checked(CheckOutcome),
     /// The service action ran.
     Serviced(ServiceOutcome),
+    /// The unit files were reloaded; a short detail.
+    Reloaded(String),
     /// The subsystem is absent on this host.
     Unavailable(String),
     /// The request was refused or the subsystem failed.
@@ -165,6 +171,15 @@ fn answer(
                 .services
                 .service(entry.binding, core)
                 .map(RunnerResponse::Serviced)
+        }
+        RunnerRequest::ReloadUnitFiles => {
+            if !allow.reloads_unit_files() {
+                return RunnerResponse::Failed("no enabled module reloads unit files".to_owned());
+            }
+            hooks
+                .services
+                .reload_unit_files()
+                .map(RunnerResponse::Reloaded)
         }
     };
     outcome.unwrap_or_else(|err| match err {
@@ -316,6 +331,14 @@ impl ServiceControl for RunnerClient {
             _ => None,
         })
     }
+
+    fn reload_unit_files(&self) -> Result<String, HookError> {
+        let response = self.call(&RunnerRequest::ReloadUnitFiles)?;
+        hook_result(response, |response| match response {
+            RunnerResponse::Reloaded(detail) => Some(detail),
+            _ => None,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -423,6 +446,10 @@ mod tests {
                 detail: format!("{action:?}"),
             })
         }
+
+        fn reload_unit_files(&self) -> Result<String, HookError> {
+            Ok("reloaded".to_owned())
+        }
     }
 
     static FILED_CHECKS: &[ExternalCheck] = &[ExternalCheck {
@@ -459,6 +486,7 @@ mod tests {
             targets,
             services: &[],
             checks: FILED_CHECKS,
+            reload_unit_files: true,
             ..MODULE
         }))
     }
@@ -552,6 +580,39 @@ mod tests {
             assert_eq!(outcome.detail, "Restart");
             Ok(())
         })
+    }
+
+    #[test]
+    fn a_unit_files_reload_is_forwarded() -> R {
+        let fx = fixture()?;
+        with_runner(&fx, |client| {
+            assert_eq!(client.reload_unit_files()?, "reloaded");
+            Ok(())
+        })
+    }
+
+    /// With no enabled module that declares `reload_unit_files`, the runner
+    /// refuses the reload: a compromised monitor gains nothing new.
+    #[test]
+    fn the_runner_refuses_a_reload_no_module_declares() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let allow = Allowlist::from_modules(&[&MODULE], &Config::with_state_root(dir.path()))?;
+        let hooks = Hooks {
+            checks: &Fake,
+            services: &Fake,
+        };
+        let response = answer(
+            &allow,
+            dir.path(),
+            &profile(),
+            &hooks,
+            RunnerRequest::ReloadUnitFiles,
+        );
+        assert!(
+            matches!(response, RunnerResponse::Failed(_)),
+            "answered {response:?}"
+        );
+        Ok(())
     }
 
     #[test]
@@ -785,6 +846,10 @@ mod tests {
             client.service(binding()?, CoreServiceAction::Restart),
             Err(HookError::Unavailable(_))
         ));
+        assert!(matches!(
+            client.reload_unit_files(),
+            Err(HookError::Unavailable(_))
+        ));
         Ok(())
     }
 
@@ -797,6 +862,12 @@ mod tests {
                 RunnerResponse::Serviced(ServiceOutcome {
                     binding: BindingId(0),
                     active: true,
+                    detail: String::new(),
+                }),
+                RunnerResponse::Checked(CheckOutcome {
+                    check: CheckId(0),
+                    passed: true,
+                    exit_code: Some(0),
                     detail: String::new(),
                 }),
                 RunnerResponse::Checked(CheckOutcome {
@@ -818,6 +889,10 @@ mod tests {
         ));
         assert!(matches!(
             client.service(binding()?, CoreServiceAction::Restart),
+            Err(HookError::Failed(_))
+        ));
+        assert!(matches!(
+            client.reload_unit_files(),
             Err(HookError::Failed(_))
         ));
         drop(client);

@@ -306,6 +306,10 @@ impl ServiceControl for ServiceControlAdapter {
             detail: outcome.detail,
         })
     }
+
+    fn reload_unit_files(&self) -> Result<String, HookError> {
+        self.0.reload_unit_files().map_err(HookError::from)
+    }
 }
 
 /// Caches which alternative of a `&'static [&'static str]` list resolved to
@@ -531,6 +535,17 @@ mod tests {
         assert!(matches!(
             AlwaysActive.status(&binding.units),
             Err(ServiceError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn service_control_adapter_forwards_a_unit_files_reload() {
+        use crate::privsep::monitor::{NoServices, ServiceControl};
+        let adapter = ServiceControlAdapter(Box::new(AlwaysActive));
+        assert_eq!(adapter.reload_unit_files(), Ok("reloaded".to_owned()));
+        assert!(matches!(
+            NoServices.reload_unit_files(),
+            Err(crate::privsep::monitor::HookError::Unavailable(_))
         ));
     }
 
