@@ -13,6 +13,10 @@
 #   SBOM.cyclonedx.json
 # where <triple> ∈ {x86_64-unknown-linux-musl, aarch64-unknown-linux-musl}.
 #
+# `gh attestation verify` checks the actions/attest attestation in GitHub's
+# attestation store, not the detent-<triple>.sigstore.json asset (since the
+# Rekor v2 switch that asset is a cosign bundle; release.yml gates it).
+#
 # Attestation identity (ADR-005): the published bundles must have been signed
 # by the release workflow, SAN
 #   https://github.com/jauderho/detent/.github/workflows/release.yml@refs/tags/<tag>

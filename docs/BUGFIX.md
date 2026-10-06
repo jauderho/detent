@@ -331,7 +331,9 @@ deferred by the owner.
    fixtures, then the `fuzz_bundle_parse` target). Rekor v2 bundles verify;
    the real-material proof is staging only (no public-good v2 bundle yet),
    and the production log2025-1 key and TSA are checked against
-   `trusted_root.json`.
+   `trusted_root.json`. **Follow-up:** after the next tag, add its
+   `detent-<triple>.sigstore.json` (the first production Rekor v2 bundle) as
+   a fixture with a `real_bundle.rs`-style end-to-end test.
 8. ~~**`run_update` coverage.**~~ Done: `update_takes_min_age_days_from_the_config`
    and `update_refuses_a_bad_config_before_any_network_call` drive
    `run_update` itself up to the network; the flow after it is covered by
@@ -348,8 +350,16 @@ deferred by the owner.
 12. **`update --check` text:** a newer release held by the age gate prints
     "no update available"; the JSON has the tag. Name the held tag and the
     reason.
-13. **`release.yml` publish egress list:** `tuf-rekor-cdn.sigstore.dev` does
-    not resolve (harden-runner log); remove it.
+13. ~~**`release.yml` publish egress list:** `tuf-rekor-cdn.sigstore.dev` does
+    not resolve (harden-runner log); remove it.~~ Done (`0228efa`), with the
+    Rekor v2 switch (`6121291`, `0228efa`, `892d145`): the updater asset
+    `detent-<triple>.sigstore.json` is now a cosign Rekor v2 bundle (one
+    in-toto v1 statement per binary), gated before publish; `actions/attest`
+    stays for GitHub's store. The egress list gains
+    `log2025-1.rekor.sigstore.dev` and `tuf-repo-cdn.sigstore.dev`. Owner
+    decision: switch at once; devices on `v0.1.0` or older (Rekor v1 only)
+    refuse the next release and need a manual reinstall. Unproven until the
+    next tag (see PROGRESS 2026-10-05).
 
 ### Track F — Phase 12 / M4 (v1.0)
 

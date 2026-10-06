@@ -65,11 +65,20 @@ advisories bypass the cooldown. Do not lower these values.
    `bun install --frozen-lockfile` for the SPA, merged CycloneDX SBOM
    (`cargo cyclonedx` + `cdxgen`), then publishes `detent-<target-triple>`,
    per-asset `detent-<target-triple>.sigstore.json` bundles, `SHA256SUMS`,
-   and `SBOM.cyclonedx.json` via `gh release create --verify-tag`. The
-   bundles are the `actions/attest` build-provenance bundle (Sigstore bundle
-   v0.3, DSSE envelope, SLSA provenance predicate). One attestation names
-   all binaries as subjects, so each `.sigstore.json` file is a copy of
-   that one bundle. The self-updater verifies it (ADR-014). `SHA256SUMS`
+   and `SBOM.cyclonedx.json` via `gh release create --verify-tag`. Each
+   `.sigstore.json` file is a **Rekor v2** bundle made by `cosign
+   attest-blob` (cosign v3.1.3, signing config
+   `.github/sigstore/signing-config-rekor-v2.json`): one in-toto v1
+   statement per binary, with that binary as the only subject and the SLSA
+   provenance predicate of the `actions/attest` run, logged to
+   `log2025-1.rekor.sigstore.dev` with an RFC 3161 timestamp. The
+   self-updater verifies it (ADR-014). A gate step stops the release unless
+   every bundle is `hashedrekord` 0.0.2 with a timestamp and one subject and
+   passes `cosign verify-blob-attestation` for this workflow and tag.
+   `actions/attest` still runs: its Rekor v1 attestation goes to GitHub's
+   attestation store, which `gh attestation verify` (step 5) and
+   `rebuild-verify.yml` use. Devices on `v0.1.0` or older verify Rekor v1
+   only: they refuse these bundles and need a manual reinstall. `SHA256SUMS`
    covers the binaries only. Each target is built twice, on two runners
    (the second build without the cargo cache); the `reproducible` job
    stops the release unless both builds have the same SHA-256.
@@ -86,7 +95,16 @@ advisories bypass the cooldown. Do not lower these values.
    ```
    Each asset must verify with the workflow identity pinned to
    `release.yml` at this tag (ADR-005); `SHA256SUMS` must match every
-   downloaded asset.
+   downloaded asset. `gh attestation verify` checks the `actions/attest`
+   attestation in GitHub's store. To check the updater bundle itself:
+   ```
+   cosign verify-blob-attestation \
+     --bundle detent-x86_64-unknown-linux-musl.sigstore.json \
+     --certificate-identity https://github.com/jauderho/detent/.github/workflows/release.yml@refs/tags/<tag> \
+     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+     --type https://slsa.dev/provenance/v1 \
+     detent-x86_64-unknown-linux-musl
+   ```
 6. `rebuild-verify.yml` runs weekly and on demand (`workflow_dispatch`): it
    rebuilds the latest tag from source with the same reproducible flags and
    compares hashes against the published assets, plus `gh attestation verify`

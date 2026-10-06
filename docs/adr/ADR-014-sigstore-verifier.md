@@ -13,9 +13,19 @@ across 16 version pairs, and **panics at verifier construction** on static
 musl systems with no CA bundle. The decision stands; the mechanism is the
 PLAN §2.9 fallback: a minimal in-tree verifier. This ADR is its build spec.
 
-The verifier is **fully offline**: bundles from `actions/attest` carry enough
-material (certificate chain, Rekor inclusion proof) to verify with no network,
-using the embedded trust root only.
+The verifier is **fully offline**: Sigstore bundles carry enough material
+(certificate chain, Rekor inclusion proof, timestamps) to verify with no
+network, using the embedded trust root only.
+
+**Release bundle source** (2026-10-05): `detent-<triple>.sigstore.json` is a
+Rekor v2 bundle made in `release.yml` by `cosign attest-blob` with the
+v2-only signing config in `.github/sigstore/` (one in-toto v1 statement per
+binary, the SLSA predicate of the `actions/attest` run). `actions/attest`
+(v4.2.2, the latest) logs to Rekor v1 only; it still runs for GitHub's
+attestation store. The switch is at once: verifiers older than the Rekor v2
+support (`v0.1.0` and older) refuse the new bundles, and those devices need a
+manual reinstall. The bundles from `v0.0.1-rc.2` and `v0.1.0` were the
+`actions/attest` Rekor v1 bundle, which the verifier still accepts.
 
 ## Decision
 
