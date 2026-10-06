@@ -332,9 +332,11 @@ deferred by the owner.
    the real-material proof is staging only (no public-good v2 bundle yet),
    and the production log2025-1 key and TSA are checked against
    `trusted_root.json`.
-8. **`run_update` coverage:** B3 removed the two placeholder-root tests in
-   `run.rs`; `run_update` past the trust load has no test now. Restore
-   coverage (crate floor 95%) with a fixture signed by a test root.
+8. ~~**`run_update` coverage.**~~ Done: `update_takes_min_age_days_from_the_config`
+   and `update_refuses_a_bad_config_before_any_network_call` drive
+   `run_update` itself up to the network; the flow after it is covered by
+   the hermetic `run_update_on` tests. `detent` crate was 95.36% (floor 95%)
+   before.
 9. **Build-signer extension** (`verify.rs`, `extension_uri`): it compares the
    raw extension value with the pinned URI. OID 1.3.6.1.4.1.57264.1.9 holds
    a DER UTF8String, so this branch can never match; the SAN branch carries

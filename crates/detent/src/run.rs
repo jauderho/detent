@@ -2271,6 +2271,28 @@ mod tests {
         Ok(())
     }
 
+    /// `detent update` reads its config before it contacts GitHub: a config
+    /// it cannot parse stops the run there (E8: `run_update` itself).
+    #[cfg(feature = "update")]
+    #[test]
+    fn update_refuses_a_bad_config_before_any_network_call() -> R {
+        let dir = tempfile::tempdir()?;
+        let config = dir.path().join("detent.toml");
+        std::fs::write(&config, "[update]\nmin_age_days = \"soon\"\n")?;
+        let config = config.to_str().ok_or("path")?;
+        for argv in [
+            ["detent", "--config", config, "update", "--check"].as_slice(),
+            ["detent", "--config", config, "update"].as_slice(),
+        ] {
+            let (exit, out, notes) = run_with(argv)?;
+            assert_eq!(exit, Exit::Failed, "{argv:?}: {notes}");
+            assert!(out.is_empty(), "{out}");
+            assert!(notes.contains("update failed"), "{notes}");
+            assert!(notes.contains("min_age_days"), "{notes}");
+        }
+        Ok(())
+    }
+
     fn run_with(argv: &[&str]) -> Result<(Exit, String, String), Box<dyn std::error::Error>> {
         let cli = parse(argv)?;
         let mut input = std::io::empty();
