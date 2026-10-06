@@ -239,3 +239,10 @@ path = "fuzz_targets/fuzz_tsa_verify.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_bundle_parse"
+path = "fuzz_targets/fuzz_bundle_parse.rs"
+test = false
+doc = false
+bench = false

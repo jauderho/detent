@@ -325,12 +325,13 @@ deferred by the owner.
    leaf needs a verified SCT; `gen-fixtures` signs each fixture leaf's SCT
    with a test CT key (`tests/fixtures/ctfe-pub.pem`, loaded with
    `trust::from_pems_with_ct`).
-7. **Rekor v2** (log2025-1): commits 1–4 done (`7bf5c5a` trust material,
-   `63f0af3` Ed25519 checkpoints, `4cb46d2` RFC 3161 timestamps, then the
-   v2 path in `bundle::parse` and `verify`). Rekor v2 bundles verify; the
-   proof is real staging material only. **Open (commit 5):** self-minted v2
-   fixtures from `gen-fixtures` (test Ed25519 log key, test TSA) for the
-   refusal matrix and a v1 bundle with a valid timestamp.
+7. ~~**Rekor v2** (log2025-1).~~ Done (`7bf5c5a` trust material, `63f0af3`
+   Ed25519 checkpoints, `4cb46d2` RFC 3161 timestamps, `ca1846a` the v2 path
+   in `bundle::parse` and `verify`, `83410de` self-minted v2 and timestamp
+   fixtures, then the `fuzz_bundle_parse` target). Rekor v2 bundles verify;
+   the real-material proof is staging only (no public-good v2 bundle yet),
+   and the production log2025-1 key and TSA are checked against
+   `trusted_root.json`.
 8. **`run_update` coverage:** B3 removed the two placeholder-root tests in
    `run.rs`; `run_update` past the trust load has no test now. Restore
    coverage (crate floor 95%) with a fixture signed by a test root.
