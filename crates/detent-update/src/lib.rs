@@ -42,6 +42,7 @@ pub mod listener;
 #[cfg(feature = "client")]
 pub mod policy;
 pub mod trust;
+pub mod tsa;
 #[cfg(feature = "client")]
 pub mod update;
 pub mod verify;

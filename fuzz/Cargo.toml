@@ -25,6 +25,7 @@ detent-module-network = { path = "../crates/modules/network", features = ["fuzzi
 detent-platform = { path = "../crates/detent-platform", features = ["fuzzing"] }
 detent-web = { path = "../crates/detent-web" }
 detent-acme = { path = "../crates/detent-acme", features = ["fuzzing"] }
+detent-update = { path = "../crates/detent-update", default-features = false }
 
 [profile.release]
 debug = 1
@@ -228,6 +229,13 @@ bench = false
 [[bin]]
 name = "fuzz_dns_response"
 path = "fuzz_targets/fuzz_dns_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_tsa_verify"
+path = "fuzz_targets/fuzz_tsa_verify.rs"
 test = false
 doc = false
 bench = false

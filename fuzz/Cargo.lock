@@ -434,9 +434,11 @@ dependencies = [
 
 [[package]]
 name = "detent-acme"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "base64 0.22.1",
+ "http-body-util",
  "hyper",
  "hyper-rustls",
  "hyper-util",
@@ -446,13 +448,14 @@ dependencies = [
  "serde_json",
  "thiserror",
  "time",
+ "tokio",
  "webpki-roots",
  "x509-parser",
 ]
 
 [[package]]
 name = "detent-core"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "arbitrary",
  "schemars",
@@ -478,6 +481,7 @@ dependencies = [
  "detent-module-resolver",
  "detent-module-samba",
  "detent-platform",
+ "detent-update",
  "detent-web",
  "libfuzzer-sys",
  "serde",
@@ -486,7 +490,7 @@ dependencies = [
 
 [[package]]
 name = "detent-module-chrony"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "arbitrary",
  "detent-core",
@@ -497,7 +501,7 @@ dependencies = [
 
 [[package]]
 name = "detent-module-dhcp"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "arbitrary",
  "detent-core",
@@ -508,7 +512,7 @@ dependencies = [
 
 [[package]]
 name = "detent-module-hosts"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "arbitrary",
  "detent-core",
@@ -519,7 +523,7 @@ dependencies = [
 
 [[package]]
 name = "detent-module-mounts"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "arbitrary",
  "detent-core",
@@ -530,7 +534,7 @@ dependencies = [
 
 [[package]]
 name = "detent-module-network"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "arbitrary",
  "detent-core",
@@ -541,7 +545,7 @@ dependencies = [
 
 [[package]]
 name = "detent-module-nfs"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "arbitrary",
  "detent-core",
@@ -552,7 +556,7 @@ dependencies = [
 
 [[package]]
 name = "detent-module-resolver"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "arbitrary",
  "detent-core",
@@ -563,7 +567,7 @@ dependencies = [
 
 [[package]]
 name = "detent-module-samba"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "arbitrary",
  "detent-core",
@@ -574,14 +578,14 @@ dependencies = [
 
 [[package]]
 name = "detent-modules"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "detent-core",
 ]
 
 [[package]]
 name = "detent-ops"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "detent-core",
  "detent-platform",
@@ -594,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "detent-platform"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "arbitrary",
  "caps",
@@ -617,7 +621,7 @@ dependencies = [
 
 [[package]]
 name = "detent-update"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "http-body-util",
@@ -642,7 +646,7 @@ dependencies = [
 
 [[package]]
 name = "detent-web"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "argon2",
  "axum",
@@ -655,6 +659,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rcgen",
+ "rustix",
  "rustls",
  "semver",
  "serde",

@@ -74,6 +74,10 @@ pub enum VerificationError {
     /// embedded CT log key signed.
     #[error("signing certificate has no valid embedded SCT list")]
     SctInvalid,
+    /// An RFC 3161 timestamp does not verify against the embedded timestamp
+    /// authority (the signing time of a Rekor v2 entry).
+    #[error("RFC 3161 timestamp does not verify against the embedded timestamp authority")]
+    TimestampInvalid,
     /// Step 6: the Rekor entry kind is not `hashedrekord` or `dsse`.
     #[error("Rekor entry kind is not supported by the verifier")]
     UnsupportedEntryKind,
@@ -673,7 +677,7 @@ fn precert_tbs(tbs: &[u8]) -> Option<Vec<u8>> {
 
 /// Splits one DER TLV with a single-byte tag off `input`: (tag, contents,
 /// rest). Lengths of up to three bytes; indefinite lengths are refused.
-fn der_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+pub(crate) fn der_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
     let (&tag, input) = input.split_first()?;
     let (&first, mut input) = input.split_first()?;
     let len = if first < 0x80 {

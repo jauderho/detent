@@ -138,6 +138,14 @@ and certificate digests, and the TSA chain signatures (`trust.rs` tests). The
 Ed25519 checkpoint check (`verify::verify_v2_checkpoint`) is proven against
 real **staging** material only (`tests/fixtures/staging-rekor-v2/`, from
 sigstore-python, Apache-2.0): no public-good Rekor v2 bundle exists yet.
+The same holds for the RFC 3161 check (`tsa::verify_timestamp`): it is
+proven on the staging token with the staging TSA chain. It accepts only
+status `granted` (0), as sigstore-go does; a SHA-256/384/512 imprint over the
+DSSE signature; one `SignerInfo` that names the TSA leaf and whose ECDSA
+signature over the signed attributes verifies with the leaf key; a matching
+message digest and `ESSCertIDv2` (an SHA-1 `ESSCertID` is refused); a leaf
+with a critical `timeStamping`-only EKU; and a UTC `genTime` inside the TSA
+window and the leaf validity. Certificates in the token are ignored.
 
 Refresh procedure (per release, and out-of-band when Sigstore rotates roots):
 1. Fetch the current Sigstore TUF snapshot with the TUF client and verify the
@@ -191,6 +199,8 @@ enum VerificationError {
     SignatureInvalid,     // step 4: DSSE signature does not verify
     DigestMismatch,       // step 5: subject digest != file digest (or ambiguous subject)
     SetInvalid,           // step 6: Rekor inclusion proof / checkpoint / body / SET fails
+    SctInvalid,           // step 3: no embedded SCT verifies against an embedded CT log key
+    TimestampInvalid,     // Rekor v2: the RFC 3161 timestamp does not verify (not wired yet)
     TrustRootUnavailable, // no embedded root valid at integratedTime (rotation gap)
 }
 ```
