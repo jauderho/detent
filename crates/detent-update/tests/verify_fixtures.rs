@@ -204,6 +204,31 @@ fn a_legacy_leaf_without_an_sct_is_refused() {
 }
 
 #[test]
+fn a_v1_bundle_with_a_timestamp_that_does_not_verify_is_refused() {
+    // A Rekor v1 bundle needs no RFC 3161 timestamp, but one it carries must
+    // verify. This one is a real staging token over another signature.
+    let staging: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            fixtures().join("staging-rekor-v2/a.dsse.staging-rekor-v2.txt.sigstore.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut bundle: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixtures().join("valid.json")).unwrap()).unwrap();
+    bundle["verificationMaterial"]["timestampVerificationData"] =
+        staging["verificationMaterial"]["timestampVerificationData"].clone();
+    let decoded = detent_update::bundle::parse(&serde_json::to_vec(&bundle).unwrap()).unwrap();
+    assert_eq!(decoded.rfc3161_timestamps.len(), 1);
+    let digest: [u8; 32] =
+        Sha256::digest(std::fs::read(fixtures().join("binary.bin")).unwrap()).into();
+    assert_eq!(
+        verify(&decoded, &digest, FIXTURE_TAG, &trust()),
+        Err(VerificationError::TimestampInvalid)
+    );
+}
+
+#[test]
 fn wrong_identity_is_refused_at_step_3() {
     let error = run("wrong-identity.json").expect_err("wrong identity must be refused");
     assert!(

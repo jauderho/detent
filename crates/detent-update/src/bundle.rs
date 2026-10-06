@@ -22,6 +22,14 @@ pub const MAX_INCLUSION_PATH: usize = 64;
 /// v0.3; unknown major bumps are refused).
 pub const MEDIA_TYPE: &str = "application/vnd.dev.sigstore.bundle.v0.3+json";
 
+/// Most RFC 3161 timestamps accepted in one bundle. Each one is verified, so
+/// the cap bounds the work an untrusted bundle can ask for.
+pub const MAX_RFC3161_TIMESTAMPS: usize = 4;
+
+/// The tlog entry kind and version of a Rekor v2 entry. Rekor v2 logs DSSE
+/// envelopes as `hashedrekord` 0.0.2 over the DSSE PAE.
+pub const REKOR_V2_KIND: (&str, &str) = ("hashedrekord", "0.0.2");
+
 /// The in-toto envelope payload type emitted by Sigstore attestations.
 pub const DSSE_PAYLOAD_TYPE: &str = "application/vnd.in-toto+json";
 
@@ -72,6 +80,22 @@ struct VerificationMaterialJson {
     certificate: Option<CertificateJson>,
     #[serde(default)]
     tlog_entries: Vec<TlogEntryJson>,
+    #[serde(default)]
+    timestamp_verification_data: Option<TimestampVerificationDataJson>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TimestampVerificationDataJson {
+    #[serde(default)]
+    rfc3161_timestamps: Vec<Rfc3161TimestampJson>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Rfc3161TimestampJson {
+    /// Base64 DER `TimeStampResp`.
+    signed_timestamp: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,12 +128,16 @@ struct X509ChainJson {
 struct TlogEntryJson {
     #[serde(deserialize_with = "de_i64")]
     log_index: i64,
-    #[serde(deserialize_with = "de_i64")]
-    integrated_time: i64,
+    /// Required for Rekor v1; a Rekor v2 entry has none, and any value it
+    /// carries is ignored.
+    #[serde(default, deserialize_with = "de_opt_i64")]
+    integrated_time: Option<i64>,
     log_id: LogIdJson,
     kind_version: KindVersionJson,
     canonicalized_body: String,
-    inclusion_promise: InclusionPromiseJson,
+    /// Required for Rekor v1 (the SET); a Rekor v2 entry has none.
+    #[serde(default)]
+    inclusion_promise: Option<InclusionPromiseJson>,
     inclusion_proof: InclusionProofJson,
 }
 
@@ -179,6 +207,13 @@ where
     }
 }
 
+fn de_opt_i64<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    de_i64(deserializer).map(Some)
+}
+
 fn de_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -228,8 +263,10 @@ pub struct SubjectDigest {
 /// base64 left in it.
 #[derive(Debug)]
 pub struct Decoded {
-    /// `integratedTime` of the tlog entry, in Unix seconds; the chain is
-    /// validated at this instant, not now (ADR-014 step 2).
+    /// `integratedTime` of a Rekor v1 tlog entry, in Unix seconds; the chain
+    /// is validated at this instant, not now (ADR-014 step 2). Always 0 for a
+    /// Rekor v2 entry ([`Decoded::is_rekor_v2`]), which has no signed
+    /// integrated time.
     pub integrated_time: i64,
     /// DER certificates, leaf first; `certs[0]` is the leaf, the rest are
     /// intermediates in order.
@@ -262,7 +299,20 @@ pub struct Decoded {
     pub checkpoint: String,
     /// The Rekor signed entry timestamp (`inclusionPromise`), decoded DER.
     /// It is the only signature that binds `integratedTime` to the entry.
+    /// Empty for a Rekor v2 entry.
     pub signed_entry_timestamp: Vec<u8>,
+    /// The RFC 3161 timestamp responses
+    /// (`timestampVerificationData.rfc3161Timestamps`), decoded DER; at most
+    /// [`MAX_RFC3161_TIMESTAMPS`].
+    pub rfc3161_timestamps: Vec<Vec<u8>>,
+}
+
+impl Decoded {
+    /// Whether the tlog entry is a Rekor v2 entry ([`REKOR_V2_KIND`]).
+    #[must_use]
+    pub fn is_rekor_v2(&self) -> bool {
+        (self.kind.as_str(), self.kind_version.as_str()) == REKOR_V2_KIND
+    }
 }
 
 /// Parses and decodes a bundle, enforcing the 1 MiB cap and the strict field
@@ -353,8 +403,11 @@ pub fn parse(bytes: &[u8]) -> Result<Decoded, BundleError> {
         certs.push(decode(cert.bytes().as_bytes(), "certificate")?);
     }
 
+    let (integrated_time, signed_entry_timestamp) = signed_time(tlog)?;
+    let rfc3161_timestamps = rfc3161_timestamps(&json.verification_material)?;
+
     Ok(Decoded {
-        integrated_time: tlog.integrated_time,
+        integrated_time,
         certs,
         statement,
         dsse_payload,
@@ -369,11 +422,54 @@ pub fn parse(bytes: &[u8]) -> Result<Decoded, BundleError> {
         proof_log_index: tlog.inclusion_proof.log_index,
         path_hashes: decode_path(&tlog.inclusion_proof.hashes)?,
         checkpoint: tlog.inclusion_proof.checkpoint.envelope.clone(),
-        signed_entry_timestamp: decode(
-            tlog.inclusion_promise.signed_entry_timestamp.as_bytes(),
+        signed_entry_timestamp,
+        rfc3161_timestamps,
+    })
+}
+
+/// The `integratedTime` and SET of a Rekor v1 entry, which must carry both.
+/// A Rekor v2 entry has neither (its time comes from RFC 3161 timestamps):
+/// `(0, [])`, whatever the entry holds.
+fn signed_time(tlog: &TlogEntryJson) -> Result<(i64, Vec<u8>), BundleError> {
+    let rekor_v2 = (
+        tlog.kind_version.kind.as_str(),
+        tlog.kind_version.version.as_str(),
+    ) == REKOR_V2_KIND;
+    if rekor_v2 {
+        return Ok((0, Vec::new()));
+    }
+    let promise = tlog
+        .inclusion_promise
+        .as_ref()
+        .ok_or_else(|| BundleError::Malformed("no inclusionPromise (SET)".to_owned()))?;
+    let time = tlog
+        .integrated_time
+        .ok_or_else(|| BundleError::Malformed("no integratedTime".to_owned()))?;
+    Ok((
+        time,
+        decode(
+            promise.signed_entry_timestamp.as_bytes(),
             "signed entry timestamp",
         )?,
-    })
+    ))
+}
+
+/// The decoded RFC 3161 timestamps, at most [`MAX_RFC3161_TIMESTAMPS`].
+fn rfc3161_timestamps(material: &VerificationMaterialJson) -> Result<Vec<Vec<u8>>, BundleError> {
+    let timestamps = material
+        .timestamp_verification_data
+        .as_ref()
+        .map(|data| data.rfc3161_timestamps.as_slice())
+        .unwrap_or_default();
+    if timestamps.len() > MAX_RFC3161_TIMESTAMPS {
+        return Err(BundleError::Malformed(format!(
+            "more than {MAX_RFC3161_TIMESTAMPS} RFC 3161 timestamps"
+        )));
+    }
+    timestamps
+        .iter()
+        .map(|timestamp| decode(timestamp.signed_timestamp.as_bytes(), "rfc3161 timestamp"))
+        .collect()
 }
 
 /// Decode an inclusion path, refusing one longer than [`MAX_INCLUSION_PATH`]
@@ -487,6 +583,84 @@ mod tests {
                 "missing {field} must be refused"
             );
         }
+    }
+
+    /// [`minimal`] as a Rekor v2 entry: `hashedrekord` 0.0.2, no SET, no
+    /// integrated time.
+    fn minimal_v2() -> serde_json::Value {
+        let mut value = minimal();
+        let entry = &mut value["verificationMaterial"]["tlogEntries"][0];
+        entry["kindVersion"]["version"] = serde_json::json!("0.0.2");
+        let entry = entry.as_object_mut().unwrap();
+        entry.remove("inclusionPromise");
+        entry.remove("integratedTime");
+        value
+    }
+
+    #[test]
+    fn a_rekor_v2_entry_needs_no_set_or_integrated_time() {
+        let decoded = parse_json(&minimal_v2()).expect("v2 entry parses");
+        assert!(decoded.is_rekor_v2());
+        assert_eq!(decoded.integrated_time, 0);
+        assert!(decoded.signed_entry_timestamp.is_empty());
+
+        // An integratedTime on a v2 entry is never used.
+        let mut value = minimal_v2();
+        value["verificationMaterial"]["tlogEntries"][0]["integratedTime"] =
+            serde_json::json!(1_758_000_000);
+        assert_eq!(parse_json(&value).unwrap().integrated_time, 0);
+    }
+
+    #[test]
+    fn only_a_rekor_v2_entry_may_omit_the_set() {
+        // dsse 0.0.2 and hashedrekord 0.0.1 without a SET or time are refused.
+        for (kind, version) in [("dsse", "0.0.2"), ("hashedrekord", "0.0.1")] {
+            let mut value = minimal_v2();
+            value["verificationMaterial"]["tlogEntries"][0]["kindVersion"] =
+                serde_json::json!({ "kind": kind, "version": version });
+            assert!(
+                matches!(parse_json(&value), Err(BundleError::Malformed(_))),
+                "{kind} {version}"
+            );
+        }
+        // A v1 entry with a SET but no integratedTime is refused too.
+        let mut value = minimal();
+        remove_pointer(
+            &mut value,
+            "/verificationMaterial/tlogEntries/0/integratedTime",
+        );
+        assert!(matches!(parse_json(&value), Err(BundleError::Malformed(_))));
+    }
+
+    #[test]
+    fn rfc3161_timestamps_are_decoded_and_capped() {
+        let with = |count: usize, token: &str| {
+            let mut value = minimal_v2();
+            value["verificationMaterial"]["timestampVerificationData"] = serde_json::json!({
+                "rfc3161Timestamps": vec![serde_json::json!({ "signedTimestamp": token }); count]
+            });
+            parse_json(&value)
+        };
+        assert_eq!(
+            with(MAX_RFC3161_TIMESTAMPS, "AAAA")
+                .unwrap()
+                .rfc3161_timestamps,
+            vec![vec![0, 0, 0]; MAX_RFC3161_TIMESTAMPS]
+        );
+        assert!(matches!(
+            with(MAX_RFC3161_TIMESTAMPS + 1, "AAAA"),
+            Err(BundleError::Malformed(_))
+        ));
+        assert!(matches!(
+            with(1, "not base64!"),
+            Err(BundleError::BadBase64(_))
+        ));
+        assert!(
+            parse_json(&minimal())
+                .unwrap()
+                .rfc3161_timestamps
+                .is_empty()
+        );
     }
 
     #[test]

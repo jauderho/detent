@@ -122,6 +122,28 @@ No partial state, no retries with weaker checks.
    `trust::from_pems_with_ct`). Unknown entry kinds fall
    through to the `hashedrekord` body check (H17 step 6).
 
+   **Rekor v2 entries** (`hashedrekord` 0.0.2; Rekor v2 logs DSSE this way,
+   over the PAE) carry no SET and no `integratedTime`; `bundle::parse`
+   accepts a missing SET and time only for this kind and version (any
+   other entry without them is `BundleMalformed`), and never uses an
+   `integratedTime` a v2 entry carries. **Signing time:** every RFC 3161
+   timestamp in `timestampVerificationData` (at most 4) must verify against
+   an embedded TSA (`tsa::verify_timestamp`, over the DSSE signature), for
+   v1 and v2 alike; a v2 entry needs at least one. Otherwise
+   `TimestampInvalid`, checked before step 2. Step 2 then runs at every
+   signing time: the SET-bound `integratedTime` (v1) and each `genTime`, as
+   sigstore-go checks the leaf at each verified timestamp. **Step 6 (v2):**
+   the log key is the embedded Ed25519 key whose log id is the entry's
+   `logId`, and its window must cover every signing time. The body is
+   rebuilt from the bundle as the RFC 8785 JSON of `{apiVersion 0.0.2,
+   kind hashedrekord, spec.hashedRekordV002 {data {SHA2_256, SHA-256(PAE)},
+   signature {content: DSSE signature, verifier {PKIX_ECDSA_P256_SHA_256,
+   x509Certificate: leaf DER}}}}` and must equal `canonicalizedBody` byte for
+   byte (only P-256 leaves; others are `UnsupportedEntryKind`); its RFC 6962
+   leaf hash must reach, by the inclusion proof, the root of a checkpoint
+   that `verify_v2_checkpoint` accepts. Failures are `SetInvalid`. Steps 3–5
+   are unchanged.
+
 ### Embedded trust root and refresh procedure
 
 Trust material is embedded at build time (PLAN §2.9 step 4) in
@@ -130,7 +152,7 @@ Trust material is embedded at build time (PLAN §2.9 step 4) in
 key and the `ctfe.sigstore.dev/2022` CT log public key, extracted from Sigstore's `trusted_root.json` (2026-10-03: root-signing
 commit 5888f35, recorded in `trust::TRUST_MANIFEST`).
 
-For Rekor v2 (BUGFIX Track E 7, not yet wired into `verify`) the same
+For Rekor v2 (BUGFIX Track E 7) the same
 `trusted_root.json` also gives the `log2025-1.rekor.sigstore.dev` Ed25519
 key (origin and `validFor` start as constants) and the `timestamp.sigstore.dev`
 TSA leaf and root. Those are proven against `trusted_root.json` only: log id
@@ -145,7 +167,11 @@ DSSE signature; one `SignerInfo` that names the TSA leaf and whose ECDSA
 signature over the signed attributes verifies with the leaf key; a matching
 message digest and `ESSCertIDv2` (an SHA-1 `ESSCertID` is refused); a leaf
 with a critical `timeStamping`-only EKU; and a UTC `genTime` inside the TSA
-window and the leaf validity. Certificates in the token are ignored.
+window and the leaf validity. Certificates in the token are ignored. The
+whole v2 path is proven end to end on the staging bundle with a trust root
+built from the staging `trusted_root.json` (`verify.rs`
+`a_real_staging_rekor_v2_bundle_verifies` and its mutation tests); the
+identity is passed in by the test because the staging bundle is not ours.
 
 Refresh procedure (per release, and out-of-band when Sigstore rotates roots):
 1. Fetch the current Sigstore TUF snapshot with the TUF client and verify the

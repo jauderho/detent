@@ -87,67 +87,45 @@ pub enum VerificationError {
 /// [`bundle::parse`]).
 ///
 /// `file_digest` is the SHA-256 of the downloaded binary; `tag` is the exact
-/// release tag being installed.
+/// release tag being installed. The identity is pinned to
+/// [`pinned_identity`]`(tag)`.
 ///
 /// # Errors
 ///
 /// The first failing step's [`VerificationError`]; no partial state.
-#[allow(clippy::too_many_lines)]
 pub fn verify(
     decoded: &Decoded,
     file_digest: &[u8; 32],
     tag: &str,
     trust: &TrustRoot,
 ) -> Result<(), VerificationError> {
-    // Step 2: certificate chain to the embedded Fulcio roots, at
-    // integratedTime, using only roots whose own window covers that instant.
-    let usable_roots: Vec<CertificateDer<'_>> = trust
-        .fulcio_roots
-        .iter()
-        .zip(&trust.root_windows)
-        .filter(|(_, window)| crate::trust::window_covers(**window, decoded.integrated_time))
-        .map(|(root, _)| CertificateDer::from(root.as_ref()))
-        .collect();
-    if usable_roots.is_empty() {
-        return Err(VerificationError::TrustRootUnavailable);
-    }
-    let anchors: Vec<rustls_pki_types::TrustAnchor<'_>> = usable_roots
-        .iter()
-        .map(|root| webpki::anchor_from_trusted_cert(root))
-        .collect::<Result<_, _>>()
-        .map_err(|_| VerificationError::CertChainInvalid)?;
+    verify_for_identity(decoded, file_digest, &pinned_identity(tag), trust)
+}
 
+/// [`verify`] with the pinned workflow identity given directly. Only
+/// [`verify`] and tests call it: tests use it to verify real third-party
+/// bundles, whose identity is not ours, through every step.
+#[allow(clippy::too_many_lines)]
+fn verify_for_identity(
+    decoded: &Decoded,
+    file_digest: &[u8; 32],
+    pinned: &str,
+    trust: &TrustRoot,
+) -> Result<(), VerificationError> {
+    // The signing times. Rekor v1: the integratedTime the SET binds (checked
+    // in step 6). Rekor v2 has no signed integrated time. Every RFC 3161
+    // timestamp the bundle carries must verify and adds its genTime; a Rekor
+    // v2 entry needs at least one (sigstore-go `VerifyObserverTimestamps`).
+    let times = signing_times(decoded, trust)?;
+
+    // Step 2: certificate chain to the embedded Fulcio roots, at every
+    // signing time.
+    for &time in &times {
+        verify_chain_at(decoded, trust, time)?;
+    }
     let Some((leaf_raw, intermediate_raws)) = decoded.certs.split_first() else {
         return Err(VerificationError::CertChainInvalid);
     };
-    let leaf_der = CertificateDer::from(leaf_raw.as_slice());
-    let intermediates: Vec<CertificateDer<'_>> = intermediate_raws
-        .iter()
-        .map(|der| CertificateDer::from(der.as_slice()))
-        .collect();
-    let leaf =
-        EndEntityCert::try_from(&leaf_der).map_err(|_| VerificationError::CertChainInvalid)?;
-    let integrated = UnixTime::since_unix_epoch(Duration::from_secs(
-        decoded.integrated_time.max(0).cast_unsigned(),
-    ));
-    leaf.verify_for_usage(
-        &[
-            webpki::aws_lc_rs::ECDSA_P256_SHA256,
-            webpki::aws_lc_rs::ECDSA_P384_SHA384,
-        ],
-        &anchors,
-        &intermediates,
-        integrated,
-        &PermissiveEku,
-        None,
-        None,
-    )
-    .map_err(|error| match error {
-        webpki::Error::CertExpired { .. } | webpki::Error::CertNotValidYet { .. } => {
-            VerificationError::CertExpired
-        }
-        _ => VerificationError::CertChainInvalid,
-    })?;
 
     // Step 3: identity pinning, on the parsed leaf. New Fulcio certificates
     // carry the workflow URI in the build-signer extension; older fixtures
@@ -157,7 +135,6 @@ pub fn verify(
     let san = parsed_leaf
         .subject_alternative_name()
         .map_err(|_| VerificationError::CertChainInvalid)?;
-    let pinned = pinned_identity(tag);
     let san_matches = san.is_some_and(|extension| {
         extension
             .value
@@ -192,8 +169,16 @@ pub fn verify(
         return Err(VerificationError::IssuerMismatch);
     }
     // Every leaf, with either issuer extension, needs a verified SCT.
-    let candidates: Vec<CertificateDer<'_>> =
-        usable_roots.iter().chain(&intermediates).cloned().collect();
+    let candidates: Vec<CertificateDer<'_>> = trust
+        .fulcio_roots
+        .iter()
+        .map(|root| CertificateDer::from(root.as_ref()))
+        .chain(
+            intermediate_raws
+                .iter()
+                .map(|der| CertificateDer::from(der.as_slice())),
+        )
+        .collect();
     let issuer_spki =
         sct_issuer_spki(&parsed_leaf, &candidates).ok_or(VerificationError::SctInvalid)?;
     verify_embedded_scts(&parsed_leaf, &issuer_spki, &trust.ct_logs)?;
@@ -221,7 +206,13 @@ pub fn verify(
         return Err(VerificationError::DigestMismatch);
     }
 
-    // Step 6: Rekor inclusion — Merkle recompute, checkpoint signature
+    // Step 6, Rekor v2: the entry body rebuilt from this bundle, its
+    // inclusion proof, and the Ed25519 checkpoint of the embedded log.
+    if decoded.is_rekor_v2() {
+        return verify_rekor_v2_entry(decoded, trust, &times, leaf_raw, &parsed_leaf);
+    }
+
+    // Step 6, Rekor v1: inclusion — Merkle recompute, checkpoint signature
     // against the embedded log key, tree sizes, and body agreement; then
     // the SET, which binds integratedTime.
     verify_inclusion(
@@ -231,6 +222,81 @@ pub fn verify(
     )?;
     verify_set(decoded, &trust.rekor_key)?;
     Ok(())
+}
+
+/// Step 2 at one signing time: the leaf chains to an embedded Fulcio root
+/// whose own window covers `time`, and is valid at `time`.
+fn verify_chain_at(
+    decoded: &Decoded,
+    trust: &TrustRoot,
+    time: i64,
+) -> Result<(), VerificationError> {
+    let usable_roots: Vec<CertificateDer<'_>> = trust
+        .fulcio_roots
+        .iter()
+        .zip(&trust.root_windows)
+        .filter(|(_, window)| crate::trust::window_covers(**window, time))
+        .map(|(root, _)| CertificateDer::from(root.as_ref()))
+        .collect();
+    if usable_roots.is_empty() {
+        return Err(VerificationError::TrustRootUnavailable);
+    }
+    let anchors: Vec<rustls_pki_types::TrustAnchor<'_>> = usable_roots
+        .iter()
+        .map(|root| webpki::anchor_from_trusted_cert(root))
+        .collect::<Result<_, _>>()
+        .map_err(|_| VerificationError::CertChainInvalid)?;
+
+    let Some((leaf_raw, intermediate_raws)) = decoded.certs.split_first() else {
+        return Err(VerificationError::CertChainInvalid);
+    };
+    let leaf_der = CertificateDer::from(leaf_raw.as_slice());
+    let intermediates: Vec<CertificateDer<'_>> = intermediate_raws
+        .iter()
+        .map(|der| CertificateDer::from(der.as_slice()))
+        .collect();
+    let leaf =
+        EndEntityCert::try_from(&leaf_der).map_err(|_| VerificationError::CertChainInvalid)?;
+    let at = UnixTime::since_unix_epoch(Duration::from_secs(time.max(0).cast_unsigned()));
+    leaf.verify_for_usage(
+        &[
+            webpki::aws_lc_rs::ECDSA_P256_SHA256,
+            webpki::aws_lc_rs::ECDSA_P384_SHA384,
+        ],
+        &anchors,
+        &intermediates,
+        at,
+        &PermissiveEku,
+        None,
+        None,
+    )
+    .map_err(|error| match error {
+        webpki::Error::CertExpired { .. } | webpki::Error::CertNotValidYet { .. } => {
+            VerificationError::CertExpired
+        }
+        _ => VerificationError::CertChainInvalid,
+    })?;
+    Ok(())
+}
+
+/// The signing times of a bundle: see the call in [`verify_for_identity`].
+fn signing_times(decoded: &Decoded, trust: &TrustRoot) -> Result<Vec<i64>, VerificationError> {
+    let mut times = Vec::with_capacity(decoded.rfc3161_timestamps.len().saturating_add(1));
+    if !decoded.is_rekor_v2() {
+        times.push(decoded.integrated_time);
+    }
+    for token in &decoded.rfc3161_timestamps {
+        let time = trust
+            .tsas
+            .iter()
+            .find_map(|tsa| crate::tsa::verify_timestamp(token, &decoded.dsse_signature, tsa).ok())
+            .ok_or(VerificationError::TimestampInvalid)?;
+        times.push(time);
+    }
+    if times.is_empty() {
+        return Err(VerificationError::TimestampInvalid);
+    }
+    Ok(times)
 }
 
 /// The DSSE PAE (DSSE v1 spec): `DSSEv1 <len(type)> <type> <len(payload)> <payload>`.
@@ -267,24 +333,7 @@ fn verify_inclusion(
 ) -> Result<(), VerificationError> {
     // The Merkle leaf covers the canonicalized body only. integratedTime,
     // logIndex and logID are bound by the SET (`verify_set`), not here.
-    let leaf_hash = rekor_leaf_hash(&decoded.body);
-
-    let path: Vec<[u8; 32]> = decoded
-        .path_hashes
-        .iter()
-        .map(|hash| {
-            <[u8; 32]>::try_from(hash.as_slice()).map_err(|_| VerificationError::SetInvalid)
-        })
-        .collect::<Result<_, _>>()?;
-    if decoded.proof_log_index < 0 || decoded.tree_size == 0 {
-        return Err(VerificationError::SetInvalid);
-    }
-    let root = root_from_path(
-        decoded.proof_log_index.cast_unsigned(),
-        decoded.tree_size,
-        leaf_hash,
-        &path,
-    )?;
+    let root = inclusion_root(decoded)?;
 
     verify_checkpoint(
         &decoded.checkpoint,
@@ -297,6 +346,96 @@ fn verify_inclusion(
     // signing key the envelope carries (ADR-014 step 6).
     verify_body_agreement(decoded, leaf_point)?;
     Ok(())
+}
+
+/// The root hash the inclusion proof gives for the entry's body: the RFC 6962
+/// leaf hash of `canonicalizedBody`, walked up the path.
+fn inclusion_root(decoded: &Decoded) -> Result<[u8; 32], VerificationError> {
+    let leaf_hash = rekor_leaf_hash(&decoded.body);
+    let path: Vec<[u8; 32]> = decoded
+        .path_hashes
+        .iter()
+        .map(|hash| {
+            <[u8; 32]>::try_from(hash.as_slice()).map_err(|_| VerificationError::SetInvalid)
+        })
+        .collect::<Result<_, _>>()?;
+    if decoded.proof_log_index < 0 || decoded.tree_size == 0 {
+        return Err(VerificationError::SetInvalid);
+    }
+    root_from_path(
+        decoded.proof_log_index.cast_unsigned(),
+        decoded.tree_size,
+        leaf_hash,
+        &path,
+    )
+}
+
+/// Step 6 for a Rekor v2 entry (`hashedrekord` 0.0.2). The log key is the
+/// embedded one whose log id is the entry's `logId`, and its window must
+/// cover every signing time. The body must be exactly
+/// [`rekor_v2_body`] for this bundle; its RFC 6962 leaf must reach the root
+/// the checkpoint signs ([`verify_v2_checkpoint`]). Because the body is
+/// rebuilt from the bundle's own signature, leaf and PAE digest, it binds
+/// them to the log entry (sigstore-go `reconstructV2EntryHash`).
+fn verify_rekor_v2_entry(
+    decoded: &Decoded,
+    trust: &TrustRoot,
+    times: &[i64],
+    leaf_der: &[u8],
+    leaf: &X509Certificate<'_>,
+) -> Result<(), VerificationError> {
+    let key = trust
+        .rekor_v2_keys
+        .iter()
+        .find(|key| key.log_id.as_slice() == decoded.log_key_id.as_slice())
+        .ok_or(VerificationError::SetInvalid)?;
+    if !times
+        .iter()
+        .all(|time| crate::trust::window_covers(key.window, *time))
+    {
+        return Err(VerificationError::SetInvalid);
+    }
+    if rekor_v2_body(decoded, leaf_der, leaf)?.as_bytes() != decoded.body.as_slice() {
+        return Err(VerificationError::SetInvalid);
+    }
+    let root = inclusion_root(decoded)?;
+    verify_v2_checkpoint(&decoded.checkpoint, decoded.tree_size, &root, key)
+}
+
+/// The canonical (RFC 8785) Rekor v2 `hashedrekord` 0.0.2 body for this
+/// bundle: the digest is SHA-256 of the DSSE PAE, the signature the DSSE
+/// signature, the verifier the leaf certificate. The keys are written in
+/// RFC 8785 order and base64 needs no JSON escaping (rekor-tiles
+/// `pkg/types/hashedrekord`, `ToEntryHash`). Only P-256 leaves
+/// (`PKIX_ECDSA_P256_SHA_256`) are supported; others are
+/// [`VerificationError::UnsupportedEntryKind`].
+fn rekor_v2_body(
+    decoded: &Decoded,
+    leaf_der: &[u8],
+    leaf: &X509Certificate<'_>,
+) -> Result<String, VerificationError> {
+    let spki = leaf.public_key().raw;
+    if spki
+        .strip_prefix(&P256_SPKI_PREFIX)
+        .is_none_or(|point| point.len() != 65)
+    {
+        return Err(VerificationError::UnsupportedEntryKind);
+    }
+    let digest = Sha256::digest(dsse_pae(
+        decoded.dsse_payload_type.as_bytes(),
+        &decoded.dsse_payload,
+    ));
+    Ok(format!(
+        concat!(
+            r#"{{"apiVersion":"0.0.2","kind":"hashedrekord","spec":{{"hashedRekordV002":{{"#,
+            r#""data":{{"algorithm":"SHA2_256","digest":"{}"}},"#,
+            r#""signature":{{"content":"{}","verifier":{{"keyDetails":"PKIX_ECDSA_P256_SHA_256","#,
+            r#""x509Certificate":{{"rawBytes":"{}"}}}}}}}}}}}}"#,
+        ),
+        base64_of(&digest),
+        base64_of(&decoded.dsse_signature),
+        base64_of(leaf_der),
+    ))
 }
 
 /// The DER prefix of a `SubjectPublicKeyInfo` for an uncompressed P-256 point:
@@ -889,6 +1028,7 @@ mod tests {
             path_hashes: Vec::new(),
             checkpoint: String::new(),
             signed_entry_timestamp: b64("/entry/inclusionPromise/signedEntryTimestamp"),
+            rfc3161_timestamps: Vec::new(),
         };
         (decoded, key)
     }
@@ -939,6 +1079,7 @@ mod tests {
             path_hashes: Vec::new(),
             checkpoint: String::new(),
             signed_entry_timestamp: Vec::new(),
+            rfc3161_timestamps: Vec::new(),
         }
     }
 
@@ -1340,6 +1481,7 @@ mod tests {
             path_hashes: Vec::new(),
             checkpoint: String::new(),
             signed_entry_timestamp: Vec::new(),
+            rfc3161_timestamps: Vec::new(),
         };
         (decoded, trust, rekor, root)
     }
@@ -1568,6 +1710,7 @@ mod tests {
                 .collect(),
             checkpoint: text("/entry/inclusionProof/checkpoint/envelope").to_owned(),
             signed_entry_timestamp: Vec::new(),
+            rfc3161_timestamps: Vec::new(),
         };
         (decoded, trust)
     }
@@ -1650,6 +1793,295 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    /// The SAN of the staging Rekor v2 bundle's leaf.
+    const STAGING_V2_IDENTITY: &str = "https://github.com/sigstore-conformance/extremely-dangerous-public-oidc-beacon/.github/workflows/extremely-dangerous-oidc-beacon.yml@refs/heads/main";
+
+    /// The SHA-256 the staging bundle's one subject (`a.txt`) attests.
+    const STAGING_V2_SUBJECT: &str =
+        "a0cfc71271d6e278e57cd332ff957c3f7043fdda354c4cbb190a30d56efa01bf";
+
+    /// The staging Rekor v2 bundle as JSON.
+    fn staging_v2_bundle() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/staging-rekor-v2/a.dsse.staging-rekor-v2.txt.sigstore.json"
+        ))
+        .expect("bundle json")
+    }
+
+    /// A [`TrustRoot`] from the staging `trusted_root.json`: the staging
+    /// Fulcio CA, Rekor v1 key, CT log keys, Rekor v2 (Ed25519) log keys
+    /// and timestamp authority. The real embedded root has the public-good
+    /// equivalents.
+    fn staging_trust() -> TrustRoot {
+        let trusted: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/staging-rekor-v2/trusted_root.json"
+        ))
+        .expect("trusted root json");
+        let b64 = |value: &serde_json::Value| {
+            BASE64
+                .decode(value.as_str().expect("base64 string"))
+                .expect("base64")
+        };
+        let p256 = |spki: &[u8]| {
+            let (_, spki) = x509_parser::x509::SubjectPublicKeyInfo::from_der(spki).expect("spki");
+            VerifyingKey::from_sec1_bytes(spki.subject_public_key.data.as_ref()).expect("P-256")
+        };
+        let mut fulcio_roots = Vec::new();
+        let mut root_windows = Vec::new();
+        for authority in trusted["certificateAuthorities"].as_array().expect("CAs") {
+            for cert in authority["certChain"]["certificates"]
+                .as_array()
+                .expect("chain")
+            {
+                let der = b64(&cert["rawBytes"]);
+                let (_, parsed) = X509Certificate::from_der(&der).expect("CA cert");
+                root_windows.push((
+                    parsed.validity().not_before.timestamp(),
+                    parsed.validity().not_after.timestamp(),
+                ));
+                fulcio_roots.push(CertificateDer::from(der));
+            }
+        }
+        let tlogs = trusted["tlogs"].as_array().expect("tlogs");
+        let rekor_key = tlogs
+            .iter()
+            .find(|log| log["publicKey"]["keyDetails"] == "PKIX_ECDSA_P256_SHA_256")
+            .map(|log| p256(&b64(&log["publicKey"]["rawBytes"])))
+            .expect("Rekor v1 key");
+        let rekor_v2_keys = tlogs
+            .iter()
+            .filter(|log| log["publicKey"]["keyDetails"] == "PKIX_ED25519")
+            .map(|log| {
+                let origin = log["baseUrl"]
+                    .as_str()
+                    .and_then(|url| url.strip_prefix("https://"))
+                    .expect("https baseUrl");
+                NoteLogKey::from_spki(origin, &b64(&log["publicKey"]["rawBytes"]), (0, i64::MAX))
+                    .expect("Ed25519 key")
+            })
+            .collect();
+        let ct_logs = trusted["ctlogs"]
+            .as_array()
+            .expect("ctlogs")
+            .iter()
+            .filter(|log| log["publicKey"]["keyDetails"] == "PKIX_ECDSA_P256_SHA_256")
+            .map(|log| {
+                let spki = b64(&log["publicKey"]["rawBytes"]);
+                CtLogKey {
+                    log_id: Sha256::digest(&spki).into(),
+                    key: p256(&spki),
+                }
+            })
+            .collect();
+        let chain = &trusted["timestampAuthorities"][0]["certChain"]["certificates"];
+        let tsas = vec![crate::trust::TsaChain {
+            leaf: b64(&chain[0]["rawBytes"]).into(),
+            root: b64(&chain[1]["rawBytes"]).into(),
+            // validFor.start 2025-04-09T00:00:00Z.
+            window: (1_744_156_800, i64::MAX),
+        }];
+        TrustRoot {
+            fulcio_roots,
+            rekor_key,
+            root_windows,
+            ct_logs,
+            rekor_v2_keys,
+            tsas,
+        }
+    }
+
+    fn staging_subject() -> [u8; 32] {
+        let mut digest = [0_u8; 32];
+        for (byte, pair) in digest
+            .iter_mut()
+            .zip(STAGING_V2_SUBJECT.as_bytes().chunks(2))
+        {
+            *byte = u8::from_str_radix(std::str::from_utf8(pair).expect("ascii"), 16).expect("hex");
+        }
+        digest
+    }
+
+    /// Verifies `bundle` (JSON) against the staging trust root, pinned to
+    /// the staging bundle's own identity.
+    fn verify_staging_v2(
+        bundle: &serde_json::Value,
+        trust: &TrustRoot,
+    ) -> Result<(), VerificationError> {
+        let decoded = bundle::parse(bundle.to_string().as_bytes())?;
+        verify_for_identity(&decoded, &staging_subject(), STAGING_V2_IDENTITY, trust)
+    }
+
+    #[test]
+    fn a_real_staging_rekor_v2_bundle_verifies() {
+        assert_eq!(
+            verify_staging_v2(&staging_v2_bundle(), &staging_trust()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_real_staging_rekor_v2_bundle_is_pinned_to_our_identity() {
+        let decoded = bundle::parse(staging_v2_bundle().to_string().as_bytes()).expect("parse");
+        assert_eq!(
+            verify(&decoded, &staging_subject(), "v0.0.1", &staging_trust()),
+            Err(VerificationError::IdentityMismatch)
+        );
+    }
+
+    #[test]
+    fn a_rekor_v2_bundle_without_a_timestamp_is_refused() {
+        let mut bundle = staging_v2_bundle();
+        bundle["verificationMaterial"]
+            .as_object_mut()
+            .expect("verificationMaterial")
+            .remove("timestampVerificationData");
+        assert_eq!(
+            verify_staging_v2(&bundle, &staging_trust()),
+            Err(VerificationError::TimestampInvalid)
+        );
+    }
+
+    #[test]
+    fn every_rfc3161_timestamp_must_verify() {
+        let mut bundle = staging_v2_bundle();
+        let timestamps =
+            &mut bundle["verificationMaterial"]["timestampVerificationData"]["rfc3161Timestamps"];
+        let good = timestamps[0].clone();
+        let mut token = BASE64
+            .decode(good["signedTimestamp"].as_str().expect("token"))
+            .expect("base64");
+        *token.last_mut().expect("bytes") ^= 0x01;
+        let bad = serde_json::json!({ "signedTimestamp": BASE64.encode(token) });
+        *timestamps = serde_json::json!([bad.clone()]);
+        assert_eq!(
+            verify_staging_v2(&bundle, &staging_trust()),
+            Err(VerificationError::TimestampInvalid)
+        );
+        bundle["verificationMaterial"]["timestampVerificationData"]["rfc3161Timestamps"] =
+            serde_json::json!([good, bad]);
+        assert_eq!(
+            verify_staging_v2(&bundle, &staging_trust()),
+            Err(VerificationError::TimestampInvalid)
+        );
+    }
+
+    #[test]
+    fn a_rekor_v2_integrated_time_is_ignored() {
+        // 1970: outside every certificate's validity. A Rekor v2 entry has no
+        // signed integrated time, so the value must not be used.
+        let mut bundle = staging_v2_bundle();
+        bundle["verificationMaterial"]["tlogEntries"][0]["integratedTime"] = serde_json::json!("1");
+        assert_eq!(verify_staging_v2(&bundle, &staging_trust()), Ok(()));
+    }
+
+    #[test]
+    fn a_changed_rekor_v2_body_is_refused() {
+        let mut bundle = staging_v2_bundle();
+        let entry = &mut bundle["verificationMaterial"]["tlogEntries"][0];
+        let body = BASE64
+            .decode(entry["canonicalizedBody"].as_str().expect("body"))
+            .expect("base64");
+        let mut body = String::from_utf8(body).expect("utf-8");
+        // A space before the closing brace: same JSON, not the canonical bytes.
+        body.insert(body.len() - 1, ' ');
+        entry["canonicalizedBody"] = serde_json::json!(BASE64.encode(body));
+        assert_eq!(
+            verify_staging_v2(&bundle, &staging_trust()),
+            Err(VerificationError::SetInvalid)
+        );
+    }
+
+    #[test]
+    fn a_rekor_v2_entry_needs_an_inclusion_proof() {
+        let mut bundle = staging_v2_bundle();
+        bundle["verificationMaterial"]["tlogEntries"][0]
+            .as_object_mut()
+            .expect("entry")
+            .remove("inclusionProof");
+        assert!(matches!(
+            verify_staging_v2(&bundle, &staging_trust()),
+            Err(VerificationError::BundleMalformed(_))
+        ));
+    }
+
+    #[test]
+    fn a_rekor_v2_entry_from_an_unknown_log_is_refused() {
+        // The production log2025-1 key: another log id.
+        let trust = TrustRoot {
+            rekor_v2_keys: crate::trust::embedded().expect("embedded").rekor_v2_keys,
+            ..staging_trust()
+        };
+        assert_eq!(
+            verify_staging_v2(&staging_v2_bundle(), &trust),
+            Err(VerificationError::SetInvalid)
+        );
+    }
+
+    #[test]
+    fn a_rekor_v2_log_key_must_cover_the_signing_time() {
+        let mut trust = staging_trust();
+        for key in &mut trust.rekor_v2_keys {
+            key.window = (0, 1_700_000_000);
+        }
+        assert_eq!(
+            verify_staging_v2(&staging_v2_bundle(), &trust),
+            Err(VerificationError::SetInvalid)
+        );
+    }
+
+    #[test]
+    fn a_rekor_v2_checkpoint_of_another_origin_is_refused() {
+        let mut bundle = staging_v2_bundle();
+        let envelope = &mut bundle["verificationMaterial"]["tlogEntries"][0]["inclusionProof"]["checkpoint"]
+            ["envelope"];
+        let text = envelope.as_str().expect("envelope").replacen(
+            "log2025-alpha3.rekor.sigstage.dev\n",
+            "log2025-alpha2.rekor.sigstage.dev\n",
+            1,
+        );
+        *envelope = serde_json::json!(text);
+        assert_eq!(
+            verify_staging_v2(&bundle, &staging_trust()),
+            Err(VerificationError::SetInvalid)
+        );
+    }
+
+    #[test]
+    fn a_rekor_v2_inclusion_path_must_reach_the_checkpoint_root() {
+        let mut bundle = staging_v2_bundle();
+        let hash =
+            &mut bundle["verificationMaterial"]["tlogEntries"][0]["inclusionProof"]["hashes"][0];
+        let mut raw = BASE64.decode(hash.as_str().expect("hash")).expect("base64");
+        raw[0] ^= 0x01;
+        *hash = serde_json::json!(BASE64.encode(raw));
+        assert_eq!(
+            verify_staging_v2(&bundle, &staging_trust()),
+            Err(VerificationError::SetInvalid)
+        );
+    }
+
+    #[test]
+    fn a_rekor_v2_bundle_still_needs_the_file_digest_and_dsse_signature() {
+        let decoded = bundle::parse(staging_v2_bundle().to_string().as_bytes()).expect("parse");
+        let mut other = staging_subject();
+        other[0] ^= 0x01;
+        assert_eq!(
+            verify_for_identity(&decoded, &other, STAGING_V2_IDENTITY, &staging_trust()),
+            Err(VerificationError::DigestMismatch)
+        );
+        let mut decoded = decoded;
+        decoded.dsse_payload_type = bundle::LEGACY_DSSE_PAYLOAD_TYPE.to_owned();
+        assert_eq!(
+            verify_for_identity(
+                &decoded,
+                &staging_subject(),
+                STAGING_V2_IDENTITY,
+                &staging_trust()
+            ),
+            Err(VerificationError::SignatureInvalid)
+        );
     }
 
     #[test]
