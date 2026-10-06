@@ -1245,6 +1245,8 @@ mod tests {
             rekor_key: *rekor.verifying_key(),
             root_windows: Vec::new(),
             ct_logs: Vec::new(),
+            rekor_v2_keys: Vec::new(),
+            tsas: Vec::new(),
         };
         let payload = br#"{"_type":"https://in-toto.io/Statement/v1"}"#.to_vec();
         let dsse_signature = vec![0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01];
@@ -1474,6 +1476,8 @@ mod tests {
                 .expect("P-256 key"),
             root_windows: Vec::new(),
             ct_logs: Vec::new(),
+            rekor_v2_keys: Vec::new(),
+            tsas: Vec::new(),
         };
         let decoded = Decoded {
             integrated_time: 1_712_085_549,

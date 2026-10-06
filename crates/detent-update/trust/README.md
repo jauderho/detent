@@ -1,6 +1,7 @@
 # Trust root (ADR-014, PLAN §2.9 step 4)
 
-`fulcio-root.pem`, `rekor-pub.pem` and `ctfe-pub.pem` are embedded into the binary at compile
+`fulcio-root.pem`, `rekor-pub.pem`, `ctfe-pub.pem`, `rekor-v2-pub.pem` and
+`tsa-chain.pem` are embedded into the binary at compile
 time (`include_str!` from `src/trust.rs`) and are the *only* trust anchors the
 self-update verifier accepts: never the system store, never anything fetched
 at runtime (refuse-closed, ADR-014).
@@ -17,6 +18,8 @@ Material that does not parse fails every verification with
 | `fulcio-root.pem` | The active Fulcio CA chain: intermediate, then root | PEM (`CERTIFICATE`), one after another; every certificate is a trust anchor, used only while its own validity window covers `integratedTime`. The intermediate must be here: a v0.3 bundle carries only the leaf. Multiple CAs with overlapping windows are all honored, so a device updating across a rotation never hits a gap |
 | `rekor-pub.pem` | The Rekor v1 log public key (`rekor.sigstore.dev`) | PEM (`PUBLIC KEY`, PKIX SPKI), ECDSA P-256 |
 | `ctfe-pub.pem` | The CT log public key (`ctfe.sigstore.dev/2022`) that signs the SCTs in Fulcio leaves | PEM (`PUBLIC KEY`, PKIX SPKI), ECDSA P-256; the log id is the SHA-256 of the SPKI |
+| `rekor-v2-pub.pem` | The Rekor v2 log public key (`log2025-1.rekor.sigstore.dev`) that signs its checkpoints | PEM (`PUBLIC KEY`, PKIX SPKI), Ed25519; the log id is SHA-256 of `origin ‖ "\n" ‖ 0x01 ‖ key`. The origin (`REKOR_V2_ORIGIN`, the `baseUrl` host) and `validFor.start` (`REKOR_V2_VALID_FROM`) are constants in `src/trust.rs` |
+| `tsa-chain.pem` | The RFC 3161 timestamp authority (`timestamp.sigstore.dev`): the TSA leaf, then its root | PEM (`CERTIFICATE`), leaf first; `validFor.start` is `TSA_VALID_FROM` in `src/trust.rs` |
 
 Text outside the PEM blocks is ignored.
 
@@ -29,11 +32,16 @@ Text outside the PEM blocks is ignored.
    `certificateAuthorities` entry for `https://fulcio.sigstore.dev` whose
    `validFor` is still open, and the `publicKey` of the
    `https://rekor.sigstore.dev` tlog, and the `publicKey` of each `ctlogs`
-   entry whose `validFor` is still open. Each `rawBytes` is base64 DER.
+   entry whose `validFor` is still open, the `publicKey`, `baseUrl` and
+   `validFor` of the Rekor v2 tlog (`PKIX_ED25519`), and the `certChain` and
+   `validFor` of the `timestampAuthorities` entry. Each `rawBytes` is base64
+   DER.
 3. Write the certificates as PEM, chain order, into `fulcio-root.pem`; write
    the Rekor key as PEM into `rekor-pub.pem`; write the CT log key as PEM
-   into `ctfe-pub.pem`. Update the pinned digests and log ids in the
-   `src/trust.rs` tests.
+   into `ctfe-pub.pem`; write the Rekor v2 key into `rekor-v2-pub.pem` and
+   the TSA chain, leaf first, into `tsa-chain.pem`. Update
+   `REKOR_V2_ORIGIN`, `REKOR_V2_VALID_FROM`, `TSA_VALID_FROM` and the pinned
+   digests and log ids in the `src/trust.rs` tests.
 4. Set `TRUST_MANIFEST` in `src/trust.rs` to the source commit and the
    SHA-256 of `trusted_root.json`, so the provenance of the embedded roots is
    greppable.
