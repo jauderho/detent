@@ -2318,7 +2318,8 @@ mod tests {
         let dir = update_fixtures();
         let root = std::fs::read_to_string(dir.join("fulcio-root.pem"))?;
         let rekor = std::fs::read_to_string(dir.join("rekor-pub.pem"))?;
-        Ok(detent_update::trust::from_pems(&root, &rekor)?)
+        let ct = std::fs::read_to_string(dir.join("ctfe-pub.pem"))?;
+        Ok(detent_update::trust::from_pems_with_ct(&root, &rekor, &ct)?)
     }
 
     /// Every call a probe seam received, for the order assertions.

@@ -67,7 +67,8 @@ impl Transport for FixtureFeed {
 fn prepare_stages_an_executable_binary() -> Result<(), Box<dyn std::error::Error>> {
     let root = std::fs::read_to_string(fixtures().join("fulcio-root.pem"))?;
     let rekor = std::fs::read_to_string(fixtures().join("rekor-pub.pem"))?;
-    let trust = detent_update::trust::from_pems(&root, &rekor)?;
+    let ct = std::fs::read_to_string(fixtures().join("ctfe-pub.pem"))?;
+    let trust = detent_update::trust::from_pems_with_ct(&root, &rekor, &ct)?;
     let feed = FixtureFeed {
         binary: std::fs::read(fixtures().join("binary.bin"))?,
     };

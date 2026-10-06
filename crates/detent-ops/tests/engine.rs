@@ -629,7 +629,8 @@ fn update_fixtures() -> PathBuf {
 fn update_trust() -> Result<detent_update::trust::TrustRoot, Box<dyn std::error::Error>> {
     let root = std::fs::read_to_string(update_fixtures().join("fulcio-root.pem"))?;
     let rekor = std::fs::read_to_string(update_fixtures().join("rekor-pub.pem"))?;
-    Ok(detent_update::trust::from_pems(&root, &rekor)?)
+    let ct = std::fs::read_to_string(update_fixtures().join("ctfe-pub.pem"))?;
+    Ok(detent_update::trust::from_pems_with_ct(&root, &rekor, &ct)?)
 }
 
 fn plant_update(state_root: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {

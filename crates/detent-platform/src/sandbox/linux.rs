@@ -1456,7 +1456,8 @@ mod tests {
     fn fixture_trust() -> Result<detent_update::trust::TrustRoot, Box<dyn std::error::Error>> {
         let root = std::fs::read_to_string(fixture_dir().join("fulcio-root.pem"))?;
         let rekor = std::fs::read_to_string(fixture_dir().join("rekor-pub.pem"))?;
-        Ok(detent_update::trust::from_pems(&root, &rekor)?)
+        let ct = std::fs::read_to_string(fixture_dir().join("ctfe-pub.pem"))?;
+        Ok(detent_update::trust::from_pems_with_ct(&root, &rekor, &ct)?)
     }
 
     /// Run a real confined `Role::Monitor` (`Monitor::serve`, the real

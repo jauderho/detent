@@ -110,14 +110,16 @@ No partial state, no retries with weaker checks.
    (as Rekor `VerifySignedEntryTimestamp` and sigstore-go `VerifySET`). The
    SET is the only signature over `integratedTime`, the instant step 2 uses.
 
-   **Embedded SCTs** (leaves with the current issuer extension
-   1.3.6.1.4.1.57264.1.8): at least one SCT in the leaf must name the log id
+   **Embedded SCTs** (every leaf, with the current issuer extension
+   1.3.6.1.4.1.57264.1.8 or only the legacy 1.3.6.1.4.1.57264.1.1): at least
+   one SCT in the leaf must name the log id
    of an embedded CT log key and carry a valid ECDSA P-256 SHA-256 signature
    over the RFC 6962 §3.2 `precert_entry` data: the SHA-256 of the issuing
    CA's SPKI (the embedded or bundled certificate whose key verifies the
    leaf) and the leaf `TBSCertificate` with the SCT list extension removed.
-   Otherwise `SctInvalid`. Leaves with only the legacy issuer extension
-   (1.3.6.1.4.1.57264.1.1) are not checked for SCTs. Unknown entry kinds fall
+   Otherwise `SctInvalid`. The self-minted fixtures carry SCTs by a test CT
+   key (`tests/fixtures/ctfe-pub.pem`, loaded with
+   `trust::from_pems_with_ct`). Unknown entry kinds fall
    through to the `hashedrekord` body check (H17 step 6).
 
 ### Embedded trust root and refresh procedure
@@ -158,6 +160,7 @@ every one must fail or pass for the stated reason, asserted by test:
 |---|---|
 | `valid.json` | passes all six steps |
 | `wrong-identity.json` | step 3 fails: SAN ≠ pinned workflow identity (different repo/workflow ref) |
+| `no-sct.json` | step 3 fails: the leaf has no SCT (`SctInvalid`) |
 | `wrong-digest.json` | step 5 fails: subject digest ≠ file SHA-256 |
 | `expired-leaf.json` | step 2 fails: leaf validity window excludes `integratedTime` |
 | `bad-checkpoint-sig.json` | step 6 fails: checkpoint signature does not verify against the embedded Rekor key |

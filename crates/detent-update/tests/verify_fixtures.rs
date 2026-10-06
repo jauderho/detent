@@ -43,7 +43,9 @@ fn trust() -> TrustRoot {
         .expect("fulcio-root.pem fixture");
     let rekor =
         std::fs::read_to_string(fixtures().join("rekor-pub.pem")).expect("rekor-pub.pem fixture");
-    detent_update::trust::from_pems(&root, &rekor).expect("fixture trust root")
+    let ct =
+        std::fs::read_to_string(fixtures().join("ctfe-pub.pem")).expect("ctfe-pub.pem fixture");
+    detent_update::trust::from_pems_with_ct(&root, &rekor, &ct).expect("fixture trust root")
 }
 
 /// Verifies `fixture` against `binary.bin`'s digest.
@@ -192,6 +194,13 @@ fn an_empty_chain_is_invalid_not_unavailable() {
         verify(&decoded, &digest, FIXTURE_TAG, &trust()),
         Err(VerificationError::CertChainInvalid)
     );
+}
+
+#[test]
+fn a_legacy_leaf_without_an_sct_is_refused() {
+    // no-sct.json is valid.json with a leaf that carries only the legacy
+    // OIDC-issuer extension and no SCT list. Every leaf needs a verified SCT.
+    assert_eq!(run("no-sct.json"), Err(VerificationError::SctInvalid));
 }
 
 #[test]

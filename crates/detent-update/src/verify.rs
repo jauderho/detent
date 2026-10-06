@@ -187,13 +187,12 @@ pub fn verify(
     if !modern_issuer && !legacy_issuer {
         return Err(VerificationError::IssuerMismatch);
     }
-    if modern_issuer {
-        let candidates: Vec<CertificateDer<'_>> =
-            usable_roots.iter().chain(&intermediates).cloned().collect();
-        let issuer_spki =
-            sct_issuer_spki(&parsed_leaf, &candidates).ok_or(VerificationError::SctInvalid)?;
-        verify_embedded_scts(&parsed_leaf, &issuer_spki, &trust.ct_logs)?;
-    }
+    // Every leaf, with either issuer extension, needs a verified SCT.
+    let candidates: Vec<CertificateDer<'_>> =
+        usable_roots.iter().chain(&intermediates).cloned().collect();
+    let issuer_spki =
+        sct_issuer_spki(&parsed_leaf, &candidates).ok_or(VerificationError::SctInvalid)?;
+    verify_embedded_scts(&parsed_leaf, &issuer_spki, &trust.ct_logs)?;
 
     // Step 4: DSSE signature, ECDSA P-256 over the PAE, with the leaf's key.
     let leaf_key =

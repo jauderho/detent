@@ -65,15 +65,31 @@ pub fn embedded() -> Result<TrustRoot, VerificationError> {
     from_pems(FULCIO_ROOTS_PEM, REKOR_KEY_PEM)
 }
 
-/// Parses trust material from PEM text (the embedded files are the only
-/// production source; tests load their own fixtures through this). The CT
-/// log keys are always the embedded [`CT_LOG_KEY_PEM`].
+/// Parses trust material from PEM text, with the embedded
+/// [`CT_LOG_KEY_PEM`] as the CT log keys (see [`from_pems_with_ct`]).
 ///
 /// # Errors
 ///
 /// [`VerificationError::TrustRootUnavailable`] when the PEM material does
 /// not parse.
 pub fn from_pems(fulcio_pem: &str, rekor_pem: &str) -> Result<TrustRoot, VerificationError> {
+    from_pems_with_ct(fulcio_pem, rekor_pem, CT_LOG_KEY_PEM)
+}
+
+/// Parses trust material from PEM text: Fulcio certificates, the Rekor key
+/// and the CT log keys (one or more `PUBLIC KEY` blocks). The embedded files
+/// are the only production source; tests load their own fixtures through
+/// this.
+///
+/// # Errors
+///
+/// [`VerificationError::TrustRootUnavailable`] when the PEM material does
+/// not parse or holds no CT log key.
+pub fn from_pems_with_ct(
+    fulcio_pem: &str,
+    rekor_pem: &str,
+    ct_pem: &str,
+) -> Result<TrustRoot, VerificationError> {
     let fulcio_roots = pems(fulcio_pem, "CERTIFICATE")?
         .into_iter()
         .map(rustls_pki_types::CertificateDer::from)
@@ -98,7 +114,7 @@ pub fn from_pems(fulcio_pem: &str, rekor_pem: &str) -> Result<TrustRoot, Verific
         .ok_or(VerificationError::TrustRootUnavailable)?;
     let rekor_key = spki_to_p256(&rekor_spki)?;
 
-    let ct_logs = pems(CT_LOG_KEY_PEM, "PUBLIC KEY")?
+    let ct_logs = pems(ct_pem, "PUBLIC KEY")?
         .iter()
         .map(|spki| {
             Ok(CtLogKey {

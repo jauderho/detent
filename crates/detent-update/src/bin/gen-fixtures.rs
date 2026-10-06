@@ -2,7 +2,8 @@
 //! (PLAN Phase 9 task 3; run with `--features fixture-gen`).
 //!
 //! A fixed test CA plays the Fulcio root, a fixed P-256 key plays the Rekor
-//! log; every signature is real ECDSA over the real PAE / checkpoint bytes,
+//! log, another plays the CT log that signs each leaf's embedded SCT; every
+//! signature is real ECDSA over the real PAE / checkpoint bytes,
 //! so the six verification steps fail for their cryptographic reasons. When
 //! the first real `v0.0.1-rc` bundle is captured, these are replaced (ADR-014
 //! test-vector table).
@@ -93,8 +94,66 @@ struct Material {
     rekor_key: SigningKey,
 }
 
-/// Mints the test CA and a leaf carrying `identity` in its URI SAN.
-fn mint(identity: &str, not_before: i64, not_after: i64) -> Material {
+/// The fixed test CT log key; its public key is `tests/fixtures/ctfe-pub.pem`.
+fn ct_key() -> SigningKey {
+    key("8182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0")
+}
+
+/// DER TLV with a minimal-length encoding.
+fn der(tag: u8, content: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    let len = content.len();
+    if len < 0x80 {
+        out.push(u8::try_from(len).expect("short length"));
+    } else {
+        let bytes: Vec<u8> = len
+            .to_be_bytes()
+            .into_iter()
+            .skip_while(|&byte| byte == 0)
+            .collect();
+        out.push(0x80 | u8::try_from(bytes.len()).expect("length bytes"));
+        out.extend_from_slice(&bytes);
+    }
+    out.extend_from_slice(content);
+    out
+}
+
+/// The SCT list extension content (an OCTET STRING around the TLS list) with
+/// one RFC 6962 precert SCT by [`ct_key`] over `tbs`, the leaf TBS without
+/// the SCT extension, issued by the CA whose SPKI DER is `issuer_spki`. The
+/// form is the one `verify` checks.
+fn sct_extension(issuer_spki: &[u8], tbs: &[u8]) -> Vec<u8> {
+    let timestamp = (u64::try_from(INTEGRATED_TIME).expect("positive time") * 1000).to_be_bytes();
+    let mut signed = vec![0, 0];
+    signed.extend_from_slice(&timestamp);
+    signed.extend_from_slice(&[0, 1]);
+    signed.extend_from_slice(&Sha256::digest(issuer_spki));
+    signed.extend_from_slice(&u32::try_from(tbs.len()).expect("tbs length").to_be_bytes()[1..]);
+    signed.extend_from_slice(tbs);
+    signed.extend_from_slice(&[0, 0]);
+    let signature: p256::ecdsa::Signature = ct_key().sign(&signed);
+    let signature = encode_sig(&signature);
+
+    let mut sct = vec![0];
+    sct.extend_from_slice(&Sha256::digest(spki_der(&ct_key())));
+    sct.extend_from_slice(&timestamp);
+    sct.extend_from_slice(&[0, 0, 4, 3]);
+    sct.extend_from_slice(
+        &u16::try_from(signature.len())
+            .expect("sig length")
+            .to_be_bytes(),
+    );
+    sct.extend_from_slice(&signature);
+    let sct_len = u16::try_from(sct.len()).expect("sct length");
+    let mut list = (sct_len + 2).to_be_bytes().to_vec();
+    list.extend_from_slice(&sct_len.to_be_bytes());
+    list.extend_from_slice(&sct);
+    der(0x04, &list)
+}
+
+/// Mints the test CA and a leaf carrying `identity` in its URI SAN and,
+/// when `with_sct`, an SCT by the test CT log.
+fn mint(identity: &str, not_before: i64, not_after: i64, with_sct: bool) -> Material {
     let root_key = key("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20");
     let root_keypair = leaf_keypair(&root_key);
     let mut root_params = CertificateParams::default();
@@ -128,7 +187,21 @@ fn mint(identity: &str, not_before: i64, not_after: i64) -> Material {
         &[1, 3, 6, 1, 4, 1, 57264, 1, 1],
         b"https://token.actions.githubusercontent.com".to_vec(),
     )];
-    let leaf = leaf_params.signed_by(&leaf_keypair, &issuer).expect("leaf");
+    let mut leaf = leaf_params.signed_by(&leaf_keypair, &issuer).expect("leaf");
+    if with_sct {
+        // The precertificate is this leaf without the SCT extension; the
+        // serial is derived from the leaf key, so the second signing gives
+        // the same TBS plus the extension.
+        let (_, precert) = x509_parser::parse_x509_certificate(leaf.der()).expect("precert");
+        let content = sct_extension(&spki_der(&root_key), precert.tbs_certificate.as_ref());
+        leaf_params
+            .custom_extensions
+            .push(CustomExtension::from_oid_content(
+                &[1, 3, 6, 1, 4, 1, 11129, 2, 4, 2],
+                content,
+            ));
+        leaf = leaf_params.signed_by(&leaf_keypair, &issuer).expect("leaf");
+    }
 
     Material {
         root_der: root.der().to_vec(),
@@ -310,17 +383,25 @@ fn main() {
     let digest_hex = hex(&Sha256::digest(BINARY));
 
     // Valid leaf, valid at integratedTime.
-    let valid = mint(&pinned, 1_700_000_000, 1_900_000_000);
+    let valid = mint(&pinned, 1_700_000_000, 1_900_000_000, true);
     // Wrong-identity leaf: same validity, a different SAN.
     let wrong = mint(
         &format!("https://github.com/other/repo/.github/workflows/release.yml@refs/tags/{TAG}"),
         1_700_000_000,
         1_900_000_000,
+        true,
     );
     // Expired leaf: not valid at integratedTime.
-    let expired = mint(&pinned, 1_800_000_000, 1_900_000_000);
+    let expired = mint(&pinned, 1_800_000_000, 1_900_000_000, true);
+    // A leaf with no SCT: otherwise valid, refused for the missing SCT.
+    let no_sct = mint(&pinned, 1_700_000_000, 1_900_000_000, false);
 
     write(dir, "valid.json", bundle_for(&valid, &digest_hex, "valid"));
+    write(
+        dir,
+        "no-sct.json",
+        bundle_for(&no_sct, &digest_hex, "valid"),
+    );
     write(
         dir,
         "wrong-identity.json",
@@ -372,6 +453,7 @@ fn main() {
         &detent_update::verify::pinned_identity("v0.0.0"),
         1_700_000_000,
         1_900_000_000,
+        true,
     );
     write(
         dir,
@@ -389,6 +471,11 @@ fn main() {
         dir,
         "rekor-pub.pem",
         serde_json::to_value(spki_pem(&valid.rekor_key)).expect("text"),
+    );
+    write(
+        dir,
+        "ctfe-pub.pem",
+        serde_json::to_value(spki_pem(&ct_key())).expect("text"),
     );
     println!("fixtures written to {}", dir.display());
 }
