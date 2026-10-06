@@ -351,9 +351,10 @@ deferred by the owner.
     set; `gh attestation verify` pins the release workflow and tag.
 11. ~~**`ci.yml` `rust-macos`.**~~ Done: the job runs harden-runner in
     audit mode, as release.yml's macOS legs do; the stale comment is gone.
-12. **`update --check` text:** a newer release held by the age gate prints
+12. ~~**`update --check` text:** a newer release held by the age gate prints
     "no update available"; the JSON has the tag. Name the held tag and the
-    reason.
+    reason.~~ Done: `CheckReport.held` (`too_young` with `min_age_days`, or
+    `rejected` for a tag in bad.json); the text names the tag and the reason.
 13. ~~**`release.yml` publish egress list:** `tuf-rekor-cdn.sigstore.dev` does
     not resolve (harden-runner log); remove it.~~ Done (`0228efa`), with the
     Rekor v2 switch (`6121291`, `0228efa`, `892d145`): the updater asset

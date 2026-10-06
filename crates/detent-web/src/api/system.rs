@@ -876,6 +876,7 @@ mod tests {
             tag: Some("v0.0.2".to_owned()),
             published: Some("2026-01-01T00:00:00Z".to_owned()),
             security: true,
+            held: None,
         });
         assert_eq!(
             serde_json::to_value(&report)?,
@@ -900,7 +901,9 @@ mod tests {
             !report.update_available,
             "bad tag is filtered before select"
         );
-        assert_eq!(report.tag, None);
+        // The newer rolled-back tag is named; the page ignores it unless an
+        // update is available.
+        assert_eq!(report.tag.as_deref(), Some("v99.0.0"));
         Ok(())
     }
 

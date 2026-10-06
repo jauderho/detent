@@ -31,6 +31,23 @@ pub struct CheckReport {
     pub published: Option<String>,
     /// Whether it bypassed the age gate via `detent-security: true`.
     pub security: bool,
+    /// Why a newer release is not offered, when one exists but is held.
+    /// JSON: absent, `{"too_young":{"min_age_days":N}}` or `"rejected"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<Held>,
+}
+
+/// Why a newer release is not offered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Held {
+    /// Younger than the configured minimum age and not a security release.
+    TooYoung {
+        /// The configured minimum age in days.
+        min_age_days: u64,
+    },
+    /// This host rolled the tag back (it is in the bad list).
+    Rejected,
 }
 
 /// A failure of the whole update flow.
@@ -212,15 +229,28 @@ pub fn check(
                         .unwrap_or_else(|_| published.to_string())
                 }),
                 security,
+                held: None,
             }
         }
-        Err(policy::PolicyError::NoUpdate) => CheckReport {
-            update_available: false,
-            current: current.to_string(),
-            tag: None,
-            published: None,
-            security: false,
-        },
+        Err(policy::PolicyError::NoUpdate) => {
+            // The bad list is filtered out above, so a newer tag this host
+            // rolled back shows up here as "nothing": name it.
+            let rejected = bad
+                .iter()
+                .filter(|tag| releases.iter().any(|r| &r.candidate.tag == *tag))
+                .filter_map(|tag| policy::version_of(tag).map(|version| (version, tag)))
+                .filter(|(version, _)| version > current)
+                .max_by(|(left, _), (right, _)| left.cmp(right))
+                .map(|(_, tag)| tag.clone());
+            CheckReport {
+                update_available: false,
+                current: current.to_string(),
+                held: rejected.as_ref().map(|_| Held::Rejected),
+                tag: rejected,
+                published: None,
+                security: false,
+            }
+        }
         Err(policy::PolicyError::DowngradeRefused {
             candidate,
             current: _,
@@ -230,16 +260,24 @@ pub fn check(
             tag: Some(candidate),
             published: None,
             security: false,
+            held: None,
         },
-        Err(policy::PolicyError::TooYoung { tag, .. } | policy::PolicyError::BadTag(tag)) => {
-            CheckReport {
-                update_available: false,
-                current: current.to_string(),
-                tag: Some(tag),
-                published: None,
-                security: false,
-            }
-        }
+        Err(policy::PolicyError::TooYoung { tag, min_age_days }) => CheckReport {
+            update_available: false,
+            current: current.to_string(),
+            tag: Some(tag),
+            published: None,
+            security: false,
+            held: Some(Held::TooYoung { min_age_days }),
+        },
+        Err(policy::PolicyError::BadTag(tag)) => CheckReport {
+            update_available: false,
+            current: current.to_string(),
+            tag: Some(tag),
+            published: None,
+            security: false,
+            held: Some(Held::Rejected),
+        },
     })
 }
 
@@ -638,6 +676,73 @@ mod tests {
         .expect("too young");
         assert!(!report.update_available);
         assert_eq!(report.tag.as_deref(), Some("v0.0.2"));
+        assert_eq!(
+            report.held,
+            Some(Held::TooYoung {
+                min_age_days: 10_000
+            })
+        );
+        let report = check(&feed("v0.0.1", ""), &current, &policy, now(), &[]).expect("same");
+        assert_eq!(report.held, None, "NoUpdate is not held");
+        let report = check(&feed("v0.0.0", ""), &current, &policy, now(), &[]).expect("down");
+        assert_eq!(report.held, None, "a refused downgrade is not held");
+    }
+
+    #[test]
+    fn a_rolled_back_newer_tag_is_reported_as_rejected() {
+        let current = semver::Version::new(0, 0, 1);
+        let bad = vec!["v0.0.2".to_owned()];
+        let report = check(
+            &feed("v0.0.2", ""),
+            &current,
+            &Policy::default(),
+            now(),
+            &bad,
+        )
+        .expect("filtered");
+        assert!(!report.update_available);
+        assert_eq!(report.tag.as_deref(), Some("v0.0.2"));
+        assert_eq!(report.held, Some(Held::Rejected));
+        // A bad tag that is not newer is not a held update.
+        let report = check(
+            &feed("v0.0.1", ""),
+            &current,
+            &Policy::default(),
+            now(),
+            &["v0.0.1".to_owned()],
+        )
+        .expect("not newer");
+        assert_eq!(report.held, None);
+    }
+
+    #[test]
+    fn a_stamp_without_held_still_deserializes_and_held_serializes_snake_case() {
+        let old = r#"{"update_available":false,"current":"0.0.1","tag":null,"published":null,"security":false}"#;
+        let report: CheckReport = serde_json::from_str(old).expect("old stamp");
+        assert_eq!(report.held, None);
+        assert!(
+            !serde_json::to_string(&report)
+                .expect("json")
+                .contains("held")
+        );
+        let young = CheckReport {
+            held: Some(Held::TooYoung { min_age_days: 7 }),
+            ..report.clone()
+        };
+        assert!(
+            serde_json::to_string(&young)
+                .expect("json")
+                .contains(r#""held":{"too_young":{"min_age_days":7}}"#)
+        );
+        let rejected = CheckReport {
+            held: Some(Held::Rejected),
+            ..report
+        };
+        assert!(
+            serde_json::to_string(&rejected)
+                .expect("json")
+                .contains(r#""held":"rejected""#)
+        );
     }
 
     #[test]
@@ -743,7 +848,8 @@ mod tests {
         let bad = vec!["v0.0.2".to_owned()];
         let report = check(&feed("v0.0.2", ""), &current, &policy, now(), &bad).expect("filtered");
         assert!(!report.update_available, "a bad tag is not offered");
-        assert_eq!(report.tag, None);
+        assert_eq!(report.tag.as_deref(), Some("v0.0.2"), "but it is named");
+        assert_eq!(report.held, Some(Held::Rejected));
     }
 
     /// Writes an executable `#!/bin/sh` script the probe can run.

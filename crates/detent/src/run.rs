@@ -997,11 +997,28 @@ fn render_check_report(
     } else if report.update_available {
         render_available(report, renderer, streams)?;
     } else {
-        renderer.line(
-            streams.out,
-            MessageId::new("cli-update-none"),
-            &[("current", &report.current)],
-        )?;
+        let tag = report.tag.as_deref().unwrap_or_default();
+        match report.held {
+            Some(detent_update::Held::TooYoung { min_age_days }) => renderer.line(
+                streams.out,
+                MessageId::new("cli-update-held-young"),
+                &[
+                    ("tag", tag),
+                    ("current", &report.current),
+                    ("days", &min_age_days.to_string()),
+                ],
+            )?,
+            Some(detent_update::Held::Rejected) => renderer.line(
+                streams.out,
+                MessageId::new("cli-update-held-rejected"),
+                &[("tag", tag), ("current", &report.current)],
+            )?,
+            None => renderer.line(
+                streams.out,
+                MessageId::new("cli-update-none"),
+                &[("current", &report.current)],
+            )?,
+        }
     }
     Ok(Exit::Ok)
 }
@@ -2719,6 +2736,55 @@ mod tests {
         assert!(!notes.is_empty());
         Ok(())
     }
+    #[cfg(feature = "update")]
+    #[test]
+    fn update_check_names_a_held_release_and_the_reason() -> R {
+        use detent_update::{CheckReport, Held};
+        let messages = crate::i18n::Messages::new(Some("en-US"));
+        let held = |held: Held| CheckReport {
+            update_available: false,
+            current: "0.0.1".to_owned(),
+            tag: Some("v0.0.2".to_owned()),
+            published: None,
+            security: false,
+            held: Some(held),
+        };
+        for (json, report, want) in [
+            (
+                false,
+                held(Held::TooYoung { min_age_days: 7 }),
+                "v0.0.2 is newer than 0.0.1 but younger than 7 day(s)",
+            ),
+            (
+                false,
+                held(Held::Rejected),
+                "v0.0.2 is newer than 0.0.1 but was rolled back on this host",
+            ),
+            (true, held(Held::Rejected), "\"held\": \"rejected\""),
+        ] {
+            let renderer = crate::output::Renderer {
+                messages: &messages,
+                json,
+                verbose: false,
+            };
+            let mut out = Vec::new();
+            let mut notes = Vec::new();
+            let exit = super::render_check_report(
+                &report,
+                &renderer,
+                &mut Streams {
+                    input: &mut std::io::empty(),
+                    out: &mut out,
+                    notes: &mut notes,
+                },
+            )?;
+            assert_eq!(exit, Exit::Ok);
+            let text = String::from_utf8(out)?;
+            assert!(text.contains(want), "{text}");
+            assert!(!text.contains("no update available"), "{text}");
+        }
+        Ok(())
+    }
     /// A fresh stamp short-circuits the fetch: a transport that panics
     /// proves `check_report` never touches the network, and `--force`
     /// bypasses the guard.
@@ -2755,6 +2821,7 @@ mod tests {
             tag: None,
             published: None,
             security: false,
+            held: None,
         };
         detent_update::update::write_cached(&stamp, &report, now, true)
             .map_err(std::io::Error::other)?;
@@ -2803,6 +2870,7 @@ mod tests {
             tag: Some("v0.0.2".to_owned()),
             published: None,
             security: false,
+            held: None,
         };
         // mark_bad deletes check.json, so mark a decoy first, then write the
         // stale report naming v0.0.2 and mark it: the second mark deletes the

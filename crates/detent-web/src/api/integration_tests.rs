@@ -1026,6 +1026,7 @@ async fn system_update_serves_a_fresh_stamp_without_reaching_the_feed() -> R {
         tag: Some("v9.9.9".to_owned()),
         published: Some("2026-01-01T00:00:00Z".to_owned()),
         security: true,
+        held: None,
     };
     let written = detent_update::update::write_cached(
         &state.update_stamp(),

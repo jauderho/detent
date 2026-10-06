@@ -56,5 +56,5 @@ pub use install::Installed;
 pub use policy::{Candidate, Policy, PolicyError};
 pub use trust::TrustRoot;
 #[cfg(feature = "client")]
-pub use update::{Candidate as StagedUpdate, CheckReport, FeatureSet, UpdateError};
+pub use update::{Candidate as StagedUpdate, CheckReport, FeatureSet, Held, UpdateError};
 pub use verify::VerificationError;
