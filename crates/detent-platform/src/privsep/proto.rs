@@ -332,6 +332,18 @@ pub enum Request {
     /// Appended after [`Request::RollbackCommit`] to preserve every existing
     /// discriminant; see [`PROTO_VERSION`]'s doc comment.
     PendingCommit,
+    /// Ask the init system to re-read its unit files after a write to a
+    /// module whose descriptor sets `reload_unit_files` (`mounts`). The
+    /// module is an id; the monitor refuses a module that does not declare
+    /// the reload, and the platform layer chooses the command
+    /// (`systemctl daemon-reload` on systemd, nothing elsewhere).
+    ///
+    /// Appended after [`Request::PendingCommit`] to preserve every existing
+    /// discriminant; see [`PROTO_VERSION`]'s doc comment.
+    ReloadUnitFiles {
+        /// Which module was written.
+        module: ModuleId,
+    },
 }
 
 impl Request {
@@ -350,7 +362,8 @@ impl Request {
             | Self::ConfirmCommit { .. }
             | Self::RollbackCommit { .. }
             | Self::Mount { .. }
-            | Self::ReplaceBinary { .. } => true,
+            | Self::ReplaceBinary { .. }
+            | Self::ReloadUnitFiles { .. } => true,
             Self::Service { action, .. } => !matches!(action, ServiceAction::Status),
             Self::Hello { .. }
             | Self::ReadTarget { .. }
@@ -582,6 +595,14 @@ pub enum Response {
     /// Appended after [`Response::Replaced`] to preserve every existing
     /// discriminant; see [`PROTO_VERSION`]'s doc comment.
     Pending(Option<CommitId>),
+    /// Answer to [`Request::ReloadUnitFiles`].
+    ///
+    /// Appended after [`Response::Pending`] to preserve every existing
+    /// discriminant; see [`PROTO_VERSION`]'s doc comment.
+    UnitFilesReloaded {
+        /// A short human-readable result.
+        detail: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -852,6 +873,9 @@ mod tests {
                 commit: CommitId(11),
             },
             Request::PendingCommit,
+            Request::ReloadUnitFiles {
+                module: ModuleId(2),
+            },
         ]
     }
 
@@ -967,6 +991,9 @@ mod tests {
             },
             Response::Pending(Some(CommitId(3))),
             Response::Pending(None),
+            Response::UnitFilesReloaded {
+                detail: "systemctl daemon-reload succeeded".to_owned(),
+            },
         ];
         responses.extend(every_error_response());
         responses
@@ -1139,6 +1166,25 @@ mod tests {
                 Some(rollback_for_other_commit.clone())
             );
         }
+    }
+
+    #[test]
+    fn reload_unit_files_takes_the_next_discriminants() {
+        // Appended after `PendingCommit` and `Pending`: no existing
+        // discriminant moves.
+        let request = Request::ReloadUnitFiles {
+            module: ModuleId(3),
+        };
+        let bytes = encode(&request).unwrap_or_default();
+        assert_eq!(bytes.first(), Some(&14));
+        assert_eq!(decode::<Request>(&bytes).ok(), Some(request));
+
+        let response = Response::UnitFilesReloaded {
+            detail: "ok".to_owned(),
+        };
+        let bytes = encode(&response).unwrap_or_default();
+        assert_eq!(bytes.first(), Some(&14));
+        assert_eq!(decode::<Response>(&bytes).ok(), Some(response));
     }
 
     #[test]

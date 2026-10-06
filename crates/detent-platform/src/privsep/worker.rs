@@ -243,6 +243,21 @@ impl Client {
         }
     }
 
+    /// Ask the init system to re-read its unit files after a write to
+    /// `module`. Returns the monitor's detail.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::read_target`]; [`ProtoError::ActionNotAllowed`] when the
+    /// module does not declare `reload_unit_files`, and the hook's error
+    /// when the reload failed.
+    pub fn reload_unit_files(&mut self, module: ModuleId) -> Result<String, ClientError> {
+        match self.checked_call(&Request::ReloadUnitFiles { module })? {
+            Response::UnitFilesReloaded { detail } => Ok(detail),
+            other => Err(unexpected("UnitFilesReloaded", &other)),
+        }
+    }
+
     /// List a module's retained backups, newest first.
     ///
     /// # Errors
@@ -434,6 +449,7 @@ const fn variant_name(response: &Response) -> &'static str {
         Response::RolledBack { .. } => "RolledBack",
         Response::Replaced { .. } => "Replaced",
         Response::Pending(_) => "Pending",
+        Response::UnitFilesReloaded { .. } => "UnitFilesReloaded",
     }
 }
 
@@ -794,6 +810,33 @@ mod tests {
             Err(ClientError::Unexpected {
                 want: "Pending",
                 got: "Replaced"
+            })
+        ));
+        drop(client);
+        let _ = handle.join();
+        Ok(())
+    }
+
+    #[test]
+    fn reload_unit_files_returns_the_monitor_detail() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut client, handle) = client_with_scripted_reply(Response::UnitFilesReloaded {
+            detail: "reloaded".to_owned(),
+        })?;
+        assert_eq!(client.reload_unit_files(ModuleId(0))?, "reloaded");
+        drop(client);
+        let _ = handle.join();
+        Ok(())
+    }
+
+    #[test]
+    fn reload_unit_files_reports_unexpected_for_a_wrong_response()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut client, handle) = client_with_scripted_reply(Response::Pending(None))?;
+        assert!(matches!(
+            client.reload_unit_files(ModuleId(0)),
+            Err(ClientError::Unexpected {
+                want: "UnitFilesReloaded",
+                got: "Pending"
             })
         ));
         drop(client);

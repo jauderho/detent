@@ -644,6 +644,7 @@ impl<'a> Monitor<'a> {
             )),
             Request::ReplaceBinary { tag, len, sha256 } => self.replace_binary(&tag, len, sha256),
             Request::Shutdown => Response::ShuttingDown,
+            Request::ReloadUnitFiles { module } => self.reload_unit_files(module),
         })
     }
     /// Materialize and authenticate a staged release, then atomically swap it.
@@ -999,6 +1000,23 @@ impl<'a> Monitor<'a> {
                 outcome.detail = truncate(&outcome.detail);
                 Response::Serviced(outcome)
             }
+            Err(err) => Response::Error(err.into()),
+        }
+    }
+
+    /// Re-read the init system's unit files for `module`, which must
+    /// declare `reload_unit_files`.
+    fn reload_unit_files(&self, module: ModuleId) -> Response {
+        let Some(descriptor) = self.allow.module(module) else {
+            return unknown(IdKind::Module, u32::from(module.get()));
+        };
+        if !descriptor.reload_unit_files {
+            return Response::Error(ProtoError::ActionNotAllowed);
+        }
+        match self.hooks.services.reload_unit_files() {
+            Ok(detail) => Response::UnitFilesReloaded {
+                detail: truncate(&detail),
+            },
             Err(err) => Response::Error(err.into()),
         }
     }
@@ -2408,6 +2426,10 @@ mod tests {
             _action: CoreServiceAction,
         ) -> Result<ServiceOutcome, HookError> {
             Err(HookError::Failed("boom".to_owned()))
+        }
+
+        fn reload_unit_files(&self) -> Result<String, HookError> {
+            Err(HookError::Failed("reload boom".to_owned()))
         }
     }
     // -- getters and formatting ----------------------------------------------
@@ -4627,6 +4649,8 @@ mod tests {
     struct RecordingServices {
         target: PathBuf,
         calls: std::cell::RefCell<Vec<(CoreServiceAction, Vec<u8>)>>,
+        /// The target's contents at each unit-file reload.
+        reloads: std::cell::RefCell<Vec<Vec<u8>>>,
     }
 
     impl RecordingServices {
@@ -4634,6 +4658,7 @@ mod tests {
             Self {
                 target: target.to_path_buf(),
                 calls: std::cell::RefCell::new(Vec::new()),
+                reloads: std::cell::RefCell::new(Vec::new()),
             }
         }
 
@@ -4661,6 +4686,106 @@ mod tests {
                 detail: "running".to_owned(),
             })
         }
+
+        fn reload_unit_files(&self) -> Result<String, HookError> {
+            let contents = std::fs::read(&self.target).unwrap_or_default();
+            self.reloads.borrow_mut().push(contents);
+            Ok("reloaded".to_owned())
+        }
+    }
+
+    // -- reload_unit_files ----------------------------------------------------
+
+    impl Fixture {
+        /// The fixture's module with `reload_unit_files` set, as `mounts`.
+        fn allow_reloading(&self) -> Result<Allowlist, AllowlistError> {
+            let module = leak(ModuleDescriptor {
+                reload_unit_files: true,
+                ..*descriptor(&self.target)
+            });
+            Allowlist::from_modules(&[module], &Config::with_state_root(&self.state_root))
+        }
+    }
+
+    #[test]
+    fn a_reload_reaches_the_hook_for_a_module_that_declares_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let services = RecordingServices::new(&fx.target);
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &services,
+        };
+        let mut monitor = greeted(fx.allow_reloading()?, hooks);
+        let response = monitor.dispatch(Request::ReloadUnitFiles {
+            module: ModuleId(0),
+        })?;
+        assert!(
+            matches!(&response, Response::UnitFilesReloaded { detail } if detail == "reloaded"),
+            "{response:?}"
+        );
+        let unknown = monitor.dispatch(Request::ReloadUnitFiles {
+            module: ModuleId(9),
+        })?;
+        assert!(
+            matches!(
+                unknown,
+                Response::Error(ProtoError::UnknownId {
+                    kind: IdKind::Module,
+                    id: 9
+                })
+            ),
+            "{unknown:?}"
+        );
+        assert_eq!(services.reloads.borrow().len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn a_reload_for_a_module_that_does_not_declare_it_is_refused()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let services = RecordingServices::new(&fx.target);
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &services,
+        };
+        let mut monitor = greeted(fx.allow()?, hooks);
+        let response = monitor.dispatch(Request::ReloadUnitFiles {
+            module: ModuleId(0),
+        })?;
+        assert!(
+            matches!(response, Response::Error(ProtoError::ActionNotAllowed)),
+            "{response:?}"
+        );
+        assert!(services.reloads.borrow().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_reload_is_an_error_response() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let cases: [(&dyn ServiceControl, ProtoError); 2] = [
+            (&FailingServices, ProtoError::Io("reload boom".to_owned())),
+            (
+                &super::NoServices,
+                ProtoError::Unavailable(
+                    "service control is not available in this build".to_owned(),
+                ),
+            ),
+        ];
+        for (services, expected) in cases {
+            let hooks = Hooks {
+                checks: &super::NoChecks,
+                services,
+            };
+            let mut monitor = greeted(fx.allow_reloading()?, hooks);
+            let response = monitor.dispatch(Request::ReloadUnitFiles {
+                module: ModuleId(0),
+            })?;
+            assert_eq!(response, Response::Error(expected));
+        }
+        Ok(())
     }
 
     #[test]
@@ -4985,6 +5110,9 @@ mod tests {
                 tag: "v9.9.9".to_owned(),
                 len: 5,
                 sha256: Sha256Digest::of(b"image"),
+            },
+            Request::ReloadUnitFiles {
+                module: ModuleId(0),
             },
         ]
     }
