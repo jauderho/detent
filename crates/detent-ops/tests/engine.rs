@@ -310,6 +310,32 @@ impl ServiceControl for OkServices {
 
 static OK_SERVICES: OkServices = OkServices;
 
+/// Answers service actions as [`OkServices`] does, and counts unit-file
+/// reloads; with `fail_reload` every reload fails.
+struct ReloadingServices {
+    reloads: AtomicUsize,
+    fail_reload: bool,
+}
+
+impl ServiceControl for ReloadingServices {
+    fn service(
+        &self,
+        binding: &ServiceBinding,
+        action: CoreServiceAction,
+    ) -> Result<ServiceOutcome, HookError> {
+        OK_SERVICES.service(binding, action)
+    }
+
+    fn reload_unit_files(&self) -> Result<String, HookError> {
+        self.reloads.fetch_add(1, Ordering::SeqCst);
+        if self.fail_reload {
+            Err(HookError::Failed("daemon-reload exited 1".to_owned()))
+        } else {
+            Ok("daemon-reload succeeded".to_owned())
+        }
+    }
+}
+
 /// A [`ServiceManager`] that reports a fixed status and refuses mutation, so
 /// `ServiceStatus` is testable without an init system.
 struct FakeServices {
@@ -428,6 +454,10 @@ struct Setup {
     fail_arm: bool,
     /// Answer every `Restore` with a planted error.
     fail_restore: bool,
+    /// With `hooks`, fail every unit-file reload.
+    fail_reload: bool,
+    /// Set `reload_unit_files` on the module, as `mounts` does.
+    reload: bool,
 }
 
 /// Which [`ServiceManager`] the engine is built with.
@@ -447,6 +477,8 @@ struct Harness {
     target: PathBuf,
     /// The monitor's check runner, when `Setup::hooks` wired it up.
     checks: &'static FakeChecks,
+    /// The monitor's service hook, when `Setup::hooks` wired it up.
+    services: &'static ReloadingServices,
     /// The policy every operation runs under.
     authz: Box<dyn Authz>,
     _dir: TempDir,
@@ -479,6 +511,11 @@ impl Harness {
         self.checks.runs.load(Ordering::SeqCst)
     }
 
+    /// How often the monitor asked for a unit-file reload.
+    fn reloads(&self) -> usize {
+        self.services.reloads.load(Ordering::SeqCst)
+    }
+
     /// Shut the monitor down and confirm it exited cleanly.
     fn finish(mut self) -> TestResult {
         self.engine.shutdown()?;
@@ -496,7 +533,13 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
     let target = root.join("target.conf");
     std::fs::write(&target, initial)?;
 
-    let allow_descriptor = build_descriptor("fake", &target, setup.shape);
+    let mut allow_descriptor = build_descriptor("fake", &target, setup.shape);
+    if setup.reload {
+        allow_descriptor = leak(ModuleDescriptor {
+            reload_unit_files: true,
+            ..*allow_descriptor
+        });
+    }
     let mut config = Config::with_state_root(root.join("state"));
     let staging_dir = root.join("monitor-staging");
     if setup.disable_backups {
@@ -517,12 +560,16 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
         mode: setup.checks,
         runs: AtomicUsize::new(0),
     });
+    let monitor_services: &'static ReloadingServices = leak(ReloadingServices {
+        reloads: AtomicUsize::new(0),
+        fail_reload: setup.fail_reload,
+    });
     let handle = thread::spawn(move || {
         let mut channel = monitor_end;
         let hooks = if setup.hooks {
             Hooks {
                 checks,
-                services: &OK_SERVICES,
+                services: monitor_services,
             }
         } else {
             Hooks::default()
@@ -585,6 +632,7 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
         handle: Some(handle),
         target,
         checks,
+        services: monitor_services,
         authz,
         _dir: dir,
     })
@@ -1997,6 +2045,135 @@ fn a_failed_service_action_on_a_commit_confirm_module_restores_the_file() -> Tes
         )))
     ));
     assert_eq!(fx.contents()?, "v1\n");
+    fx.finish()
+}
+
+#[test]
+fn a_reloading_module_apply_reloads_unit_files_once() -> TestResult {
+    let mut fx = harness(
+        b"v1\n",
+        Setup {
+            hooks: true,
+            reload: true,
+            ..Setup::default()
+        },
+    )?;
+    let apply = || Operation::Apply {
+        id: MODULE.to_owned(),
+        model: json!({"text": "v2\n"}),
+        expected_hash: None,
+        service_action: None,
+        confirm: None,
+    };
+    fx.run(apply())?;
+    assert_eq!(fx.contents()?, "v2\n");
+    assert_eq!(fx.reloads(), 1);
+    // An apply that changes nothing writes nothing and reloads nothing.
+    fx.run(apply())?;
+    assert_eq!(fx.reloads(), 1);
+    fx.finish()
+}
+
+#[test]
+fn a_module_without_the_flag_never_reloads_unit_files() -> TestResult {
+    let mut fx = harness(
+        b"v1\n",
+        Setup {
+            shape: Shape {
+                commit_confirm: true,
+                ..Shape::default()
+            },
+            hooks: true,
+            ..Setup::default()
+        },
+    )?;
+    let outcome = fx.run(Operation::Apply {
+        id: MODULE.to_owned(),
+        model: json!({"text": "v2\n"}),
+        expected_hash: None,
+        service_action: None,
+        confirm: None,
+    })?;
+    let OpOutcome::Applied(report) = outcome else {
+        return Err("Apply must answer with an apply report".into());
+    };
+    let commit = report.commit.ok_or("a commit-confirm window was armed")?;
+    fx.run(Operation::RollbackCommit {
+        commit_id: commit.commit_id,
+    })?;
+    assert_eq!(fx.contents()?, "v1\n");
+    assert_eq!(fx.reloads(), 0);
+    fx.finish()
+}
+
+#[test]
+fn a_reloading_commit_confirm_apply_reloads_and_its_rollback_reloads_again() -> TestResult {
+    let mut fx = harness(
+        b"v1\n",
+        Setup {
+            shape: Shape {
+                commit_confirm: true,
+                ..Shape::default()
+            },
+            hooks: true,
+            reload: true,
+            ..Setup::default()
+        },
+    )?;
+    let outcome = fx.run(Operation::Apply {
+        id: MODULE.to_owned(),
+        model: json!({"text": "v2\n"}),
+        expected_hash: None,
+        service_action: None,
+        confirm: None,
+    })?;
+    let OpOutcome::Applied(report) = outcome else {
+        return Err("Apply must answer with an apply report".into());
+    };
+    let commit = report.commit.ok_or("a commit-confirm window was armed")?;
+    assert_eq!(fx.reloads(), 1);
+    fx.run(Operation::RollbackCommit {
+        commit_id: commit.commit_id,
+    })?;
+    assert_eq!(fx.contents()?, "v1\n");
+    assert_eq!(fx.reloads(), 2);
+    fx.finish()
+}
+
+#[test]
+fn a_failed_reload_fails_the_apply_and_rolls_the_commit_back() -> TestResult {
+    let mut fx = harness(
+        b"v1\n",
+        Setup {
+            shape: Shape {
+                commit_confirm: true,
+                ..Shape::default()
+            },
+            hooks: true,
+            reload: true,
+            fail_reload: true,
+            ..Setup::default()
+        },
+    )?;
+    let result = fx.run(Operation::Apply {
+        id: MODULE.to_owned(),
+        model: json!({"text": "v2\n"}),
+        expected_hash: None,
+        service_action: None,
+        confirm: None,
+    });
+    assert!(
+        matches!(
+            &result,
+            Err(OpsError::Privsep(ClientError::Remote(ProtoError::Io(message))))
+                if message.contains("daemon-reload")
+        ),
+        "{result:?}"
+    );
+    assert_eq!(fx.contents()?, "v1\n");
+    assert!(fx.engine.pending_commit()?.is_none());
+    // The apply's reload, then the rollback's.
+    assert_eq!(fx.reloads(), 2);
     fx.finish()
 }
 

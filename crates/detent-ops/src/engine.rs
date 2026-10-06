@@ -35,7 +35,7 @@ use detent_core::module::{DynModule, ParseError};
 use detent_platform::fs::atomic::Sha256Digest;
 use detent_platform::host::Detected;
 use detent_platform::privsep::proto::{
-    BackupId, BindingId, CheckId, CommitId, PendingService, ProtoError,
+    BackupId, BindingId, CheckId, CommitId, ModuleId, PendingService, ProtoError,
     ServiceAction as WireServiceAction, TargetId, WriteReceipt,
 };
 use detent_platform::privsep::worker::{Client, ClientError};
@@ -595,6 +595,7 @@ impl OpsEngine {
                 module: descriptor.id.to_owned(),
             });
         }
+        let reload_module = self.reload_module(descriptor)?;
 
         // 3. Read the current file and check the caller's expectation.
         let contents = self.client.read_target(wiring.target).map_err(map_client)?;
@@ -668,7 +669,11 @@ impl OpsEngine {
             return Err(OpsError::NoBackup);
         }
 
-        // 6. Act on the service. Step 2 established that a binding exists
+        // 6. Have the init system re-read its unit files when the module
+        //    asks for it (mounts), before any service action.
+        self.reload_or_discard(reload_module, commit.as_ref())?;
+
+        // 7. Act on the service. Step 2 established that a binding exists
         //    whenever an action was asked for.
         let service = match (service_action, wiring.binding.as_ref()) {
             (Some(action), Some(&(binding, ref affected))) => {
@@ -692,6 +697,35 @@ impl OpsEngine {
             commit,
             checks,
         })
+    }
+
+    /// The module id to reload unit files for after a write, or `None` when
+    /// the module does not declare `reload_unit_files`. Resolved before the
+    /// write, so an unknown module changes nothing.
+    fn reload_module(&self, descriptor: &ModuleDescriptor) -> Result<Option<ModuleId>, OpsError> {
+        if !descriptor.reload_unit_files {
+            return Ok(None);
+        }
+        module_id(&self.client, find_module(&self.modules, descriptor.id)?).map(Some)
+    }
+
+    /// Ask the monitor to reload the init system's unit files after a write
+    /// to `module` (`None`: the module does not declare it). A failure is
+    /// handled as a failed service action: `commit` is rolled back and the
+    /// error returned.
+    fn reload_or_discard(
+        &mut self,
+        module: Option<ModuleId>,
+        commit: Option<&PendingCommit>,
+    ) -> Result<(), OpsError> {
+        let Some(module) = module else {
+            return Ok(());
+        };
+        let reloaded = self.client.reload_unit_files(module).map_err(map_client);
+        if reloaded.is_err() {
+            self.discard_commit(commit);
+        }
+        reloaded.map(drop)
     }
 
     /// Arm commit-confirm for a write already on disk. When arming fails the new
