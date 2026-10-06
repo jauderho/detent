@@ -320,10 +320,11 @@ deferred by the owner.
 6. ~~**SCT signatures** (H17).~~ Done (`3c7e270`): a leaf with the modern
    issuer extension needs one SCT from the embedded `ctfe.sigstore.dev/2022`
    key that verifies (RFC 6962 precert form; the real `v0.0.1-rc.2` SCT
-   verifies). **Open (6-a):** a leaf with only the legacy issuer extension
-   (1.3.6.1.4.1.57264.1.1) still skips the SCT check; all self-minted
-   fixtures take that path. Require a verified SCT for every leaf and give
-   `gen-fixtures` a test CT key.
+   verifies). ~~**6-a:** a leaf with only the legacy issuer extension
+   (1.3.6.1.4.1.57264.1.1) skips the SCT check.~~ Done (`8f310ac`): every
+   leaf needs a verified SCT; `gen-fixtures` signs each fixture leaf's SCT
+   with a test CT key (`tests/fixtures/ctfe-pub.pem`, loaded with
+   `trust::from_pems_with_ct`).
 7. **Rekor v2** (log2025-1): the verifier supports Rekor v1 entries only.
    Decide before Sigstore moves public-good signing to v2.
 8. **`run_update` coverage:** B3 removed the two placeholder-root tests in
