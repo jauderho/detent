@@ -329,6 +329,12 @@ impl ServiceManager for FakeServices {
             "the engine never mutates through a ServiceManager".to_owned(),
         ))
     }
+
+    fn reload_unit_files(&self) -> Result<String, ServiceError> {
+        Err(ServiceError::Unsupported(
+            "the engine never mutates through a ServiceManager".to_owned(),
+        ))
+    }
 }
 
 fn fake_services() -> Box<dyn ServiceManager> {

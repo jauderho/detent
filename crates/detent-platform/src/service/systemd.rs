@@ -185,6 +185,27 @@ impl ServiceManager for SystemdManager {
             detail,
         })
     }
+
+    fn reload_unit_files(&self) -> Result<String, ServiceError> {
+        let program = self.program()?;
+        let output = self
+            .runner
+            .run(program, &["daemon-reload".to_owned()], ACTION_TIMEOUT)
+            .map_err(|err| ServiceError::Failed(err.to_string()))?;
+        if output.timed_out {
+            Err(ServiceError::Failed(
+                "systemctl daemon-reload timed out".to_owned(),
+            ))
+        } else if output.status == Some(0) {
+            Ok("systemctl daemon-reload succeeded".to_owned())
+        } else {
+            Err(ServiceError::Failed(format!(
+                "systemctl daemon-reload exited {:?}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            )))
+        }
+    }
 }
 
 const fn action_verb(action: ServiceAction) -> &'static str {

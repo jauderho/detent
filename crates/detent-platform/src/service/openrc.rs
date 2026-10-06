@@ -143,6 +143,10 @@ impl ServiceManager for OpenRcManager {
             detail,
         })
     }
+
+    fn reload_unit_files(&self) -> Result<String, ServiceError> {
+        Ok("OpenRC has no generated unit files to reload".to_owned())
+    }
 }
 
 const fn action_verb(action: ServiceAction) -> &'static str {

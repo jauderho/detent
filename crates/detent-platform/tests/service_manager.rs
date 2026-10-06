@@ -240,6 +240,69 @@ fn systemd_act_reports_a_timeout_without_panicking() -> TestResult {
 }
 
 // ---------------------------------------------------------------------------
+// Reloading the init system's unit files
+// ---------------------------------------------------------------------------
+
+#[test]
+fn systemd_reload_unit_files_runs_daemon_reload_and_nothing_else() -> TestResult {
+    let fake = Arc::new(
+        FakeRunner::new()
+            .existing(&["/usr/bin/systemctl"])
+            .respond(output_ok("")),
+    );
+    let mgr = SystemdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
+    let detail = mgr.reload_unit_files()?;
+    assert!(detail.contains("daemon-reload"), "{detail}");
+    assert_eq!(
+        fake.calls(),
+        vec![(
+            "/usr/bin/systemctl".to_owned(),
+            vec!["daemon-reload".to_owned()],
+            ACTION_TIMEOUT
+        )]
+    );
+    Ok(())
+}
+
+#[test]
+fn systemd_reload_unit_files_fails_on_a_nonzero_exit_or_a_timeout() {
+    for (output, needle) in [(output_fail(1), "boom"), (output_timeout(), "timed out")] {
+        let fake = Arc::new(
+            FakeRunner::new()
+                .existing(&["/usr/bin/systemctl"])
+                .respond(output),
+        );
+        let mgr = SystemdManager::with_runner(Box::new(SharedFake(fake)));
+        assert!(
+            matches!(mgr.reload_unit_files(), Err(ServiceError::Failed(ref m)) if m.contains(needle)),
+            "{needle}"
+        );
+    }
+}
+
+#[test]
+fn systemd_reload_unit_files_is_unavailable_without_systemctl() {
+    let fake = Arc::new(FakeRunner::new());
+    let mgr = SystemdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
+    assert!(matches!(
+        mgr.reload_unit_files(),
+        Err(ServiceError::Unavailable(_))
+    ));
+    assert!(fake.calls().is_empty());
+}
+
+#[test]
+fn other_init_systems_have_no_unit_files_to_reload_and_run_nothing() -> TestResult {
+    let fake = Arc::new(FakeRunner::new().existing(&["/sbin/rc-service", "/bin/launchctl"]));
+    let openrc = OpenRcManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
+    let launchd = LaunchdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
+    assert!(openrc.reload_unit_files()?.contains("OpenRC"));
+    assert!(launchd.reload_unit_files()?.contains("launchd"));
+    assert!(fake.calls().is_empty());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // systemd: alternatives resolution
 // ---------------------------------------------------------------------------
 

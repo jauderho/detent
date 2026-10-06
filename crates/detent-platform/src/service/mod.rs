@@ -215,6 +215,22 @@ pub trait ServiceManager: Send + Sync {
     /// Same as [`ServiceManager::status`], plus [`ServiceError::Unsupported`]
     /// on backends (launchd) that do not implement mutation.
     fn act(&self, units: &UnitNames, action: ServiceAction) -> Result<ActionOutcome, ServiceError>;
+
+    /// Asks the init system to re-read its unit files, for a module whose
+    /// descriptor sets `reload_unit_files` (`mounts`: `/etc/fstab`).
+    ///
+    /// systemd runs `systemctl daemon-reload`, so its generators (e.g.
+    /// `systemd-fstab-generator`) run again. Every other init system has no
+    /// generated units: its backend runs nothing and says so in the detail.
+    /// Returns a short detail string.
+    ///
+    /// # Errors
+    ///
+    /// [`ServiceError::Unavailable`] when the backend program is absent,
+    /// [`ServiceError::Failed`] when it ran and did not exit 0 (or timed
+    /// out). Unlike [`ServiceManager::act`], a failure is an error, not an
+    /// outcome: there is no unit whose state could be reported instead.
+    fn reload_unit_files(&self) -> Result<String, ServiceError>;
 }
 
 /// A [`ServiceManager`] for hosts with no supported init system.
@@ -236,6 +252,10 @@ impl ServiceManager for NullManager {
         Err(ServiceError::Unsupported(
             "no supported service manager was detected on this host".to_owned(),
         ))
+    }
+
+    fn reload_unit_files(&self) -> Result<String, ServiceError> {
+        Ok("no init system was detected: no unit files to reload".to_owned())
     }
 }
 
@@ -332,6 +352,14 @@ mod tests {
         assert!(matches!(
             NullManager.act(&units, ServiceAction::Restart),
             Err(ServiceError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn null_manager_has_no_unit_files_to_reload() {
+        assert!(matches!(
+            NullManager.reload_unit_files(),
+            Ok(detail) if detail.contains("no init system")
         ));
     }
 
@@ -472,6 +500,10 @@ mod tests {
                 active: true,
                 detail: "delegated".to_owned(),
             })
+        }
+
+        fn reload_unit_files(&self) -> Result<String, ServiceError> {
+            Ok("reloaded".to_owned())
         }
     }
 

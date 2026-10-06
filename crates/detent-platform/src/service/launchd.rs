@@ -136,6 +136,10 @@ impl ServiceManager for LaunchdManager {
                 .to_owned(),
         ))
     }
+
+    fn reload_unit_files(&self) -> Result<String, ServiceError> {
+        Ok("launchd has no generated unit files to reload".to_owned())
+    }
 }
 
 #[cfg(test)]
