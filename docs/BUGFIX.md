@@ -401,13 +401,16 @@ numbers in the README, then v1.0.0. Acceptance is in PLAN Phase 12.
 Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
 
 - H5: apply refuses when a declared validator cannot run (binary missing), not
-  only when it fails. — proposed: keep fail-closed — owner answer:
+  only when it fails. — proposed: keep fail-closed — owner answer: keep
+  fail-closed (2026-10-06).
 - M5: `plan` runs root validators but needs only read scope. — proposed: keep
-  read scope (plan writes nothing; validators get a staged copy) — owner answer:
+  read scope (plan writes nothing; validators get a staged copy) — owner
+  answer: keep read scope (2026-10-06).
 - C1-b: chunked `StageUpdate`, so the worker never writes update bytes to a
   path the monitor reads. The interim (`4b098d0`, `95f6b01`) copies into
   monitor staging with no-follow opens and owner checks. — proposed: confirm
-  the interim, defer chunking — owner answer:
+  the interim, defer chunking — owner answer (2026-10-06): do chunked
+  `StageUpdate` now (open).
 - D4: remove build toolchains from testhost. — proposed: after Track C A1–A3 —
   owner answer:
 - libbz2 on testhost: `libbz2-1.0` was downgraded to `1.0.8-6build2` by an earlier
@@ -432,6 +435,10 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
 - Track G: defer `hickory-client`, the TPM attestor and the LE staging run past
   v1, so Phase 6 can close? — proposed: defer the TPM attestor; keep the other
   two for v1 — owner answer:
+- D1 optional mount: after an fstab apply, the monitor mounts new entries.
+  Needs `CAP_SYS_ADMIN` and the mount syscalls in the monitor. — owner
+  answer (2026-10-06): yes, behind a config flag (PLAN §2.4: the capability
+  only when mount apply is enabled) (open).
 
 ---
 
