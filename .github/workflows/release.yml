@@ -476,8 +476,10 @@ jobs:
 
       # Gate: every updater bundle is a Rekor v2 entry with an RFC 3161
       # timestamp and one in-toto v1 subject, and verifies for this workflow
-      # at this tag. Any failure stops the release before anything is
-      # published.
+      # at this tag with cosign and with detent's own verifier (the hidden
+      # `detent verify-bundle`, run from the static x86_64 musl build), so a
+      # bundle a device would refuse is never published. Any failure stops
+      # the release before anything is published.
       - name: Check updater bundles
         env:
           ATTEST_BUNDLE: ${{ steps.attest.outputs.bundle-path }}
@@ -485,6 +487,8 @@ jobs:
           set -euo pipefail
           predicate_type=$(jq -er '.dsseEnvelope.payload' "$ATTEST_BUNDLE" | base64 -d | jq -er '.predicateType')
           identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
+          verifier=dist/detent-x86_64-unknown-linux-musl
+          chmod +x "$verifier"
           for b in dist/detent-*; do
             bundle="dist/sigstore/$(basename "$b").sigstore.json"
             jq -e '.verificationMaterial.tlogEntries[0].kindVersion == {"kind": "hashedrekord", "version": "0.0.2"}' "$bundle" > /dev/null
@@ -497,6 +501,7 @@ jobs:
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
               --type "$predicate_type" \
               "$b"
+            "$verifier" verify-bundle --tag "$GITHUB_REF_NAME" --bundle "$bundle" "$b"
           done
 
       - name: Attest SBOM
