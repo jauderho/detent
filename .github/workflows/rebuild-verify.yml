@@ -11,7 +11,12 @@
 #   detent-<triple>.sigstore.json
 #   SHA256SUMS                  top-level; covers all detent-<triple> binaries
 #   SBOM.cyclonedx.json
-# where <triple> ∈ {x86_64-unknown-linux-musl, aarch64-unknown-linux-musl}.
+# where <triple> ∈ {x86_64-unknown-linux-musl, aarch64-unknown-linux-musl,
+# aarch64-apple-darwin, x86_64-apple-darwin}.
+#
+# The macOS legs build on macos-latest, as release.yml did. A later runner
+# image (Xcode SDK) can change the bytes; a red macOS leg alone means check
+# the image first.
 #
 # `gh attestation verify` checks the actions/attest attestation in GitHub's
 # attestation store, not the detent-<triple>.sigstore.json asset (since the
@@ -48,46 +53,55 @@ env:
 jobs:
   rebuild-verify:
     name: Rebuild ${{ matrix.target }} vs published release
-    runs-on: ubuntu-26.04
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
+      # Same targets, runners and deployment targets as release.yml's build
+      # job.
       matrix:
-        target:
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-musl
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-26.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-26.04
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            macos-deployment-target: "11.0"
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            macos-deployment-target: "10.12"
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: audit
 
-      # Full history so every `v*` tag is available for resolution.
+      # Full history so the release tag is available.
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
 
-      # Reproducible builds — same env as release.yml's build job: the epoch
-      # is the tag commit's time (not wall clock) and absolute paths are
-      # remapped out of the binary. Written to GITHUB_ENV because env values
-      # can't run shell expansions inline. The tag must be checked out first
-      # so git log -1 reads the released tree, not main.
-      - name: Resolve latest v* tag and check it out
+      # The tag is GitHub's latest release (never a draft or pre-release,
+      # so never a test tag such as v0.1.1-test). Reproducible builds — same
+      # env as release.yml's build job: the epoch is the tag commit's time
+      # (not wall clock) and absolute paths are remapped out of the binary.
+      # The tag must be checked out first so git log -1 reads the released
+      # tree, not main.
+      - name: Resolve the latest release and check it out
         run: |
           set -euo pipefail
-          TAG=$(git tag --list 'v*' --sort=-v:refname | head -n 1)
-          if [[ -z "$TAG" ]]; then
-            echo "no v* tags found; nothing to verify" >&2
-            exit 1
-          fi
+          TAG=$(gh release view -R "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
           git checkout "$TAG"
           echo "TAG=$TAG" >> "$GITHUB_ENV"
           {
             echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)"
             echo "RUSTFLAGS=--remap-path-prefix=$PWD=/src --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
           } >> "$GITHUB_ENV"
-          echo "verifying $TAG (epoch $SOURCE_DATE_EPOCH)"
+          echo "verifying $TAG"
 
       # Same versioned install as release.yml's build job, so the target
       # lands on the toolchain `cargo` actually uses.
@@ -97,26 +111,20 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          # One cache per target; the matrix job would otherwise thrash a
-          # single shared cache with two different target dirs.
-          key: ${{ matrix.target }}
+      # No cargo cache, as in release.yml: cargo does not rebuild a C
+      # dependency when SOURCE_DATE_EPOCH changes, so a cached mimalloc
+      # object would keep another commit's __TIME__.
 
-      # Same cross-build toolchain as release.yml (and ci.yml's size job;
-      # docs/spikes/00-cross-build.md is the reference).
       - name: Install Zig
+        if: runner.os == 'Linux'
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: "0.16.0"
 
       - name: Install cargo-zigbuild
+        if: runner.os == 'Linux'
         run: cargo install cargo-zigbuild --version 0.23.2 --locked
 
-      # cargo auditable wraps any cargo build subcommand (zigbuild included)
-      # and embeds the dependency list into the binary, so `cargo audit bin`
-      # works against released artifacts.
       - name: Install cargo-auditable
         run: cargo install cargo-auditable --version 0.7.5 --locked
 
@@ -132,28 +140,51 @@ jobs:
           bun install --frozen-lockfile
           bun run build
 
-      # Identical command to release.yml's build step — a reviewer diffs these
-      # two lines; any drift breaks byte-reproducibility.
+      # Identical commands to release.yml's build steps — a reviewer diffs
+      # these; any drift breaks byte-reproducibility.
       - name: Rebuild detent (release, ${{ matrix.target }})
+        if: runner.os == 'Linux'
         run: cargo auditable zigbuild --release --locked -p detent --target ${{ matrix.target }} --features ui
+
+      - name: Rebuild detent (release, ${{ matrix.target }}, macOS)
+        if: runner.os == 'macOS'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos-deployment-target }}
+        run: cargo auditable build --release --locked -p detent --target ${{ matrix.target }} --features ui
 
       - name: Download published release assets
         run: |
           set -euo pipefail
-          gh release download "$TAG" -R jauderho/detent \
+          mkdir published
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" --dir published \
             --pattern "detent-${{ matrix.target }}" \
-            --pattern "SHA256SUMS" \
-            --clobber
-          ls -l
+            --pattern "SHA256SUMS"
 
-      # sha256sum exits non-zero on any mismatch or missing entry, so a
-      # tampered or replaced asset fails the job here.
-      - name: Compare hashes against SHA256SUMS
+      # The published asset and the rebuilt binary must both match the
+      # published SHA256SUMS entry for this target. A tampered asset, a
+      # non-reproducible build or a missing entry fails here.
+      - name: Compare the rebuild with the published release
+        env:
+          ASSET: detent-${{ matrix.target }}
         run: |
           set -euo pipefail
-          # SHA256SUMS covers every binary; --ignore-missing checks only this
-          # matrix leg's asset (the other legs verify in their own jobs).
-          sha256sum --check --ignore-missing SHA256SUMS
+          expected=$(awk -v name="$ASSET" '$2 == name { print $1 }' published/SHA256SUMS)
+          if [[ -z "$expected" ]]; then
+            echo "::error::SHA256SUMS has no entry for $ASSET" >&2
+            exit 1
+          fi
+          published=$(shasum -a 256 "published/$ASSET" | cut -d' ' -f1)
+          rebuilt=$(shasum -a 256 "target/${{ matrix.target }}/release/detent" | cut -d' ' -f1)
+          echo "SHA256SUMS $expected"
+          echo "published  $published"
+          echo "rebuilt    $rebuilt"
+          if [[ "$published" != "$expected" || "$rebuilt" != "$expected" ]]; then
+            echo "::error::$ASSET does not match SHA256SUMS for $TAG" >&2
+            exit 1
+          fi
 
       - name: Verify release attestation
-        run: gh attestation verify "detent-${{ matrix.target }}" -R jauderho/detent
+        run: |
+          gh attestation verify "published/detent-${{ matrix.target }}" -R "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-ref "refs/tags/$TAG"

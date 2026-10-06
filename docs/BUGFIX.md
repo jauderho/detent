@@ -342,8 +342,13 @@ deferred by the owner.
    issuer check, which handled short lengths only); test
    `the_build_signer_extension_names_the_release_workflow` on the real
    v0.0.1-rc.2 and v0.1.1 leaves.
-10. **`rebuild-verify.yml`** rebuilds the Linux targets only; add the two
-    macOS targets.
+10. ~~**`rebuild-verify.yml`**~~ Done: all four targets (macOS on
+    `macos-latest` with the release deployment targets). It also never
+    compared the rebuild: it hashed only the downloaded asset. Now the
+    published asset and the rebuilt binary must both equal the `SHA256SUMS`
+    entry. No cargo cache (stale mimalloc `__TIME__`); the tag is GitHub's
+    latest release (never a pre-release such as `v0.1.1-test`); `GH_TOKEN`
+    set; `gh attestation verify` pins the release workflow and tag.
 11. **`ci.yml` `rust-macos`:** the comment says harden-runner supports Linux
     only; it supports macOS in audit mode (as `release.yml` uses it).
 12. **`update --check` text:** a newer release held by the age gate prints
