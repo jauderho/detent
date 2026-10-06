@@ -1572,6 +1572,7 @@ static DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     services: SERVICES,
     checks: CHECKS,
     commit_confirm: true,
+    reload_unit_files: false,
     security_notes: &[MessageId::new("network-note-precedence")],
 };
 

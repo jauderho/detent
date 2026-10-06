@@ -276,6 +276,7 @@ static DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     services: SERVICES,
     checks: CHECKS,
     commit_confirm: false,
+    reload_unit_files: false,
     security_notes: &[MessageId::new("chrony-note-precedence")],
 };
 

@@ -227,6 +227,7 @@ static HOSTS_DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     services: &[],
     checks: &[],
     commit_confirm: false,
+    reload_unit_files: false,
     security_notes: &[MessageId::new("hosts-note-spoofing")],
 };
 

@@ -516,6 +516,7 @@ mod tests {
         services: &[],
         checks: &[],
         commit_confirm: false,
+        reload_unit_files: false,
         security_notes: &[],
     };
 

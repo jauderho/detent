@@ -387,6 +387,7 @@ static NFS_DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     services: NFS_SERVICES,
     checks: NFS_CHECKS,
     commit_confirm: false,
+    reload_unit_files: false,
     security_notes: &[MessageId::new("nfs-note-live-state")],
 };
 

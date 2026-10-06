@@ -503,6 +503,7 @@ mod tests {
             services: &[],
             checks: &[],
             commit_confirm: false,
+            reload_unit_files: false,
             security_notes: &[],
         };
         Ok(Allowlist::from_modules(
@@ -950,6 +951,7 @@ mod tests {
                 services: &[],
                 checks: PROBE_CHECKS,
                 commit_confirm: false,
+                reload_unit_files: false,
                 security_notes: &[],
             }));
             let Ok(allow) = Allowlist::from_modules(&[probe], &Config::with_state_root(&dir))
@@ -1439,6 +1441,7 @@ mod tests {
             services: &[],
             checks: DRIVE_CHECKS,
             commit_confirm: true,
+            reload_unit_files: false,
             security_notes: &[],
         }))
     }

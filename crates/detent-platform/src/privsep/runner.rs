@@ -375,6 +375,7 @@ mod tests {
         services: SERVICES,
         checks: CHECKS,
         commit_confirm: false,
+        reload_unit_files: false,
         security_notes: &[],
     };
     /// Equal in value to `CHECKS[0]` but not the allow-listed declaration.

@@ -91,6 +91,7 @@ static KV_DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
         expects: CheckExpectation::ExitZero,
     }],
     commit_confirm: false,
+    reload_unit_files: false,
     security_notes: &[MessageId::new("kv-note")],
 };
 

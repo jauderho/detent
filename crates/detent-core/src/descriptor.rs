@@ -196,6 +196,17 @@ pub struct ModuleDescriptor {
     /// Whether a change to this module needs commit-confirm (it can lock an admin
     /// out, e.g. network configuration).
     pub commit_confirm: bool,
+    /// Whether the init system must re-read its unit files after this
+    /// module's files change: after an apply and after a commit-confirm
+    /// rollback. On systemd this is `systemctl daemon-reload`, so generators
+    /// such as `systemd-fstab-generator` run again; other init systems have
+    /// no generated units and do nothing. The platform layer maps it.
+    ///
+    /// Not serialized: it is an instruction to the monitor, not something
+    /// the UI shows, and leaving it out keeps the API schema unchanged.
+    #[serde(skip)]
+    #[cfg_attr(feature = "openapi", schema(ignore = true))]
+    pub reload_unit_files: bool,
     /// Fluent ids of security notes shown alongside this module.
     pub security_notes: &'static [MessageId],
 }
@@ -501,8 +512,20 @@ mod tests {
         }],
         checks: CHECKS,
         commit_confirm: false,
+        reload_unit_files: false,
         security_notes: &[MessageId::new("chrony-note-nts")],
     };
+
+    #[test]
+    fn reload_unit_files_stays_out_of_the_api() {
+        let descriptor = ModuleDescriptor {
+            reload_unit_files: true,
+            ..DESCRIPTOR
+        };
+        let json = serde_json::to_value(descriptor).unwrap_or_default();
+        assert!(json.get("commit_confirm").is_some());
+        assert!(json.get("reload_unit_files").is_none());
+    }
 
     #[test]
     fn descriptor_serializes_without_the_detector() {

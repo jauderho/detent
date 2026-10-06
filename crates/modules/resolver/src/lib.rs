@@ -917,6 +917,7 @@ static RESOLVER_DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     // Network-critical per ADR-012: a bad resolver config can lock the admin
     // out of name resolution entirely.
     commit_confirm: true,
+    reload_unit_files: false,
     security_notes: &[MessageId::new("resolver-note-managed-symlink")],
 };
 
