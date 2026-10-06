@@ -360,6 +360,10 @@ deferred by the owner.
     decision: switch at once; devices on `v0.1.0` or older (Rekor v1 only)
     refuse the next release and need a manual reinstall. Unproven until the
     next tag (see PROGRESS 2026-10-05).
+14. **Release gate with detent's own verifier:** the publish job checks
+    the updater bundles with `cosign verify-blob-attestation`. Gate them
+    with the verifier devices run (the built x86_64 musl binary, through a
+    small verify command), so a bundle detent would refuse is never published.
 
 ### Track F — Phase 12 / M4 (v1.0)
 
