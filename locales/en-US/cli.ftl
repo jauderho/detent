@@ -42,6 +42,7 @@ cli-update-security-available = security update available: {$tag} published {$pu
 cli-update-none = no update available (current {$current})
 cli-update-held-young = {$tag} is newer than {$current} but younger than {$days} day(s); the age gate holds it
 cli-update-held-rejected = {$tag} is newer than {$current} but was rolled back on this host; it is skipped
+cli-verify-bundle-ok = {$file} is attested for {$tag}
 cli-update-failed = update failed: {$reason}
 cli-update-installed = installed {$tag}; the binary it replaced is kept at {$previous}
 cli-update-not-restarted = the service was not restarted, so the new binary is not running yet: {$reason}

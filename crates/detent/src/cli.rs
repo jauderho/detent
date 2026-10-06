@@ -123,6 +123,11 @@ pub enum Command {
     /// `detent-update`; a build that cannot verify refuses closed.
     #[cfg(feature = "update")]
     Update(UpdateArgs),
+    /// Check one release binary against its updater bundle with the verifier
+    /// a device runs. Used by the release workflow; not for operators.
+    #[cfg(feature = "update")]
+    #[command(hide = true)]
+    VerifyBundle(VerifyBundleArgs),
     /// Check this host for common misconfigurations.
     Doctor,
     /// First-run bootstrap: create the initial administrator account.
@@ -489,6 +494,22 @@ pub struct UpdateArgs {
     /// on-disk stamp is still fresh. Only meaningful with `--check`.
     #[arg(long)]
     pub force: bool,
+}
+
+/// `detent verify-bundle …`: the release workflow's own gate on an updater
+/// bundle. It reads two files and uses no network and no state root.
+#[cfg(feature = "update")]
+#[derive(Debug, Args)]
+pub struct VerifyBundleArgs {
+    /// The release tag the bundle must be signed for, e.g. `v0.1.1`.
+    #[arg(long, value_name = "TAG")]
+    pub tag: String,
+    /// The Sigstore bundle, `detent-<triple>.sigstore.json`.
+    #[arg(long, value_name = "PATH")]
+    pub bundle: PathBuf,
+    /// The release binary the bundle attests.
+    #[arg(value_name = "FILE")]
+    pub file: PathBuf,
 }
 
 /// `--service` on `config apply`: a service command, or explicitly nothing.

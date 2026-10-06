@@ -301,6 +301,8 @@ fn dispatch(
         Some(Command::Mcp(args)) => crate::mcp::run(args, cli.dryrun, &settings, renderer, streams),
         #[cfg(feature = "update")]
         Some(Command::Update(args)) => run_update(args, cli, renderer, streams),
+        #[cfg(feature = "update")]
+        Some(Command::VerifyBundle(args)) => run_verify_bundle(args, renderer, streams),
         Some(Command::Config {
             module,
             action: ConfigAction::Defaults,
@@ -762,6 +764,69 @@ fn run_update(
         renderer,
         streams,
     )
+}
+
+/// `detent verify-bundle` (hidden): the release workflow's gate. It runs the
+/// verifier a device runs, on one binary and its bundle, so a bundle a device
+/// would refuse is never published. Reads two files; no network, no state.
+#[cfg(feature = "update")]
+fn run_verify_bundle(
+    args: &crate::cli::VerifyBundleArgs,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Exit> {
+    let bundle = match std::fs::read(&args.bundle) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return failed(
+                renderer,
+                streams,
+                &format!("{}: {err}", args.bundle.display()),
+            );
+        }
+    };
+    let file = match std::fs::read(&args.file) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return failed(
+                renderer,
+                streams,
+                &format!("{}: {err}", args.file.display()),
+            );
+        }
+    };
+    let trust = match detent_update::trust::embedded() {
+        Ok(trust) => trust,
+        Err(err) => return failed(renderer, streams, &err.to_string()),
+    };
+    let digest = detent_update::fetch::sha256_of(&file);
+    match verify_bundle_bytes(&bundle, digest, &args.tag, &trust) {
+        Ok(()) => {
+            renderer.line(
+                streams.out,
+                MessageId::new("cli-verify-bundle-ok"),
+                &[
+                    ("tag", &args.tag),
+                    ("file", &args.file.display().to_string()),
+                ],
+            )?;
+            Ok(Exit::Ok)
+        }
+        Err(err) => failed(renderer, streams, &err.to_string()),
+    }
+}
+
+/// Parses `bundle` and verifies it for `file_digest` and `tag`: the same two
+/// calls `detent update` makes, with the same trust root.
+#[cfg(feature = "update")]
+fn verify_bundle_bytes(
+    bundle: &[u8],
+    file_digest: [u8; 32],
+    tag: &str,
+    trust: &detent_update::TrustRoot,
+) -> Result<(), detent_update::verify::VerificationError> {
+    let decoded = detent_update::bundle::parse(bundle)?;
+    detent_update::verify::verify(&decoded, &file_digest, tag, trust)
 }
 
 /// The release policy for `detent update`: the age gate from
@@ -2308,6 +2373,114 @@ mod tests {
             assert!(notes.contains("min_age_days"), "{notes}");
         }
         Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    const V011_X86_64_SHA256: &str =
+        "e9de9f265aac0e1fc69042054112cfe170555f635165e630df67c0f328b32ae9";
+
+    #[cfg(feature = "update")]
+    fn digest_from_hex(hex: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+        let mut bytes = Vec::new();
+        for pair in hex.as_bytes().chunks(2) {
+            bytes.push(u8::from_str_radix(std::str::from_utf8(pair)?, 16)?);
+        }
+        Ok(bytes.as_slice().try_into()?)
+    }
+
+    #[cfg(feature = "update")]
+    fn real_v011_bundle() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        Ok(std::fs::read(
+            update_fixtures().join("real-v0.1.1.sigstore.json"),
+        )?)
+    }
+
+    /// The real v0.1.1 bundle verifies for its own binary digest and tag, and
+    /// not for another tag.
+    #[cfg(feature = "update")]
+    #[test]
+    fn verify_bundle_bytes_checks_the_tag_and_the_digest() -> R {
+        use detent_update::verify::VerificationError;
+        let bundle = real_v011_bundle()?;
+        let digest = digest_from_hex(V011_X86_64_SHA256)?;
+        let trust = detent_update::trust::embedded()?;
+        super::verify_bundle_bytes(&bundle, digest, "v0.1.1", &trust)?;
+        assert_eq!(
+            super::verify_bundle_bytes(&bundle, digest, "v0.1.0", &trust),
+            Err(VerificationError::IdentityMismatch)
+        );
+        let mut other = digest;
+        other[0] ^= 1;
+        assert_eq!(
+            super::verify_bundle_bytes(&bundle, other, "v0.1.1", &trust),
+            Err(VerificationError::DigestMismatch)
+        );
+        Ok(())
+    }
+
+    /// An unparsable bundle is a bundle error, never a pass.
+    #[cfg(feature = "update")]
+    #[test]
+    fn verify_bundle_bytes_refuses_garbage() -> R {
+        let trust = detent_update::trust::embedded()?;
+        assert!(matches!(
+            super::verify_bundle_bytes(b"not json", [0; 32], "v0.1.1", &trust),
+            Err(detent_update::verify::VerificationError::BundleMalformed(_))
+        ));
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn verify_bundle_fails_on_a_missing_bundle_file() -> R {
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("detent");
+        std::fs::write(&file, b"binary")?;
+        let missing = dir.path().join("none.sigstore.json");
+        let (exit, out, notes) = run_with(&[
+            "detent",
+            "verify-bundle",
+            "--tag",
+            "v0.1.1",
+            "--bundle",
+            missing.to_str().ok_or("path")?,
+            file.to_str().ok_or("path")?,
+        ])?;
+        assert_eq!(exit, Exit::Failed, "{notes}");
+        assert!(out.is_empty(), "{out}");
+        assert!(notes.contains("update failed"), "{notes}");
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn verify_bundle_fails_naming_a_digest_mismatch() -> R {
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("detent");
+        std::fs::write(&file, b"not the v0.1.1 binary")?;
+        let bundle = update_fixtures().join("real-v0.1.1.sigstore.json");
+        let (exit, out, notes) = run_with(&[
+            "detent",
+            "verify-bundle",
+            "--tag",
+            "v0.1.1",
+            "--bundle",
+            bundle.to_str().ok_or("path")?,
+            file.to_str().ok_or("path")?,
+        ])?;
+        assert_eq!(exit, Exit::Failed, "{notes}");
+        assert!(out.is_empty(), "{out}");
+        assert!(notes.contains("subject digest does not match"), "{notes}");
+        Ok(())
+    }
+
+    /// The command stays out of `--help`: it is for the release workflow.
+    #[cfg(feature = "update")]
+    #[test]
+    fn verify_bundle_is_hidden_from_help() {
+        use clap::CommandFactory as _;
+        let help = Cli::command().render_help().to_string();
+        assert!(!help.contains("verify-bundle"), "{help}");
     }
 
     fn run_with(argv: &[&str]) -> Result<(Exit, String, String), Box<dyn std::error::Error>> {
