@@ -290,8 +290,16 @@ deferred by the owner.
 
 ### Track D — Phase 7/8 gaps
 
-1. **mounts:** apply runs `daemon-reload` (and the optional mount) through
+1. **mounts:** apply runs `daemon-reload` and the optional mount through
    the monitor, as PLAN Phase 7 says.
+   - ~~**`daemon-reload`.**~~ Done: `ModuleDescriptor::reload_unit_files`
+     (mounts sets it). The engine sends `Request::ReloadUnitFiles` (a
+     module id) after a write; the monitor reloads again after every
+     commit-confirm rollback. `systemctl daemon-reload` on systemd, nothing
+     on `OpenRC`. A failed reload fails the apply like a failed service
+     action.
+   - **Optional mount** via the monitor: open. It needs `CAP_SYS_ADMIN` and
+     the mount syscalls (owner decision).
 2. **Version-gated options** (chrony, samba): detect the installed version so
    `since`-gated options are offered only when supported.
 3. **VM acceptance runs** (owner): Phase 7 per-module spikes

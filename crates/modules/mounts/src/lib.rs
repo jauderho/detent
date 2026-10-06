@@ -224,9 +224,23 @@ static CHECKS: &[ExternalCheck] = &[ExternalCheck {
 
 /// The services a change to these files affects. There is no daemon unit to
 /// bind, so this stays empty (`hosts` does the same for the same reason).
-/// Nothing reloads or mounts after an apply: the monitor does not reload
-/// systemd, and it answers `Request::Mount` with `Unsupported`. The new table
-/// takes effect at the next boot or the next manual `mount -a`.
+///
+/// The reload after a change is [`ModuleDescriptor::reload_unit_files`], not
+/// a binding: on systemd, `systemd-fstab-generator` turns `/etc/fstab` into
+/// `.mount` units, and only `systemctl daemon-reload` makes it run again. A
+/// binding would name a unit and a start/stop/restart/reload action, and the
+/// UI would offer those for a unit that does not exist. With the flag set,
+/// the engine asks the monitor (`Request::ReloadUnitFiles`, a module id
+/// only) after a successful write, and the monitor reloads again after a
+/// commit-confirm rollback; the platform layer maps it to
+/// `systemctl daemon-reload` on systemd and to nothing on `OpenRC`, which
+/// reads `/etc/fstab` directly. A failed reload fails the apply and rolls
+/// the commit back, like a failed service action.
+///
+/// Nothing mounts after an apply: the monitor answers `Request::Mount` with
+/// `Unsupported` (it would need `CAP_SYS_ADMIN` and the mount syscalls; owner
+/// decision). The new table takes effect at the next boot, the next manual
+/// `mount -a`, or the next start of a regenerated `.mount` unit.
 static SERVICES: &[ServiceBinding] = &[];
 
 /// The descriptor. `commit_confirm` is `true` because a bad fstab can leave
@@ -234,9 +248,9 @@ static SERVICES: &[ServiceBinding] = &[];
 /// second confirmation.
 ///
 /// Commit-confirm cannot protect fstab the way it protects a network change.
-/// Nothing reads the new table before the next boot, so a bad entry does not
-/// break the session that must confirm it, and the automatic rollback never
-/// triggers. The confirmation is only a second look; `validate` and
+/// Nothing mounts from the new table before the next boot (the unit-file
+/// reload only regenerates `.mount` units), so a bad entry does not break the
+/// session that must confirm it, and the automatic rollback never triggers. The confirmation is only a second look; `validate` and
 /// `findmnt --verify` are the real guard.
 static DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     id: "mounts",
@@ -252,7 +266,7 @@ static DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     services: SERVICES,
     checks: CHECKS,
     commit_confirm: true,
-    reload_unit_files: false,
+    reload_unit_files: true,
     security_notes: &[MessageId::new("mounts-note-boot")],
 };
 
@@ -1377,6 +1391,7 @@ mod tests {
         let descriptor = MountsModule::descriptor();
         assert_eq!(descriptor.id, MountsModule::ID);
         assert!(descriptor.commit_confirm);
+        assert!(descriptor.reload_unit_files);
         assert!(descriptor.services.is_empty());
         assert_eq!(descriptor.targets.len(), 2);
         for target in descriptor.targets {
