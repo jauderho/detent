@@ -437,7 +437,13 @@ jobs:
       # toolchain (macOS images lag at 1.98.0) and must use it, not default.
       RUSTUP_TOOLCHAIN: "1.98.1"
     steps:
-      # step-security/harden-runner only supports Linux runners; omitted here.
+      # harden-runner supports GitHub-hosted macOS runners in audit mode
+      # only (as release.yml's macOS build legs use it).
+      - name: Harden Runner (audit, macOS)
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

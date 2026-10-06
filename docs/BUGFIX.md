@@ -349,8 +349,8 @@ deferred by the owner.
     entry. No cargo cache (stale mimalloc `__TIME__`); the tag is GitHub's
     latest release (never a pre-release such as `v0.1.1-test`); `GH_TOKEN`
     set; `gh attestation verify` pins the release workflow and tag.
-11. **`ci.yml` `rust-macos`:** the comment says harden-runner supports Linux
-    only; it supports macOS in audit mode (as `release.yml` uses it).
+11. ~~**`ci.yml` `rust-macos`.**~~ Done: the job runs harden-runner in
+    audit mode, as release.yml's macOS legs do; the stale comment is gone.
 12. **`update --check` text:** a newer release held by the age gate prints
     "no update available"; the JSON has the tag. Name the held tag and the
     reason.
