@@ -636,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "detent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "clap",
@@ -668,7 +668,7 @@ dependencies = [
 
 [[package]]
 name = "detent-acme"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
@@ -691,7 +691,7 @@ dependencies = [
 
 [[package]]
 name = "detent-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arbitrary",
  "proptest",
@@ -704,7 +704,7 @@ dependencies = [
 
 [[package]]
 name = "detent-ffi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "detent-core",
  "detent-modules",
@@ -714,7 +714,7 @@ dependencies = [
 
 [[package]]
 name = "detent-i18n"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "detent-core",
  "fluent-bundle",
@@ -723,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "detent-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "detent-core",
  "detent-ops",
@@ -739,7 +739,7 @@ dependencies = [
 
 [[package]]
 name = "detent-module-chrony"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arbitrary",
  "detent-core",
@@ -751,7 +751,7 @@ dependencies = [
 
 [[package]]
 name = "detent-module-dhcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arbitrary",
  "detent-core",
@@ -763,7 +763,7 @@ dependencies = [
 
 [[package]]
 name = "detent-module-hosts"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arbitrary",
  "detent-core",
@@ -775,7 +775,7 @@ dependencies = [
 
 [[package]]
 name = "detent-module-mounts"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arbitrary",
  "detent-core",
@@ -787,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "detent-module-network"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arbitrary",
  "detent-core",
@@ -799,7 +799,7 @@ dependencies = [
 
 [[package]]
 name = "detent-module-nfs"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arbitrary",
  "detent-core",
@@ -811,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "detent-module-resolver"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arbitrary",
  "detent-core",
@@ -823,7 +823,7 @@ dependencies = [
 
 [[package]]
 name = "detent-module-samba"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arbitrary",
  "detent-core",
@@ -835,7 +835,7 @@ dependencies = [
 
 [[package]]
 name = "detent-module-template"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arbitrary",
  "detent-core",
@@ -847,7 +847,7 @@ dependencies = [
 
 [[package]]
 name = "detent-modules"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "detent-core",
  "detent-module-chrony",
@@ -862,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "detent-ops"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "detent-core",
  "detent-modules",
@@ -880,7 +880,7 @@ dependencies = [
 
 [[package]]
 name = "detent-platform"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arbitrary",
  "caps",
@@ -913,7 +913,7 @@ dependencies = [
 
 [[package]]
 name = "detent-update"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "http-body-util",
@@ -940,7 +940,7 @@ dependencies = [
 
 [[package]]
 name = "detent-web"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arbitrary",
  "argon2",
