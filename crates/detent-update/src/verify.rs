@@ -127,9 +127,9 @@ fn verify_for_identity(
         return Err(VerificationError::CertChainInvalid);
     };
 
-    // Step 3: identity pinning, on the parsed leaf. New Fulcio certificates
-    // carry the workflow URI in the build-signer extension; older fixtures
-    // carry it as a URI SAN, so accept either while pinning the exact tag.
+    // Step 3: identity pinning, on the parsed leaf. Fulcio certificates
+    // carry the workflow URI as a URI SAN and in the build-signer extension
+    // (a DER UTF8String); accept either while pinning the exact tag.
     let (_, parsed_leaf) =
         X509Certificate::from_der(leaf_raw).map_err(|_| VerificationError::CertChainInvalid)?;
     let san = parsed_leaf
@@ -142,25 +142,12 @@ fn verify_for_identity(
             .iter()
             .any(|name| matches!(name, GeneralName::URI(uri) if *uri == pinned))
     });
-    let extension_uri = |oid: &str| {
-        parsed_leaf.extensions().iter().any(|extension| {
-            extension.oid.to_id_string() == oid && extension.value == pinned.as_bytes()
-        })
-    };
-    if !san_matches && !extension_uri(BUILD_SIGNER_URI_OID) {
+    if !san_matches && !build_signer_is(&parsed_leaf, pinned) {
         return Err(VerificationError::IdentityMismatch);
     }
     let modern_issuer = parsed_leaf.extensions().iter().any(|extension| {
-        let Some(value) = extension.value.strip_prefix(&[0x0c]) else {
-            return false;
-        };
-        let Some(length) = value.first().copied() else {
-            return false;
-        };
-        let value = value.get(1..).unwrap_or_default();
-        usize::from(length) == value.len()
-            && value == ISSUER.as_bytes()
-            && extension.oid.to_id_string() == ISSUER_V2_OID
+        extension.oid.to_id_string() == ISSUER_V2_OID
+            && der_utf8_string(extension.value) == Some(ISSUER.as_bytes())
     });
     let legacy_issuer = parsed_leaf.extensions().iter().any(|extension| {
         extension.oid.to_id_string() == ISSUER_OID && extension.value == ISSUER.as_bytes()
@@ -814,6 +801,23 @@ fn precert_tbs(tbs: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Whether the leaf's Fulcio build-signer URI extension
+/// (1.3.6.1.4.1.57264.1.9) names `pinned`.
+fn build_signer_is(leaf: &X509Certificate<'_>, pinned: &str) -> bool {
+    leaf.extensions().iter().any(|extension| {
+        extension.oid.to_id_string() == BUILD_SIGNER_URI_OID
+            && der_utf8_string(extension.value) == Some(pinned.as_bytes())
+    })
+}
+
+/// The content of a DER `UTF8String` (tag 12) that fills `value` exactly.
+fn der_utf8_string(value: &[u8]) -> Option<&[u8]> {
+    match der_tlv(value)? {
+        (0x0c, content, []) => Some(content),
+        _ => None,
+    }
+}
+
 /// Splits one DER TLV with a single-byte tag off `input`: (tag, contents,
 /// rest). Lengths of up to three bytes; indefinite lengths are refused.
 pub(crate) fn der_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
@@ -1165,6 +1169,34 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .expect("leaf rawBytes");
         BASE64.decode(leaf).expect("leaf base64")
+    }
+
+    /// The leaf of the real `v0.1.1` release bundle (cosign, Rekor v2).
+    fn real_v2_leaf() -> Vec<u8> {
+        let raw: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/real-v0.1.1.sigstore.json"))
+                .expect("bundle json");
+        let leaf = raw
+            .pointer("/verificationMaterial/certificate/rawBytes")
+            .and_then(serde_json::Value::as_str)
+            .expect("leaf rawBytes");
+        BASE64.decode(leaf).expect("leaf base64")
+    }
+
+    /// The build-signer extension holds a DER `UTF8String`, not the bare URI
+    /// (E9: the raw compare could never match).
+    #[test]
+    fn the_build_signer_extension_names_the_release_workflow() {
+        for (leaf, tag) in [(real_leaf(), "v0.0.1-rc.2"), (real_v2_leaf(), "v0.1.1")] {
+            let (_, parsed) = X509Certificate::from_der(&leaf).expect("leaf");
+            assert!(build_signer_is(&parsed, &pinned_identity(tag)), "{tag}");
+            assert!(
+                !build_signer_is(&parsed, &pinned_identity("v0.1.0")),
+                "{tag}"
+            );
+            let longer = format!("{}x", pinned_identity(tag));
+            assert!(!build_signer_is(&parsed, &longer), "{tag}");
+        }
     }
 
     /// The SPKI of the embedded Fulcio certificate that issued the real leaf.

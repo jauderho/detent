@@ -337,10 +337,11 @@ deferred by the owner.
    `run_update` itself up to the network; the flow after it is covered by
    the hermetic `run_update_on` tests. `detent` crate was 95.36% (floor 95%)
    before.
-9. **Build-signer extension** (`verify.rs`, `extension_uri`): it compares the
-   raw extension value with the pinned URI. OID 1.3.6.1.4.1.57264.1.9 holds
-   a DER UTF8String, so this branch can never match; the SAN branch carries
-   the check today. Decode the value, with a test on a real leaf.
+9. ~~**Build-signer extension** (`verify.rs`).~~ Done: `build_signer_is`
+   decodes the DER `UTF8String` (`der_utf8_string`, also used for the 1.8
+   issuer check, which handled short lengths only); test
+   `the_build_signer_extension_names_the_release_workflow` on the real
+   v0.0.1-rc.2 and v0.1.1 leaves.
 10. **`rebuild-verify.yml`** rebuilds the Linux targets only; add the two
     macOS targets.
 11. **`ci.yml` `rust-macos`:** the comment says harden-runner supports Linux
