@@ -130,10 +130,20 @@ Trust material is embedded at build time (PLAN §2.9 step 4) in
 key and the `ctfe.sigstore.dev/2022` CT log public key, extracted from Sigstore's `trusted_root.json` (2026-10-03: root-signing
 commit 5888f35, recorded in `trust::TRUST_MANIFEST`).
 
+For Rekor v2 (BUGFIX Track E 7, not yet wired into `verify`) the same
+`trusted_root.json` also gives the `log2025-1.rekor.sigstore.dev` Ed25519
+key (origin and `validFor` start as constants) and the `timestamp.sigstore.dev`
+TSA leaf and root. Those are proven against `trusted_root.json` only: log id
+and certificate digests, and the TSA chain signatures (`trust.rs` tests). The
+Ed25519 checkpoint check (`verify::verify_v2_checkpoint`) is proven against
+real **staging** material only (`tests/fixtures/staging-rekor-v2/`, from
+sigstore-python, Apache-2.0): no public-good Rekor v2 bundle exists yet.
+
 Refresh procedure (per release, and out-of-band when Sigstore rotates roots):
 1. Fetch the current Sigstore TUF snapshot with the TUF client and verify the
    metadata chain up to the pinned TUF root (the only pinned secret).
-2. Extract the active Fulcio root CA(s), Rekor log key and CT log key.
+2. Extract the active Fulcio root CA(s), Rekor log key, CT log key, Rekor v2
+   log key (with origin and `validFor`) and TSA chain (with `validFor`).
 3. Write them to `crates/detent-update/trust/` as PEM files, and set
    `TRUST_MANIFEST` to the source commit and `trusted_root.json` SHA-256.
    Do not copy a retired CA: the verifier honours the certificate's own

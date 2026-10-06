@@ -19,7 +19,7 @@ use x509_parser::extensions::{CtVersion, ParsedExtension};
 use x509_parser::prelude::{FromDer as _, GeneralName};
 
 use crate::bundle::{self, Decoded};
-use crate::trust::{CtLogKey, TrustRoot};
+use crate::trust::{CtLogKey, NoteLogKey, TrustRoot};
 
 /// The GitHub Actions OIDC issuer every leaf must carry (ADR-005).
 pub const ISSUER: &str = "https://token.actions.githubusercontent.com";
@@ -286,7 +286,7 @@ fn verify_inclusion(
         &decoded.checkpoint,
         decoded.tree_size,
         &root,
-        &trust.rekor_key,
+        CheckpointKey::Rekor(&trust.rekor_key),
     )?;
 
     // The hashedrekord body must embed the same signature bytes and the same
@@ -322,6 +322,38 @@ fn checkpoint_key_hint(key: &VerifyingKey) -> [u8; 4] {
     [a, b, c, d]
 }
 
+/// Verifies a Rekor v2 checkpoint, a signed note signed by the Ed25519 log
+/// key `key`. As [`verify_checkpoint`], and also: the origin (first line)
+/// must be `key.origin`; the log's signature line must carry the key name
+/// `key.origin` and the key hash `key.log_id[..4]` (rekor-tiles
+/// `pkg/note/note.go`, `genConformantKeyHash`); its signature is the raw
+/// 64-byte Ed25519 signature over the body. Lines with another name or key
+/// hash (witness cosignatures) are not checked.
+///
+/// Not yet called by [`verify`]; the Rekor v2 entry path will use it.
+///
+/// # Errors
+///
+/// [`VerificationError::SetInvalid`] when the checkpoint has another size,
+/// root or origin, has no valid signature by the log, or is malformed.
+pub fn verify_v2_checkpoint(
+    checkpoint: &str,
+    tree_size: u64,
+    root: &[u8; 32],
+    key: &NoteLogKey,
+) -> Result<(), VerificationError> {
+    verify_checkpoint(checkpoint, tree_size, root, CheckpointKey::Note(key))
+}
+
+/// The log key a checkpoint must be signed by.
+#[derive(Clone, Copy)]
+enum CheckpointKey<'a> {
+    /// Rekor v1: ECDSA P-256, DER signatures, any key name.
+    Rekor(&'a VerifyingKey),
+    /// Rekor v2: Ed25519 signed note under the key's origin.
+    Note(&'a NoteLogKey),
+}
+
 /// Verifies a Rekor checkpoint: a signed note (`golang.org/x/mod/sumdb/note`)
 /// in the transparency-dev checkpoint format,
 ///
@@ -335,7 +367,8 @@ fn checkpoint_key_hint(key: &VerifyingKey) -> [u8; 4] {
 /// gives). At least one signature line must carry the hint of `key`, and
 /// every line that does must verify over the whole body including its final
 /// newline. Lines with another hint are other signers (witnesses) and are
-/// not checked. Any other shape is refused.
+/// not checked. Any other shape is refused. For a [`CheckpointKey::Note`]
+/// key see [`verify_v2_checkpoint`].
 ///
 /// Format: Rekor `pkg/util/checkpoint.go` (`UnmarshalCheckpoint`) and
 /// `pkg/util/signed_note.go` (`UnmarshalText`, `Verify`).
@@ -343,7 +376,7 @@ fn verify_checkpoint(
     checkpoint: &str,
     tree_size: u64,
     root: &[u8; 32],
-    key: &VerifyingKey,
+    key: CheckpointKey<'_>,
 ) -> Result<(), VerificationError> {
     let (body, signature_lines) = checkpoint
         .split_once("\n\n")
@@ -357,6 +390,7 @@ fn verify_checkpoint(
         return Err(VerificationError::SetInvalid);
     };
     if origin.is_empty()
+        || matches!(key, CheckpointKey::Note(note) if origin != note.origin)
         || size.is_empty()
         || !size.bytes().all(|byte| byte.is_ascii_digit())
         || size.parse::<u64>() != Ok(tree_size)
@@ -374,7 +408,13 @@ fn verify_checkpoint(
     // the blank-line split removed.
     let mut signed_body = body.to_owned();
     signed_body.push('\n');
-    let hint = checkpoint_key_hint(key);
+    let hint = match key {
+        CheckpointKey::Rekor(rekor) => checkpoint_key_hint(rekor),
+        CheckpointKey::Note(note) => {
+            let [a, b, c, d, ..] = note.log_id;
+            [a, b, c, d]
+        }
+    };
     let mut verified = false;
     for line in signature_lines.split_terminator('\n') {
         let mut fields = line
@@ -397,10 +437,25 @@ fn verify_checkpoint(
         if *line_hint != hint {
             continue;
         }
-        let signature =
-            Signature::from_der(signature_der).map_err(|_| VerificationError::SetInvalid)?;
-        key.verify(signed_body.as_bytes(), &signature)
-            .map_err(|_| VerificationError::SetInvalid)?;
+        match key {
+            CheckpointKey::Rekor(rekor) => {
+                let signature = Signature::from_der(signature_der)
+                    .map_err(|_| VerificationError::SetInvalid)?;
+                rekor
+                    .verify(signed_body.as_bytes(), &signature)
+                    .map_err(|_| VerificationError::SetInvalid)?;
+            }
+            CheckpointKey::Note(note) => {
+                // A signed note names its signer: a line with the log's
+                // key hash under another name is another signer's.
+                if name != note.origin {
+                    continue;
+                }
+                webpki::aws_lc_rs::ED25519
+                    .verify_signature(&note.key, signed_body.as_bytes(), signature_der)
+                    .map_err(|_| VerificationError::SetInvalid)?;
+            }
+        }
         verified = true;
     }
     if verified {
@@ -1533,8 +1588,191 @@ mod tests {
             &decoded.checkpoint,
             decoded.tree_size,
             &root,
-            &trust.rekor_key,
+            CheckpointKey::Rekor(&trust.rekor_key),
         )
+    }
+
+    /// The checkpoint, tree size and root hash of the staging Rekor v2 entry
+    /// in the sigstore-python asset, and the staging `log2025-alpha3` key
+    /// from the staging trust root (tests/fixtures/staging-rekor-v2).
+    fn staging_v2() -> (String, u64, [u8; 32], NoteLogKey) {
+        const ORIGIN: &str = "log2025-alpha3.rekor.sigstage.dev";
+        let bundle: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/staging-rekor-v2/a.dsse.staging-rekor-v2.txt.sigstore.json"
+        ))
+        .expect("bundle json");
+        let proof = bundle
+            .pointer("/verificationMaterial/tlogEntries/0/inclusionProof")
+            .expect("inclusionProof");
+        let checkpoint = proof["checkpoint"]["envelope"].as_str().expect("envelope");
+        let tree_size = proof["treeSize"]
+            .as_str()
+            .expect("treeSize")
+            .parse()
+            .expect("decimal");
+        let root: [u8; 32] = BASE64
+            .decode(proof["rootHash"].as_str().expect("rootHash"))
+            .expect("base64")
+            .try_into()
+            .expect("32 bytes");
+        let trusted: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/staging-rekor-v2/trusted_root.json"
+        ))
+        .expect("trusted root json");
+        let log = trusted["tlogs"]
+            .as_array()
+            .expect("tlogs")
+            .iter()
+            .find(|log| log["baseUrl"] == format!("https://{ORIGIN}"))
+            .expect("staging v2 log");
+        let spki = BASE64
+            .decode(log["publicKey"]["rawBytes"].as_str().expect("rawBytes"))
+            .expect("base64");
+        let key = NoteLogKey::from_spki(ORIGIN, &spki, (0, i64::MAX)).expect("Ed25519 key");
+        assert_eq!(
+            BASE64.encode(key.log_id),
+            log["logId"]["keyId"].as_str().expect("keyId"),
+            "the log id is the signed-note key hash of origin and key"
+        );
+        (checkpoint.to_owned(), tree_size, root, key)
+    }
+
+    /// `checkpoint` with its signature lines replaced by `lines`.
+    fn with_signature_lines(checkpoint: &str, lines: &[&str]) -> String {
+        let (body, _) = checkpoint.split_once("\n\n").expect("note body");
+        let mut out = format!("{body}\n\n");
+        for line in lines {
+            out.push_str(line);
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn a_real_staging_v2_checkpoint_verifies() {
+        let (checkpoint, size, root, key) = staging_v2();
+        assert_eq!(verify_v2_checkpoint(&checkpoint, size, &root, &key), Ok(()));
+    }
+
+    #[test]
+    fn a_real_staging_v2_checkpoint_is_bound_to_its_size_and_root() {
+        let (checkpoint, size, root, key) = staging_v2();
+        assert_eq!(
+            verify_v2_checkpoint(&checkpoint, size + 1, &root, &key),
+            Err(VerificationError::SetInvalid)
+        );
+        let mut other = root;
+        other[0] ^= 1;
+        assert_eq!(
+            verify_v2_checkpoint(&checkpoint, size, &other, &key),
+            Err(VerificationError::SetInvalid)
+        );
+    }
+
+    #[test]
+    fn a_real_staging_v2_checkpoint_with_a_flipped_signature_bit_is_refused() {
+        let (checkpoint, size, root, key) = staging_v2();
+        let (_, signatures) = checkpoint.split_once("\n\n").expect("note body");
+        let lines: Vec<&str> = signatures.lines().collect();
+        let (name, encoded) = lines[0]
+            .strip_prefix(NOTE_SIGNATURE_PREFIX)
+            .and_then(|line| line.split_once(' '))
+            .expect("log signature line");
+        assert_eq!(name, key.origin);
+        let mut raw = BASE64.decode(encoded).expect("base64");
+        *raw.last_mut().expect("signature bytes") ^= 0x01;
+        let flipped = format!("{NOTE_SIGNATURE_PREFIX}{name} {}", BASE64.encode(raw));
+        let mut mangled = vec![flipped.as_str()];
+        mangled.extend_from_slice(&lines[1..]);
+        assert_eq!(
+            verify_v2_checkpoint(
+                &with_signature_lines(&checkpoint, &mangled),
+                size,
+                &root,
+                &key
+            ),
+            Err(VerificationError::SetInvalid)
+        );
+    }
+
+    #[test]
+    fn a_witness_only_v2_checkpoint_is_refused() {
+        // The real witness cosignatures stay; the log's own line is gone.
+        let (checkpoint, size, root, key) = staging_v2();
+        let (_, signatures) = checkpoint.split_once("\n\n").expect("note body");
+        let witnesses: Vec<&str> = signatures
+            .lines()
+            .filter(|line| !line.starts_with(&format!("{NOTE_SIGNATURE_PREFIX}{} ", key.origin)))
+            .collect();
+        assert_eq!(witnesses.len(), 3, "the asset carries three witness lines");
+        assert_eq!(
+            verify_v2_checkpoint(
+                &with_signature_lines(&checkpoint, &witnesses),
+                size,
+                &root,
+                &key
+            ),
+            Err(VerificationError::SetInvalid)
+        );
+    }
+
+    #[test]
+    fn a_v2_checkpoint_without_any_signature_is_refused() {
+        let (checkpoint, size, root, key) = staging_v2();
+        assert_eq!(
+            verify_v2_checkpoint(&with_signature_lines(&checkpoint, &[]), size, &root, &key),
+            Err(VerificationError::SetInvalid)
+        );
+    }
+
+    /// A test Ed25519 log for `origin`: its key, and a signer that makes
+    /// a signature line named `name` over a note body.
+    fn test_note_log(origin: &str) -> (NoteLogKey, impl Fn(&str, &str) -> String) {
+        use rcgen::{KeyPair, PublicKeyData as _, SigningKey as _};
+        let pair = KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("Ed25519 key");
+        let key = NoteLogKey::from_spki(origin, &pair.subject_public_key_info(), (0, i64::MAX))
+            .expect("Ed25519 SPKI");
+        let hint = key.log_id;
+        let signer = move |name: &str, body: &str| {
+            let mut raw = hint[..4].to_vec();
+            raw.extend_from_slice(&pair.sign(body.as_bytes()).expect("sign"));
+            format!("{NOTE_SIGNATURE_PREFIX}{name} {}", BASE64.encode(raw))
+        };
+        (key, signer)
+    }
+
+    #[test]
+    fn a_v2_checkpoint_must_start_with_the_log_origin() {
+        let (key, sign) = test_note_log("log.example");
+        let root = [7_u8; 32];
+        let note = |origin: &str| {
+            let body = format!("{origin}\n5\n{}\n", BASE64.encode(root));
+            format!("{body}\n{}\n", sign("log.example", &body))
+        };
+        // The control: the same signer and shape verifies under its origin.
+        assert_eq!(
+            verify_v2_checkpoint(&note("log.example"), 5, &root, &key),
+            Ok(())
+        );
+        // Validly signed by the log key, but for another origin.
+        assert_eq!(
+            verify_v2_checkpoint(&note("other.example"), 5, &root, &key),
+            Err(VerificationError::SetInvalid)
+        );
+    }
+
+    #[test]
+    fn a_v2_signature_line_must_carry_the_log_name() {
+        // Right key hash and a valid signature, but another key name: the
+        // line is not the log's, so no log signature is left.
+        let (key, sign) = test_note_log("log.example");
+        let root = [7_u8; 32];
+        let body = format!("log.example\n5\n{}\n", BASE64.encode(root));
+        let note = format!("{body}\n{}\n", sign("witness.example", &body));
+        assert_eq!(
+            verify_v2_checkpoint(&note, 5, &root, &key),
+            Err(VerificationError::SetInvalid)
+        );
     }
 
     #[test]
