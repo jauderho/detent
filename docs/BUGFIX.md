@@ -408,6 +408,11 @@ deferred by the owner.
     verify-bundle` (hidden, `update` feature) runs the device verifier on a
     binary and its bundle; the publish job calls it from the x86_64 musl
     build after `cosign verify-blob-attestation`. Unproven until the next tag.
+15. **Flaky coverage merge:** run 37590569498's coverage job failed once with
+    "invalid instrumentation profile data (file header is corrupt)" for one
+    `detent-*.profraw` after all tests passed (a forked test process killed
+    mid-write, likely); the re-run passed. Make the merge skip or the forking
+    tests not write a profile.
 
 ### Track F — Phase 12 / M4 (v1.0)
 
