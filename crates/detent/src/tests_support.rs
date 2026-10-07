@@ -295,6 +295,7 @@ pub fn applied_without_commit() -> OpOutcome {
         service: None,
         commit: None,
         checks: Vec::new(),
+        mounts: None,
     }))
 }
 
@@ -345,6 +346,7 @@ pub fn every_outcome() -> Vec<OpOutcome> {
                 rollback_targets: 1,
             }),
             checks: Vec::new(),
+            mounts: None,
         })),
         OpOutcome::CommitConfirmed {
             commit_id: CommitId(1),

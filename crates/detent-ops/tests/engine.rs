@@ -22,13 +22,14 @@ use std::thread;
 use std::time::Duration;
 
 use detent_core::descriptor::{
-    ArgTemplate, CheckExpectation, ExternalCheck, HostProfile, InitSystem, ModuleDescriptor, Os,
-    Owner, PathSpec, ServiceAction as CoreServiceAction, ServiceBinding, Target, TargetKind,
-    UnitNames, Upstream, ValidationCtx,
+    AddedMounts, ArgTemplate, CheckExpectation, ExternalCheck, HostProfile, InitSystem,
+    ModuleDescriptor, MountUnit, Os, Owner, PathSpec, ServiceAction as CoreServiceAction,
+    ServiceBinding, Target, TargetKind, UnitNames, Upstream, ValidationCtx,
 };
 use detent_core::diag::{Diagnostic, Diagnostics, MessageId, Severity};
 use detent_core::module::{DynError, DynModule, ModelError, ParseError};
 use detent_ops::audit::{AuditError, AuditRecord, AuditSink};
+use detent_ops::report::{MountReport, MountReportState, MountsReport};
 use detent_ops::{
     AllowAll, AuditQuery, AuditResult, Authz, CaptureAudit, CertFrontEnd, CertReport, Denied,
     FileAudit, Identity, IdentityKind, OpKind, OpOutcome, Operation, OpsEngine, OpsError,
@@ -41,7 +42,8 @@ use detent_platform::privsep::monitor::{
     CheckRunner, ExitReason, HookError, Hooks, Monitor, MonitorError, ServiceControl,
 };
 use detent_platform::privsep::proto::{
-    BackupId, CheckId, CheckOutcome, CommitId, ProtoError, Request, Response, ServiceOutcome,
+    BackupId, CheckId, CheckOutcome, CommitId, MountOutcome, MountState, ProtoError, Request,
+    Response, ServiceOutcome, TargetId,
 };
 use detent_platform::privsep::transport::Channel;
 use detent_platform::privsep::worker::{Client, ClientError};
@@ -312,10 +314,13 @@ impl ServiceControl for OkServices {
 static OK_SERVICES: OkServices = OkServices;
 
 /// Answers service actions as [`OkServices`] does, and counts unit-file
-/// reloads; with `fail_reload` every reload fails.
+/// reloads and mount starts; with `fail_reload` every reload fails, with
+/// `fail_mounts` every mount start.
 struct ReloadingServices {
     reloads: AtomicUsize,
     fail_reload: bool,
+    mount_starts: AtomicUsize,
+    fail_mounts: bool,
 }
 
 impl ServiceControl for ReloadingServices {
@@ -335,6 +340,37 @@ impl ServiceControl for ReloadingServices {
             Ok("daemon-reload succeeded".to_owned())
         }
     }
+
+    fn start_added_mounts(&self, _target: TargetId) -> Result<Vec<MountOutcome>, HookError> {
+        self.mount_starts.fetch_add(1, Ordering::SeqCst);
+        if self.fail_mounts {
+            return Err(HookError::Unavailable(
+                "mount units need systemd".to_owned(),
+            ));
+        }
+        Ok(vec![MountOutcome {
+            mountpoint: "/srv".to_owned(),
+            unit: "srv.mount".to_owned(),
+            state: MountState::Mounted,
+            detail: String::new(),
+        }])
+    }
+
+    fn stop_started_mounts(&self) -> Result<Vec<MountOutcome>, HookError> {
+        Ok(Vec::new())
+    }
+
+    fn forget_started_mounts(&self) -> Result<(), HookError> {
+        Ok(())
+    }
+}
+
+/// The units the harness's mounting module lists for any change.
+fn srv_unit(_previous: &str, _current: &str) -> Vec<MountUnit> {
+    vec![MountUnit {
+        mountpoint: "/srv".to_owned(),
+        unit: "srv.mount".to_owned(),
+    }]
 }
 
 /// A [`ServiceManager`] that reports a fixed status and refuses mutation, so
@@ -459,6 +495,12 @@ struct Setup {
     fail_reload: bool,
     /// Set `reload_unit_files` on the module, as `mounts` does.
     reload: bool,
+    /// Declare `added_mounts` on the module, as `mounts` does.
+    mounts: bool,
+    /// `[mounts] activate_new_entries`.
+    activate: bool,
+    /// With `hooks`, fail every mount start.
+    fail_mounts: bool,
 }
 
 /// Which [`ServiceManager`] the engine is built with.
@@ -517,6 +559,11 @@ impl Harness {
         self.services.reloads.load(Ordering::SeqCst)
     }
 
+    /// How often the monitor asked the runner hook to start mounts.
+    fn mount_starts(&self) -> usize {
+        self.services.mount_starts.load(Ordering::SeqCst)
+    }
+
     /// Shut the monitor down and confirm it exited cleanly.
     fn finish(mut self) -> TestResult {
         self.engine.shutdown()?;
@@ -528,20 +575,25 @@ impl Harness {
     }
 }
 
+/// The module under test, shaped by `setup`.
+fn harness_descriptor(target: &Path, setup: Setup) -> &'static ModuleDescriptor {
+    let descriptor = build_descriptor("fake", target, setup.shape);
+    leak(ModuleDescriptor {
+        reload_unit_files: setup.reload,
+        added_mounts: setup.mounts.then_some(srv_unit as AddedMounts),
+        ..*descriptor
+    })
+}
+
 fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::Error>> {
     let dir = TempDir::new()?;
     let root = dir.path().to_path_buf();
     let target = root.join("target.conf");
     std::fs::write(&target, initial)?;
 
-    let mut allow_descriptor = build_descriptor("fake", &target, setup.shape);
-    if setup.reload {
-        allow_descriptor = leak(ModuleDescriptor {
-            reload_unit_files: true,
-            ..*allow_descriptor
-        });
-    }
+    let allow_descriptor = harness_descriptor(&target, setup);
     let mut config = Config::with_state_root(root.join("state"));
+    config.activate_mounts = setup.activate;
     let staging_dir = root.join("monitor-staging");
     if setup.disable_backups {
         config.keep_backups = 0;
@@ -564,6 +616,8 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
     let monitor_services: &'static ReloadingServices = leak(ReloadingServices {
         reloads: AtomicUsize::new(0),
         fail_reload: setup.fail_reload,
+        mount_starts: AtomicUsize::new(0),
+        fail_mounts: setup.fail_mounts,
     });
     let handle = thread::spawn(move || {
         let mut channel = monitor_end;
@@ -2138,6 +2192,118 @@ fn a_reloading_commit_confirm_apply_reloads_and_its_rollback_reloads_again() -> 
     })?;
     assert_eq!(fx.contents()?, "v1\n");
     assert_eq!(fx.reloads(), 2);
+    fx.finish()
+}
+
+/// A harness whose module behaves as `mounts`: commit-confirm, unit-file
+/// reload, `added_mounts`.
+fn mounting(activate: bool, fail_mounts: bool) -> Result<Harness, Box<dyn std::error::Error>> {
+    harness(
+        b"v1\n",
+        Setup {
+            shape: Shape {
+                commit_confirm: true,
+                ..Shape::default()
+            },
+            hooks: true,
+            reload: true,
+            mounts: true,
+            activate,
+            fail_mounts,
+            ..Setup::default()
+        },
+    )
+}
+
+fn apply_v2(
+    fx: &mut Harness,
+) -> Result<Box<detent_ops::report::ApplyReport>, Box<dyn std::error::Error>> {
+    let outcome = fx.run(Operation::Apply {
+        id: MODULE.to_owned(),
+        model: json!({"text": "v2\n"}),
+        expected_hash: None,
+        service_action: None,
+        confirm: None,
+    })?;
+    let OpOutcome::Applied(report) = outcome else {
+        return Err("Apply must answer with an apply report".into());
+    };
+    Ok(report)
+}
+
+#[test]
+fn a_mounting_apply_reports_the_units_it_started() -> TestResult {
+    let mut fx = mounting(true, false)?;
+    let report = apply_v2(&mut fx)?;
+    assert_eq!(
+        report.mounts,
+        Some(MountsReport {
+            activated: true,
+            units: vec![MountReport {
+                mountpoint: "/srv".to_owned(),
+                unit: "srv.mount".to_owned(),
+                state: MountReportState::Mounted,
+                detail: String::new(),
+            }],
+            error: None,
+        })
+    );
+    assert_eq!(fx.mount_starts(), 1);
+    assert_eq!(fx.reloads(), 1);
+    assert!(fx.engine.pending_commit()?.is_some());
+    fx.finish()
+}
+
+#[test]
+fn a_mounting_apply_with_activation_off_says_so_and_starts_nothing() -> TestResult {
+    let mut fx = mounting(false, false)?;
+    let report = apply_v2(&mut fx)?;
+    assert_eq!(
+        report.mounts,
+        Some(MountsReport {
+            activated: false,
+            units: Vec::new(),
+            error: None,
+        })
+    );
+    assert_eq!(fx.mount_starts(), 0);
+    fx.finish()
+}
+
+/// Owner decision (D1): a mount that cannot start is reported; the write and
+/// the commit-confirm window stay.
+#[test]
+fn a_failed_mount_start_is_reported_and_the_commit_stays_pending() -> TestResult {
+    let mut fx = mounting(true, true)?;
+    let report = apply_v2(&mut fx)?;
+    let mounts = report.mounts.ok_or("a mounts report")?;
+    assert!(mounts.activated);
+    assert!(mounts.units.is_empty());
+    assert!(
+        mounts
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("mount units need systemd")),
+        "{mounts:?}"
+    );
+    assert_eq!(fx.contents()?, "v2\n");
+    assert!(fx.engine.pending_commit()?.is_some());
+    fx.finish()
+}
+
+#[test]
+fn an_apply_of_a_module_without_mounts_has_no_mounts_report() -> TestResult {
+    let mut fx = harness(
+        b"v1\n",
+        Setup {
+            hooks: true,
+            activate: true,
+            ..Setup::default()
+        },
+    )?;
+    let report = apply_v2(&mut fx)?;
+    assert_eq!(report.mounts, None);
+    assert_eq!(fx.mount_starts(), 0);
     fx.finish()
 }
 

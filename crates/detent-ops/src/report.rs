@@ -13,7 +13,7 @@ use detent_core::descriptor::{HostProfile, ModuleDescriptor};
 use detent_core::diag::Diagnostics;
 use detent_platform::fs::atomic::Sha256Digest;
 use detent_platform::host::{Detected, NetworkBackend, ResolverBackend};
-use detent_platform::privsep::proto::{BackupInfo, CommitId, TargetId};
+use detent_platform::privsep::proto::{BackupInfo, CommitId, MountOutcome, MountState, TargetId};
 use detent_platform::service::ServiceStatus;
 use serde::Serialize;
 use serde_json::Value;
@@ -157,6 +157,84 @@ pub struct ApplyReport {
     /// unless every one ran and passed. Empty when the module declares none
     /// or the apply changed nothing.
     pub checks: Vec<CheckReport>,
+    /// What happened to the mount units of the entries the apply added, for
+    /// a module that declares mounts (`mounts`). `None` for every other
+    /// module, and when the apply changed nothing.
+    pub mounts: Option<MountsReport>,
+}
+
+/// What a `mounts` apply did with the entries it added or changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct MountsReport {
+    /// Whether `[mounts] activate_new_entries` is on. When false nothing
+    /// was started: the new table takes effect at the next boot or mount.
+    pub activated: bool,
+    /// One entry per unit of an added or changed entry.
+    pub units: Vec<MountReport>,
+    /// Why no unit could be started at all, for example on a host whose
+    /// init system is not systemd. The write and the commit-confirm window
+    /// stay.
+    pub error: Option<String>,
+}
+
+/// One mount unit and what the apply did with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct MountReport {
+    /// The fstab entry's mount point.
+    pub mountpoint: String,
+    /// The systemd unit.
+    pub unit: String,
+    /// What happened.
+    pub state: MountReportState,
+    /// The init system's message for a failure, or empty.
+    pub detail: String,
+}
+
+/// What happened to one mount unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub enum MountReportState {
+    /// Started, and mounted now.
+    Mounted,
+    /// Already mounted before the apply; left alone.
+    AlreadyMounted,
+    /// Started; still pending when the wait ended (a network share). The
+    /// job goes on in systemd.
+    Pending,
+    /// The start failed.
+    Failed,
+    /// Refused: `/` or an ancestor of `/etc`, `/usr`, `/boot`, the state
+    /// root or the binary's directory.
+    Protected,
+    /// Stopped by a rollback.
+    Stopped,
+}
+
+impl From<MountState> for MountReportState {
+    fn from(state: MountState) -> Self {
+        match state {
+            MountState::Mounted => Self::Mounted,
+            MountState::AlreadyMounted => Self::AlreadyMounted,
+            MountState::Pending => Self::Pending,
+            MountState::Failed => Self::Failed,
+            MountState::Protected => Self::Protected,
+            MountState::Stopped => Self::Stopped,
+        }
+    }
+}
+
+impl From<MountOutcome> for MountReport {
+    fn from(outcome: MountOutcome) -> Self {
+        Self {
+            mountpoint: outcome.mountpoint,
+            unit: outcome.unit,
+            state: outcome.state.into(),
+            detail: outcome.detail,
+        }
+    }
 }
 
 /// What was detected about this host.

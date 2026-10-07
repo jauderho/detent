@@ -51,8 +51,8 @@ use crate::error::OpsError;
 use crate::identity::Identity;
 use crate::op::{DEFAULT_CONFIRM, Operation, ServiceCommand};
 use crate::report::{
-    AffectedService, ApplyReport, CertReport, CheckReport, HostReport, ModuleView, OpOutcome,
-    PendingCommit, PlanReport, ServiceReport,
+    AffectedService, ApplyReport, CertReport, CheckReport, HostReport, ModuleView, MountReport,
+    MountsReport, OpOutcome, PendingCommit, PlanReport, ServiceReport,
 };
 
 /// The certificate answers only a front end can give.
@@ -673,7 +673,11 @@ impl OpsEngine {
         //    asks for it (mounts), before any service action.
         self.reload_or_discard(reload_module, commit.as_ref())?;
 
-        // 7. Act on the service. Step 2 established that a binding exists
+        // 7. Start the mount units of the entries the apply added (mounts).
+        //    A failure is reported, never fatal (D1).
+        let mounts = self.start_mounts(descriptor, wiring.target);
+
+        // 8. Act on the service. Step 2 established that a binding exists
         //    whenever an action was asked for.
         let service = match (service_action, wiring.binding.as_ref()) {
             (Some(action), Some(&(binding, ref affected))) => {
@@ -696,6 +700,36 @@ impl OpsEngine {
             service,
             commit,
             checks,
+            mounts,
+        })
+    }
+
+    /// For a module that declares mounts, ask the monitor to start the mount
+    /// units of the entries an apply added to `target`, and report what
+    /// happened; `None` for every other module. Every error goes into the
+    /// report: the write and the commit-confirm window stay.
+    fn start_mounts(
+        &mut self,
+        descriptor: &ModuleDescriptor,
+        target: TargetId,
+    ) -> Option<MountsReport> {
+        descriptor.added_mounts?;
+        Some(match self.client.mount(target) {
+            Ok((activated, units)) => MountsReport {
+                activated,
+                units: units.into_iter().map(MountReport::from).collect(),
+                error: None,
+            },
+            Err(err) => MountsReport {
+                activated: true,
+                units: Vec::new(),
+                error: Some(match err {
+                    ClientError::Remote(
+                        ProtoError::Unavailable(message) | ProtoError::Io(message),
+                    ) => message,
+                    other => other.to_string(),
+                }),
+            },
         })
     }
 
@@ -1020,6 +1054,7 @@ fn unchanged_report(module: &str, path: String, digest: Sha256Digest) -> ApplyRe
         service: None,
         commit: None,
         checks: Vec::new(),
+        mounts: None,
     }
 }
 

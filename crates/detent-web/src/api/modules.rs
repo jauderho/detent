@@ -584,6 +584,7 @@ mod tests {
             service: None,
             commit: None,
             checks: Vec::new(),
+            mounts: None,
         };
         assert!(render_applied(OpOutcome::Applied(Box::new(report))).is_ok());
         assert!(render_applied(wrong_outcome()).is_err());

@@ -445,6 +445,7 @@ export interface components {
             created: boolean;
             /** @description The module. */
             module: string;
+            mounts?: null | components["schemas"]["MountsReport"];
             /** @description Digest now on disk. */
             new_hash: components["schemas"]["Sha256Digest"];
             /** @description The target that was written. */
@@ -842,6 +843,38 @@ export interface components {
             model?: Record<string, never> | null;
             /** @description The JSON Schema of its model, with `x-detent` UI hints. */
             schema: Record<string, never>;
+        };
+        /** @description One mount unit and what the apply did with it. */
+        MountReport: {
+            /** @description The init system's message for a failure, or empty. */
+            detail: string;
+            /** @description The fstab entry's mount point. */
+            mountpoint: string;
+            /** @description What happened. */
+            state: components["schemas"]["MountReportState"];
+            /** @description The systemd unit. */
+            unit: string;
+        };
+        /**
+         * @description What happened to one mount unit.
+         * @enum {string}
+         */
+        MountReportState: "mounted" | "already_mounted" | "pending" | "failed" | "protected" | "stopped";
+        /** @description What a `mounts` apply did with the entries it added or changed. */
+        MountsReport: {
+            /**
+             * @description Whether `[mounts] activate_new_entries` is on. When false nothing
+             *     was started: the new table takes effect at the next boot or mount.
+             */
+            activated: boolean;
+            /**
+             * @description Why no unit could be started at all, for example on a host whose
+             *     init system is not systemd. The write and the commit-confirm window
+             *     stay.
+             */
+            error?: string | null;
+            /** @description One entry per unit of an added or changed entry. */
+            units: components["schemas"]["MountReport"][];
         };
         /**
          * @description The kind of an [`Operation`], with none of its payload.
