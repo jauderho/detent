@@ -14,7 +14,8 @@ use detent_core::descriptor::{ServiceAction, UnitNames};
 
 use super::exec::{self, ACTION_TIMEOUT, ProcessRunner, RealProcessRunner, STATUS_TIMEOUT};
 use super::{
-    ActionOutcome, AltCache, ServiceError, ServiceManager, ServiceStatus, State, validate_unit_name,
+    ActionOutcome, AltCache, MOUNT_WAIT, MountUnitState, ServiceError, ServiceManager,
+    ServiceStatus, State, validate_mount_unit_name, validate_unit_name,
 };
 
 /// Absolute paths `systemctl` may live at, most common first.
@@ -24,6 +25,9 @@ const SYSTEMCTL_CANDIDATES: &[&str] = &["/usr/bin/systemctl", "/bin/systemctl"];
 /// literal: no user input ever reaches this argv position.
 const SHOW_PROPERTIES: &str =
     "--property=LoadState,ActiveState,SubState,UnitFileState,ActiveEnterTimestamp";
+
+/// Properties `systemctl show` reports for a mount unit. A fixed literal.
+const MOUNT_PROPERTIES: &str = "--property=ActiveState,Result";
 
 /// Drives systemd via the `systemctl` binary. See the module docs at
 /// [`crate::service`] for why this uses `systemctl` rather than `zbus`.
@@ -110,6 +114,98 @@ impl SystemdManager {
             }
         }
         Err(ServiceError::NoKnownUnit { tried })
+    }
+}
+
+impl SystemdManager {
+    /// Runs `systemctl <verb> -- <units>` once, with `timeout`. `--` keeps
+    /// a unit name from ever being read as an option.
+    fn run_on_units(
+        &self,
+        program: &'static str,
+        verb: &str,
+        units: &[String],
+        timeout: std::time::Duration,
+    ) -> Result<super::exec::ProcessOutput, ServiceError> {
+        let mut args = vec![verb.to_owned(), "--".to_owned()];
+        args.extend(units.iter().cloned());
+        self.runner
+            .run(program, &args, timeout)
+            .map_err(|err| ServiceError::Failed(err.to_string()))
+    }
+
+    /// The `ActiveState` of `unit`.
+    fn mount_unit_state(&self, program: &'static str, unit: &str) -> Result<State, ServiceError> {
+        let args = vec![
+            "show".to_owned(),
+            MOUNT_PROPERTIES.to_owned(),
+            "--".to_owned(),
+            unit.to_owned(),
+        ];
+        let output = self
+            .runner
+            .run(program, &args, STATUS_TIMEOUT)
+            .map_err(|err| ServiceError::Failed(err.to_string()))?;
+        if output.timed_out {
+            return Err(ServiceError::Failed(format!(
+                "systemctl show {unit} timed out"
+            )));
+        }
+        let props = parse_key_values(&output.stdout);
+        Ok(parse_active_state(
+            props.get("ActiveState").map(String::as_str),
+        ))
+    }
+
+    /// The state of each unit in `units`, read with `systemctl show`.
+    /// `judge` maps each read state to the reported state and detail.
+    fn read_mount_states(
+        &self,
+        program: &'static str,
+        units: &[String],
+        judge: impl Fn(State) -> (State, String),
+    ) -> Result<Vec<MountUnitState>, ServiceError> {
+        units
+            .iter()
+            .map(|unit| {
+                let (state, detail) = judge(self.mount_unit_state(program, unit)?);
+                Ok(MountUnitState {
+                    unit: unit.clone(),
+                    state,
+                    detail,
+                })
+            })
+            .collect()
+    }
+
+    /// The `systemctl` program, once every name in `units` passed
+    /// [`validate_mount_unit_name`].
+    fn mount_program(&self, units: &[String]) -> Result<&'static str, ServiceError> {
+        for unit in units {
+            validate_mount_unit_name(unit)?;
+        }
+        self.program()
+    }
+}
+
+/// A short detail for a `systemctl` call that did not succeed within
+/// `timeout`.
+fn failure_detail(
+    verb: &str,
+    output: &super::exec::ProcessOutput,
+    timeout: std::time::Duration,
+) -> String {
+    if output.timed_out {
+        format!(
+            "systemctl {verb} timed out after {}s; the job goes on in systemd",
+            timeout.as_secs()
+        )
+    } else {
+        format!(
+            "systemctl {verb} exited {:?}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
     }
 }
 
@@ -205,6 +301,44 @@ impl ServiceManager for SystemdManager {
                 String::from_utf8_lossy(&output.stderr)
             )))
         }
+    }
+
+    fn mount_unit_states(&self, units: &[String]) -> Result<Vec<MountUnitState>, ServiceError> {
+        let program = self.mount_program(units)?;
+        self.read_mount_states(program, units, |state| (state, String::new()))
+    }
+
+    fn start_mount_units(&self, units: &[String]) -> Result<Vec<MountUnitState>, ServiceError> {
+        let program = self.mount_program(units)?;
+        let output = self.run_on_units(program, "start", units, MOUNT_WAIT)?;
+        let succeeded = !output.timed_out && output.status == Some(0);
+        let detail = if succeeded {
+            String::new()
+        } else {
+            failure_detail("start", &output, MOUNT_WAIT)
+        };
+        self.read_mount_states(program, units, |state| match state {
+            State::Active => (State::Active, String::new()),
+            // A job that has not finished yet goes on in systemd.
+            State::Inactive | State::Activating if output.timed_out => {
+                (State::Activating, detail.clone())
+            }
+            // The start job ended and the unit is not mounted: it failed,
+            // or a dependency (the device) did.
+            State::Inactive | State::Failed => (State::Failed, detail.clone()),
+            other => (other, detail.clone()),
+        })
+    }
+
+    fn stop_mount_units(&self, units: &[String]) -> Result<Vec<MountUnitState>, ServiceError> {
+        let program = self.mount_program(units)?;
+        let output = self.run_on_units(program, "stop", units, ACTION_TIMEOUT)?;
+        let detail = if !output.timed_out && output.status == Some(0) {
+            String::new()
+        } else {
+            failure_detail("stop", &output, ACTION_TIMEOUT)
+        };
+        self.read_mount_states(program, units, |state| (state, detail.clone()))
     }
 }
 

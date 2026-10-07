@@ -84,6 +84,48 @@ pub fn validate_unit_name(name: &str) -> Result<(), ServiceError> {
     }
 }
 
+/// How long [`ServiceManager::start_mount_units`] waits for the start jobs.
+/// A job still running then (an unreachable network share) goes on in the
+/// init system; its unit is reported as [`State::Activating`].
+pub const MOUNT_WAIT: std::time::Duration = exec::ACTION_TIMEOUT;
+
+/// Validates a mount unit name before it is ever used as a process
+/// argument: it ends in `.mount` or `.automount`, does not start with `-`,
+/// and holds only what `systemd-escape --path` writes (`[A-Za-z0-9:_.\-]`).
+///
+/// # Errors
+///
+/// [`ServiceError::InvalidUnitName`] when `name` fails the check.
+pub fn validate_mount_unit_name(name: &str) -> Result<(), ServiceError> {
+    let stem = name
+        .strip_suffix(".mount")
+        .or_else(|| name.strip_suffix(".automount"));
+    let valid = name.len() <= MAX_UNIT_NAME_LEN
+        && stem.is_some_and(|stem| !stem.is_empty() && !stem.starts_with('-'))
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '.' | '\\' | '-'));
+    if valid {
+        Ok(())
+    } else {
+        Err(ServiceError::InvalidUnitName(name.to_owned()))
+    }
+}
+
+/// One mount unit and its state, as a [`ServiceManager`] found or left it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountUnitState {
+    /// The unit name.
+    pub unit: String,
+    /// Its state after the call.
+    pub state: State,
+    /// A short detail: the init system's message for a failure, or empty.
+    pub detail: String,
+}
+
+/// What every backend but systemd answers for mount units.
+const MOUNT_UNITS_NEED_SYSTEMD: &str = "mount units need systemd; on this init system the new fstab entries take effect at the next mount or boot";
+
 /// The run state of a service, as reported by [`ServiceManager::status`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -231,6 +273,45 @@ pub trait ServiceManager: Send + Sync {
     /// out). Unlike [`ServiceManager::act`], a failure is an error, not an
     /// outcome: there is no unit whose state could be reported instead.
     fn reload_unit_files(&self) -> Result<String, ServiceError>;
+
+    /// The state of each mount unit in `units`, in order. Acts on nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`ServiceError::InvalidUnitName`] before any process runs when a name
+    /// fails [`validate_mount_unit_name`]; [`ServiceError::Unsupported`] on
+    /// every backend but systemd; [`ServiceError::Unavailable`] and
+    /// [`ServiceError::Failed`] as for [`ServiceManager::status`].
+    fn mount_unit_states(&self, _units: &[String]) -> Result<Vec<MountUnitState>, ServiceError> {
+        Err(ServiceError::Unsupported(
+            MOUNT_UNITS_NEED_SYSTEMD.to_owned(),
+        ))
+    }
+
+    /// Starts the mount units in `units`, waits at most [`MOUNT_WAIT`] for
+    /// their jobs, and reports each unit's state then: [`State::Active`]
+    /// (mounted), [`State::Activating`] (still pending), or
+    /// [`State::Failed`] with the init system's message.
+    ///
+    /// # Errors
+    ///
+    /// As [`ServiceManager::mount_unit_states`].
+    fn start_mount_units(&self, _units: &[String]) -> Result<Vec<MountUnitState>, ServiceError> {
+        Err(ServiceError::Unsupported(
+            MOUNT_UNITS_NEED_SYSTEMD.to_owned(),
+        ))
+    }
+
+    /// Stops the mount units in `units` and reports each unit's state then.
+    ///
+    /// # Errors
+    ///
+    /// As [`ServiceManager::mount_unit_states`].
+    fn stop_mount_units(&self, _units: &[String]) -> Result<Vec<MountUnitState>, ServiceError> {
+        Err(ServiceError::Unsupported(
+            MOUNT_UNITS_NEED_SYSTEMD.to_owned(),
+        ))
+    }
 }
 
 /// A [`ServiceManager`] for hosts with no supported init system.

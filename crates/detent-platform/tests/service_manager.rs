@@ -15,9 +15,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use detent_core::descriptor::{ServiceAction, UnitNames};
-use detent_platform::service::exec::{ACTION_TIMEOUT, ProcessError, ProcessOutput, ProcessRunner};
+use detent_platform::service::exec::{
+    ACTION_TIMEOUT, ProcessError, ProcessOutput, ProcessRunner, STATUS_TIMEOUT,
+};
 use detent_platform::service::{
-    LaunchdManager, OpenRcManager, ServiceError, ServiceManager, State, SystemdManager,
+    LaunchdManager, MOUNT_WAIT, MountUnitState, OpenRcManager, ServiceError, ServiceManager, State,
+    SystemdManager,
 };
 
 /// Error type for tests; any `?`-able error is acceptable.
@@ -300,6 +303,208 @@ fn other_init_systems_have_no_unit_files_to_reload_and_run_nothing() -> TestResu
     assert!(launchd.reload_unit_files()?.contains("launchd"));
     assert!(fake.calls().is_empty());
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Mount units
+// ---------------------------------------------------------------------------
+
+/// The argv of `systemctl show` for one mount unit.
+fn show_argv(unit: &str) -> Vec<String> {
+    vec![
+        "show".to_owned(),
+        "--property=ActiveState,Result".to_owned(),
+        "--".to_owned(),
+        unit.to_owned(),
+    ]
+}
+
+fn units(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| (*name).to_owned()).collect()
+}
+
+fn states(found: &[MountUnitState]) -> Vec<(String, State)> {
+    found
+        .iter()
+        .map(|unit| (unit.unit.clone(), unit.state))
+        .collect()
+}
+
+#[test]
+fn systemd_starts_mount_units_in_one_call_then_reads_each_state() -> TestResult {
+    let fake = Arc::new(
+        FakeRunner::new()
+            .existing(&["/usr/bin/systemctl"])
+            .respond(output_fail(1)) // one start job failed
+            .respond(output_ok("ActiveState=active\nResult=success\n"))
+            .respond(output_ok("ActiveState=failed\nResult=exit-code\n"))
+            .respond(output_ok("ActiveState=inactive\nResult=success\n")),
+    );
+    let mgr = SystemdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
+    let names = units(&["srv-a.mount", "srv-b.mount", "mnt-my\\x2dnas.automount"]);
+    let found = mgr.start_mount_units(&names)?;
+    assert_eq!(
+        states(&found),
+        vec![
+            ("srv-a.mount".to_owned(), State::Active),
+            ("srv-b.mount".to_owned(), State::Failed),
+            ("mnt-my\\x2dnas.automount".to_owned(), State::Failed),
+        ]
+    );
+    assert!(
+        found
+            .iter()
+            .skip(1)
+            .all(|unit| unit.detail.contains("boom"))
+    );
+    let mut start = vec!["start".to_owned(), "--".to_owned()];
+    start.extend(names.iter().cloned());
+    assert_eq!(
+        fake.calls(),
+        vec![
+            ("/usr/bin/systemctl".to_owned(), start, MOUNT_WAIT),
+            (
+                "/usr/bin/systemctl".to_owned(),
+                show_argv("srv-a.mount"),
+                STATUS_TIMEOUT
+            ),
+            (
+                "/usr/bin/systemctl".to_owned(),
+                show_argv("srv-b.mount"),
+                STATUS_TIMEOUT
+            ),
+            (
+                "/usr/bin/systemctl".to_owned(),
+                show_argv("mnt-my\\x2dnas.automount"),
+                STATUS_TIMEOUT
+            ),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn systemd_reports_a_mount_still_inactive_after_a_timed_out_start_as_pending() -> TestResult {
+    let fake = Arc::new(
+        FakeRunner::new()
+            .existing(&["/usr/bin/systemctl"])
+            .respond(output_timeout())
+            .respond(output_ok("ActiveState=inactive\nResult=success\n"))
+            .respond(output_ok("ActiveState=activating\nResult=success\n")),
+    );
+    let mgr = SystemdManager::with_runner(Box::new(SharedFake(fake)));
+    let found = mgr.start_mount_units(&units(&["mnt-a.mount", "mnt-b.mount"]))?;
+    assert_eq!(
+        states(&found),
+        vec![
+            ("mnt-a.mount".to_owned(), State::Activating),
+            ("mnt-b.mount".to_owned(), State::Activating),
+        ]
+    );
+    assert!(found.iter().all(|unit| unit.detail.contains("timed out")));
+    Ok(())
+}
+
+#[test]
+fn systemd_stops_mount_units_and_reads_each_state() -> TestResult {
+    let fake = Arc::new(
+        FakeRunner::new()
+            .existing(&["/usr/bin/systemctl"])
+            .respond(output_ok(""))
+            .respond(output_ok("ActiveState=inactive\nResult=success\n")),
+    );
+    let mgr = SystemdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
+    let found = mgr.stop_mount_units(&units(&["srv-a.mount"]))?;
+    assert_eq!(
+        states(&found),
+        vec![("srv-a.mount".to_owned(), State::Inactive)]
+    );
+    assert_eq!(
+        fake.calls().first().map(|call| (call.1.clone(), call.2)),
+        Some((units(&["stop", "--", "srv-a.mount"]), ACTION_TIMEOUT))
+    );
+    Ok(())
+}
+
+#[test]
+fn systemd_reads_mount_unit_states_without_acting() -> TestResult {
+    let fake = Arc::new(
+        FakeRunner::new()
+            .existing(&["/usr/bin/systemctl"])
+            .respond(output_ok("ActiveState=active\nResult=success\n")),
+    );
+    let mgr = SystemdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
+    let found = mgr.mount_unit_states(&units(&["srv-a.mount"]))?;
+    assert_eq!(
+        states(&found),
+        vec![("srv-a.mount".to_owned(), State::Active)]
+    );
+    assert_eq!(
+        fake.calls(),
+        vec![(
+            "/usr/bin/systemctl".to_owned(),
+            show_argv("srv-a.mount"),
+            STATUS_TIMEOUT
+        )]
+    );
+    Ok(())
+}
+
+#[test]
+fn systemd_refuses_a_name_that_is_not_a_mount_unit_before_any_call() {
+    for bad in [
+        "sshd.service",
+        "-.mount",
+        "--now.mount",
+        "a b.mount",
+        "a/b.mount",
+        "a*.mount",
+        ".mount",
+        "",
+    ] {
+        let fake = Arc::new(FakeRunner::new().existing(&["/usr/bin/systemctl"]));
+        let mgr = SystemdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
+        let names = units(&["srv-a.mount", bad]);
+        assert!(
+            matches!(
+                mgr.start_mount_units(&names),
+                Err(ServiceError::InvalidUnitName(_))
+            ),
+            "{bad:?}"
+        );
+        assert!(matches!(
+            mgr.stop_mount_units(&names),
+            Err(ServiceError::InvalidUnitName(_))
+        ));
+        assert!(matches!(
+            mgr.mount_unit_states(&names),
+            Err(ServiceError::InvalidUnitName(_))
+        ));
+        assert!(fake.calls().is_empty(), "{bad:?}");
+    }
+}
+
+#[test]
+fn other_init_systems_do_not_start_mount_units() {
+    let fake = Arc::new(FakeRunner::new().existing(&["/sbin/rc-service", "/bin/launchctl"]));
+    let openrc = OpenRcManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
+    let launchd = LaunchdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
+    let names = units(&["srv-a.mount"]);
+    for mgr in [&openrc as &dyn ServiceManager, &launchd] {
+        assert!(matches!(
+            mgr.start_mount_units(&names),
+            Err(ServiceError::Unsupported(_))
+        ));
+        assert!(matches!(
+            mgr.stop_mount_units(&names),
+            Err(ServiceError::Unsupported(_))
+        ));
+        assert!(matches!(
+            mgr.mount_unit_states(&names),
+            Err(ServiceError::Unsupported(_))
+        ));
+    }
+    assert!(fake.calls().is_empty());
 }
 
 // ---------------------------------------------------------------------------
