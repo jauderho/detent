@@ -290,16 +290,26 @@ deferred by the owner.
 
 ### Track D — Phase 7/8 gaps
 
-1. **mounts:** apply runs `daemon-reload` and the optional mount through
-   the monitor, as PLAN Phase 7 says.
+1. ~~**mounts:** apply runs `daemon-reload` and the optional mount through
+   the monitor, as PLAN Phase 7 says.~~ Done in code; the testhost run
+   (`scripts/mounts-activation-check.sh`) is open.
    - ~~**`daemon-reload`.**~~ Done: `ModuleDescriptor::reload_unit_files`
      (mounts sets it). The engine sends `Request::ReloadUnitFiles` (a
      module id) after a write; the monitor reloads again after every
      commit-confirm rollback. `systemctl daemon-reload` on systemd, nothing
      on `OpenRC`. A failed reload fails the apply like a failed service
      action.
-   - **Optional mount** via the monitor: open. It needs `CAP_SYS_ADMIN` and
-     the mount syscalls (owner decision).
+   - ~~**Optional mount**~~ Done (`666572d`…`792c4dc`), by the systemd
+     route of the owner decision (§4): `[mounts] activate_new_entries`
+     (default off). After the reload the engine sends `Request::Mount` (a
+     target id); the runner works out the `.mount`/`.automount` units of
+     added or changed entries from the target and its newest backup
+     (`ModuleDescriptor::added_mounts`), refuses protected mount points,
+     records what it starts in `/run/detent/started-mounts.json`, and runs
+     `systemctl start`. Every rollback path stops only the recorded units
+     first; a confirm forgets them. A failed or pending mount is reported
+     (`ApplyReport.mounts`, CLI, web, `doctor`), never fatal. No
+     capability, seccomp or unit-file change. Not yet run on a real host.
 2. ~~**Version-gated options** (chrony, samba)~~ Done: `Dyn::validate_json`
    checks `x-detent.since` against the detected version (error if older,
    warning if unknown); chrony and samba gate real directives; the web form
@@ -440,7 +450,7 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
 - D1 optional mount: after an fstab apply, the monitor mounts new entries.
   Needs `CAP_SYS_ADMIN` and the mount syscalls in the monitor. — owner
   answer (2026-10-06): yes, behind a config flag (PLAN §2.4: the capability
-  only when mount apply is enabled) (open).
+  only when mount apply is enabled). Superseded by the route below.
 - D1 mount route (2026-10-06, after the design report): use systemd, not
   `CAP_SYS_ADMIN` — the monitor's Landlock forbids `mount(2)` and the unit's
   private mount namespace would hide the mount. `[mounts]
@@ -453,7 +463,8 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   unmounted. No remount on option-only changes. Never mount over `/` or an
   ancestor of `/etc`, `/usr`, `/boot`, the state root or the binary
   directory. Phase 12 capability-user polkit rule: allow start/stop of
-  `.mount`/`.automount` units. (open)
+  `.mount`/`.automount` units. (done in code, `666572d`…`792c4dc`; testhost
+  run and the Phase 12 polkit rule open)
 
 ---
 

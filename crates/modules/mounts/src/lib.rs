@@ -358,10 +358,14 @@ static CHECKS: &[ExternalCheck] = &[ExternalCheck {
 /// reads `/etc/fstab` directly. A failed reload fails the apply and rolls
 /// the commit back, like a failed service action.
 ///
-/// Nothing mounts after an apply: the monitor answers `Request::Mount` with
-/// `Unsupported` (it would need `CAP_SYS_ADMIN` and the mount syscalls; owner
-/// decision). The new table takes effect at the next boot, the next manual
-/// `mount -a`, or the next start of a regenerated `.mount` unit.
+/// With `[mounts] activate_new_entries = true` (default off), after the
+/// reload the engine sends `Request::Mount` (a target id) and the runner
+/// starts the `.mount`/`.automount` units of the entries the apply added or
+/// changed ([`ModuleDescriptor::added_mounts`]); systemd only, no
+/// `CAP_SYS_ADMIN` in detent. A failed or pending mount is reported and the
+/// commit stays pending; a rollback stops only the units the apply started.
+/// With the setting off, the new table takes effect at the next boot, the
+/// next manual `mount -a`, or the next start of a regenerated `.mount` unit.
 static SERVICES: &[ServiceBinding] = &[];
 
 /// The descriptor. `commit_confirm` is `true` because a bad fstab can leave
@@ -369,9 +373,11 @@ static SERVICES: &[ServiceBinding] = &[];
 /// second confirmation.
 ///
 /// Commit-confirm cannot protect fstab the way it protects a network change.
-/// Nothing mounts from the new table before the next boot (the unit-file
-/// reload only regenerates `.mount` units), so a bad entry does not break the
-/// session that must confirm it, and the automatic rollback never triggers. The confirmation is only a second look; `validate` and
+/// With mount activation off, nothing mounts from the new table before the
+/// next boot (the unit-file reload only regenerates `.mount` units), so a bad
+/// entry does not break the session that must confirm it, and the automatic
+/// rollback never triggers. With it on, a new entry is mounted inside the
+/// window and a rollback unmounts it again. Either way `validate` and
 /// `findmnt --verify` are the real guard.
 static DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     id: "mounts",
