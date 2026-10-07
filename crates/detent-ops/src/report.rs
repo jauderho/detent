@@ -425,6 +425,22 @@ mod tests {
     type R = Result<(), Box<dyn std::error::Error>>;
 
     #[test]
+    fn every_mount_state_maps_to_its_report_state() {
+        use super::MountReportState;
+        use detent_platform::privsep::proto::MountState;
+        for (state, report) in [
+            (MountState::Mounted, MountReportState::Mounted),
+            (MountState::AlreadyMounted, MountReportState::AlreadyMounted),
+            (MountState::Pending, MountReportState::Pending),
+            (MountState::Failed, MountReportState::Failed),
+            (MountState::Protected, MountReportState::Protected),
+            (MountState::Stopped, MountReportState::Stopped),
+        ] {
+            assert_eq!(MountReportState::from(state), report, "{state:?}");
+        }
+    }
+
+    #[test]
     fn expiry_warning_trips_at_half_and_quarter_life() {
         assert_eq!(super::warning_for_percent(None), None);
         assert_eq!(super::warning_for_percent(Some(0)), None);

@@ -723,12 +723,7 @@ impl OpsEngine {
             Err(err) => MountsReport {
                 activated: true,
                 units: Vec::new(),
-                error: Some(match err {
-                    ClientError::Remote(
-                        ProtoError::Unavailable(message) | ProtoError::Io(message),
-                    ) => message,
-                    other => other.to_string(),
-                }),
+                error: Some(mount_error_text(err)),
             },
         })
     }
@@ -1094,8 +1089,39 @@ fn deadline_rfc3339(timeout_s: u16) -> String {
         .unwrap_or_default()
 }
 
+/// The text of a failed `Mount` request: the monitor's own message for a
+/// hook failure, the full error otherwise.
+fn mount_error_text(err: ClientError) -> String {
+    match err {
+        ClientError::Remote(ProtoError::Unavailable(message) | ProtoError::Io(message)) => message,
+        other => other.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_mount_error_keeps_the_monitor_message_and_names_other_refusals() {
+        use super::mount_error_text;
+        use detent_platform::privsep::proto::ProtoError;
+        use detent_platform::privsep::worker::ClientError;
+        assert_eq!(
+            mount_error_text(ClientError::Remote(ProtoError::Unavailable(
+                "mount units need systemd".to_owned()
+            ))),
+            "mount units need systemd"
+        );
+        assert_eq!(
+            mount_error_text(ClientError::Remote(ProtoError::Io("busy".to_owned()))),
+            "busy"
+        );
+        let refused = mount_error_text(ClientError::Remote(ProtoError::ActionNotAllowed));
+        assert!(
+            refused.starts_with("monitor refused the request"),
+            "{refused}"
+        );
+    }
+
     use super::{Hashes, command, deadline_rfc3339, decode, is_staged_name, map_client};
     use crate::op::ServiceCommand;
     use detent_platform::fs::atomic::Sha256Digest;
