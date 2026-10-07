@@ -323,7 +323,9 @@ impl Allowlist {
 
     /// The directory an external-check candidate for `module` is written to:
     /// the parent of the module's primary target when that target is a file,
-    /// `None` otherwise (the caller then uses monitor staging).
+    /// `None` otherwise (the caller then uses monitor staging). The monitor
+    /// also uses staging when this directory is read-only for it, and the
+    /// runner then finds the candidate there.
     ///
     /// The primary target is the one the operations engine reads and renders
     /// (`detent_ops` `wiring`): the first of the module's declared targets

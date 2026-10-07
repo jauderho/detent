@@ -153,7 +153,9 @@ fn answer(
             // The same directory the monitor wrote to, worked out here
             // from the check's module, not taken from the monitor. Beside
             // real configuration only a candidate-named file in a directory
-            // that passes the monitor's own trust check is accepted.
+            // that passes the monitor's own trust check is accepted. When
+            // that directory was read-only for the monitor, the candidate
+            // is in staging instead, under the same name rules.
             let path = match allow.candidate_dir(entry.module, profile) {
                 Some(dir)
                     if candidate.starts_with(CANDIDATE_PREFIX)
@@ -165,6 +167,7 @@ fn answer(
                         .is_ok() =>
                 {
                     staged_candidate(dir, &candidate)
+                        .or_else(|| staged_candidate(staging_dir, &candidate))
                 }
                 Some(_) => None,
                 None => staged_candidate(staging_dir, &candidate),
@@ -828,6 +831,55 @@ mod tests {
         })
     }
 
+    /// The monitor puts the candidate in its staging directory when the
+    /// target directory is read-only for it (`ProtectSystem=strict`). The
+    /// runner looks there itself when the trusted target directory lacks the
+    /// name; a name without the candidate prefix is refused in either.
+    #[test]
+    fn the_runner_finds_a_candidate_in_staging_when_the_target_directory_lacks_it() -> R {
+        let fx = fixture()?;
+        let staged = fx.staging.join(".detent-candidate-staged");
+        std::fs::write(&staged, b"x")?;
+        std::fs::write(fx.staging.join("plain"), b"x")?;
+        std::fs::write(fx.second.join("plain"), b"x")?;
+        let hooks = Hooks {
+            checks: &Fake,
+            services: &Fake,
+        };
+        let ask = |name: &str| {
+            answer(
+                &fx.allow,
+                &fx.staging,
+                &profile(),
+                &hooks,
+                filed_check(name),
+            )
+        };
+        let response = ask(".detent-candidate-staged");
+        assert!(
+            matches!(&response, RunnerResponse::Checked(outcome) if outcome.detail == staged.display().to_string()),
+            "answered {response:?}"
+        );
+        for name in ["plain", ".detent-candidate-missing"] {
+            let response = ask(name);
+            assert!(
+                matches!(response, RunnerResponse::Failed(_)),
+                "{name} answered {response:?}"
+            );
+        }
+        // An untrusted target directory is still refused: no staging lookup.
+        std::fs::set_permissions(
+            &fx.second,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o775),
+        )?;
+        let response = ask(".detent-candidate-staged");
+        assert!(
+            matches!(response, RunnerResponse::Failed(_)),
+            "answered {response:?}"
+        );
+        Ok(())
+    }
+
     /// The runner refuses what the monitor cannot legitimately ask for.
     #[test]
     fn the_runner_refuses_anything_outside_the_allow_list() -> R {
@@ -942,7 +994,6 @@ mod tests {
         for name in [
             "second.conf",
             "x",
-            ".detent-candidate-staged",
             ".detent-candidate-first",
             ".detent-candidate-link",
             ".detent-candidate-conf",

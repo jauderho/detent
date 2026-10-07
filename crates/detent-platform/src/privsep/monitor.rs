@@ -941,13 +941,9 @@ impl<'a> Monitor<'a> {
         if descriptor.checks.is_empty() {
             return Ok(());
         }
-        let dir = self.candidate_dir(module).map_err(Response::Error)?;
-        let (candidate, candidate_path) = create_candidate(&dir).map_err(|err| {
-            Response::Error(ProtoError::Io(format!(
-                "cannot create a candidate file: {}",
-                err.kind()
-            )))
-        })?;
+        let (candidate, candidate_path) = self
+            .create_module_candidate(module)
+            .map_err(Response::Error)?;
         let _remove = RemoveOnDrop(&candidate_path);
         write_all_and_sync(&candidate, bytes).map_err(|err| {
             Response::Error(ProtoError::Io(format!(
@@ -1007,20 +1003,40 @@ impl<'a> Monitor<'a> {
         super::exec_deny::adds_exec_directive(module, previous, candidate)
     }
 
-    /// Where a candidate for `module`'s validators is written: beside the
+    /// Create the candidate file for `module`'s validators, in the one
+    /// place both the write path and [`Request::RunCheck`] use: beside the
     /// module's primary target ([`Allowlist::candidate_dir`]), where the
     /// distro's `AppArmor` profile for the validator allows it to read, or
     /// monitor staging when the module has no file target. The directory
     /// comes from the allow-list, never from the request. A target directory
     /// that fails [`require_trusted_dir`] (owner root or the monitor's euid,
-    /// so capability-user mode works) is refused, with no fallback.
-    fn candidate_dir(&self, module: ModuleId) -> Result<PathBuf, ProtoError> {
-        match self.allow.candidate_dir(module, &self.host_profile) {
-            Some(dir) => {
-                require_trusted_dir(dir, "candidate directory", DirOwner::EuidOrRoot)?;
-                Ok(dir.to_path_buf())
+    /// so capability-user mode works) is refused, with no fallback. A trusted
+    /// target directory the monitor cannot write — a read-only file system
+    /// (the packaged unit's `ProtectSystem=strict` makes `/etc` read-only and
+    /// lists only the target file in `ReadWritePaths=`) or no write
+    /// permission — falls back to monitor staging. The runner looks in both
+    /// places itself.
+    fn create_module_candidate(
+        &self,
+        module: ModuleId,
+    ) -> Result<(std::fs::File, PathBuf), ProtoError> {
+        let cannot = |err: std::io::Error| {
+            ProtoError::Io(format!("cannot create a candidate file: {}", err.kind()))
+        };
+        let Some(dir) = self.allow.candidate_dir(module, &self.host_profile) else {
+            return create_candidate(&ensure_staging_dir(&self.staging_dir)?).map_err(cannot);
+        };
+        require_trusted_dir(dir, "candidate directory", DirOwner::EuidOrRoot)?;
+        match create_candidate(dir) {
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::ReadOnlyFilesystem | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                create_candidate(&ensure_staging_dir(&self.staging_dir)?).map_err(cannot)
             }
-            None => ensure_staging_dir(&self.staging_dir),
+            created => created.map_err(cannot),
         }
     }
 
@@ -1028,18 +1044,9 @@ impl<'a> Monitor<'a> {
         let Some(entry) = self.allow.check(id) else {
             return unknown(IdKind::Check, u32::from(id.get()));
         };
-        let dir = match self.candidate_dir(entry.module) {
-            Ok(dir) => dir,
-            Err(err) => return Response::Error(err),
-        };
-        let (candidate, candidate_path) = match create_candidate(&dir) {
+        let (candidate, candidate_path) = match self.create_module_candidate(entry.module) {
             Ok(created) => created,
-            Err(err) => {
-                return Response::Error(ProtoError::Io(format!(
-                    "cannot create a candidate file: {}",
-                    err.kind()
-                )));
-            }
+            Err(err) => return Response::Error(err),
         };
         let _remove = RemoveOnDrop(&candidate_path);
         if let Err(err) = write_all_and_sync(&candidate, bytes) {
@@ -2808,10 +2815,10 @@ mod tests {
 
     /// Capability-user mode: a monitor that is not root still trusts a
     /// root-owned target directory. `/usr` is root-owned and not writable
-    /// for an unprivileged user, so the directory check passes and creating
-    /// the candidate then fails; nothing is written. As root the directory
-    /// would really be written to, so that run relies on
-    /// `dir_owner_accepts_only_the_owners_it_names` instead.
+    /// for an unprivileged user, so the directory check passes, creating the
+    /// candidate there is denied, and the candidate goes to monitor staging
+    /// instead. As root the directory would really be written to, so that
+    /// run relies on `dir_owner_accepts_only_the_owners_it_names` instead.
     #[test]
     fn run_check_trusts_a_root_owned_target_directory() -> Result<(), Box<dyn std::error::Error>> {
         if rustix::process::geteuid().is_root() {
@@ -2820,10 +2827,68 @@ mod tests {
         let checks = RecordingChecks::default();
         let response = run_check_beside(Path::new("/usr/detent-monitor-test.conf"), &checks)?;
         assert!(
-            matches!(&response, Response::Error(ProtoError::Io(message)) if message.starts_with("cannot create a candidate file")),
+            matches!(&response, Response::Checked(outcome) if outcome.passed),
             "expected the root-owned directory to be trusted, got {response:?}"
         );
-        assert!(checks.seen().is_empty());
+        let seen = checks.seen();
+        let (path, _) = seen.first().ok_or("the check did not run")?;
+        assert!(
+            path.parent()
+                .is_some_and(|dir| dir.ends_with("monitor-staging")),
+            "candidate at {path:?}"
+        );
+        Ok(())
+    }
+
+    /// A trusted target directory the monitor cannot write (a read-only file
+    /// system under `ProtectSystem=strict`, or no write permission) is not a
+    /// dead end: the candidate goes to monitor staging and the check runs.
+    /// Only an unprivileged run can provoke it (root ignores the mode).
+    #[test]
+    fn run_check_falls_back_to_staging_when_the_target_directory_is_not_writable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if rustix::process::geteuid().is_root() {
+            return Ok(());
+        }
+        let work = TempDir::new()?;
+        let etc = work.path().join("etc");
+        std::fs::create_dir(&etc)?;
+        std::fs::write(etc.join("target.conf"), b"v1")?;
+        std::fs::set_permissions(&etc, std::fs::Permissions::from_mode(0o555))?;
+        let allow = Allowlist::from_modules(
+            &[descriptor(&etc.join("target.conf"))],
+            &Config::with_state_root(work.path().join("state")),
+        )?;
+        let staging_dir = allow.state_root().with_file_name("monitor-staging");
+        let checks = RecordingChecks::default();
+        let hooks = Hooks {
+            checks: &checks,
+            services: &super::NoServices,
+        };
+        let mut monitor = greeted(allow, hooks);
+        let response = monitor.dispatch(Request::RunCheck {
+            check: CheckId(0),
+            bytes: b"candidate".to_vec(),
+        })?;
+        let write = write_v2(&mut monitor)?;
+        std::fs::set_permissions(&etc, std::fs::Permissions::from_mode(0o755))?;
+        assert!(
+            matches!(&response, Response::Checked(outcome) if outcome.passed),
+            "{response:?}"
+        );
+        // The write path places its candidate the same way; the write itself
+        // then fails in the read-only directory, after the check.
+        assert!(
+            !matches!(&write, Response::Error(ProtoError::Io(message)) if message.starts_with("cannot create a candidate file")),
+            "{write:?}"
+        );
+        let seen = checks.seen();
+        assert_eq!(seen.len(), 2, "both checks ran: {seen:?}");
+        for (path, _) in &seen {
+            assert!(is_candidate_in(path, &staging_dir), "candidate at {path:?}");
+        }
+        assert_eq!(entries(&etc)?, ["target.conf"]);
+        assert_eq!(entries(&staging_dir)?, Vec::<String>::new());
         Ok(())
     }
 

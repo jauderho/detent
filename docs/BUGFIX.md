@@ -287,6 +287,16 @@ deferred by the owner.
    already allow): the candidate is written beside the module's primary
    target as `.detent-candidate-*`; testhost `serve` chrony check ran and
    passed with AppArmor enforcing.
+   Regression, found by the D1 testhost run (2026-10-06), fixed: under the
+   packaged unit (`ProtectSystem=strict`, `ReadWritePaths=/etc/fstab`, the
+   file, not `/etc`) a candidate beside a target directly in `/etc` gave
+   EROFS, so every `mounts` apply failed `ops-check-failed` (the same for
+   any target file directly in `/etc`; chrony worked because `/etc/chrony/`
+   is writable). Now a trusted target directory that is read-only for the
+   monitor (EROFS or EACCES) falls back to monitor staging, and the runner
+   looks there itself; an untrusted target directory is still refused.
+   Residual: a validator with an AppArmor profile whose target sits
+   directly in `/etc` would meet the A5 denial again in staging.
 
 ### Track D — Phase 7/8 gaps
 
