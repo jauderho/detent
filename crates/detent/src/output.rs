@@ -288,14 +288,16 @@ impl Renderer<'_> {
             return self.line(out, MessageId::new("cli-mounts-none"), &[]);
         }
         for unit in &mounts.units {
+            // Literal ids: `cli_message_ids_and_the_catalogue_agree` reads
+            // them out of the source text.
             let id = if unit.detail.is_empty() {
-                "cli-mounts-unit"
+                MessageId::new("cli-mounts-unit")
             } else {
-                "cli-mounts-unit-detail"
+                MessageId::new("cli-mounts-unit-detail")
             };
             self.line(
                 out,
-                MessageId::new(id),
+                id,
                 &[
                     ("mountpoint", &unit.mountpoint),
                     ("unit", &unit.unit),
