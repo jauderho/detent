@@ -46,9 +46,9 @@ use serde::{Deserialize, Serialize};
 
 use super::allowlist::{Allowlist, CANDIDATE_PREFIX};
 use super::proto::{
-    BackupId, BackupInfo, BindingId, CheckId, CheckOutcome, CommitId, IdKind, ModuleId,
-    MountOutcome, PendingService, ProtoError, Request, Response, ServiceAction, ServiceOutcome,
-    TargetContents, TargetId, WriteReceipt,
+    BackupId, BackupInfo, BindingId, CheckId, CheckOutcome, CommitId, IdKind, MAX_STAGE_BUNDLE,
+    MAX_STAGE_CHUNK, MAX_UPDATE_BYTES, ModuleId, MountOutcome, PendingService, ProtoError, Request,
+    Response, ServiceAction, ServiceOutcome, TargetContents, TargetId, WriteReceipt,
 };
 use super::transport::{Channel, ChannelError};
 use crate::fs::atomic::{
@@ -448,6 +448,19 @@ struct Pending {
     service: Option<PendingService>,
 }
 
+/// The one release image being staged ([`Request::StageBegin`], C1-b). The
+/// bytes are in [`UPDATE_STAGE`] in the monitor staging directory; `file`
+/// is the monitor's own `O_EXCL` handle on it.
+#[derive(Debug)]
+struct Stage {
+    tag: String,
+    len: u64,
+    sha256: crate::fs::atomic::Sha256Digest,
+    bundle: Vec<u8>,
+    file: std::fs::File,
+    received: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Monitor
 // ---------------------------------------------------------------------------
@@ -459,9 +472,12 @@ pub struct Monitor<'a> {
     greeted: bool,
     journal: Vec<RollbackEntry>,
     pending: Option<Pending>,
-    /// Monitor-only base for content-addressed update images. Production uses
-    /// the systemd runtime directory; tests may override it per monitor.
+    /// Monitor-only base for the update stage and validator candidates.
+    /// Production uses the systemd runtime directory; tests may override it
+    /// per monitor.
     staging_dir: PathBuf,
+    /// The release image being staged, if any.
+    stage: Option<Stage>,
     /// Test-only swap target. `None` (production) swaps `current_exe()`; the
     /// engine tests point it at their temp target instead. A field — not a
     /// global — so parallel tests cannot steer each other.
@@ -498,6 +514,7 @@ impl<'a> Monitor<'a> {
             journal: Vec::new(),
             pending: None,
             staging_dir: PathBuf::from(DEFAULT_STAGING_DIR),
+            stage: None,
             binary_override: None,
             #[cfg(feature = "update")]
             update_trust: None,
@@ -532,7 +549,7 @@ impl<'a> Monitor<'a> {
         self.binary_override = Some(path);
     }
 
-    /// Override the monitor-only base for materialized update images.
+    /// Override the monitor-only base for the update stage.
     ///
     /// Production uses [`DEFAULT_STAGING_DIR`], created by systemd. This is
     /// public rather than test-gated so the operations integration harness,
@@ -589,7 +606,14 @@ impl<'a> Monitor<'a> {
         let lock_held = state_lock.is_held();
         // Kept until every return path completes.
         let _state_lock = state_lock;
+        if lock_held {
+            // A stage a dead monitor left is never installed.
+            self.discard_stage();
+        }
         let result = self.serve_loop(channel, lock_held);
+        if self.stage.is_some() {
+            self.discard_stage();
+        }
         let cleanup = self.rollback_pending_on_exit();
         match (result, cleanup) {
             (Ok(reason), Ok(())) => Ok(reason),
@@ -753,53 +777,151 @@ impl<'a> Monitor<'a> {
             Request::ReplaceBinary { tag, len, sha256 } => self.replace_binary(&tag, len, sha256),
             Request::Shutdown => Response::ShuttingDown,
             Request::ReloadUnitFiles { module } => self.reload_unit_files(module),
+            Request::StageBegin {
+                tag,
+                len,
+                sha256,
+                bundle,
+            } => self.stage_begin(tag, len, sha256, bundle),
+            Request::StageUpdate { offset, chunk } => self.stage_update(offset, &chunk),
         })
     }
-    /// Materialize and authenticate a staged release, then atomically swap it.
+
+    /// The path of the one update stage.
+    fn stage_path(&self) -> PathBuf {
+        self.staging_dir.join(UPDATE_STAGE)
+    }
+
+    /// Drop the stage, if any, and remove its file. A missing file is not an
+    /// error; any other failure is logged, and the next begin's `O_EXCL`
+    /// create refuses rather than reuse the file.
+    fn discard_stage(&mut self) {
+        self.stage = None;
+        if let Err(err) = unlink(&self.stage_path())
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(error = %err, "removing the update stage failed");
+        }
+    }
+
+    /// Begin a new stage (C1-b). Any earlier stage is discarded first, so at
+    /// most one image, of at most [`MAX_UPDATE_BYTES`], is ever on disk.
+    fn stage_begin(
+        &mut self,
+        tag: String,
+        len: u64,
+        sha256: crate::fs::atomic::Sha256Digest,
+        bundle: Vec<u8>,
+    ) -> Response {
+        self.discard_stage();
+        if let Err(err) = refuse_downgrade(&tag) {
+            return Response::Error(err);
+        }
+        if len == 0 || len > MAX_UPDATE_BYTES {
+            return Response::Error(ProtoError::Io(
+                "update size is outside the allowed range".to_owned(),
+            ));
+        }
+        if bundle.is_empty() || bundle.len() > MAX_STAGE_BUNDLE {
+            return Response::Error(ProtoError::Io(
+                "update bundle size is outside the allowed range".to_owned(),
+            ));
+        }
+        let file = match create_stage(&self.staging_dir) {
+            Ok(file) => file,
+            Err(err) => return Response::Error(err),
+        };
+        self.stage = Some(Stage {
+            tag,
+            len,
+            sha256,
+            bundle,
+            file,
+            received: 0,
+        });
+        Response::Staged { received: 0 }
+    }
+
+    /// Append one chunk to the stage. Chunks come in order, without gap or
+    /// overlap, and never past the declared length; any refusal or write
+    /// failure discards the whole stage.
+    fn stage_update(&mut self, offset: u64, chunk: &[u8]) -> Response {
+        let Some(stage) = self.stage.as_mut() else {
+            return Response::Error(ProtoError::Io("no update is being staged".to_owned()));
+        };
+        let appended = if chunk.is_empty() || chunk.len() > MAX_STAGE_CHUNK {
+            Err(ProtoError::Io(
+                "update chunk size is outside the allowed range".to_owned(),
+            ))
+        } else if offset != stage.received {
+            Err(ProtoError::Io("update chunk is out of order".to_owned()))
+        } else if chunk.len() as u64 > stage.len.saturating_sub(stage.received) {
+            Err(ProtoError::Io(
+                "update chunk runs past the declared length".to_owned(),
+            ))
+        } else {
+            stage
+                .file
+                .write_all(chunk)
+                .map(|()| {
+                    stage.received = stage.received.saturating_add(chunk.len() as u64);
+                    stage.received
+                })
+                .map_err(|err| ProtoError::Io(format!("write update stage: {}", err.kind())))
+        };
+        match appended {
+            Ok(received) => Response::Staged { received },
+            Err(err) => {
+                self.discard_stage();
+                Response::Error(err)
+            }
+        }
+    }
+
+    /// Install the monitor's own complete stage: check that the request
+    /// names it, read it back (`O_NOFOLLOW`, owner, one link, length,
+    /// digest), authenticate it against the bundle the stage carries, and
+    /// atomically swap it in. The stage is consumed on every path.
     fn replace_binary(
-        &self,
+        &mut self,
         tag: &str,
         len: u64,
         sha256: crate::fs::atomic::Sha256Digest,
     ) -> Response {
-        // C1-e: refuse downgrades over privsep. The worker is untrusted; only
-        // a CLI-typed operator path may downgrade. Parse `tag` as semver
-        // (strip leading `v`, same as `detent-update::policy::version_of`)
-        // and require it to be strictly greater than the running version.
-        let current = semver::Version::parse(env!("CARGO_PKG_VERSION"))
-            .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
-        let Ok(tag_version) = semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag)) else {
-            return Response::Error(ProtoError::Io(
-                "release tag is not a semver version".to_owned(),
-            ));
-        };
-        if tag_version <= current {
-            return Response::Error(ProtoError::Io(format!(
-                "refusing downgrade to {tag} from {}",
-                env!("CARGO_PKG_VERSION")
-            )));
-        }
-        let staged = staged_path(&self.staging_dir, sha256);
-        if let Err(err) =
-            materialize_staged(self.allow.state_root(), &self.staging_dir, tag, len, sha256)
-        {
+        let stage = self.stage.take();
+        let path = self.stage_path();
+        // Remove the stage file on every path that does not swap it in.
+        let _stage = RemoveOnDrop(&path);
+        if let Err(err) = refuse_downgrade(tag) {
             return Response::Error(err);
         }
-        // From here the monitor holds a copy of the candidate. Remove it on
-        // every path that does not swap it in (the swap consumes it itself).
-        let _copy = RemoveOnDrop(&staged);
-        let bytes = match read_staged_verified(&staged, len, sha256) {
+        let Some(stage) = stage else {
+            return Response::Error(ProtoError::Io("no update is staged".to_owned()));
+        };
+        if stage.tag != tag || stage.len != len || stage.sha256 != sha256 {
+            return Response::Error(ProtoError::Io(
+                "the request does not match the staged update".to_owned(),
+            ));
+        }
+        if stage.received != stage.len {
+            return Response::Error(ProtoError::Io("the staged update is incomplete".to_owned()));
+        }
+        if let Err(err) = stage.file.sync_all() {
+            return Response::Error(ProtoError::Io(format!("sync update stage: {}", err.kind())));
+        }
+        drop(stage.file);
+        let bytes = match read_staged_verified(&path, len, sha256) {
             Ok(bytes) => bytes,
             Err(err) => return Response::Error(err),
         };
-        if let Err(err) = self.verify_release(&format!("{tag}.sigstore.json"), tag, sha256) {
+        if let Err(err) = self.verify_release(&stage.bundle, tag, sha256) {
             return Response::Error(err);
         }
         let target = self
             .binary_override
             .clone()
             .unwrap_or_else(current_exe_path);
-        match swap_running_binary(&bytes, &staged, &target) {
+        match swap_running_binary(&bytes, &path, &target) {
             Ok(()) => Response::Replaced {
                 version: sha256.to_string(),
             },
@@ -807,25 +929,17 @@ impl<'a> Monitor<'a> {
         }
     }
 
-    /// Authenticate a staged release against its Sigstore bundle.
+    /// Authenticate a staged release against its Sigstore bundle, which
+    /// came over the socket in [`Request::StageBegin`].
     #[cfg(feature = "update")]
     fn verify_release(
         &self,
-        bundle_name: &str,
+        bundle: &[u8],
         tag: &str,
         sha256: crate::fs::atomic::Sha256Digest,
     ) -> Result<(), ProtoError> {
-        // The worker writes the bundle, so open it as the staged binary is
-        // opened: no symlink, no FIFO, no directory outside the state root's
-        // owner.
-        let opened = open_staged_input(self.allow.state_root(), bundle_name).map_err(|err| {
-            tracing::warn!(error = ?err, "staged release bundle refused");
-            ProtoError::VerificationFailed
-        })?;
-        let Ok(bundle) = read_bounded_file(&opened, detent_update::bundle::MAX_BUNDLE_BYTES) else {
-            return Err(ProtoError::VerificationFailed);
-        };
-        let Ok(decoded) = detent_update::bundle::parse(&bundle) else {
+        let Ok(decoded) = detent_update::bundle::parse(bundle) else {
+            tracing::warn!("staged release bundle refused");
             return Err(ProtoError::VerificationFailed);
         };
         let verified = if let Some(trust) = &self.update_trust {
@@ -846,13 +960,13 @@ impl<'a> Monitor<'a> {
     #[cfg(not(feature = "update"))]
     fn verify_release(
         &self,
-        bundle_name: &str,
+        bundle: &[u8],
         tag: &str,
         _sha256: crate::fs::atomic::Sha256Digest,
     ) -> Result<(), ProtoError> {
         tracing::warn!(
             tag,
-            bundle = bundle_name,
+            bundle_len = bundle.len(),
             staging = %self.staging_dir.display(),
             "staged release refused: built without the update feature"
         );
@@ -1795,31 +1909,52 @@ fn unix_millis() -> u128 {
 // ReplaceBinary (PLAN §2.9 step 5's binary swap)
 // ---------------------------------------------------------------------------
 
-/// Default monitor-only base for materialized update images. The service unit
+/// Default monitor-only base for the update stage. The service unit
 /// creates this as a private systemd runtime directory.
 pub const DEFAULT_STAGING_DIR: &str = "/run/detent/staging";
 
-/// Directory under the state root containing worker-written tag inputs.
-pub(crate) const STAGED_DIR: &str = "update/staged";
 /// Suffix the replaced binary is kept under, next to the target.
 pub(crate) const PREVIOUS_SUFFIX: &str = ".prev";
 
-/// `<monitor_staging_dir>/<hex sha256>`.
-fn staged_path(monitor_staging_dir: &Path, sha256: crate::fs::atomic::Sha256Digest) -> PathBuf {
-    monitor_staging_dir.join(sha256.to_string())
+/// File name of the one update stage in the monitor staging directory
+/// ([`Request::StageBegin`]).
+pub(crate) const UPDATE_STAGE: &str = "update.stage";
+
+/// C1-e: refuse downgrades over privsep. The worker is untrusted; only a
+/// CLI-typed operator path may downgrade. Parse `tag` as semver (strip a
+/// leading `v`, same as `detent-update::policy::version_of`) and require it
+/// to be strictly greater than the running version.
+fn refuse_downgrade(tag: &str) -> Result<(), ProtoError> {
+    let current = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+        .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
+    let Ok(tag_version) = semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag)) else {
+        return Err(ProtoError::Io(
+            "release tag is not a semver version".to_owned(),
+        ));
+    };
+    if tag_version <= current {
+        return Err(ProtoError::Io(format!(
+            "refusing downgrade to {tag} from {}",
+            env!("CARGO_PKG_VERSION")
+        )));
+    }
+    Ok(())
 }
 
-fn staged_input_path(state_root: &Path, tag: &str) -> Result<PathBuf, ProtoError> {
-    if tag.is_empty()
-        || tag.len() > 128
-        || tag == "."
-        || tag == ".."
-        || tag.contains('/')
-        || tag.as_bytes().contains(&0)
-    {
-        return Err(ProtoError::VerificationFailed);
-    }
-    Ok(state_root.join(STAGED_DIR).join(tag))
+/// Create the update stage file in the monitor staging directory: the
+/// directory must pass [`ensure_staging_dir`], the file is opened
+/// `O_CREAT | O_EXCL | O_NOFOLLOW`, mode `0600`. The caller removed any
+/// earlier file under the name first.
+fn create_stage(monitor_staging_dir: &Path) -> Result<std::fs::File, ProtoError> {
+    use rustix::fs::{Mode, OFlags};
+    let dir = ensure_staging_dir(monitor_staging_dir)?;
+    let fd = rustix::fs::open(
+        dir.join(UPDATE_STAGE),
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_bits_truncate(0o600),
+    )
+    .map_err(|err| ProtoError::Io(format!("create update stage: {err}")))?;
+    Ok(fd.into())
 }
 
 /// The effective uid of this process, read once and then remembered.
@@ -1832,48 +1967,6 @@ fn staged_input_path(state_root: &Path, tag: &str) -> Result<PathBuf, ProtoError
 pub(crate) fn process_euid() -> u32 {
     static EUID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *EUID.get_or_init(|| rustix::process::geteuid().as_raw())
-}
-
-/// Open the worker-written input `<state_root>/update/staged/<name>` for
-/// reading without following a symlink at any component below `state_root`.
-///
-/// Each directory is opened with `openat(O_NOFOLLOW | O_DIRECTORY)` and must
-/// have the same owner as `state_root`, so a worker cannot point `update` or
-/// `staged` at a root-readable directory elsewhere. The file is opened
-/// `O_NONBLOCK` and must be a regular file: a planted FIFO would otherwise
-/// block the monitor, and with it the commit-confirm deadline.
-fn open_staged_input(state_root: &Path, name: &str) -> Result<std::fs::File, ProtoError> {
-    use rustix::fs::{FileType, Mode, OFlags, fstat, openat};
-    use rustix::io::Errno;
-    let open_error = |err: Errno| ProtoError::Io(format!("open staged binary: {err}"));
-    let stat_error = |err: Errno| ProtoError::Io(format!("stat staged binary: {err}"));
-    let untrusted = || ProtoError::Io("staged input directory is not trusted".to_owned());
-    let dir_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let mut dir = rustix::fs::open(state_root, dir_flags, Mode::empty()).map_err(open_error)?;
-    let owner = fstat(&dir).map_err(stat_error)?.st_uid;
-    for component in STAGED_DIR.split('/') {
-        dir = match openat(&dir, component, dir_flags, Mode::empty()) {
-            Ok(fd) => fd,
-            Err(Errno::LOOP | Errno::NOTDIR) => return Err(untrusted()),
-            Err(err) => return Err(open_error(err)),
-        };
-        if fstat(&dir).map_err(stat_error)?.st_uid != owner {
-            return Err(untrusted());
-        }
-    }
-    let fd = openat(
-        &dir,
-        name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(open_error)?;
-    if FileType::from_raw_mode(fstat(&fd).map_err(stat_error)?.st_mode) != FileType::RegularFile {
-        return Err(ProtoError::Io(
-            "staged binary is not a regular file".to_owned(),
-        ));
-    }
-    Ok(fd.into())
 }
 
 /// Create the monitor staging directory `0700` if it is missing (parents as
@@ -2025,81 +2118,12 @@ fn create_candidate(dir: &Path) -> std::io::Result<(std::fs::File, PathBuf)> {
     Ok((file, path.to_path_buf()))
 }
 
-fn materialize_staged(
-    state_root: &Path,
-    monitor_staging_dir: &Path,
-    tag: &str,
-    len: u64,
-    expected: crate::fs::atomic::Sha256Digest,
-) -> Result<(), ProtoError> {
-    use rustix::fs::{Mode, OFlags};
-    let source = staged_input_path(state_root, tag)?;
-    let dir = ensure_staging_dir(monitor_staging_dir)?;
-    let destination = staged_path(&dir, expected);
-    if source == destination {
-        return Err(ProtoError::VerificationFailed);
-    }
-    let mut bytes = Vec::new();
-    let source_file = open_staged_input(state_root, tag)?;
-    if let Err(err) = (&source_file)
-        .take(u64::from(u32::MAX))
-        .read_to_end(&mut bytes)
-    {
-        return Err(ProtoError::Io(format!(
-            "read staged binary: {}",
-            err.kind()
-        )));
-    }
-    if bytes.len() as u64 != len {
-        return Err(ProtoError::Io(
-            "staged binary size does not match the request".to_owned(),
-        ));
-    }
-    let actual = crate::fs::atomic::Sha256Digest::of(&bytes);
-    if actual != expected {
-        return Err(ProtoError::Conflict {
-            expected,
-            actual: Some(actual),
-        });
-    }
-    let fd = rustix::fs::open(
-        &destination,
-        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::from_bits_truncate(0o600),
-    )
-    .map_err(|err| ProtoError::Io(format!("materialize staged binary: {err}")))?;
-    let file: std::fs::File = fd.into();
-    let written = write_all_and_sync(&file, &bytes)
-        .map_err(|err| ProtoError::Io(format!("materialize staged binary: {}", err.kind())))
-        .and_then(|()| {
-            std::fs::File::open(dir)
-                .and_then(|directory| directory.sync_all())
-                .map_err(|err| ProtoError::Io(format!("sync staging directory: {}", err.kind())))
-        });
-    if written.is_err() {
-        // The copy is incomplete or not durable: do not leave it to be found.
-        let _ = unlink(&destination);
-    }
-    written
-}
-
-#[cfg(feature = "update")]
-fn read_bounded_file(file: &std::fs::File, max: usize) -> Result<Vec<u8>, std::io::Error> {
-    let mut bytes = Vec::new();
-    file.take(u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1))
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > max {
-        return Err(std::io::Error::other("file exceeds size cap"));
-    }
-    Ok(bytes)
-}
-
 /// Open `path` with `O_NOFOLLOW`, require ownership by the monitor's own
 /// euid, and return the bytes read from that same fd.
 ///
 /// The `len` gate doubles as the allocation cap: at most `u32::MAX` bytes
-/// are read (the privsep frame cap is 1 MiB, so production requests are far
-/// smaller), and the digest gate compares the fd bytes against `expected`.
+/// are read (a stage holds at most [`MAX_UPDATE_BYTES`]), and the digest
+/// gate compares the fd bytes against `expected`.
 /// Reading from the open fd — not a second `fs::read(path)` — closes the
 /// check-then-use race where a worker-owned path is swapped or replaced
 /// between the check and the swap.
@@ -2387,16 +2411,15 @@ mod tests {
     use super::{
         CheckRunner, DirOwner, ExitReason, HookError, Hooks, InPlaceOutcome, MAX_CONFIRM_TIMEOUT_S,
         MONITOR_LOCK, Monitor, MonitorError, PENDING_COMMIT_MARKER, PREVIOUS_SUFFIX,
-        PendingCommitMarker, STAGED_DIR, ServiceControl, StateLock, finish_send_error,
-        materialize_staged, read_staged_verified, staged_path, swap_running_binary,
-        write_temp_and_swap,
+        PendingCommitMarker, ServiceControl, StateLock, UPDATE_STAGE, finish_send_error,
+        read_staged_verified, swap_running_binary, write_temp_and_swap,
     };
     use crate::fs::atomic::{AtomicError, InPlaceMarker, Sha256Digest};
     use crate::privsep::allowlist::{Allowlist, AllowlistError, Config};
     use crate::privsep::proto::{
-        BackupId, BindingId, CheckId, CheckOutcome, CommitId, IdKind, ModuleId, MountOutcome,
-        MountState, PROTO_VERSION, PendingService, ProtoError, Request, Response, ServiceAction,
-        ServiceOutcome, TargetId,
+        BackupId, BindingId, CheckId, CheckOutcome, CommitId, IdKind, MAX_STAGE_BUNDLE,
+        MAX_STAGE_CHUNK, MAX_UPDATE_BYTES, ModuleId, MountOutcome, MountState, PROTO_VERSION,
+        PendingService, ProtoError, Request, Response, ServiceAction, ServiceOutcome, TargetId,
     };
     use crate::privsep::transport::{Channel, ChannelError};
     use crate::privsep::worker::Client;
@@ -4273,27 +4296,47 @@ mod tests {
         Ok(detent_update::trust::from_pems_with_ct(&root, &rekor, &ct)?)
     }
 
-    fn plant_release(
-        state_root: &Path,
-        bundle_name: &str,
-    ) -> Result<(Sha256Digest, Vec<u8>), Box<dyn std::error::Error>> {
-        plant_release_for(state_root, bundle_name, FIXTURE_TAG)
+    /// Stage `bytes` under `declared` with `bundle`, through the monitor's
+    /// own requests, as the worker does.
+    fn stage_bytes(
+        monitor: &mut Monitor<'_>,
+        bytes: &[u8],
+        declared: Sha256Digest,
+        bundle: Vec<u8>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let begin = monitor.dispatch(Request::StageBegin {
+            tag: FIXTURE_TAG.to_owned(),
+            len: bytes.len() as u64,
+            sha256: declared,
+            bundle,
+        })?;
+        if begin != (Response::Staged { received: 0 }) {
+            return Err(format!("StageBegin was answered {begin:?}").into());
+        }
+        let chunk = monitor.dispatch(Request::StageUpdate {
+            offset: 0,
+            chunk: bytes.to_vec(),
+        })?;
+        if chunk
+            != (Response::Staged {
+                received: bytes.len() as u64,
+            })
+        {
+            return Err(format!("StageUpdate was answered {chunk:?}").into());
+        }
+        Ok(())
     }
 
-    fn plant_release_for(
-        state_root: &Path,
+    /// Stage the fixture release image with the fixture bundle
+    /// `bundle_name`, and return its digest and bytes.
+    fn stage_release(
+        monitor: &mut Monitor<'_>,
         bundle_name: &str,
-        tag: &str,
     ) -> Result<(Sha256Digest, Vec<u8>), Box<dyn std::error::Error>> {
         let bytes = std::fs::read(fixture_dir().join("binary.bin"))?;
+        let bundle = std::fs::read(fixture_dir().join(bundle_name))?;
         let digest = Sha256Digest::of(&bytes);
-        let dir = state_root.join(STAGED_DIR);
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join(tag), &bytes)?;
-        std::fs::copy(
-            fixture_dir().join(bundle_name),
-            dir.join(format!("{tag}.sigstore.json")),
-        )?;
+        stage_bytes(monitor, &bytes, digest, bundle)?;
         Ok((digest, bytes))
     }
 
@@ -4314,82 +4357,149 @@ mod tests {
         Ok(monitor)
     }
 
-    #[cfg(feature = "update")]
-    #[test]
-    fn monitor_materializes_and_verifies_a_valid_release() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let work = TempDir::new()?;
+    /// A greeted update monitor in `work` (state root `state`, staging
+    /// `monitor-staging`) that swaps `target`.
+    fn work_monitor(
+        work: &TempDir,
+        target: PathBuf,
+    ) -> Result<Monitor<'static>, Box<dyn std::error::Error>> {
         let state_root = work.path().join("state");
         std::fs::create_dir_all(&state_root)?;
-        let target = swap_target(work.path(), "detent-old", b"old-binary")?;
-        let (digest, bytes) = plant_release(&state_root, "valid.json")?;
-        let staging_dir = work.path().join("monitor-staging");
-        let mut monitor = update_monitor(&state_root, &staging_dir, target.clone())?;
+        update_monitor(&state_root, &work.path().join("monitor-staging"), target)
+    }
 
-        let response = monitor.dispatch(Request::ReplaceBinary {
+    fn replace(digest: Sha256Digest, len: usize) -> Request {
+        Request::ReplaceBinary {
             tag: FIXTURE_TAG.to_owned(),
-            len: bytes.len() as u64,
+            len: len as u64,
             sha256: digest,
-        })?;
+        }
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn monitor_installs_a_staged_valid_release() -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let target = swap_target(work.path(), "detent-old", b"old-binary")?;
+        let mut monitor = work_monitor(&work, target.clone())?;
+        let (digest, bytes) = stage_release(&mut monitor, "valid.json")?;
+
+        let response = monitor.dispatch(replace(digest, bytes.len()))?;
         let Response::Replaced { version } = response else {
             return Err(format!("expected Replaced, got {response:?}").into());
         };
         assert_eq!(version, digest.to_string());
         assert_eq!(std::fs::read(&target)?, bytes);
+        assert!(!stage_file(&work).exists(), "the stage is consumed");
         Ok(())
     }
 
     #[test]
-    fn materialized_digest_is_monitor_owned_private_and_durable()
+    fn replace_binary_never_reads_the_worker_staged_directory()
     -> Result<(), Box<dyn std::error::Error>> {
-        use std::os::unix::fs::MetadataExt as _;
+        // The interim layout: a valid release the worker wrote under the
+        // state root. The monitor must not install it without a stage.
         let work = TempDir::new()?;
         let state_root = work.path().join("state");
-        std::fs::create_dir_all(&state_root)?;
-        let (digest, bytes) = plant_release(&state_root, "valid.json")?;
-        let staging_dir = work.path().join("monitor-staging");
-        materialize_staged(
-            &state_root,
-            &staging_dir,
-            FIXTURE_TAG,
-            bytes.len() as u64,
-            digest,
+        let inputs = state_root.join("update/staged");
+        std::fs::create_dir_all(&inputs)?;
+        let bytes = std::fs::read(fixture_dir().join("binary.bin"))?;
+        std::fs::write(inputs.join(FIXTURE_TAG), &bytes)?;
+        std::fs::copy(
+            fixture_dir().join("valid.json"),
+            inputs.join(format!("{FIXTURE_TAG}.sigstore.json")),
         )?;
-        let materialized = staged_path(&staging_dir, digest);
-        assert!(!materialized.starts_with(&state_root));
-        let meta = std::fs::metadata(&materialized)?;
-        assert_eq!(meta.uid(), rustix::process::geteuid().as_raw());
-        assert_eq!(meta.mode() & 0o777, 0o600);
-        let staging_meta = std::fs::metadata(&staging_dir)?;
-        assert_eq!(staging_meta.uid(), rustix::process::geteuid().as_raw());
-        assert_eq!(staging_meta.mode() & 0o022, 0);
+        let target = swap_target(work.path(), "detent-inputs", b"old-binary")?;
+        let mut monitor = work_monitor(&work, target.clone())?;
+        let response = monitor.dispatch(replace(Sha256Digest::of(&bytes), bytes.len()))?;
+        assert_eq!(
+            io_message(&response),
+            Some("no update is staged"),
+            "{response:?}"
+        );
+        assert_eq!(std::fs::read(&target)?, b"old-binary");
         Ok(())
     }
 
     #[test]
-    fn monitor_rejects_group_writable_staging_permissions() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn replace_binary_refuses_a_wrong_digest_before_the_swap()
+    -> Result<(), Box<dyn std::error::Error>> {
         let work = TempDir::new()?;
-        let state_root = work.path().join("state");
-        std::fs::create_dir_all(&state_root)?;
-        let (digest, bytes) = plant_release(&state_root, "valid.json")?;
-        let staging_dir = work.path().join("monitor-staging");
-        std::fs::create_dir(&staging_dir)?;
-        std::fs::set_permissions(&staging_dir, std::fs::Permissions::from_mode(0o770))?;
-
-        let error = match materialize_staged(
-            &state_root,
-            &staging_dir,
-            FIXTURE_TAG,
-            bytes.len() as u64,
-            digest,
-        ) {
-            Ok(()) => return Err("group-writable staging must be rejected".into()),
-            Err(error) => error,
-        };
+        let target = swap_target(work.path(), "detent-digest", b"old-binary")?;
+        let mut monitor = work_monitor(&work, target.clone())?;
+        let bytes = std::fs::read(fixture_dir().join("binary.bin"))?;
+        let bundle = std::fs::read(fixture_dir().join("valid.json"))?;
+        // Every chunk is accepted; the declared digest is not the image's.
+        let claimed = Sha256Digest::of(b"different bytes");
+        stage_bytes(&mut monitor, &bytes, claimed, bundle)?;
+        let response = monitor.dispatch(replace(claimed, bytes.len()))?;
         assert!(
-            matches!(error, ProtoError::Io(message) if message == "monitor staging directory is not trusted")
+            matches!(
+                response,
+                Response::Error(ProtoError::Conflict { expected, actual: Some(actual) })
+                    if expected == claimed && actual == Sha256Digest::of(&bytes)
+            ),
+            "{response:?}"
         );
+        assert_eq!(std::fs::read(&target)?, b"old-binary");
+        assert!(!stage_file(&work).exists(), "a refused stage is discarded");
+        Ok(())
+    }
+
+    #[test]
+    fn replace_binary_refuses_an_incomplete_stage() -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let target = swap_target(work.path(), "detent-partial", b"old-binary")?;
+        let mut monitor = work_monitor(&work, target.clone())?;
+        monitor.dispatch(stage_begin(STAGE_IMAGE))?;
+        monitor.dispatch(stage_chunk(0, b"abcd"))?;
+        let response =
+            monitor.dispatch(replace(Sha256Digest::of(STAGE_IMAGE), STAGE_IMAGE.len()))?;
+        assert_eq!(
+            io_message(&response),
+            Some("the staged update is incomplete")
+        );
+        assert_eq!(std::fs::read(&target)?, b"old-binary");
+        assert!(!stage_file(&work).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn replace_binary_refuses_a_request_that_does_not_match_the_stage()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let digest = Sha256Digest::of(STAGE_IMAGE);
+        let len = STAGE_IMAGE.len() as u64;
+        let requests = [
+            Request::ReplaceBinary {
+                tag: "v99.0.1".to_owned(),
+                len,
+                sha256: digest,
+            },
+            Request::ReplaceBinary {
+                tag: FIXTURE_TAG.to_owned(),
+                len: len + 1,
+                sha256: digest,
+            },
+            Request::ReplaceBinary {
+                tag: FIXTURE_TAG.to_owned(),
+                len,
+                sha256: Sha256Digest::of(b"other"),
+            },
+        ];
+        for request in requests {
+            let work = TempDir::new()?;
+            let target = swap_target(work.path(), "detent-mismatch", b"old-binary")?;
+            let mut monitor = work_monitor(&work, target.clone())?;
+            monitor.dispatch(stage_begin(STAGE_IMAGE))?;
+            monitor.dispatch(stage_chunk(0, STAGE_IMAGE))?;
+            let response = monitor.dispatch(request)?;
+            assert_eq!(
+                io_message(&response),
+                Some("the request does not match the staged update")
+            );
+            assert_eq!(std::fs::read(&target)?, b"old-binary");
+            assert!(!stage_file(&work).exists());
+        }
         Ok(())
     }
 
@@ -4398,23 +4508,16 @@ mod tests {
     fn a_build_without_the_update_feature_refuses_a_valid_release()
     -> Result<(), Box<dyn std::error::Error>> {
         let work = TempDir::new()?;
-        let state_root = work.path().join("state");
-        std::fs::create_dir_all(&state_root)?;
         let target = swap_target(work.path(), "detent-old", b"old-binary")?;
-        let (digest, bytes) = plant_release(&state_root, "valid.json")?;
-        let staging_dir = work.path().join("monitor-staging");
-        let mut monitor = update_monitor(&state_root, &staging_dir, target.clone())?;
-
-        let response = monitor.dispatch(Request::ReplaceBinary {
-            tag: FIXTURE_TAG.to_owned(),
-            len: bytes.len() as u64,
-            sha256: digest,
-        })?;
+        let mut monitor = work_monitor(&work, target.clone())?;
+        let (digest, bytes) = stage_release(&mut monitor, "valid.json")?;
+        let response = monitor.dispatch(replace(digest, bytes.len()))?;
         assert!(matches!(
             response,
             Response::Error(ProtoError::VerificationFailed)
         ));
         assert_eq!(std::fs::read(&target)?, b"old-binary");
+        assert!(!stage_file(&work).exists());
         Ok(())
     }
 
@@ -4422,17 +4525,10 @@ mod tests {
     #[test]
     fn monitor_rejects_wrong_identity_without_swapping() -> Result<(), Box<dyn std::error::Error>> {
         let work = TempDir::new()?;
-        let state_root = work.path().join("state");
-        std::fs::create_dir_all(&state_root)?;
         let target = swap_target(work.path(), "detent-identity", b"old-binary")?;
-        let (digest, bytes) = plant_release(&state_root, "wrong-identity.json")?;
-        let staging_dir = work.path().join("monitor-staging");
-        let mut monitor = update_monitor(&state_root, &staging_dir, target.clone())?;
-        let response = monitor.dispatch(Request::ReplaceBinary {
-            tag: FIXTURE_TAG.to_owned(),
-            len: bytes.len() as u64,
-            sha256: digest,
-        })?;
+        let mut monitor = work_monitor(&work, target.clone())?;
+        let (digest, bytes) = stage_release(&mut monitor, "wrong-identity.json")?;
+        let response = monitor.dispatch(replace(digest, bytes.len()))?;
         assert!(matches!(
             response,
             Response::Error(ProtoError::VerificationFailed)
@@ -4442,47 +4538,22 @@ mod tests {
     }
 
     #[test]
-    fn monitor_rejects_a_tampered_digest_without_swapping() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let work = TempDir::new()?;
-        let state_root = work.path().join("state");
-        std::fs::create_dir_all(&state_root)?;
-        let target = swap_target(work.path(), "detent-digest", b"old-binary")?;
-        let (_, bytes) = plant_release(&state_root, "valid.json")?;
-        let claimed = Sha256Digest::of(b"different bytes");
-        let staging_dir = work.path().join("monitor-staging");
-        let mut monitor = update_monitor(&state_root, &staging_dir, target.clone())?;
-        let response = monitor.dispatch(Request::ReplaceBinary {
-            tag: FIXTURE_TAG.to_owned(),
-            len: bytes.len() as u64,
-            sha256: claimed,
-        })?;
-        assert!(matches!(
-            response,
-            Response::Error(ProtoError::Conflict { .. })
-        ));
-        assert_eq!(std::fs::read(&target)?, b"old-binary");
-        Ok(())
-    }
-
-    #[test]
     fn replace_binary_refuses_an_older_signed_release() -> Result<(), Box<dyn std::error::Error>> {
-        // `older-tag.json` is a valid Sigstore bundle for v0.0.0 (< 0.0.1),
-        // so only the monitor-side downgrade check can refuse it.
+        // `older-tag.json` is a valid Sigstore bundle for v0.0.0 (< 0.0.1).
+        // `StageBegin` already refuses that tag, so stage a newer one and
+        // ask for v0.0.0: only `ReplaceBinary`'s own downgrade check can
+        // refuse it.
         let work = TempDir::new()?;
-        let state_root = work.path().join("state");
-        std::fs::create_dir_all(&state_root)?;
         let target = swap_target(work.path(), "detent-downgrade", b"old-binary")?;
-        let (digest, bytes) = plant_release_for(&state_root, "older-tag.json", "v0.0.0")?;
-        let staging_dir = work.path().join("monitor-staging");
-        let mut monitor = update_monitor(&state_root, &staging_dir, target.clone())?;
+        let mut monitor = work_monitor(&work, target.clone())?;
+        let (digest, bytes) = stage_release(&mut monitor, "older-tag.json")?;
         let response = monitor.dispatch(Request::ReplaceBinary {
             tag: "v0.0.0".to_owned(),
             len: bytes.len() as u64,
             sha256: digest,
         })?;
         assert!(
-            matches!(response, Response::Error(_)),
+            io_message(&response).is_some_and(|message| message.starts_with("refusing downgrade")),
             "older signed tag must be refused, got {response:?}"
         );
         assert_eq!(
@@ -4490,6 +4561,309 @@ mod tests {
             b"old-binary",
             "target must be unchanged on downgrade refusal"
         );
+        assert!(!stage_file(&work).exists());
+        Ok(())
+    }
+
+    // -- StageBegin / StageUpdate (C1-b) ----------------------------------------
+
+    /// A greeted monitor over an empty allow-list that stages into
+    /// `<work>/monitor-staging`.
+    fn stage_monitor(work: &TempDir) -> Result<Monitor<'static>, Box<dyn std::error::Error>> {
+        let target = swap_target(work.path(), "detent-stage", b"old-binary")?;
+        work_monitor(work, target)
+    }
+
+    fn stage_begin(image: &[u8]) -> Request {
+        Request::StageBegin {
+            tag: FIXTURE_TAG.to_owned(),
+            len: image.len() as u64,
+            sha256: Sha256Digest::of(image),
+            bundle: b"{}".to_vec(),
+        }
+    }
+
+    fn stage_chunk(offset: u64, chunk: &[u8]) -> Request {
+        Request::StageUpdate {
+            offset,
+            chunk: chunk.to_vec(),
+        }
+    }
+
+    fn stage_file(work: &TempDir) -> PathBuf {
+        work.path().join("monitor-staging").join(UPDATE_STAGE)
+    }
+
+    const STAGE_IMAGE: &[u8] = b"abcdefghij";
+
+    #[test]
+    fn stage_update_writes_in_order_chunks_to_a_private_monitor_file()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::MetadataExt as _;
+        let work = TempDir::new()?;
+        let mut monitor = stage_monitor(&work)?;
+        assert_eq!(
+            monitor.dispatch(stage_begin(STAGE_IMAGE))?,
+            Response::Staged { received: 0 }
+        );
+        assert_eq!(
+            monitor.dispatch(stage_chunk(0, b"abcd"))?,
+            Response::Staged { received: 4 }
+        );
+        assert_eq!(
+            monitor.dispatch(stage_chunk(4, b"efghij"))?,
+            Response::Staged { received: 10 }
+        );
+        let file = stage_file(&work);
+        assert_eq!(std::fs::read(&file)?, STAGE_IMAGE);
+        let meta = std::fs::symlink_metadata(&file)?;
+        assert!(meta.is_file());
+        assert_eq!(meta.mode() & 0o777, 0o600);
+        assert_eq!(meta.uid(), rustix::process::geteuid().as_raw());
+        Ok(())
+    }
+
+    #[test]
+    fn stage_update_refuses_out_of_order_overlapping_and_overlong_chunks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let oversize = Request::StageUpdate {
+            offset: 0,
+            chunk: vec![0_u8; MAX_STAGE_CHUNK + 1],
+        };
+        let cases: [(bool, Request, &str); 6] = [
+            (true, stage_chunk(6, b"gh"), "update chunk is out of order"),
+            (true, stage_chunk(2, b"cd"), "update chunk is out of order"),
+            (
+                false,
+                stage_chunk(0, b"abcdefghijk"),
+                "update chunk runs past the declared length",
+            ),
+            (
+                true,
+                stage_chunk(4, b"efghijk"),
+                "update chunk runs past the declared length",
+            ),
+            (
+                false,
+                stage_chunk(0, b""),
+                "update chunk size is outside the allowed range",
+            ),
+            (
+                false,
+                oversize,
+                "update chunk size is outside the allowed range",
+            ),
+        ];
+        for (first, bad, message) in cases {
+            let work = TempDir::new()?;
+            let mut monitor = stage_monitor(&work)?;
+            monitor.dispatch(stage_begin(STAGE_IMAGE))?;
+            if first {
+                assert_eq!(
+                    monitor.dispatch(stage_chunk(0, b"abcd"))?,
+                    Response::Staged { received: 4 }
+                );
+            }
+            let response = monitor.dispatch(bad)?;
+            assert_eq!(io_message(&response), Some(message), "{response:?}");
+            // A refused chunk discards the whole stage.
+            assert!(!stage_file(&work).exists());
+            assert_eq!(
+                io_message(&monitor.dispatch(stage_chunk(0, b"abcd"))?),
+                Some("no update is being staged")
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn stage_update_without_a_begin_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let mut monitor = stage_monitor(&work)?;
+        assert_eq!(
+            io_message(&monitor.dispatch(stage_chunk(0, b"abcd"))?),
+            Some("no update is being staged")
+        );
+        assert!(!stage_file(&work).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn stage_begin_refuses_a_release_over_the_size_cap() -> Result<(), Box<dyn std::error::Error>> {
+        let digest = Sha256Digest::of(STAGE_IMAGE);
+        let begin = |tag: &str, len: u64, bundle: Vec<u8>| Request::StageBegin {
+            tag: tag.to_owned(),
+            len,
+            sha256: digest,
+            bundle,
+        };
+        let cases = [
+            (
+                begin(FIXTURE_TAG, MAX_UPDATE_BYTES + 1, b"{}".to_vec()),
+                "update size is outside the allowed range".to_owned(),
+            ),
+            (
+                begin(FIXTURE_TAG, 0, b"{}".to_vec()),
+                "update size is outside the allowed range".to_owned(),
+            ),
+            (
+                begin(FIXTURE_TAG, 10, vec![b' '; MAX_STAGE_BUNDLE + 1]),
+                "update bundle size is outside the allowed range".to_owned(),
+            ),
+            (
+                begin(FIXTURE_TAG, 10, Vec::new()),
+                "update bundle size is outside the allowed range".to_owned(),
+            ),
+            (
+                begin("latest", 10, b"{}".to_vec()),
+                "release tag is not a semver version".to_owned(),
+            ),
+            (
+                begin("v0.0.0", 10, b"{}".to_vec()),
+                format!(
+                    "refusing downgrade to v0.0.0 from {}",
+                    env!("CARGO_PKG_VERSION")
+                ),
+            ),
+        ];
+        for (request, message) in cases {
+            let work = TempDir::new()?;
+            let mut monitor = stage_monitor(&work)?;
+            let response = monitor.dispatch(request)?;
+            assert_eq!(io_message(&response), Some(message.as_str()));
+            assert!(!stage_file(&work).exists());
+            assert_eq!(
+                io_message(&monitor.dispatch(stage_chunk(0, b"abcd"))?),
+                Some("no update is being staged")
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_new_stage_begin_discards_the_abandoned_stage() -> Result<(), Box<dyn std::error::Error>> {
+        let work = TempDir::new()?;
+        let mut monitor = stage_monitor(&work)?;
+        monitor.dispatch(stage_begin(STAGE_IMAGE))?;
+        monitor.dispatch(stage_chunk(0, b"abcd"))?;
+        assert_eq!(
+            monitor.dispatch(stage_begin(b"xyz"))?,
+            Response::Staged { received: 0 }
+        );
+        assert_eq!(std::fs::read(stage_file(&work))?, b"");
+        assert_eq!(
+            monitor.dispatch(stage_chunk(0, b"xyz"))?,
+            Response::Staged { received: 3 }
+        );
+        assert_eq!(std::fs::read(stage_file(&work))?, b"xyz");
+        Ok(())
+    }
+
+    #[test]
+    fn stage_begin_never_writes_through_a_planted_symlink() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let work = TempDir::new()?;
+        let staging = work.path().join("monitor-staging");
+        std::fs::create_dir(&staging)?;
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700))?;
+        let victim = work.path().join("victim");
+        std::fs::write(&victim, b"victim")?;
+        std::os::unix::fs::symlink(&victim, stage_file(&work))?;
+        let mut monitor = stage_monitor(&work)?;
+        monitor.dispatch(stage_begin(STAGE_IMAGE))?;
+        assert_eq!(
+            monitor.dispatch(stage_chunk(0, STAGE_IMAGE))?,
+            Response::Staged { received: 10 }
+        );
+        assert_eq!(std::fs::read(&victim)?, b"victim");
+        assert!(std::fs::symlink_metadata(stage_file(&work))?.is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn stage_begin_refuses_an_untrusted_staging_directory() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let work = TempDir::new()?;
+        let staging = work.path().join("monitor-staging");
+        std::fs::create_dir(&staging)?;
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o770))?;
+        let mut monitor = stage_monitor(&work)?;
+        assert_eq!(
+            io_message(&monitor.dispatch(stage_begin(STAGE_IMAGE))?),
+            Some("monitor staging directory is not trusted")
+        );
+        assert!(!stage_file(&work).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn the_client_stages_an_image_in_chunks_and_shutdown_discards_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let staging = fx.state_root.with_file_name("monitor-staging");
+        let file = staging.join(UPDATE_STAGE);
+        let (mut monitor_end, worker_end) = Channel::pair()?;
+        let allow = fx.allow()?;
+        let monitor_staging = staging.clone();
+        let monitor = std::thread::spawn(move || {
+            let mut monitor = Monitor::new(allow, Hooks::default());
+            monitor.set_staging_dir(monitor_staging);
+            monitor.serve(&mut monitor_end)
+        });
+        let image: Vec<u8> = (0..=2 * MAX_STAGE_CHUNK)
+            .map(|n| u8::try_from(n % 251).unwrap_or_default())
+            .collect();
+        let mut client = Client::new(worker_end);
+        client.hello()?;
+        let digest = client.stage_update(FIXTURE_TAG, &image, b"{}".to_vec())?;
+        assert_eq!(digest, Sha256Digest::of(&image));
+        assert_eq!(std::fs::read(&file)?, image);
+        client.shutdown()?;
+        assert_eq!(
+            monitor.join().map_err(|_| "monitor thread panicked")??,
+            ExitReason::Shutdown
+        );
+        assert!(!file.exists(), "Shutdown discards a stage never installed");
+        Ok(())
+    }
+
+    #[test]
+    fn serve_discards_a_leftover_stage_at_start() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let staging = fx.state_root.with_file_name("monitor-staging");
+        std::fs::create_dir_all(&staging)?;
+        let file = staging.join(UPDATE_STAGE);
+        std::fs::write(&file, b"a stage a dead monitor left")?;
+        let mut monitor = Monitor::new(fx.allow()?, Hooks::default());
+        monitor.set_staging_dir(staging);
+        let (mut channel, worker_end) = Channel::pair()?;
+        drop(worker_end);
+        assert_eq!(
+            monitor.serve(&mut channel).ok(),
+            Some(ExitReason::PeerClosed)
+        );
+        assert!(!file.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_monitor_without_the_state_lock_keeps_a_leftover_stage()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Without the lock another monitor may own the stage: leave it.
+        let fx = fixture()?;
+        let staging = fx.state_root.with_file_name("monitor-staging");
+        std::fs::create_dir_all(&staging)?;
+        let file = staging.join(UPDATE_STAGE);
+        std::fs::write(&file, b"another monitor's stage")?;
+        let mut monitor = Monitor::new(fx.allow()?, Hooks::default());
+        monitor.set_staging_dir(staging);
+        let (mut channel, worker_end) = Channel::pair()?;
+        drop(worker_end);
+        assert_eq!(
+            monitor.serve_locked(&mut channel, StateLock::Unavailable)?,
+            ExitReason::PeerClosed
+        );
+        assert_eq!(std::fs::read(&file)?, b"another monitor's stage");
         Ok(())
     }
 
@@ -6088,6 +6462,16 @@ mod tests {
             Request::ReloadUnitFiles {
                 module: ModuleId(0),
             },
+            Request::StageBegin {
+                tag: "v9.9.9".to_owned(),
+                len: 5,
+                sha256: Sha256Digest::of(b"image"),
+                bundle: b"{}".to_vec(),
+            },
+            Request::StageUpdate {
+                offset: 0,
+                chunk: b"image".to_vec(),
+            },
         ]
     }
 
@@ -6280,7 +6664,7 @@ mod tests {
         Ok(())
     }
 
-    // -- staged images: verification, materialization and the swap ------------
+    // -- staged images: verification and the swap ------------------------------
 
     /// A monitor-private staging directory holding one image, `image`.
     fn private_staging(work: &TempDir) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
@@ -6379,145 +6763,10 @@ mod tests {
     }
 
     #[test]
-    fn materialize_staged_refuses_a_tag_that_is_not_a_plain_file_name()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let work = TempDir::new()?;
-        let digest = Sha256Digest::of(b"image");
-        for tag in ["", ".", "..", "a/b", "nul\0byte"] {
-            assert!(matches!(
-                materialize_staged(work.path(), &work.path().join("staging"), tag, 5, digest),
-                Err(ProtoError::VerificationFailed)
-            ));
-        }
-        assert!(!work.path().join("staging").exists());
-        Ok(())
-    }
-
-    #[test]
-    fn materialize_staged_reports_io_error_when_staging_cannot_be_created()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let work = TempDir::new()?;
-        let file = work.path().join("file");
-        std::fs::write(&file, b"x")?;
-        let result = materialize_staged(
-            work.path(),
-            &file.join("staging"),
-            FIXTURE_TAG,
-            5,
-            Sha256Digest::of(b"image"),
-        );
-        assert!(matches!(
-            result,
-            Err(ProtoError::Io(message)) if message.starts_with("create monitor staging directory")
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn materialize_staged_refuses_a_source_that_is_its_own_destination()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let work = TempDir::new()?;
-        let digest = Sha256Digest::of(b"image");
-        let tag = digest.to_string();
-        let inputs = work.path().join(STAGED_DIR);
-        std::fs::create_dir_all(&inputs)?;
-        // Private, so the staging trust check passes whatever the umask.
-        std::fs::set_permissions(&inputs, std::fs::Permissions::from_mode(0o700))?;
-        std::fs::write(inputs.join(&tag), b"image")?;
-        assert!(matches!(
-            materialize_staged(work.path(), &inputs, &tag, 5, digest),
-            Err(ProtoError::VerificationFailed)
-        ));
-        assert_eq!(std::fs::read(inputs.join(&tag))?, b"image");
-        Ok(())
-    }
-
-    #[test]
-    fn materialize_staged_refuses_an_unreadable_or_wrong_sized_input()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let work = TempDir::new()?;
-        let digest = Sha256Digest::of(b"image");
-        let inputs = work.path().join(STAGED_DIR);
-        let staging = work.path().join("monitor-staging");
-        // A directory is refused by the regular-file check, before any read.
-        std::fs::create_dir_all(inputs.join("v1.0.0"))?;
-        assert!(matches!(
-            materialize_staged(work.path(), &staging, "v1.0.0", 5, digest),
-            Err(ProtoError::Io(message)) if message == "staged binary is not a regular file"
-        ));
-        std::fs::write(inputs.join("v2.0.0"), b"image")?;
-        assert!(matches!(
-            materialize_staged(work.path(), &staging, "v2.0.0", 6, digest),
-            Err(ProtoError::Io(message)) if message == "staged binary size does not match the request"
-        ));
-        assert!(!staged_path(&staging, digest).exists());
-        Ok(())
-    }
-
-    #[test]
-    fn materialize_staged_refuses_a_fifo_without_blocking() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let work = TempDir::new()?;
-        let inputs = work.path().join(STAGED_DIR);
-        std::fs::create_dir_all(&inputs)?;
-        // `mkfifo(1)` rather than `mknodat`, which rustix does not offer
-        // on macOS.
-        let made = std::process::Command::new("mkfifo")
-            .arg(inputs.join("v2.0.0"))
-            .status()?;
-        assert!(made.success(), "mkfifo failed: {made}");
-        let state_root = work.path().to_path_buf();
-        let staging = work.path().join("monitor-staging");
-        let (sender, receiver) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let result = materialize_staged(
-                &state_root,
-                &staging,
-                "v2.0.0",
-                5,
-                Sha256Digest::of(b"image"),
-            );
-            let _ = sender.send(result);
-        });
-        // With no writer, a blocking open of the FIFO never returns.
-        let result = receiver.recv_timeout(Duration::from_secs(5))?;
-        assert!(matches!(
-            result,
-            Err(ProtoError::Io(message)) if message == "staged binary is not a regular file"
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn materialize_staged_refuses_a_symlinked_staged_directory()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let work = TempDir::new()?;
-        let digest = Sha256Digest::of(b"image");
-        let elsewhere = work.path().join("elsewhere");
-        std::fs::create_dir(&elsewhere)?;
-        std::fs::write(elsewhere.join("v2.0.0"), b"image")?;
-        let state_root = work.path().join("state");
-        std::fs::create_dir_all(state_root.join("update"))?;
-        std::os::unix::fs::symlink(&elsewhere, state_root.join(STAGED_DIR))?;
-        let staging = work.path().join("monitor-staging");
-        assert!(matches!(
-            materialize_staged(&state_root, &staging, "v2.0.0", 5, digest),
-            Err(ProtoError::Io(message)) if message == "staged input directory is not trusted"
-        ));
-        assert!(!staged_path(&staging, digest).exists());
-        Ok(())
-    }
-
-    #[test]
     fn replace_binary_refuses_a_tag_that_is_not_semver() -> Result<(), Box<dyn std::error::Error>> {
         let work = TempDir::new()?;
-        let state_root = work.path().join("state");
         let target = swap_target(work.path(), "detent-semver", b"old-binary")?;
-        let mut monitor = update_monitor(
-            &state_root,
-            &work.path().join("monitor-staging"),
-            target.clone(),
-        )?;
+        let mut monitor = work_monitor(&work, target.clone())?;
         let response = monitor.dispatch(Request::ReplaceBinary {
             tag: "latest".to_owned(),
             len: 5,
@@ -6532,186 +6781,56 @@ mod tests {
     }
 
     #[test]
-    fn replace_binary_surfaces_a_missing_staged_input() -> Result<(), Box<dyn std::error::Error>> {
+    fn replace_binary_without_a_stage_is_refused() -> Result<(), Box<dyn std::error::Error>> {
         let work = TempDir::new()?;
-        let state_root = work.path().join("state");
-        std::fs::create_dir_all(&state_root)?;
         let target = swap_target(work.path(), "detent-missing", b"old-binary")?;
-        let mut monitor = update_monitor(
-            &state_root,
-            &work.path().join("monitor-staging"),
-            target.clone(),
-        )?;
+        let mut monitor = work_monitor(&work, target.clone())?;
         let response = monitor.dispatch(Request::ReplaceBinary {
             tag: "v999.0.0".to_owned(),
             len: 5,
             sha256: Sha256Digest::of(b"image"),
         })?;
-        assert!(
-            io_message(&response).is_some_and(|message| message.starts_with("open staged binary")),
-            "unexpected response {response:?}"
-        );
+        assert_eq!(io_message(&response), Some("no update is staged"));
         assert_eq!(std::fs::read(&target)?, b"old-binary");
         Ok(())
     }
 
     #[test]
-    fn replace_binary_refuses_a_missing_or_unparseable_bundle()
-    -> Result<(), Box<dyn std::error::Error>> {
-        for bundle in [None, Some(b"not a sigstore bundle".as_slice())] {
-            let work = TempDir::new()?;
-            let state_root = work.path().join("state");
-            std::fs::create_dir_all(&state_root)?;
-            let target = swap_target(work.path(), "detent-bundle", b"old-binary")?;
-            let (digest, bytes) = plant_release(&state_root, "valid.json")?;
-            let bundle_path = state_root
-                .join(STAGED_DIR)
-                .join(format!("{FIXTURE_TAG}.sigstore.json"));
-            match bundle {
-                None => std::fs::remove_file(&bundle_path)?,
-                Some(contents) => std::fs::write(&bundle_path, contents)?,
-            }
-            let mut monitor = update_monitor(
-                &state_root,
-                &work.path().join("monitor-staging"),
-                target.clone(),
-            )?;
-            let response = monitor.dispatch(Request::ReplaceBinary {
-                tag: FIXTURE_TAG.to_owned(),
-                len: bytes.len() as u64,
-                sha256: digest,
-            })?;
-            assert!(matches!(
-                response,
-                Response::Error(ProtoError::VerificationFailed)
-            ));
-            assert_eq!(std::fs::read(&target)?, b"old-binary");
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn replace_binary_refuses_a_symlinked_bundle() -> Result<(), Box<dyn std::error::Error>> {
-        let work = TempDir::new()?;
-        let state_root = work.path().join("state");
-        std::fs::create_dir_all(&state_root)?;
-        let target = swap_target(work.path(), "detent-link", b"old-binary")?;
-        let (digest, bytes) = plant_release(&state_root, "valid.json")?;
-        // The linked file is the valid bundle, so only the open can refuse it.
-        let elsewhere = work.path().join("elsewhere.sigstore.json");
-        let bundle_path = state_root
-            .join(STAGED_DIR)
-            .join(format!("{FIXTURE_TAG}.sigstore.json"));
-        std::fs::rename(&bundle_path, &elsewhere)?;
-        std::os::unix::fs::symlink(&elsewhere, &bundle_path)?;
-        let staging_dir = work.path().join("monitor-staging");
-        let mut monitor = update_monitor(&state_root, &staging_dir, target.clone())?;
-        let response = monitor.dispatch(Request::ReplaceBinary {
-            tag: FIXTURE_TAG.to_owned(),
-            len: bytes.len() as u64,
-            sha256: digest,
-        })?;
-        assert!(matches!(
-            response,
-            Response::Error(ProtoError::VerificationFailed)
-        ));
-        assert_eq!(std::fs::read(&target)?, b"old-binary");
-        assert!(!staged_path(&staging_dir, digest).exists());
-        Ok(())
-    }
-
-    #[test]
-    fn replace_binary_refuses_a_fifo_bundle_without_blocking()
+    fn replace_binary_refuses_an_unparseable_bundle_and_discards_the_stage()
     -> Result<(), Box<dyn std::error::Error>> {
         let work = TempDir::new()?;
-        let state_root = work.path().join("state");
-        std::fs::create_dir_all(&state_root)?;
-        let target = swap_target(work.path(), "detent-fifo", b"old-binary")?;
-        let (digest, bytes) = plant_release(&state_root, "valid.json")?;
-        let bundle_path = state_root
-            .join(STAGED_DIR)
-            .join(format!("{FIXTURE_TAG}.sigstore.json"));
-        std::fs::remove_file(&bundle_path)?;
-        let made = std::process::Command::new("mkfifo")
-            .arg(&bundle_path)
-            .status()?;
-        assert!(made.success(), "mkfifo failed: {made}");
-        let staging_dir = work.path().join("monitor-staging");
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let thread_target = target.clone();
-        std::thread::spawn(move || {
-            let outcome = update_monitor(&state_root, &staging_dir, thread_target)
-                .and_then(|mut monitor| {
-                    monitor
-                        .dispatch(Request::ReplaceBinary {
-                            tag: FIXTURE_TAG.to_owned(),
-                            len: bytes.len() as u64,
-                            sha256: digest,
-                        })
-                        .map_err(Into::into)
-                })
-                .map_err(|err| err.to_string());
-            let _ = sender.send((outcome, staged_path(&staging_dir, digest).exists()));
-        });
-        // With no writer, a blocking open of the FIFO never returns.
-        let (outcome, copy_left) = receiver.recv_timeout(Duration::from_secs(5))?;
-        assert!(matches!(
-            outcome,
-            Ok(Response::Error(ProtoError::VerificationFailed))
-        ));
-        assert!(!copy_left);
-        assert_eq!(std::fs::read(&target)?, b"old-binary");
-        Ok(())
-    }
-
-    #[test]
-    fn replace_binary_leaves_no_copy_after_a_failed_verification()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let work = TempDir::new()?;
-        let state_root = work.path().join("state");
-        std::fs::create_dir_all(&state_root)?;
-        let target = swap_target(work.path(), "detent-leftover", b"old-binary")?;
-        let (digest, bytes) = plant_release(&state_root, "wrong-identity.json")?;
-        std::fs::write(
-            state_root
-                .join(STAGED_DIR)
-                .join(format!("{FIXTURE_TAG}.sigstore.json")),
-            b"not a sigstore bundle",
+        let target = swap_target(work.path(), "detent-bundle", b"old-binary")?;
+        let mut monitor = work_monitor(&work, target.clone())?;
+        let bytes = std::fs::read(fixture_dir().join("binary.bin"))?;
+        let digest = Sha256Digest::of(&bytes);
+        stage_bytes(
+            &mut monitor,
+            &bytes,
+            digest,
+            b"not a sigstore bundle".to_vec(),
         )?;
-        let staging_dir = work.path().join("monitor-staging");
-        let mut monitor = update_monitor(&state_root, &staging_dir, target.clone())?;
-        let response = monitor.dispatch(Request::ReplaceBinary {
-            tag: FIXTURE_TAG.to_owned(),
-            len: bytes.len() as u64,
-            sha256: digest,
-        })?;
+        let response = monitor.dispatch(replace(digest, bytes.len()))?;
         assert!(matches!(
             response,
             Response::Error(ProtoError::VerificationFailed)
         ));
-        assert!(!staged_path(&staging_dir, digest).exists());
         assert_eq!(std::fs::read(&target)?, b"old-binary");
+        assert!(!stage_file(&work).exists());
         Ok(())
     }
 
     #[cfg(feature = "update")]
     #[test]
-    fn replace_binary_leaves_no_copy_after_a_failed_swap() -> Result<(), Box<dyn std::error::Error>>
+    fn replace_binary_leaves_no_stage_after_a_failed_swap() -> Result<(), Box<dyn std::error::Error>>
     {
         let work = TempDir::new()?;
-        let state_root = work.path().join("state");
-        std::fs::create_dir_all(&state_root)?;
-        let (digest, bytes) = plant_release(&state_root, "valid.json")?;
-        let staging_dir = work.path().join("monitor-staging");
-        let mut monitor =
-            update_monitor(&state_root, &staging_dir, work.path().join("detent-gone"))?;
-        let response = monitor.dispatch(Request::ReplaceBinary {
-            tag: FIXTURE_TAG.to_owned(),
-            len: bytes.len() as u64,
-            sha256: digest,
-        })?;
+        let target = work.path().join("detent-gone");
+        let mut monitor = work_monitor(&work, target.clone())?;
+        let (digest, bytes) = stage_release(&mut monitor, "valid.json")?;
+        let response = monitor.dispatch(replace(digest, bytes.len()))?;
         assert_eq!(io_message(&response), Some("running binary is missing"));
-        assert!(!staged_path(&staging_dir, digest).exists());
+        assert!(!target.exists());
+        assert!(!stage_file(&work).exists());
         Ok(())
     }
 
@@ -6725,7 +6844,6 @@ mod tests {
         let state_root = work.path().join("state");
         std::fs::create_dir_all(&state_root)?;
         let target = swap_target(work.path(), "detent-embedded", b"old-binary")?;
-        let (digest, bytes) = plant_release(&state_root, "valid.json")?;
         let config = Config::with_state_root(&state_root);
         let mut monitor = Monitor::new(Allowlist::from_modules(&[], &config)?, Hooks::default());
         monitor.set_staging_dir(work.path().join("monitor-staging"));
@@ -6733,11 +6851,8 @@ mod tests {
         let _ = monitor.dispatch(Request::Hello {
             proto: PROTO_VERSION,
         });
-        let response = monitor.dispatch(Request::ReplaceBinary {
-            tag: FIXTURE_TAG.to_owned(),
-            len: bytes.len() as u64,
-            sha256: digest,
-        })?;
+        let (digest, bytes) = stage_release(&mut monitor, "valid.json")?;
+        let response = monitor.dispatch(replace(digest, bytes.len()))?;
         assert!(matches!(
             response,
             Response::Error(ProtoError::VerificationFailed)
@@ -6746,39 +6861,24 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "update")]
     #[test]
-    fn replace_binary_reports_a_missing_running_binary_after_verification()
+    fn replace_binary_reports_a_stage_that_cannot_be_read_back()
     -> Result<(), Box<dyn std::error::Error>> {
+        // The stage file is the monitor's own; a second name for it (which
+        // only root or the monitor could make) is refused by the read-back
+        // checks, before the bundle and the swap.
         let work = TempDir::new()?;
-        let state_root = work.path().join("state");
-        std::fs::create_dir_all(&state_root)?;
-        let (digest, bytes) = plant_release(&state_root, "valid.json")?;
-        let target = work.path().join("detent-gone");
-        let mut monitor = update_monitor(
-            &state_root,
-            &work.path().join("monitor-staging"),
-            target.clone(),
-        )?;
-        let response = monitor.dispatch(Request::ReplaceBinary {
-            tag: FIXTURE_TAG.to_owned(),
-            len: bytes.len() as u64,
-            sha256: digest,
-        })?;
-        assert_eq!(io_message(&response), Some("running binary is missing"));
-        assert!(!target.exists());
-        Ok(())
-    }
-
-    #[cfg(feature = "update")]
-    #[test]
-    fn read_bounded_file_refuses_a_file_over_its_cap() -> Result<(), Box<dyn std::error::Error>> {
-        let work = TempDir::new()?;
-        let path = work.path().join("bundle");
-        std::fs::write(&path, b"1234")?;
-        let file = std::fs::File::open(&path)?;
-        assert_eq!(super::read_bounded_file(&file, 4)?, b"1234");
-        assert!(super::read_bounded_file(&std::fs::File::open(&path)?, 3).is_err());
+        let target = swap_target(work.path(), "detent-linked", b"old-binary")?;
+        let mut monitor = work_monitor(&work, target.clone())?;
+        monitor.dispatch(stage_begin(STAGE_IMAGE))?;
+        monitor.dispatch(stage_chunk(0, STAGE_IMAGE))?;
+        let second = work.path().join("monitor-staging").join("second-name");
+        std::fs::hard_link(stage_file(&work), &second)?;
+        let response =
+            monitor.dispatch(replace(Sha256Digest::of(STAGE_IMAGE), STAGE_IMAGE.len()))?;
+        assert_eq!(io_message(&response), Some("staged binary is not trusted"));
+        assert_eq!(std::fs::read(&target)?, b"old-binary");
+        assert!(!stage_file(&work).exists());
         Ok(())
     }
 

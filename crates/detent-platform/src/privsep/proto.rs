@@ -51,13 +51,34 @@ use detent_core::descriptor::{ServiceAction as CoreServiceAction, TargetKind};
 /// variant, which changes the wire shape. `PROTO_VERSION` was bumped to `2`
 /// for it, so a mismatched pair fails at the `Hello` handshake rather than
 /// mis-decoding the frame.
+///
+/// [`Request::StageBegin`], [`Request::StageUpdate`] and [`Response::Staged`]
+/// (C1-b) are appended variants and change no existing field, so the
+/// version stays `2`. [`Request::ReplaceBinary`] keeps its fields but now
+/// installs only the monitor's own stage, so a worker that does not stage
+/// first is refused: it fails closed.
 pub const PROTO_VERSION: u16 = 2;
 /// Largest encoded message accepted in either direction, in bytes.
 ///
 /// The largest legitimate payload is a configuration file, and 1 MiB is far
 /// above any file `detent` manages. Enforcing it before allocation makes a
-/// length header from a hostile peer harmless.
+/// length header from a hostile peer harmless. A release image is larger, so
+/// it crosses in [`MAX_STAGE_CHUNK`] pieces ([`Request::StageUpdate`]).
 pub const MAX_FRAME: usize = 1024 * 1024;
+
+/// Largest release image the monitor stages, in bytes (C1-b): 64 MiB, five
+/// times the 12 MiB budget of the largest build (PLAN §4.1). The monitor
+/// refuses a [`Request::StageBegin`] that declares more, so a worker cannot
+/// fill the monitor's staging directory.
+pub const MAX_UPDATE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Largest `chunk` of one [`Request::StageUpdate`], in bytes: half of
+/// [`MAX_FRAME`], so a chunk and its framing always fit in one frame.
+pub const MAX_STAGE_CHUNK: usize = MAX_FRAME / 2;
+
+/// Largest Sigstore bundle a [`Request::StageBegin`] carries, in bytes. A
+/// release bundle is about 11 KiB.
+pub const MAX_STAGE_BUNDLE: usize = 256 * 1024;
 
 // ---------------------------------------------------------------------------
 // Identifiers
@@ -298,14 +319,18 @@ pub enum Request {
         /// Which target.
         target: TargetId,
     },
-    /// Replace the running binary with a staged release.
+    /// Replace the running binary with the release staged by
+    /// [`Request::StageBegin`] and [`Request::StageUpdate`].
     ///
-    /// The worker-written tag input remains under
-    /// `<state_root>/update/staged`; the monitor materializes a digest-named
-    /// copy in its private runtime staging base, authenticates those bytes
-    /// against `<tag>.sigstore.json`, and atomically swaps them into place.
+    /// `tag`, `len` and `sha256` must equal the stage's, and the stage must
+    /// be complete. The monitor reads the image back from its own staging
+    /// file, checks its length and digest, authenticates it against the
+    /// stage's Sigstore bundle, refuses a tag that is not newer than the
+    /// running version (C1-e), and atomically swaps it into place. It never
+    /// reads a path the worker can write (C1-b). The stage is consumed
+    /// whatever the answer.
     ReplaceBinary {
-        /// Release tag, also naming the staged binary and bundle inputs.
+        /// Release tag, as in [`Request::StageBegin`].
         tag: String,
         /// Length of the replacement image.
         len: u64,
@@ -348,6 +373,40 @@ pub enum Request {
         /// Which module was written.
         module: ModuleId,
     },
+    /// Begin staging a release image in the monitor's own staging
+    /// directory (C1-b), so the monitor never reads update bytes from a
+    /// path the worker can write. The monitor discards any earlier stage
+    /// (one at a time), refuses a `len` of 0 or over [`MAX_UPDATE_BYTES`], a
+    /// `bundle` that is empty or over [`MAX_STAGE_BUNDLE`], and a `tag`
+    /// that is not a newer semver version (C1-e), and answers
+    /// [`Response::Staged`] with `received: 0`.
+    ///
+    /// Appended after [`Request::ReloadUnitFiles`] to preserve every
+    /// existing discriminant; see [`PROTO_VERSION`]'s doc comment.
+    StageBegin {
+        /// Release tag, e.g. `v1.2.3`.
+        tag: String,
+        /// Length of the whole image.
+        len: u64,
+        /// Digest the whole image must have.
+        sha256: Sha256Digest,
+        /// The release's Sigstore bundle (`<asset>.sigstore.json`).
+        bundle: Vec<u8>,
+    },
+    /// The next piece of the image begun by [`Request::StageBegin`]. Chunks
+    /// come in order, without gaps or overlap: `offset` must equal the
+    /// bytes received so far, `chunk` must hold 1 to [`MAX_STAGE_CHUNK`]
+    /// bytes and must not run past the declared length. The monitor
+    /// discards the whole stage on any refusal.
+    ///
+    /// Appended after [`Request::StageBegin`] to preserve every existing
+    /// discriminant; see [`PROTO_VERSION`]'s doc comment.
+    StageUpdate {
+        /// Where `chunk` starts in the image.
+        offset: u64,
+        /// The bytes.
+        chunk: Vec<u8>,
+    },
 }
 
 impl Request {
@@ -366,7 +425,9 @@ impl Request {
             | Self::RollbackCommit { .. }
             | Self::Mount { .. }
             | Self::ReplaceBinary { .. }
-            | Self::ReloadUnitFiles { .. } => true,
+            | Self::ReloadUnitFiles { .. }
+            | Self::StageBegin { .. }
+            | Self::StageUpdate { .. } => true,
             Self::Service { action, .. } => !matches!(action, ServiceAction::Status),
             Self::Hello { .. }
             | Self::ReadTarget { .. }
@@ -653,6 +714,15 @@ pub enum Response {
         /// What happened to each unit of an added or changed entry.
         units: Vec<MountOutcome>,
     },
+    /// Answer to [`Request::StageBegin`] and [`Request::StageUpdate`].
+    ///
+    /// Appended after [`Response::Mounted`] to preserve every existing
+    /// discriminant; see [`PROTO_VERSION`]'s doc comment.
+    Staged {
+        /// Bytes of the image the monitor holds now; the next chunk's
+        /// `offset`.
+        received: u64,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -849,9 +919,10 @@ impl<'a> arbitrary::Arbitrary<'a> for Sha256Digest {
 mod tests {
     use super::{
         BackupId, BackupInfo, BindingId, BindingInfo, CheckId, CheckInfo, CheckOutcome, CodecError,
-        CommitId, HelloAck, IdKind, MAX_FRAME, ModuleId, ModuleInfo, MountOutcome, MountState,
-        PROTO_VERSION, PathKind, PendingService, ProtoError, Request, Response, ServiceAction,
-        ServiceOutcome, TargetContents, TargetId, TargetInfo, WriteReceipt, decode, encode,
+        CommitId, HelloAck, IdKind, MAX_FRAME, MAX_STAGE_BUNDLE, MAX_STAGE_CHUNK, MAX_UPDATE_BYTES,
+        ModuleId, ModuleInfo, MountOutcome, MountState, PROTO_VERSION, PathKind, PendingService,
+        ProtoError, Request, Response, ServiceAction, ServiceOutcome, TargetContents, TargetId,
+        TargetInfo, WriteReceipt, decode, encode,
     };
     use crate::fs::atomic::Sha256Digest;
     use detent_core::descriptor::{ServiceAction as CoreServiceAction, TargetKind};
@@ -925,6 +996,16 @@ mod tests {
             Request::PendingCommit,
             Request::ReloadUnitFiles {
                 module: ModuleId(2),
+            },
+            Request::StageBegin {
+                tag: "v1.2.3".to_owned(),
+                len: 4_096,
+                sha256: digest(),
+                bundle: b"{}".to_vec(),
+            },
+            Request::StageUpdate {
+                offset: 512,
+                chunk: vec![7_u8; 64],
             },
         ]
     }
@@ -1053,6 +1134,7 @@ mod tests {
                     detail: "systemctl start timed out".to_owned(),
                 }],
             },
+            Response::Staged { received: 512 },
         ];
         responses.extend(every_error_response());
         responses
@@ -1256,6 +1338,50 @@ mod tests {
         let bytes = encode(&response).unwrap_or_default();
         assert_eq!(bytes.first(), Some(&15));
         assert_eq!(decode::<Response>(&bytes).ok(), Some(response));
+    }
+
+    #[test]
+    fn the_stage_requests_take_the_next_discriminants() {
+        // Appended after `ReloadUnitFiles` and `Mounted`: no existing
+        // discriminant moves.
+        let begin = Request::StageBegin {
+            tag: "v1.2.3".to_owned(),
+            len: 1,
+            sha256: digest(),
+            bundle: Vec::new(),
+        };
+        let bytes = encode(&begin).unwrap_or_default();
+        assert_eq!(bytes.first(), Some(&15));
+        assert_eq!(decode::<Request>(&bytes).ok(), Some(begin));
+
+        let chunk = Request::StageUpdate {
+            offset: 0,
+            chunk: vec![1],
+        };
+        let bytes = encode(&chunk).unwrap_or_default();
+        assert_eq!(bytes.first(), Some(&16));
+        assert_eq!(decode::<Request>(&bytes).ok(), Some(chunk));
+
+        let staged = Response::Staged { received: 1 };
+        let bytes = encode(&staged).unwrap_or_default();
+        assert_eq!(bytes.first(), Some(&16));
+        assert_eq!(decode::<Response>(&bytes).ok(), Some(staged));
+    }
+
+    #[test]
+    fn a_full_stage_chunk_fits_in_one_frame() {
+        let request = Request::StageUpdate {
+            offset: MAX_UPDATE_BYTES,
+            chunk: vec![0xff_u8; MAX_STAGE_CHUNK],
+        };
+        assert!(encode(&request).is_ok());
+        let begin = Request::StageBegin {
+            tag: "v1.2.3".to_owned(),
+            len: MAX_UPDATE_BYTES,
+            sha256: digest(),
+            bundle: vec![0xff_u8; MAX_STAGE_BUNDLE],
+        };
+        assert!(encode(&begin).is_ok());
     }
 
     #[test]

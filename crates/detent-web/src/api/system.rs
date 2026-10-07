@@ -360,10 +360,10 @@ where
 }
 /// `POST /api/v1/system/update`.
 ///
-/// Installs the named update: the engine bridges the release tag to the
-/// content-addressed staged file and drives the monitor's `ReplaceBinary`
-/// swap. Refused as `Unsupported` (`ops-unsupported`, 500 with a reason)
-/// when the staged file is missing or the request is unsafe; the route,
+/// Installs the named update: the engine sends the staged release and its
+/// bundle to the monitor over the privsep socket and drives the monitor's
+/// `ReplaceBinary` swap. Refused as `Unsupported` (`ops-unsupported`, 500
+/// with a reason) when the staged file is missing or the request is unsafe; the route,
 /// authz (`write`), and audit record are the stable shape the UI builds on.
 #[cfg_attr(test, utoipa::path(
     post,

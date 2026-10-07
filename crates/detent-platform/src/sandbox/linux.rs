@@ -1675,26 +1675,27 @@ mod tests {
         )
     }
 
-    /// A `ReplaceBinary` that fails verification removes the monitor's own
-    /// copy of the candidate image (B4's cleanup guard).
+    /// A release staged over the socket (`StageBegin`, `StageUpdate`, C1-b)
+    /// that fails verification is refused, and the monitor removes its own
+    /// stage file (B4's cleanup guard).
     #[test]
-    fn enforce_mode_monitor_removes_the_staged_copy_of_a_refused_release()
+    fn enforce_mode_monitor_removes_the_stage_of_a_refused_release()
     -> Result<(), Box<dyn std::error::Error>> {
         drive_confined_monitor(
             2,
-            |state| {
-                let staged = state.join("update/staged");
-                std::fs::create_dir_all(&staged).is_ok()
-                    && std::fs::write(staged.join("v999.0.0"), b"not a release").is_ok()
-            },
+            |_| true,
             |client, drive| {
-                let digest = crate::fs::atomic::Sha256Digest::of(b"not a release");
-                matches!(
-                    client.replace_binary("v999.0.0", 13, digest),
-                    Err(crate::privsep::worker::ClientError::Remote(
-                        crate::privsep::proto::ProtoError::VerificationFailed
-                    ))
-                ) && !drive.staging.join(digest.to_string()).exists()
+                client
+                    .stage_update("v999.0.0", b"not a release", b"{}".to_vec())
+                    .is_ok_and(|digest| {
+                        matches!(
+                            client.replace_binary("v999.0.0", 13, digest),
+                            Err(crate::privsep::worker::ClientError::Remote(
+                                crate::privsep::proto::ProtoError::VerificationFailed
+                            ))
+                        )
+                    })
+                    && drive_staging_is_empty(drive)
             },
         )
     }
@@ -1745,33 +1746,31 @@ mod tests {
         )
     }
 
-    /// A `ReplaceBinary` that passes verification swaps the new image over
-    /// the running binary with `rename` and keeps the old one as `.prev`.
+    /// A release staged over the socket that passes verification is
+    /// swapped over the running binary with `rename`; the old one is kept as
+    /// `.prev`.
     #[cfg(feature = "update")]
     #[test]
     fn enforce_mode_monitor_swaps_a_verified_release() -> Result<(), Box<dyn std::error::Error>> {
         drive_confined_monitor(
             2,
-            |state| {
-                let staged = state.join("update/staged");
-                std::fs::create_dir_all(&staged).is_ok()
-                    && std::fs::copy(fixture_dir().join("binary.bin"), staged.join(FIXTURE_TAG))
-                        .is_ok()
-                    && std::fs::copy(
-                        fixture_dir().join("valid.json"),
-                        staged.join(format!("{FIXTURE_TAG}.sigstore.json")),
-                    )
-                    .is_ok()
-            },
+            |_| true,
             |client, drive| {
-                let Ok(image) = std::fs::read(fixture_dir().join("binary.bin")) else {
+                let (Ok(image), Ok(bundle)) = (
+                    std::fs::read(fixture_dir().join("binary.bin")),
+                    std::fs::read(fixture_dir().join("valid.json")),
+                ) else {
                     return false;
                 };
-                let digest = crate::fs::atomic::Sha256Digest::of(&image);
                 let previous = drive.binary.with_file_name("detent-old.prev");
                 client
-                    .replace_binary(FIXTURE_TAG, image.len() as u64, digest)
-                    .is_ok_and(|version| version == digest.to_string())
+                    .stage_update(FIXTURE_TAG, &image, bundle)
+                    .and_then(|digest| {
+                        client.replace_binary(FIXTURE_TAG, image.len() as u64, digest)
+                    })
+                    .is_ok_and(|version| {
+                        version == crate::fs::atomic::Sha256Digest::of(&image).to_string()
+                    })
                     && std::fs::read(&drive.binary).is_ok_and(|now| now == image)
                     && std::fs::read(&previous).is_ok_and(|old| old == b"old-binary")
                     && std::fs::metadata(&drive.binary).is_ok_and(|meta| {

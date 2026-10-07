@@ -761,6 +761,16 @@ fn every_request_gets_exactly_one_response() -> TestResult {
             len: 1,
             sha256: Sha256Digest::of(b"x"),
         },
+        Request::StageUpdate {
+            offset: 0,
+            chunk: b"x".to_vec(),
+        },
+        Request::StageBegin {
+            tag: "v0.0.0".to_owned(),
+            len: 1,
+            sha256: Sha256Digest::of(b"x"),
+            bundle: b"{}".to_vec(),
+        },
     ];
     let mut responses = 0_usize;
     for request in &requests {

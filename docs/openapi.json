@@ -930,7 +930,7 @@
           "system"
         ],
         "summary": "`POST /api/v1/system/update`.",
-        "description": "Installs the named update: the engine bridges the release tag to the\ncontent-addressed staged file and drives the monitor's `ReplaceBinary`\nswap. Refused as `Unsupported` (`ops-unsupported`, 500 with a reason)\nwhen the staged file is missing or the request is unsafe; the route,\nauthz (`write`), and audit record are the stable shape the UI builds on.",
+        "description": "Installs the named update: the engine sends the staged release and its\nbundle to the monitor over the privsep socket and drives the monitor's\n`ReplaceBinary` swap. Refused as `Unsupported` (`ops-unsupported`, 500\nwith a reason) when the staged file is missing or the request is unsafe; the route,\nauthz (`write`), and audit record are the stable shape the UI builds on.",
         "operationId": "apply_update",
         "requestBody": {
           "content": {

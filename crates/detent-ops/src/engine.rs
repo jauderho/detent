@@ -159,10 +159,10 @@ impl OpsEngine {
 
     /// Tell the engine where the monitor's state directory lives.
     ///
-    /// `UpdateApply` reads the worker-staged release tag from
-    /// `<state_root>/update/staged/<tag>` to compute the `(len, sha256)` it
-    /// sends via [`Client::replace_binary`]; without this set, the operation
-    /// is refused up front as `Unsupported`.
+    /// `UpdateApply` reads the worker's downloaded release
+    /// `<state_root>/update/staged/<tag>` and its `<tag>.sigstore.json`, and
+    /// sends both to the monitor ([`Client::stage_update`]); without this
+    /// set, the operation is refused up front as `Unsupported`.
     pub fn set_state_root(&mut self, state_root: impl Into<PathBuf>) {
         self.state_root = Some(state_root.into());
     }
@@ -380,8 +380,9 @@ impl OpsEngine {
                 None => Err(OpsError::Unsupported { what: "cert_renew" }),
             },
             // The worker cannot swap a binary it does not own, so this goes
-            // through the monitor's `ReplaceBinary` (`ops-unsupported` when
-            // the staged file is missing or refused, like `CertRenew`).
+            // through the monitor's stage and `ReplaceBinary`
+            // (`ops-unsupported` when the release or its bundle is missing,
+            // like `CertRenew`).
             Operation::UpdateApply { version } => self
                 .update_apply(&version, hashes)
                 .map(|()| OpOutcome::UpdateApplied { version }),
@@ -423,10 +424,10 @@ impl OpsEngine {
         })))
     }
 
-    /// Ask the monitor to bridge the tag-named staged release into the
-    /// digest-named path, authenticate it, and swap it over the running binary.
-    /// The worker only hashes the bytes it asks the monitor to install; the
-    /// monitor owns materialization and performs the authenticity gate.
+    /// Send the worker's downloaded release and its bundle to the monitor's
+    /// own staging over the socket (`StageBegin`/`StageUpdate`, C1-b), then
+    /// ask it to authenticate the stage and swap it over the running binary.
+    /// The monitor never reads the worker's files.
     /// On success `hashes.new` is the digest of the installed binary.
     fn update_apply(&mut self, version: &str, hashes: &mut Hashes) -> Result<(), OpsError> {
         let Some(state_root) = self.state_root.as_ref() else {
@@ -440,17 +441,24 @@ impl OpsEngine {
                 what: "update_apply",
             });
         }
-        let tag_path = state_root.join("update").join("staged").join(version);
-        let bytes = std::fs::read(&tag_path).map_err(|err| {
-            tracing::warn!(path = %tag_path.display(), error = %err, "staged binary missing");
-            OpsError::Unsupported {
-                what: "update_apply",
-            }
-        })?;
-        let len = bytes.len() as u64;
-        let sha256 = Sha256Digest::of(&bytes);
+        let staged = state_root.join("update").join("staged");
+        let read = |name: &str| {
+            let path = staged.join(name);
+            std::fs::read(&path).map_err(|err| {
+                tracing::warn!(path = %path.display(), error = %err, "staged release missing");
+                OpsError::Unsupported {
+                    what: "update_apply",
+                }
+            })
+        };
+        let bytes = read(version)?;
+        let bundle = read(&format!("{version}.sigstore.json"))?;
+        let sha256 = self
+            .client
+            .stage_update(version, &bytes, bundle)
+            .map_err(map_client)?;
         self.client
-            .replace_binary(version, len, sha256)
+            .replace_binary(version, bytes.len() as u64, sha256)
             .map_err(map_client)?;
         hashes.new = Some(sha256);
         Ok(())

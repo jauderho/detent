@@ -206,9 +206,10 @@ pub enum Operation {
     /// front end installs none: it authorizes this operation and asks the
     /// acme process to renew.
     CertRenew,
-    /// Install a verified update: the engine bridges the worker-staged release
-    /// tag to the monitor's private runtime staging copy and asks the
-    /// monitor's `ReplaceBinary` to swap it over the running binary.
+    /// Install a verified update: the engine sends the worker's downloaded
+    /// release and its bundle to the monitor's own staging over the privsep
+    /// socket and asks the monitor's `ReplaceBinary` to swap it over the
+    /// running binary.
     UpdateApply {
         /// The update version to install, e.g. `v1.2.3`.
         version: String,

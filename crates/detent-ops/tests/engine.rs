@@ -3042,17 +3042,13 @@ fn update_apply_refuses_dot_only_versions() -> TestResult {
 }
 
 #[test]
-fn update_apply_bridges_a_tag_inside_the_monitor() -> TestResult {
+fn update_apply_stages_the_release_in_the_monitor() -> TestResult {
     let mut fx = harness(b"v1\n", Setup::default())?;
-    let state_root = fx
-        .target
-        .parent()
-        .ok_or("harness missing parent")?
-        .join("state");
+    let root = fx.target.parent().ok_or("harness missing parent")?;
+    let state_root = root.join("state");
+    let stage = root.join("monitor-staging").join("update.stage");
     fx.engine.set_state_root(&state_root);
     let bytes = plant_update(&state_root)?;
-    let digest = Sha256Digest::of(&bytes);
-    let staged_dir = state_root.join("update").join("staged");
 
     let outcome = fx.run(Operation::UpdateApply {
         version: UPDATE_FIXTURE_TAG.to_owned(),
@@ -3061,7 +3057,7 @@ fn update_apply_bridges_a_tag_inside_the_monitor() -> TestResult {
         return Err("expected UpdateApplied outcome".into());
     };
     assert_eq!(version, UPDATE_FIXTURE_TAG);
-    assert!(!staged_dir.join(digest.to_string()).exists());
+    assert!(!stage.exists(), "the monitor consumed its stage");
     assert_eq!(std::fs::read(&fx.target)?, bytes);
     let file_name = fx
         .target
@@ -3073,7 +3069,31 @@ fn update_apply_bridges_a_tag_inside_the_monitor() -> TestResult {
 }
 
 #[test]
-fn update_apply_refuses_a_preexisting_digest_path() -> TestResult {
+fn update_apply_discards_a_leftover_stage() -> TestResult {
+    let mut fx = harness(b"v1\n", Setup::default())?;
+    let root = fx.target.parent().ok_or("harness missing parent")?;
+    let state_root = root.join("state");
+    let staging_dir = root.join("monitor-staging");
+    fx.engine.set_state_root(&state_root);
+    let bytes = plant_update(&state_root)?;
+    std::fs::create_dir_all(&staging_dir)?;
+    std::fs::set_permissions(
+        &staging_dir,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )?;
+    std::fs::write(staging_dir.join("update.stage"), b"an abandoned stage")?;
+
+    let outcome = fx.run(Operation::UpdateApply {
+        version: UPDATE_FIXTURE_TAG.to_owned(),
+    })?;
+    assert!(matches!(outcome, OpOutcome::UpdateApplied { .. }));
+    assert_eq!(std::fs::read(&fx.target)?, bytes);
+    assert!(!staging_dir.join("update.stage").exists());
+    fx.finish()
+}
+
+#[test]
+fn update_apply_refuses_a_staged_binary_without_its_bundle() -> TestResult {
     let mut fx = harness(b"v1\n", Setup::default())?;
     let state_root = fx
         .target
@@ -3081,24 +3101,26 @@ fn update_apply_refuses_a_preexisting_digest_path() -> TestResult {
         .ok_or("harness missing parent")?
         .join("state");
     fx.engine.set_state_root(&state_root);
-    let bytes = plant_update(&state_root)?;
-    let digest = Sha256Digest::of(&bytes);
-    let staging_dir = fx
-        .target
-        .parent()
-        .ok_or("harness missing parent")?
-        .join("monitor-staging");
-    std::fs::create_dir_all(&staging_dir)?;
-    std::fs::write(staging_dir.join(digest.to_string()), b"worker-planted")?;
-
+    plant_update(&state_root)?;
+    std::fs::remove_file(
+        state_root
+            .join("update")
+            .join("staged")
+            .join(format!("{UPDATE_FIXTURE_TAG}.sigstore.json")),
+    )?;
     let err = fx.run(Operation::UpdateApply {
         version: UPDATE_FIXTURE_TAG.to_owned(),
     });
     assert!(matches!(
         err,
-        Err(OpsError::Privsep(ClientError::Remote(ProtoError::Io(_))))
+        Err(OpsError::Unsupported {
+            what: "update_apply"
+        })
     ));
     assert_eq!(std::fs::read(&fx.target)?, b"v1\n");
+    let records = fx.records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records.get(1).map(|r| r.result), Some(AuditResult::Error));
     fx.finish()
 }
 
