@@ -291,8 +291,21 @@ fn is_route_form(line: &str) -> bool {
     )
 }
 
-/// fstab: systemd mount hooks, mount helpers and FUSE types, which name the
-/// program to run.
+/// `x-systemd.` options that name no program and pull in no unit
+/// (systemd.mount(5)). Every other `x-systemd.` option is refused: `makefs`
+/// and `growfs` run a program on the device, and `requires=`, `wanted-by=`,
+/// `before=` and the like start or order arbitrary units.
+const SAFE_SYSTEMD_OPTIONS: &[&str] = &[
+    "automount",
+    "idle-timeout",
+    "mount-timeout",
+    "device-timeout",
+    "rw-only",
+];
+
+/// fstab: systemd mount options outside [`SAFE_SYSTEMD_OPTIONS`], mount
+/// helpers and FUSE types, which name the program to run. Compared without
+/// case.
 fn fstab(text: &str) -> Vec<String> {
     text.lines()
         .filter(|line| {
@@ -302,10 +315,13 @@ fn fstab(text: &str) -> Vec<String> {
                 .is_some_and(|kind| kind.to_ascii_lowercase().contains("fuse"));
             fuse || line
                 .split(|c: char| c == ',' || c.is_whitespace())
+                .map(str::to_ascii_lowercase)
                 .any(|word| {
-                    word.starts_with("x-systemd.")
-                        || word.starts_with("helper=")
-                        || word.starts_with("uhelper=")
+                    let systemd = word.strip_prefix("x-systemd.").is_some_and(|option| {
+                        let name = option.split_once('=').map_or(option, |(name, _)| name);
+                        !SAFE_SYSTEMD_OPTIONS.contains(&name)
+                    });
+                    systemd || word.starts_with("helper=") || word.starts_with("uhelper=")
                 })
         })
         .map(squash)
@@ -411,6 +427,25 @@ mod tests {
             // fstab: helpers and FUSE programs.
             ("mounts", "", "/dev/sda1 /mnt ext4 helper=/bin/sh 0 0\n"),
             ("mounts", "", "x#/bin/sh /mnt fuse.sshfs defaults 0 0\n"),
+            // fstab: x-systemd options that run a program or pull in units.
+            ("mounts", "", "/dev/sdb1 /mnt ext4 x-systemd.makefs 0 0\n"),
+            ("mounts", "", "/dev/sdb1 /mnt ext4 x-systemd.growfs 0 0\n"),
+            (
+                "mounts",
+                "",
+                "/dev/sdb1 /mnt ext4 x-systemd.requires=evil.service 0 0\n",
+            ),
+            (
+                "mounts",
+                "",
+                "/dev/sdb1 /mnt ext4 x-systemd.wanted-by=evil.target 0 0\n",
+            ),
+            ("mounts", "", "/dev/sdb1 /mnt ext4 X-SYSTEMD.MAKEFS 0 0\n"),
+            (
+                "mounts",
+                "",
+                "/dev/sdb1 /mnt ext4 x-systemd.automount,x-systemd.makefs 0 0\n",
+            ),
             // exports: the root-mapping option first in the list, anonuid=0.
             ("nfs", "", "/srv 192.0.2.0/24(no_root_squash,rw)\n"),
             ("nfs", "", "/srv 192.0.2.0/24(rw,anonuid=0)\n"),
@@ -464,6 +499,12 @@ mod tests {
             ("dhcp", "", "# dhcp-script=/bin/sh\ndomain-needed\n"),
             ("chrony", "", "server 192.0.2.1 iburst\n"),
             ("mounts", "", "/dev/sda1 /mnt ext4 defaults 0 0\n"),
+            // fstab: x-systemd options that name no program and no unit.
+            (
+                "mounts",
+                "",
+                "nas:/export /mnt/nas nfs4 x-systemd.automount,x-systemd.idle-timeout=1min,x-systemd.mount-timeout=30,x-systemd.device-timeout=10s,x-systemd.rw-only,_netdev,nofail 0 0\n",
+            ),
             ("nfs", "", "/srv 192.0.2.0/24(rw,root_squash)\n"),
             ("unknown", "", "preexec = /bin/true\n"),
         ];
