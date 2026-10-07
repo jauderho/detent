@@ -178,3 +178,4 @@ cli-doctor-landlock = landlock: {$detail}
 cli-doctor-seccomp = seccomp: {$detail}
 cli-doctor-confinement = sandbox confinement: {$detail}
 cli-doctor-serve-confinement = confinement at the last serve start: {$detail}
+cli-doctor-mounts = mount activation after an fstab apply: {$detail}

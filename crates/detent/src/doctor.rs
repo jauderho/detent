@@ -92,6 +92,7 @@ impl Check {
             "landlock" => MessageId::new("cli-doctor-landlock"),
             "seccomp" => MessageId::new("cli-doctor-seccomp"),
             "serve-confinement" => MessageId::new("cli-doctor-serve-confinement"),
+            "mounts" => MessageId::new("cli-doctor-mounts"),
             _ => MessageId::new("cli-doctor-confinement"),
         }
     }
@@ -135,6 +136,12 @@ pub fn report(
     ];
     checks.extend(confinement_checks(&descriptors, &settings.state_root));
     checks.extend(serve_confinement_checks(&settings.state_root));
+    if descriptors
+        .iter()
+        .any(|descriptor| descriptor.added_mounts.is_some())
+    {
+        checks.push(mounts_check(activate_mounts(settings), host.profile.init));
+    }
     let ok = !checks.iter().any(|check| check.status == Status::Fail);
 
     if renderer.json {
@@ -165,6 +172,48 @@ fn modules_check(descriptors: &[&'static detent_core::descriptor::ModuleDescript
         return Check::new("modules", Status::Warn, "none");
     }
     Check::new("modules", Status::Ok, ids.join(" "))
+}
+
+/// `[mounts] activate_new_entries` from `detent.toml`. An unreadable file
+/// counts as off: the `config` check reports the file itself.
+fn activate_mounts(settings: &Settings) -> bool {
+    #[cfg(feature = "web")]
+    {
+        settings
+            .load_web_config()
+            .is_ok_and(|config| config.mounts.activate_new_entries)
+    }
+    #[cfg(not(feature = "web"))]
+    {
+        let _ = settings;
+        false
+    }
+}
+
+/// Whether an fstab apply mounts its new entries (`[mounts]
+/// activate_new_entries`), and whether this init system can: only systemd
+/// starts the mount units.
+fn mounts_check(activate: bool, init: detent_core::descriptor::InitSystem) -> Check {
+    if !activate {
+        return Check::new(
+            "mounts",
+            Status::Ok,
+            "off (new fstab entries take effect at the next boot or mount)",
+        );
+    }
+    if init == detent_core::descriptor::InitSystem::Systemd {
+        Check::new(
+            "mounts",
+            Status::Ok,
+            "on (systemd starts the mount units of new fstab entries after an apply)",
+        )
+    } else {
+        Check::new(
+            "mounts",
+            Status::Warn,
+            "on, but the init system is not systemd: no mount unit is started",
+        )
+    }
 }
 
 /// The state directory: present, a directory, safely owned, and not writable
@@ -425,7 +474,8 @@ mod linux_confinement_tests {
 mod tests {
     use super::{
         Check, ExitReason, MonitorError, Report, Status, config_check, directory_check,
-        mode_status, modules_check, privsep_verdict, report, serve_confinement_checks,
+        mode_status, modules_check, mounts_check, privsep_verdict, report,
+        serve_confinement_checks,
     };
     use crate::i18n::Messages;
     use crate::output::{Exit, Renderer};
@@ -578,6 +628,49 @@ mod tests {
         let empty = modules_check(&[]);
         assert_eq!(empty.status, Status::Warn);
         assert_eq!(empty.detail, "none");
+    }
+
+    #[test]
+    fn the_mounts_row_says_whether_and_how_new_entries_are_mounted() {
+        use detent_core::descriptor::InitSystem;
+        let off = mounts_check(false, InitSystem::Systemd);
+        assert_eq!(off.status, Status::Ok);
+        assert!(off.detail.starts_with("off"), "{off:?}");
+        let on = mounts_check(true, InitSystem::Systemd);
+        assert_eq!(on.status, Status::Ok);
+        assert!(on.detail.contains("systemd"), "{on:?}");
+        let openrc = mounts_check(true, InitSystem::OpenRc);
+        assert_eq!(openrc.status, Status::Warn);
+        assert!(openrc.detail.contains("not systemd"), "{openrc:?}");
+        assert_eq!(on.message().as_str(), "cli-doctor-mounts");
+    }
+
+    /// With the mounts module compiled in, the report has the row, and
+    /// `[mounts] activate_new_entries` turns it on.
+    #[cfg(all(feature = "web", feature = "module-mounts"))]
+    #[test]
+    fn doctor_reads_the_mounts_setting_from_the_config() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let config = dir.path().join("detent.toml");
+        std::fs::write(&config, b"[mounts]\nactivate_new_entries = true\n")?;
+        let (_, text) = run(&settings(dir.path(), config), true)?;
+        let parsed: serde_json::Value = serde_json::from_str(&text)?;
+        let checks = parsed
+            .pointer("/checks")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("checks")?;
+        let row = checks
+            .iter()
+            .find(|check| {
+                check.pointer("/name").and_then(serde_json::Value::as_str) == Some("mounts")
+            })
+            .ok_or("a mounts row")?;
+        let detail = row.pointer("/detail").and_then(serde_json::Value::as_str);
+        assert!(
+            detail.is_some_and(|detail| detail.starts_with("on")),
+            "{row}"
+        );
+        Ok(())
     }
 
     fn full_confinement() -> Confinement {
