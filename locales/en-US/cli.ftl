@@ -88,6 +88,7 @@ cli-dryrun-apply = dry run: this is what would be written to {$path} for {$modul
 cli-dryrun-operation = dry run: {$operation} would run for {$module}.
 cli-dryrun-nothing = dry run: nothing was changed.
 cli-dryrun-serve = dry run: the monitor and worker would start with {$modules} modules and {$targets} targets, rooted at {$state}.
+cli-dryrun-serve-mounts = dry run: after a mounts apply, the runner would start the mount units of new fstab entries (mounts.activate_new_entries = true).
 cli-dryrun-cert-renew = dry run: would ask the server at {$address} (as {$name}) to renew its certificate now; nothing was sent.
 
 ## serve

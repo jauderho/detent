@@ -100,7 +100,7 @@ pub fn router(state: state::AppState) -> Router {
 
 pub use config::{
     AcmeConfig, Argon2Params, AuthConfig, Bootstrap, Config, ConfigError, DnsProviderConfig,
-    ListenConfig, ModulesConfig, TlsConfig, UiConfig, UpdateConfig,
+    ListenConfig, ModulesConfig, MountsConfig, TlsConfig, UiConfig, UpdateConfig,
 };
 pub use csrf::{CSRF_HEADER, Origin, SAME_ORIGIN, SEC_FETCH_SITE, csrf_guard};
 pub use engine::{EngineError, EngineHandle, EngineThread, spawn as spawn_engine};

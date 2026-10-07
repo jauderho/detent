@@ -45,6 +45,10 @@ pub struct Config {
     pub keep_backups: usize,
     /// Which init system's unit names to advertise in [`HelloAck`].
     pub init: InitFlavor,
+    /// `[mounts] activate_new_entries` from `detent.toml`: after an apply,
+    /// start the mount units of the entries it added or changed. Read at
+    /// startup, before the monitor accepts requests.
+    pub activate_mounts: bool,
 }
 
 impl Default for Config {
@@ -53,6 +57,7 @@ impl Default for Config {
             state_root: PathBuf::from(DEFAULT_STATE_ROOT),
             keep_backups: DEFAULT_KEEP_BACKUPS,
             init: InitFlavor::Systemd,
+            activate_mounts: false,
         }
     }
 }
@@ -767,6 +772,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.state_root, PathBuf::from(DEFAULT_STATE_ROOT));
         assert_eq!(config.keep_backups, 20);
+        assert!(!config.activate_mounts);
         assert_eq!(config, Config::default());
         assert!(format!("{config:?}").contains("detent"));
     }

@@ -190,6 +190,8 @@ pub struct Config {
     pub modules: ModulesConfig,
     /// Presentation defaults for the web UI.
     pub ui: UiConfig,
+    /// What a `mounts` apply does after it writes `/etc/fstab`.
+    pub mounts: MountsConfig,
 }
 
 impl Config {
@@ -506,6 +508,17 @@ pub struct ModulesConfig {
     pub enabled: Option<Vec<String>>,
 }
 
+/// `[mounts]` — what a `mounts` apply does after it writes `/etc/fstab`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct MountsConfig {
+    /// After an apply and the unit-file reload, start the `.mount` (or
+    /// `.automount`) units of the entries the apply added or changed.
+    /// systemd only. Default `false`: the new table takes effect at the next
+    /// boot or the next manual mount.
+    pub activate_new_entries: bool,
+}
+
 /// `[ui]` — presentation defaults for the web UI.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -566,6 +579,7 @@ mod tests {
         assert!(!config.update.auto_install);
         assert_eq!(config.modules.enabled, None);
         assert_eq!(config.ui.default_locale, None);
+        assert!(!config.mounts.activate_new_entries);
     }
 
     #[test]
@@ -625,6 +639,9 @@ mod tests {
 
             [ui]
             default_locale = "en-US"
+
+            [mounts]
+            activate_new_entries = true
             "#,
         )?;
         assert_eq!(config.listen.addr.to_string(), "127.0.0.1:8443");
@@ -650,6 +667,7 @@ mod tests {
         assert!(config.update.auto_install);
         assert_eq!(config.modules.enabled, Some(vec!["hosts".to_owned()]));
         assert_eq!(config.ui.default_locale, Some("en-US".to_owned()));
+        assert!(config.mounts.activate_new_entries);
         Ok(())
     }
 
@@ -665,6 +683,7 @@ mod tests {
             "[update]\nmin_age = 1\n",
             "[modules]\nall = true\n",
             "[ui]\nlocale = \"en\"\n",
+            "[mounts]\nactivate = true\n",
         ] {
             let err = Config::parse(text).err().map(|e| e.message_id());
             assert_eq!(

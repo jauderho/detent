@@ -36,6 +36,7 @@
 //! runner, forked before any confinement, runs them for it by allow-list id
 //! (STAGE3 H6, [`detent_platform::privsep::runner`]).
 
+use detent_core::descriptor::ModuleDescriptor;
 use detent_core::diag::MessageId;
 use detent_platform::privsep::allowlist::{Allowlist, Config};
 use detent_platform::privsep::monitor::{
@@ -78,23 +79,21 @@ pub fn run(
     let host = detent_platform::host::detect_real();
     let registry = detent_modules::modules();
     let descriptors: Vec<_> = registry.iter().map(|entry| entry.descriptor()).collect();
-    let allow =
-        match Allowlist::from_modules(&descriptors, &Config::with_state_root(&settings.state_root))
-        {
-            Ok(allow) => allow,
-            Err(err) => {
-                renderer.line(
-                    streams.notes,
-                    MessageId::new("cli-start-failed"),
-                    &[("reason", &err.to_string())],
-                )?;
-                return Ok(Exit::Failed);
-            }
-        };
 
+    // Before the allow-list: the monitor and the runner take
+    // `[mounts] activate_new_entries` from it at startup.
     #[cfg(feature = "web")]
     let (config, provider) = match preflight_web_config(settings, renderer, streams)? {
         Ok(checked) => checked,
+        Err(exit) => return Ok(exit),
+    };
+    #[cfg(feature = "web")]
+    let activate_mounts = config.mounts.activate_new_entries;
+    #[cfg(not(feature = "web"))]
+    let activate_mounts = false;
+
+    let allow = match build_allowlist(&descriptors, settings, activate_mounts, renderer, streams)? {
+        Ok(allow) => allow,
         Err(exit) => return Ok(exit),
     };
 
@@ -197,6 +196,33 @@ pub fn run(
     }
 }
 
+/// The allow-list of `descriptors`, rooted at the configured state root,
+/// with `activate_mounts` from `[mounts] activate_new_entries`; or the exit
+/// code already reported for a module set that does not build.
+fn build_allowlist(
+    descriptors: &[&'static ModuleDescriptor],
+    settings: &Settings,
+    activate_mounts: bool,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Result<Allowlist, Exit>> {
+    let config = Config {
+        activate_mounts,
+        ..Config::with_state_root(&settings.state_root)
+    };
+    match Allowlist::from_modules(descriptors, &config) {
+        Ok(allow) => Ok(Ok(allow)),
+        Err(err) => {
+            renderer.line(
+                streams.notes,
+                MessageId::new("cli-start-failed"),
+                &[("reason", &err.to_string())],
+            )?;
+            Ok(Err(Exit::Failed))
+        }
+    }
+}
+
 /// Describes what `serve` would start, without forking.
 fn report_dry_run(
     modules: usize,
@@ -214,6 +240,9 @@ fn report_dry_run(
             ("state", &settings.state_root.display().to_string()),
         ],
     )?;
+    if allow.config().activate_mounts {
+        renderer.line(streams.out, MessageId::new("cli-dryrun-serve-mounts"), &[])?;
+    }
     Ok(Exit::Ok)
 }
 
@@ -1297,6 +1326,50 @@ mod tests {
         let text = String::from_utf8(out)?;
         assert!(!text.is_empty());
         assert!(!text.contains("cli-dryrun"), "{text}");
+        Ok(())
+    }
+
+    /// With `[mounts] activate_new_entries = true` the dry run says that a
+    /// mounts apply mounts new entries; without it, it says nothing.
+    #[cfg(feature = "web")]
+    #[test]
+    fn a_dry_run_names_mount_activation_when_it_is_on() -> R {
+        let messages = Messages::new(Some("en-US"));
+        let renderer = Renderer {
+            messages: &messages,
+            json: false,
+            verbose: true,
+        };
+        let dir = tempfile::TempDir::new()?;
+        let config_path = dir.path().join("detent.toml");
+        let mut texts = Vec::new();
+        for flag in [false, true] {
+            std::fs::write(
+                &config_path,
+                format!("[mounts]\nactivate_new_entries = {flag}\n"),
+            )?;
+            let mut input = std::io::empty();
+            let mut out = Vec::new();
+            let mut notes = Vec::new();
+            let exit = run(
+                true,
+                &Settings {
+                    state_root: dir.path().join("state"),
+                    config_path: config_path.clone(),
+                },
+                &renderer,
+                &mut Streams {
+                    input: &mut input,
+                    out: &mut out,
+                    notes: &mut notes,
+                },
+            )?;
+            assert_eq!(exit, Exit::Ok);
+            texts.push(String::from_utf8(out)?);
+        }
+        let named = |text: &String| text.contains("activate_new_entries");
+        assert!(!texts.first().is_some_and(named), "{texts:?}");
+        assert!(texts.get(1).is_some_and(named), "{texts:?}");
         Ok(())
     }
 
