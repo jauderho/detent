@@ -86,8 +86,10 @@ pub fn validate_unit_name(name: &str) -> Result<(), ServiceError> {
 
 /// How long [`ServiceManager::start_mount_units`] waits for the start jobs.
 /// A job still running then (an unreachable network share) goes on in the
-/// init system; its unit is reported as [`State::Activating`].
-pub const MOUNT_WAIT: std::time::Duration = exec::ACTION_TIMEOUT;
+/// init system; its unit is reported as [`State::Activating`]. It runs
+/// inside an apply request, after the check, the write and daemon-reload, so
+/// it stays well below the web server's default request timeout (30 s).
+pub const MOUNT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Validates a mount unit name before it is ever used as a process
 /// argument: it ends in `.mount` or `.automount`, does not start with `-`,

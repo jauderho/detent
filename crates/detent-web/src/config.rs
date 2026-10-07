@@ -550,6 +550,20 @@ mod tests {
     }
 
     #[test]
+    fn the_mount_wait_leaves_room_in_the_default_request_timeout() {
+        // An apply runs the check, the write, daemon-reload and then waits for
+        // the mount jobs; an unreachable NFS share uses the whole wait. With
+        // the wait equal to the request timeout the apply answered 408 on
+        // testhost (D1). Keep the wait at most a third of the default.
+        let timeout = std::time::Duration::from_secs(Config::default().listen.request_timeout_secs);
+        assert!(
+            detent_platform::service::MOUNT_WAIT * 3 <= timeout,
+            "MOUNT_WAIT {:?} vs request timeout {timeout:?}",
+            detent_platform::service::MOUNT_WAIT
+        );
+    }
+
+    #[test]
     fn defaults_match_the_documented_values() {
         let config = Config::default();
         assert_eq!(config.listen.addr.port(), DEFAULT_PORT);
