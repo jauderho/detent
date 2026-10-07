@@ -227,6 +227,16 @@ module-apply-service-none = leave the service alone
 module-apply-cancel = cancel
 module-applied = the change was written to {$path}.
 module-applied-created = {$path} did not exist and was created.
+module-mounts-off = new fstab entries were not mounted ([mounts] activate_new_entries is off); they take effect at the next boot or mount.
+module-mounts-error = no mount unit was started: {$reason}
+module-mounts-none = there is no new fstab entry to mount.
+module-mounts-units = mount units of the new fstab entries:
+module-mount-state-mounted = mounted
+module-mount-state-already-mounted = already mounted
+module-mount-state-pending = still mounting
+module-mount-state-failed = failed
+module-mount-state-protected = refused: protected path
+module-mount-state-stopped = unmounted
 module-cancel = cancel
 
 ## Services

@@ -19,6 +19,8 @@ export type ModuleView = components['schemas']['ModuleView']
 export type Diagnostics = components['schemas']['Diagnostics']
 export type PlanReport = components['schemas']['PlanReport']
 export type ApplyReport = components['schemas']['ApplyReport']
+export type MountsReport = components['schemas']['MountsReport']
+export type MountReportState = components['schemas']['MountReportState']
 export type ApplyRequest = components['schemas']['ApplyRequest']
 export type ModelRequest = components['schemas']['ModelRequest']
 

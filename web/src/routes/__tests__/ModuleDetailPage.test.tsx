@@ -635,6 +635,42 @@ describe('ModuleDetailPage — apply', () => {
     })
   })
 
+  it('shows what the apply did with new fstab entries', async () => {
+    const user = userEvent.setup()
+    const REPORT: ApplyReport = {
+      backed_up: true,
+      checks: [],
+      commit: null,
+      created: false,
+      module: 'hosts',
+      mounts: {
+        activated: true,
+        units: [{ mountpoint: '/srv/data', unit: 'srv-data.mount', state: 'mounted', detail: '' }],
+      },
+      new_hash: 'f'.repeat(64),
+      path: '/etc/hosts',
+      prev_hash: CURRENT_HASH,
+      service: null,
+    }
+    renderDetail({
+      [AUTH_ROUTE]: () => WRITE_SESSION,
+      [MODULE_ROUTE]: () => jsonResponse(VIEW),
+      [APPLY_ROUTE]: () => jsonResponse(REPORT),
+    })
+    await screen.findByLabelText('hostname')
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'apply' })).not.toBeDisabled()
+    })
+    await user.click(screen.getByRole('button', { name: 'apply' }))
+    const dialog = await screen.findByRole('dialog', { name: 'apply this change?' })
+    await user.click(within(dialog).getByRole('button', { name: 'apply' }))
+
+    const units = await screen.findByText(/mount units of the new fstab entries/)
+    const banner = units.closest('[role="status"]')
+    expect(banner).toHaveTextContent('/srv/data')
+    expect(banner).toHaveTextContent(/mounted/)
+  })
+
   it('disables apply and states the reason for a read-only session', async () => {
     renderDetail({
       [AUTH_ROUTE]: () => READ_ONLY_SESSION,

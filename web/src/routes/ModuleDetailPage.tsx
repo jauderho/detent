@@ -18,6 +18,7 @@ import {
   type ApplyRequest,
   type ModuleDescriptor,
   type ModuleView,
+  type MountsReport,
   type PlanReport,
   useApplyModule,
   useModule,
@@ -45,6 +46,7 @@ import {
 } from '@/forms'
 import { shortDigest } from '@/lib/format'
 import { cn } from '@/lib/utils'
+import { MountResults } from './MountResults'
 import { ROUTES } from './paths'
 import { serviceActionCaption } from './serviceLabels'
 
@@ -142,6 +144,7 @@ function ModuleDetailView({ id }: { id: string }) {
   const [appliedMessage, setAppliedMessage] = useState<{
     readonly path: string
     readonly created: boolean
+    readonly mounts: MountsReport | null
   } | null>(null)
   const [planReport, setPlanReport] = useState<PlanReport | null>(null)
   const [planOpen, setPlanOpen] = useState(false)
@@ -288,7 +291,11 @@ function ModuleDetailView({ id }: { id: string }) {
     apply.mutate(body, {
       onSuccess: (report) => {
         setApplyContext(null)
-        setAppliedMessage({ path: report.path, created: report.created })
+        setAppliedMessage({
+          path: report.path,
+          created: report.created,
+          mounts: report.mounts ?? null,
+        })
         if (report.commit !== null && report.commit !== undefined) {
           pendingCommit.arm(report.commit)
         }
@@ -401,6 +408,7 @@ function ModuleDetailView({ id }: { id: string }) {
                   : l10n.getString('module-applied', { path: appliedMessage.path })}
               </Banner>
             )}
+            {appliedMessage?.mounts ? <MountResults mounts={appliedMessage.mounts} /> : null}
             {mutationError === null ? null : <Banner tone="amber">{mutationError}</Banner>}
 
             {model === null ? (
