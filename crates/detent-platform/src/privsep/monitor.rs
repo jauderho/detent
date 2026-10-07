@@ -2212,6 +2212,7 @@ mod tests {
             checks,
             commit_confirm: false,
             reload_unit_files: false,
+            added_mounts: None,
             security_notes: &[],
         })
     }

@@ -504,6 +504,7 @@ mod tests {
             checks: &[],
             commit_confirm: false,
             reload_unit_files: false,
+            added_mounts: None,
             security_notes: &[],
         };
         Ok(Allowlist::from_modules(
@@ -952,6 +953,7 @@ mod tests {
                 checks: PROBE_CHECKS,
                 commit_confirm: false,
                 reload_unit_files: false,
+                added_mounts: None,
                 security_notes: &[],
             }));
             let Ok(allow) = Allowlist::from_modules(&[probe], &Config::with_state_root(&dir))
@@ -1442,6 +1444,7 @@ mod tests {
             checks: DRIVE_CHECKS,
             commit_confirm: true,
             reload_unit_files: false,
+            added_mounts: None,
             security_notes: &[],
         }))
     }

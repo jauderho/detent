@@ -152,6 +152,7 @@ pub fn descriptor(path: &Path) -> &'static ModuleDescriptor {
         checks: CHECKS,
         commit_confirm: false,
         reload_unit_files: false,
+        added_mounts: None,
         security_notes: &[],
     })
 }

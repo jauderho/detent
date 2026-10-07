@@ -918,6 +918,7 @@ static RESOLVER_DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     // out of name resolution entirely.
     commit_confirm: true,
     reload_unit_files: false,
+    added_mounts: None,
     security_notes: &[MessageId::new("resolver-note-managed-symlink")],
 };
 

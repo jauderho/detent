@@ -243,6 +243,7 @@ fn build_descriptor(id: &'static str, target: &Path, shape: Shape) -> &'static M
         checks,
         commit_confirm: shape.commit_confirm,
         reload_unit_files: false,
+        added_mounts: None,
         security_notes: &[],
     })
 }

@@ -365,6 +365,7 @@ static DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     checks: CHECKS,
     commit_confirm: false,
     reload_unit_files: false,
+    added_mounts: None,
     security_notes: &[MessageId::new("samba-note-guest-access")],
 };
 

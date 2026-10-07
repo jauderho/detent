@@ -1771,6 +1771,7 @@ static DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     checks: CHECKS,
     commit_confirm: true,
     reload_unit_files: false,
+    added_mounts: None,
     security_notes: &[MessageId::new("dhcp-note-commit-confirm")],
 };
 

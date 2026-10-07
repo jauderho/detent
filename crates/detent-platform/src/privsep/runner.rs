@@ -399,6 +399,7 @@ mod tests {
         checks: CHECKS,
         commit_confirm: false,
         reload_unit_files: false,
+        added_mounts: None,
         security_notes: &[],
     };
     /// Equal in value to `CHECKS[0]` but not the allow-listed declaration.

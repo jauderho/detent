@@ -122,6 +122,7 @@ fn build_descriptor(target_path: &Path) -> &'static ModuleDescriptor {
         checks,
         commit_confirm: false,
         reload_unit_files: false,
+        added_mounts: None,
         security_notes: &[],
     })
 }

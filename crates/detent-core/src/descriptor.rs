@@ -176,6 +176,22 @@ pub struct ExternalCheck {
     pub expects: CheckExpectation,
 }
 
+/// One mount unit for an entry that an apply added or changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountUnit {
+    /// The entry's mount point, an absolute path.
+    pub mountpoint: String,
+    /// The systemd unit that mounts it: `<escaped path>.mount`, or
+    /// `<escaped path>.automount` for an entry with `x-systemd.automount`.
+    pub unit: String,
+}
+
+/// Lists the mount units for the entries that `current` adds or changes
+/// relative to `previous` (the file before and after an apply). Pure: it
+/// reads only its two arguments. A named alias for the same reason as
+/// [`BackendDetect`].
+pub type AddedMounts = fn(previous: &str, current: &str) -> Vec<MountUnit>;
+
 /// Everything a module declares about itself.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -207,6 +223,16 @@ pub struct ModuleDescriptor {
     #[serde(skip)]
     #[cfg_attr(feature = "openapi", schema(ignore = true))]
     pub reload_unit_files: bool,
+    /// The mount units to start after an apply, for a module whose file
+    /// declares mounts (`mounts`: `/etc/fstab`). `None` for every other
+    /// module. The platform layer calls it with the file before and after the
+    /// apply, and starts the units only when `[mounts] activate_new_entries`
+    /// is on and the init system is systemd.
+    ///
+    /// Not serialized, for the same reason as `reload_unit_files`.
+    #[serde(skip)]
+    #[cfg_attr(feature = "openapi", schema(ignore = true))]
+    pub added_mounts: Option<AddedMounts>,
     /// Fluent ids of security notes shown alongside this module.
     pub security_notes: &'static [MessageId],
 }
@@ -437,8 +463,9 @@ pub fn apply_hints(schema: &mut serde_json::Value, pointer: &str, hints: &FieldH
 mod tests {
     use super::{
         ArgTemplate, CheckExpectation, ExternalCheck, FieldHints, HostProfile, InitSystem,
-        ModuleDescriptor, Os, Owner, PathSpec, SecurityImpact, ServiceAction, ServiceBinding,
-        Target, TargetKind, UiGroup, UnitNames, Upstream, ValidationCtx, apply_hints,
+        ModuleDescriptor, MountUnit, Os, Owner, PathSpec, SecurityImpact, ServiceAction,
+        ServiceBinding, Target, TargetKind, UiGroup, UnitNames, Upstream, ValidationCtx,
+        apply_hints,
     };
     use crate::diag::MessageId;
 
@@ -514,6 +541,7 @@ mod tests {
         checks: CHECKS,
         commit_confirm: false,
         reload_unit_files: false,
+        added_mounts: None,
         security_notes: &[MessageId::new("chrony-note-nts")],
     };
 
@@ -526,6 +554,32 @@ mod tests {
         let json = serde_json::to_value(descriptor).unwrap_or_default();
         assert!(json.get("commit_confirm").is_some());
         assert!(json.get("reload_unit_files").is_none());
+    }
+
+    fn one_mount(_previous: &str, _current: &str) -> Vec<MountUnit> {
+        vec![MountUnit {
+            mountpoint: "/srv".to_owned(),
+            unit: "srv.mount".to_owned(),
+        }]
+    }
+
+    #[test]
+    fn added_mounts_stays_out_of_the_api() {
+        let descriptor = ModuleDescriptor {
+            added_mounts: Some(one_mount),
+            ..DESCRIPTOR
+        };
+        let json = serde_json::to_value(descriptor).unwrap_or_default();
+        assert!(json.get("commit_confirm").is_some());
+        assert!(json.get("added_mounts").is_none());
+        let units = descriptor
+            .added_mounts
+            .map(|added| added("", ""))
+            .unwrap_or_default();
+        assert_eq!(
+            units.first().map(|unit| unit.unit.as_str()),
+            Some("srv.mount")
+        );
     }
 
     #[test]

@@ -267,6 +267,7 @@ static DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     checks: CHECKS,
     commit_confirm: true,
     reload_unit_files: true,
+    added_mounts: None,
     security_notes: &[MessageId::new("mounts-note-boot")],
 };
 
