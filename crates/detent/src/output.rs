@@ -26,7 +26,7 @@ use std::io::Write;
 use detent_core::descriptor::HostProfile;
 use detent_core::diag::MessageId;
 use detent_core::module::{DynError, EditError, ModelError, ParseError};
-use detent_ops::report::{ApplyReport, HostReport, OpOutcome, ServiceReport};
+use detent_ops::report::{ApplyReport, HostReport, MountsReport, OpOutcome, ServiceReport};
 use detent_ops::{AuditRecord, OpsError, PlanReport};
 use detent_platform::privsep::proto::BackupInfo;
 use serde::Serialize;
@@ -254,6 +254,9 @@ impl Renderer<'_> {
         if let Some(ref service) = report.service {
             self.serviced(out, service)?;
         }
+        if let Some(ref mounts) = report.mounts {
+            self.mounted(out, mounts)?;
+        }
         if let Some(ref commit) = report.commit {
             self.line(
                 out,
@@ -262,6 +265,42 @@ impl Renderer<'_> {
                     ("id", &commit.commit_id.to_string()),
                     ("seconds", &commit.timeout_s.to_string()),
                     ("deadline", &commit.deadline),
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// What a `mounts` apply did with the entries it added: one line per
+    /// unit, or one line that says why nothing started.
+    fn mounted(&self, out: &mut dyn Write, mounts: &MountsReport) -> std::io::Result<()> {
+        if !mounts.activated {
+            return self.line(out, MessageId::new("cli-mounts-off"), &[]);
+        }
+        if let Some(ref error) = mounts.error {
+            return self.line(
+                out,
+                MessageId::new("cli-mounts-error"),
+                &[("reason", error)],
+            );
+        }
+        if mounts.units.is_empty() {
+            return self.line(out, MessageId::new("cli-mounts-none"), &[]);
+        }
+        for unit in &mounts.units {
+            let id = if unit.detail.is_empty() {
+                "cli-mounts-unit"
+            } else {
+                "cli-mounts-unit-detail"
+            };
+            self.line(
+                out,
+                MessageId::new(id),
+                &[
+                    ("mountpoint", &unit.mountpoint),
+                    ("unit", &unit.unit),
+                    ("state", &token(&unit.state)),
+                    ("detail", &unit.detail),
                 ],
             )?;
         }
@@ -595,7 +634,7 @@ mod tests {
     use detent_core::diag::{Diagnostic, Diagnostics, MessageId, Severity};
     use detent_core::module::{DynError, EditError, ModelError, ParseError};
     use detent_ops::authz::Denied;
-    use detent_ops::report::OpOutcome;
+    use detent_ops::report::{MountReport, MountReportState, MountsReport, OpOutcome};
     use detent_ops::{OpsError, ServiceCommand};
     use detent_platform::fs::atomic::Sha256Digest;
     use detent_platform::privsep::proto::TargetId;
@@ -1076,6 +1115,78 @@ mod tests {
         assert!(out.contains("/etc/fake.conf"), "{out}{notes}");
         assert!(!notes.contains("cli-commit-armed"), "{notes}");
         assert!(!notes.contains("cli-serviced"), "{notes}");
+        Ok(())
+    }
+
+    /// `applied_without_commit` with `mounts` set.
+    fn applied_with_mounts(mounts: MountsReport) -> Result<OpOutcome, &'static str> {
+        let OpOutcome::Applied(mut report) = crate::tests_support::applied_without_commit() else {
+            return Err("applied_without_commit is an Applied outcome");
+        };
+        report.mounts = Some(mounts);
+        Ok(OpOutcome::Applied(report))
+    }
+
+    #[test]
+    fn an_applied_outcome_names_each_mount_and_what_happened() -> R {
+        let unit = |mountpoint: &str, state, detail: &str| MountReport {
+            mountpoint: mountpoint.to_owned(),
+            unit: format!("{}.mount", mountpoint.trim_start_matches('/')),
+            state,
+            detail: detail.to_owned(),
+        };
+        let cases = [
+            (
+                MountsReport {
+                    activated: true,
+                    units: vec![
+                        unit("/srv", MountReportState::Mounted, ""),
+                        unit("/nas", MountReportState::Failed, "mount boom"),
+                    ],
+                    error: None,
+                },
+                vec![
+                    "/srv",
+                    "srv.mount",
+                    "mounted",
+                    "/nas",
+                    "failed",
+                    "mount boom",
+                ],
+            ),
+            (
+                MountsReport {
+                    activated: true,
+                    units: Vec::new(),
+                    error: Some("mount units need systemd".to_owned()),
+                },
+                vec!["mount units need systemd"],
+            ),
+            (
+                MountsReport {
+                    activated: true,
+                    units: Vec::new(),
+                    error: None,
+                },
+                vec!["no new fstab entry"],
+            ),
+            (
+                MountsReport {
+                    activated: false,
+                    units: Vec::new(),
+                    error: None,
+                },
+                vec!["activate_new_entries"],
+            ),
+        ];
+        for (mounts, needles) in cases {
+            let (out, notes) = render(&applied_with_mounts(mounts)?, false)?;
+            let text = format!("{out}{notes}");
+            assert!(!text.contains("cli-"), "an unresolved id: {text}");
+            for needle in needles {
+                assert!(text.contains(needle), "{needle}: {text}");
+            }
+        }
         Ok(())
     }
 
