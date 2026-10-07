@@ -23,9 +23,9 @@
 //! owns every file operation (PLAN §2.1).
 
 use detent_core::descriptor::{
-    ArgTemplate, CheckExpectation, ExternalCheck, FieldHints, HostProfile, ModuleDescriptor, Os,
-    Owner, PathSpec, SecurityImpact, ServiceBinding, Target, TargetKind, UiGroup, Upstream,
-    ValidationCtx, apply_hints,
+    ArgTemplate, CheckExpectation, ExternalCheck, FieldHints, HostProfile, ModuleDescriptor,
+    MountUnit, Os, Owner, PathSpec, SecurityImpact, ServiceBinding, Target, TargetKind, UiGroup,
+    Upstream, ValidationCtx, apply_hints,
 };
 use detent_core::diag::{Diagnostic, Diagnostics, FieldPath, MessageId, Severity};
 use detent_core::doc::{Document, LineKind};
@@ -178,6 +178,127 @@ fn render_entry(entry: &Entry) -> Result<String, EditError> {
     Ok(raw)
 }
 
+// ------------------------------------------------------------------ added mounts
+
+/// The mount units for the entries `current` adds or changes relative to
+/// `previous` ([`ModuleDescriptor::added_mounts`]).
+///
+/// An entry counts when no entry in `previous` has its mount point, or when
+/// the entry there has another `spec` or `fstype`. A change of options alone
+/// does not count: nothing is remounted (owner decision, D1). Skipped:
+/// `noauto` entries, swap, and a mount point that is not an absolute,
+/// normalized path. An entry with `x-systemd.automount` gives its
+/// `.automount` unit, every other entry its `.mount` unit. Each mount point
+/// is listed once, in file order.
+///
+/// The unit name is the one `systemd-fstab-generator` writes: the mount point
+/// with its fstab octal escapes (`\040`) decoded, then escaped as
+/// `systemd-escape --path` does. The platform layer refuses protected mount
+/// points (`/` and the ancestors of `/etc`, `/usr`, …); this function does
+/// not know the host.
+fn added_mounts(previous: &str, current: &str) -> Vec<MountUnit> {
+    let before: Vec<Entry> = previous.lines().filter_map(parse_entry).collect();
+    let mut units: Vec<MountUnit> = Vec::new();
+    for entry in current.lines().filter_map(parse_entry) {
+        let has = |option: &str| entry.options.iter().any(|known| known == option);
+        if entry.fstype == "swap" || has("noauto") {
+            continue;
+        }
+        let Some(path) = normalized_mountpoint(&entry.mountpoint) else {
+            continue;
+        };
+        let unchanged = before.iter().any(|old| {
+            normalized_mountpoint(&old.mountpoint).as_deref() == Some(path.as_str())
+                && old.spec == entry.spec
+                && old.fstype == entry.fstype
+        });
+        if unchanged || units.iter().any(|unit| unit.mountpoint == path) {
+            continue;
+        }
+        let suffix = if has("x-systemd.automount") {
+            "automount"
+        } else {
+            "mount"
+        };
+        units.push(MountUnit {
+            unit: format!("{}.{suffix}", escape_path(&path)),
+            mountpoint: path,
+        });
+    }
+    units
+}
+
+/// `raw` with its fstab octal escapes decoded (`\040` is a space, as
+/// libmount reads it), empty and `.` components dropped, and no trailing
+/// `/`. `None` when it is not absolute, has a `..` component, or does not
+/// decode to UTF-8.
+fn normalized_mountpoint(raw: &str) -> Option<String> {
+    let decoded = String::from_utf8(unmangle(raw.as_bytes())).ok()?;
+    let rest = decoded.strip_prefix('/')?;
+    let mut parts = Vec::new();
+    for part in rest.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => return None,
+            part => parts.push(part),
+        }
+    }
+    Some(format!("/{}", parts.join("/")))
+}
+
+/// Decodes the `\ooo` octal escapes of an fstab field. Any other backslash
+/// is kept as it is.
+fn unmangle(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some((&byte, tail)) = rest.split_first() {
+        if byte == b'\\'
+            && let Some(decoded) = tail.get(..3).and_then(octal_byte)
+        {
+            out.push(decoded);
+            rest = tail.get(3..).unwrap_or_default();
+        } else {
+            out.push(byte);
+            rest = tail;
+        }
+    }
+    out
+}
+
+/// The byte three octal digits stand for, or `None`.
+fn octal_byte(digits: &[u8]) -> Option<u8> {
+    if !digits.iter().all(|digit| (b'0'..=b'7').contains(digit)) {
+        return None;
+    }
+    u8::from_str_radix(std::str::from_utf8(digits).ok()?, 8).ok()
+}
+
+/// `systemd-escape --path` for a normalized absolute path: `/` is `-`,
+/// otherwise the leading `/` goes, every other `/` becomes `-`, and each
+/// byte that is not an ASCII letter, digit, `:`, `_` or `.` (and a leading
+/// `.`) becomes `\xNN` in lower-case hex.
+fn escape_path(path: &str) -> String {
+    let rest = path.trim_start_matches('/');
+    if rest.is_empty() {
+        return "-".to_owned();
+    }
+    let mut out = String::with_capacity(rest.len());
+    for (index, byte) in rest.bytes().enumerate() {
+        let plain = byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'_' | b'.');
+        if byte == b'/' {
+            out.push('-');
+        } else if plain && !(index == 0 && byte == b'.') {
+            out.push(char::from(byte));
+        } else {
+            out.push_str("\\x");
+            for digit in [byte >> 4, byte & 0x0f] {
+                out.extend(char::from_digit(u32::from(digit), 16));
+            }
+        }
+    }
+    out
+}
+
 // -------------------------------------------------------------------- descriptor
 
 /// Whether this backend is the right one for `profile`.
@@ -267,7 +388,7 @@ static DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     checks: CHECKS,
     commit_confirm: true,
     reload_unit_files: true,
-    added_mounts: None,
+    added_mounts: Some(added_mounts),
     security_notes: &[MessageId::new("mounts-note-boot")],
 };
 
@@ -715,8 +836,8 @@ mod tests {
         CRITICAL_NO_AUTO, DESCRIPTOR, EMPTY_MOUNTPOINT, EMPTY_SPEC, Entry, INVALID_FSTYPE,
         MISSING_BOOT_ESCAPE, MISSING_GUARDS, MISSING_NOFAIL, MOUNT_GUARDS, Model, MountsModule,
         NETWORK_AUTOMOUNT, NO_ROOT_ENTRY, NOAUTO_WITHOUT_USER, PASS_TOO_HIGH, RELATIVE_MOUNTPOINT,
-        ROOT_PASS, classify, is_valid_fstype, missing_guards, parse_entry, render_entry,
-        schema_with_hints,
+        ROOT_PASS, added_mounts, classify, is_valid_fstype, missing_guards, parse_entry,
+        render_entry, schema_with_hints,
     };
     use detent_core::descriptor::{HostProfile, InitSystem, Os, ValidationCtx};
     use detent_core::diag::{MessageId, Severity};
@@ -1393,11 +1514,120 @@ mod tests {
         assert_eq!(descriptor.id, MountsModule::ID);
         assert!(descriptor.commit_confirm);
         assert!(descriptor.reload_unit_files);
+        assert!(descriptor.added_mounts.is_some());
         assert!(descriptor.services.is_empty());
         assert_eq!(descriptor.targets.len(), 2);
         for target in descriptor.targets {
             assert!((target.backend_detect)(&profile(Os::Linux, "h")));
             assert!(!(target.backend_detect)(&profile(Os::MacOs, "h")));
+        }
+    }
+
+    // ------------------------------------------------------------- added mounts
+
+    /// The `(mountpoint, unit)` pairs [`added_mounts`] gives.
+    fn added(previous: &str, current: &str) -> Vec<(String, String)> {
+        added_mounts(previous, current)
+            .into_iter()
+            .map(|unit| (unit.mountpoint, unit.unit))
+            .collect()
+    }
+
+    fn pair(mountpoint: &str, unit: &str) -> (String, String) {
+        (mountpoint.to_owned(), unit.to_owned())
+    }
+
+    const BASE: &str = "UUID=1 / ext4 defaults 0 1\n# a comment\nUUID=2 /srv ext4 defaults 0 2\n";
+
+    #[test]
+    fn added_mounts_lists_a_new_entry() {
+        let current = format!("{BASE}UUID=3 /srv/data ext4 defaults,nofail 0 2\n");
+        assert_eq!(
+            added(BASE, &current),
+            vec![pair("/srv/data", "srv-data.mount")]
+        );
+    }
+
+    #[test]
+    fn added_mounts_skips_unchanged_and_removed_entries() {
+        assert!(added(BASE, BASE).is_empty());
+        assert!(added(BASE, "UUID=1 / ext4 defaults 0 1\n").is_empty());
+    }
+
+    #[test]
+    fn added_mounts_skips_an_entry_whose_options_alone_changed() {
+        let current = BASE.replace("/srv ext4 defaults", "/srv ext4 defaults,noatime");
+        assert!(added(BASE, &current).is_empty());
+    }
+
+    #[test]
+    fn added_mounts_lists_an_entry_whose_spec_or_type_changed() {
+        let spec = BASE.replace("UUID=2 /srv", "UUID=9 /srv");
+        assert_eq!(added(BASE, &spec), vec![pair("/srv", "srv.mount")]);
+        let fstype = BASE.replace("/srv ext4", "/srv xfs");
+        assert_eq!(added(BASE, &fstype), vec![pair("/srv", "srv.mount")]);
+    }
+
+    #[test]
+    fn added_mounts_skips_noauto_swap_and_odd_mountpoints() {
+        let current = format!(
+            "{BASE}UUID=3 /mnt/usb ext4 noauto,user 0 0\n\
+             UUID=4 none swap sw 0 0\n\
+             UUID=5 swap swap defaults 0 0\n\
+             UUID=6 relative ext4 defaults 0 0\n\
+             UUID=7 /a/../b ext4 defaults 0 0\n\
+             not an entry\n"
+        );
+        assert!(added(BASE, &current).is_empty());
+    }
+
+    #[test]
+    fn added_mounts_starts_the_automount_unit_for_an_automount_entry() {
+        let current =
+            format!("{BASE}nas:/export /mnt/nas nfs4 x-systemd.automount,_netdev,nofail 0 0\n");
+        assert_eq!(
+            added(BASE, &current),
+            vec![pair("/mnt/nas", "mnt-nas.automount")]
+        );
+    }
+
+    #[test]
+    fn added_mounts_lists_a_mountpoint_once() {
+        let current = format!(
+            "{BASE}UUID=3 /srv/data ext4 defaults 0 2\nUUID=4 /srv/data ext4 defaults 0 2\n"
+        );
+        assert_eq!(
+            added(BASE, &current),
+            vec![pair("/srv/data", "srv-data.mount")]
+        );
+    }
+
+    #[test]
+    fn mount_unit_names_follow_systemd_path_escaping() {
+        // Each expectation is `systemd-escape --path --suffix=mount <path>`.
+        for (mountpoint, path, unit) in [
+            ("/", "/", "-.mount"),
+            ("/srv//data/", "/srv/data", "srv-data.mount"),
+            ("/srv/./data", "/srv/data", "srv-data.mount"),
+            ("/srv/my-data", "/srv/my-data", "srv-my\\x2ddata.mount"),
+            (
+                "/mnt/with\\040space",
+                "/mnt/with space",
+                "mnt-with\\x20space.mount",
+            ),
+            (
+                "/mnt/back\\\\slash",
+                "/mnt/back\\\\slash",
+                "mnt-back\\x5c\\x5cslash.mount",
+            ),
+            ("/.hidden/x", "/.hidden/x", "\\x2ehidden-x.mount"),
+            ("/mnt/a.b:c_d", "/mnt/a.b:c_d", "mnt-a.b:c_d.mount"),
+            ("/mnt/\u{fc}", "/mnt/\u{fc}", "mnt-\\xc3\\xbc.mount"),
+        ] {
+            let current = format!("{BASE}UUID=3 {mountpoint} ext4 defaults 0 2\n");
+            let previous = BASE.replace("UUID=1 / ext4", "UUID=0 / ext4");
+            let found = added(&previous, &current);
+            assert!(found.contains(&pair(path, unit)), "{mountpoint}: {found:?}");
         }
     }
 
