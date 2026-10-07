@@ -283,8 +283,12 @@ pub enum Request {
         /// The id passed to [`Request::StartConfirmTimer`].
         commit: CommitId,
     },
-    /// Mount an allow-listed target. Reserved for the `module-mounts` feature;
-    /// the monitor answers [`ProtoError::Unsupported`] until that lands.
+    /// Start the mount units of the entries an apply added to allow-listed
+    /// target `target` (`mounts`: `/etc/fstab`). The monitor refuses a
+    /// target whose module declares no mounts, answers
+    /// [`Response::Mounted`] with `activated: false` when `[mounts]
+    /// activate_new_entries` is off, and otherwise asks the runner, which
+    /// works the units out itself.
     ///
     /// It is defined unconditionally rather than behind `cfg(feature = …)` so
     /// that the discriminant numbering of this enum never depends on which
@@ -351,8 +355,7 @@ impl Request {
     ///
     /// A monitor without the state lock refuses these. The match is
     /// exhaustive on purpose: a new request must be classified here.
-    /// [`Request::Mount`] counts as a change although the monitor answers it
-    /// `Unsupported` today, so wiring it up later cannot skip the lock.
+    /// [`Request::Mount`] counts as a change: it may start mount units.
     #[must_use]
     pub const fn changes_state(&self) -> bool {
         match self {
@@ -639,6 +642,17 @@ pub enum Response {
         /// A short human-readable result.
         detail: String,
     },
+    /// Answer to [`Request::Mount`].
+    ///
+    /// Appended after [`Response::UnitFilesReloaded`] to preserve every
+    /// existing discriminant; see [`PROTO_VERSION`]'s doc comment.
+    Mounted {
+        /// False when `[mounts] activate_new_entries` is off: nothing was
+        /// started, and `units` is empty.
+        activated: bool,
+        /// What happened to each unit of an added or changed entry.
+        units: Vec<MountOutcome>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -835,9 +849,9 @@ impl<'a> arbitrary::Arbitrary<'a> for Sha256Digest {
 mod tests {
     use super::{
         BackupId, BackupInfo, BindingId, BindingInfo, CheckId, CheckInfo, CheckOutcome, CodecError,
-        CommitId, HelloAck, IdKind, MAX_FRAME, ModuleId, ModuleInfo, PROTO_VERSION, PathKind,
-        PendingService, ProtoError, Request, Response, ServiceAction, ServiceOutcome,
-        TargetContents, TargetId, TargetInfo, WriteReceipt, decode, encode,
+        CommitId, HelloAck, IdKind, MAX_FRAME, ModuleId, ModuleInfo, MountOutcome, MountState,
+        PROTO_VERSION, PathKind, PendingService, ProtoError, Request, Response, ServiceAction,
+        ServiceOutcome, TargetContents, TargetId, TargetInfo, WriteReceipt, decode, encode,
     };
     use crate::fs::atomic::Sha256Digest;
     use detent_core::descriptor::{ServiceAction as CoreServiceAction, TargetKind};
@@ -1030,6 +1044,15 @@ mod tests {
             Response::UnitFilesReloaded {
                 detail: "systemctl daemon-reload succeeded".to_owned(),
             },
+            Response::Mounted {
+                activated: true,
+                units: vec![MountOutcome {
+                    mountpoint: "/srv".to_owned(),
+                    unit: "srv.mount".to_owned(),
+                    state: MountState::Pending,
+                    detail: "systemctl start timed out".to_owned(),
+                }],
+            },
         ];
         responses.extend(every_error_response());
         responses
@@ -1220,6 +1243,18 @@ mod tests {
         };
         let bytes = encode(&response).unwrap_or_default();
         assert_eq!(bytes.first(), Some(&14));
+        assert_eq!(decode::<Response>(&bytes).ok(), Some(response));
+    }
+
+    #[test]
+    fn mounted_takes_the_next_response_discriminant() {
+        // Appended after `UnitFilesReloaded`: no existing discriminant moves.
+        let response = Response::Mounted {
+            activated: false,
+            units: Vec::new(),
+        };
+        let bytes = encode(&response).unwrap_or_default();
+        assert_eq!(bytes.first(), Some(&15));
         assert_eq!(decode::<Response>(&bytes).ok(), Some(response));
     }
 

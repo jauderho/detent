@@ -293,6 +293,18 @@ impl Allowlist {
         self.modules.iter().any(|module| module.reload_unit_files)
     }
 
+    /// Whether `path` is a target of a module that declares mounts
+    /// (`added_mounts`), whatever `[mounts] activate_new_entries` says: a
+    /// rollback stops what an earlier start recorded.
+    #[must_use]
+    pub fn starts_mounts_after(&self, path: &Path) -> bool {
+        self.targets
+            .iter()
+            .filter(|target| target.path == path)
+            .filter_map(|target| self.module(target.module))
+            .any(|module| module.added_mounts.is_some())
+    }
+
     /// Whether `path` is a target of a module that declares
     /// `reload_unit_files`.
     #[must_use]

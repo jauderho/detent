@@ -379,21 +379,20 @@ fn run_check_and_service_report_unavailable_with_no_collaborators() -> TestResul
 }
 
 // ---------------------------------------------------------------------------
-// Not-yet-built features
+// Mounts
 // ---------------------------------------------------------------------------
 
+/// The fixture's module declares no mounts, so a mount request for its
+/// target is refused before anything else happens.
 #[test]
-fn mount_still_answers_unsupported() -> TestResult {
+fn mount_for_a_module_without_mounts_is_refused() -> TestResult {
     let fx = fixture(b"v1")?;
     let (mut client, handle) = spawn_client(fx.allow()?)?;
     let target = target_id(&client, &fx);
 
     client.channel_mut().send(&Request::Mount { target })?;
     let response: Response = client.channel_mut().recv()?;
-    assert!(matches!(
-        response,
-        Response::Error(ProtoError::Unsupported(_))
-    ));
+    assert_eq!(response, Response::Error(ProtoError::ActionNotAllowed));
 
     client.shutdown()?;
     join_shutdown(handle);

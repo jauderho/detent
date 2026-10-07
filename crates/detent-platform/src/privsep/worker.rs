@@ -13,7 +13,7 @@ use crate::fs::atomic::Sha256Digest;
 
 use super::proto::{
     BackupId, BackupInfo, BindingId, BindingInfo, CheckId, CheckOutcome, CommitId, HelloAck,
-    ModuleId, PROTO_VERSION, PathKind, PendingService, ProtoError, Request, Response,
+    ModuleId, MountOutcome, PROTO_VERSION, PathKind, PendingService, ProtoError, Request, Response,
     ServiceAction, ServiceOutcome, TargetContents, TargetId, TargetInfo, WriteReceipt,
 };
 use super::transport::{Channel, ChannelError};
@@ -258,6 +258,21 @@ impl Client {
         }
     }
 
+    /// Start the mount units of the entries an apply added to `target`.
+    /// Returns whether activation is on and what happened to each unit.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::read_target`]; [`ProtoError::ActionNotAllowed`] when the
+    /// target's module declares no mounts, and the hook's error when the
+    /// runner or the init system cannot do it.
+    pub fn mount(&mut self, target: TargetId) -> Result<(bool, Vec<MountOutcome>), ClientError> {
+        match self.checked_call(&Request::Mount { target })? {
+            Response::Mounted { activated, units } => Ok((activated, units)),
+            other => Err(unexpected("Mounted", &other)),
+        }
+    }
+
     /// List a module's retained backups, newest first.
     ///
     /// # Errors
@@ -450,6 +465,7 @@ const fn variant_name(response: &Response) -> &'static str {
         Response::Replaced { .. } => "Replaced",
         Response::Pending(_) => "Pending",
         Response::UnitFilesReloaded { .. } => "UnitFilesReloaded",
+        Response::Mounted { .. } => "Mounted",
     }
 }
 
@@ -458,9 +474,9 @@ mod tests {
     use super::{Client, ClientError};
     use crate::fs::atomic::Sha256Digest;
     use crate::privsep::proto::{
-        BackupId, BindingId, CheckId, CheckOutcome, CommitId, HelloAck, ModuleId, PROTO_VERSION,
-        PathKind, ProtoError, Request, Response, ServiceAction, ServiceOutcome, TargetContents,
-        TargetId, WriteReceipt,
+        BackupId, BindingId, CheckId, CheckOutcome, CommitId, HelloAck, ModuleId, MountOutcome,
+        MountState, PROTO_VERSION, PathKind, ProtoError, Request, Response, ServiceAction,
+        ServiceOutcome, TargetContents, TargetId, WriteReceipt,
     };
     use crate::privsep::transport::Channel;
     use std::thread;
@@ -836,6 +852,39 @@ mod tests {
             client.reload_unit_files(ModuleId(0)),
             Err(ClientError::Unexpected {
                 want: "UnitFilesReloaded",
+                got: "Pending"
+            })
+        ));
+        drop(client);
+        let _ = handle.join();
+        Ok(())
+    }
+
+    #[test]
+    fn mount_returns_what_the_monitor_did() -> Result<(), Box<dyn std::error::Error>> {
+        let units = vec![MountOutcome {
+            mountpoint: "/srv".to_owned(),
+            unit: "srv.mount".to_owned(),
+            state: MountState::Mounted,
+            detail: String::new(),
+        }];
+        let (mut client, handle) = client_with_scripted_reply(Response::Mounted {
+            activated: true,
+            units: units.clone(),
+        })?;
+        assert_eq!(client.mount(TargetId(0))?, (true, units));
+        drop(client);
+        let _ = handle.join();
+        Ok(())
+    }
+
+    #[test]
+    fn mount_reports_unexpected_for_a_wrong_response() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut client, handle) = client_with_scripted_reply(Response::Pending(None))?;
+        assert!(matches!(
+            client.mount(TargetId(0)),
+            Err(ClientError::Unexpected {
+                want: "Mounted",
                 got: "Pending"
             })
         ));

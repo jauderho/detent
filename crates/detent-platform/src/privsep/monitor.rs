@@ -27,8 +27,11 @@
 //! Running external validators and driving service managers are separate Phase
 //! 2 subtasks. They enter through [`CheckRunner`] and [`ServiceControl`]; the
 //! default [`NoChecks`]/[`NoServices`] implementations answer
-//! [`ProtoError::Unavailable`]. `Mount` answers [`ProtoError::Unsupported`]
-//! until the `module-mounts` feature exists.
+//! [`ProtoError::Unavailable`]. `Mount` goes to the same hook
+//! ([`ServiceControl::start_added_mounts`]); before any rollback restores a
+//! target of a module that declares mounts, the monitor has the units that
+//! apply started stopped ([`ServiceControl::stop_started_mounts`]), and a
+//! confirm forgets them.
 
 use std::fmt;
 use std::io::{Read as _, Write as _};
@@ -656,6 +659,9 @@ impl<'a> Monitor<'a> {
         let Some(pending) = self.pending.take() else {
             return Ok(());
         };
+        if let Err(err) = self.stop_started_mounts(&pending.entries) {
+            tracing::error!(error = %err, "stopping the started mounts before rollback failed");
+        }
         let restored = roll_back(&pending.entries);
         if let Err(err) = self.replay_reload(&pending.entries) {
             tracing::error!(error = %err, "unit-file reload after rollback failed");
@@ -713,9 +719,7 @@ impl<'a> Monitor<'a> {
             Request::PendingCommit => {
                 Response::Pending(self.pending.as_ref().map(|pending| pending.commit))
             }
-            Request::Mount { .. } => Response::Error(ProtoError::Unsupported(
-                "mount requires the module-mounts feature".to_owned(),
-            )),
+            Request::Mount { target } => self.mount(target),
             Request::ReplaceBinary { tag, len, sha256 } => self.replace_binary(&tag, len, sha256),
             Request::Shutdown => Response::ShuttingDown,
             Request::ReloadUnitFiles { module } => self.reload_unit_files(module),
@@ -1095,6 +1099,41 @@ impl<'a> Monitor<'a> {
         }
     }
 
+    /// Start the mount units of the entries an apply added to `target`,
+    /// whose module must declare mounts. With `[mounts]
+    /// activate_new_entries` off nothing starts and the answer says so.
+    fn mount(&self, target: TargetId) -> Response {
+        let Some(entry) = self.allow.target(target) else {
+            return unknown(IdKind::Target, u32::from(target.get()));
+        };
+        if self
+            .allow
+            .module(entry.module)
+            .is_none_or(|module| module.added_mounts.is_none())
+        {
+            return Response::Error(ProtoError::ActionNotAllowed);
+        }
+        if !self.allow.config().activate_mounts {
+            return Response::Mounted {
+                activated: false,
+                units: Vec::new(),
+            };
+        }
+        match self.hooks.services.start_added_mounts(target) {
+            Ok(units) => Response::Mounted {
+                activated: true,
+                units: units
+                    .into_iter()
+                    .map(|unit| MountOutcome {
+                        detail: truncate(&unit.detail),
+                        ..unit
+                    })
+                    .collect(),
+            },
+            Err(err) => Response::Error(err.into()),
+        }
+    }
+
     fn list_backups(&self, module: ModuleId) -> Response {
         match self.collect_backups(module) {
             Ok(entries) => {
@@ -1234,7 +1273,16 @@ impl<'a> Monitor<'a> {
         }
         match &self.pending {
             Some(pending) if pending.commit == commit => {
-                self.pending = None;
+                let entries = self
+                    .pending
+                    .take()
+                    .map(|pending| pending.entries)
+                    .unwrap_or_default();
+                if self.starts_mounts(&entries)
+                    && let Err(err) = self.hooks.services.forget_started_mounts()
+                {
+                    tracing::error!(error = %err, "forgetting the started mounts failed");
+                }
                 self.clear_marker()?;
                 tracing::info!(commit = commit.get(), "commit confirmed");
                 Ok(Response::Committed { commit })
@@ -1256,6 +1304,9 @@ impl<'a> Monitor<'a> {
         let Some(pending) = self.pending.take_if(|pending| pending.commit == commit) else {
             return Ok(unknown(IdKind::Commit, commit.get()));
         };
+        if let Err(err) = self.stop_started_mounts(&pending.entries) {
+            tracing::error!(error = %err, "stopping the started mounts before rollback failed");
+        }
         let restored = roll_back(&pending.entries);
         if let Err(err) = self.replay_reload(&pending.entries) {
             tracing::error!(error = %err, "unit-file reload after rollback failed");
@@ -1288,6 +1339,9 @@ impl<'a> Monitor<'a> {
         else {
             return Ok(());
         };
+        if let Err(err) = self.stop_started_mounts(&pending.entries) {
+            tracing::error!(error = %err, "stopping the started mounts before rollback failed");
+        }
         let restored = roll_back(&pending.entries);
         if let Err(err) = self.replay_reload(&pending.entries) {
             tracing::error!(error = %err, "unit-file reload after rollback failed");
@@ -1351,6 +1405,33 @@ impl<'a> Monitor<'a> {
         })
     }
 
+    /// Whether one of `entries` is a target of a module that declares
+    /// mounts. Matched by path, as for [`Self::replay_reload`].
+    fn starts_mounts(&self, entries: &[RollbackEntry]) -> bool {
+        entries
+            .iter()
+            .any(|entry| self.allow.starts_mounts_after(&entry.path))
+    }
+
+    /// Before a rollback of `entries` restores the files, stop the mount
+    /// units the apply started, while the target still has the contents
+    /// they were started for. Only the units the runner recorded stop.
+    fn stop_started_mounts(&self, entries: &[RollbackEntry]) -> Result<(), HookError> {
+        if !self.starts_mounts(entries) {
+            return Ok(());
+        }
+        for unit in self.hooks.services.stop_started_mounts()? {
+            tracing::info!(
+                mountpoint = unit.mountpoint,
+                unit = unit.unit,
+                state = ?unit.state,
+                detail = unit.detail,
+                "stopped a mount the apply started"
+            );
+        }
+        Ok(())
+    }
+
     fn replay_service(&self, service: Option<PendingService>) -> Result<(), HookError> {
         let Some(service) = service else {
             return Ok(());
@@ -1402,6 +1483,9 @@ impl<'a> Monitor<'a> {
         let marker: PendingCommitMarker =
             serde_json::from_slice(&raw).map_err(|_| MonitorError::CorruptMarker)?;
         let mut failures = Vec::new();
+        if let Err(err) = self.stop_started_mounts(&marker.entries) {
+            failures.push(err.to_string());
+        }
         let mut restored = 0_usize;
         for entry in marker.entries.iter().rev() {
             match restore_backup_expecting(&entry.backup, &entry.path, entry.new_digest) {
@@ -2160,14 +2244,15 @@ mod tests {
     use crate::fs::atomic::{AtomicError, Sha256Digest};
     use crate::privsep::allowlist::{Allowlist, AllowlistError, Config};
     use crate::privsep::proto::{
-        BackupId, BindingId, CheckId, CheckOutcome, CommitId, IdKind, ModuleId, PROTO_VERSION,
-        PendingService, ProtoError, Request, Response, ServiceAction, ServiceOutcome, TargetId,
+        BackupId, BindingId, CheckId, CheckOutcome, CommitId, IdKind, ModuleId, MountOutcome,
+        MountState, PROTO_VERSION, PendingService, ProtoError, Request, Response, ServiceAction,
+        ServiceOutcome, TargetId,
     };
     use crate::privsep::transport::{Channel, ChannelError};
     use crate::privsep::worker::Client;
     use detent_core::descriptor::{
-        ArgTemplate, CheckExpectation, ExternalCheck, HostProfile, ModuleDescriptor, Owner,
-        PathSpec, ServiceAction as CoreServiceAction, ServiceBinding, Target, TargetKind,
+        ArgTemplate, CheckExpectation, ExternalCheck, HostProfile, ModuleDescriptor, MountUnit,
+        Owner, PathSpec, ServiceAction as CoreServiceAction, ServiceBinding, Target, TargetKind,
         UnitNames, Upstream,
     };
     use detent_core::diag::{Diagnostic, Diagnostics, MessageId, Severity};
@@ -4752,6 +4837,9 @@ mod tests {
         calls: std::cell::RefCell<Vec<(CoreServiceAction, Vec<u8>)>>,
         /// The target's contents at each unit-file reload.
         reloads: std::cell::RefCell<Vec<Vec<u8>>>,
+        /// Each mount hook call (`start`, `stop`, `forget`) with the target's
+        /// contents at call time.
+        mounts: std::cell::RefCell<Vec<(&'static str, Vec<u8>)>>,
     }
 
     impl RecordingServices {
@@ -4760,7 +4848,13 @@ mod tests {
                 target: target.to_path_buf(),
                 calls: std::cell::RefCell::new(Vec::new()),
                 reloads: std::cell::RefCell::new(Vec::new()),
+                mounts: std::cell::RefCell::new(Vec::new()),
             }
+        }
+
+        fn mount_event(&self, event: &'static str) {
+            let contents = std::fs::read(&self.target).unwrap_or_default();
+            self.mounts.borrow_mut().push((event, contents));
         }
 
         /// The one call every rollback path must make: a restart, seen
@@ -4793,6 +4887,260 @@ mod tests {
             self.reloads.borrow_mut().push(contents);
             Ok("reloaded".to_owned())
         }
+
+        fn start_added_mounts(&self, _target: TargetId) -> Result<Vec<MountOutcome>, HookError> {
+            self.mount_event("start");
+            Ok(vec![srv_mounted()])
+        }
+
+        fn stop_started_mounts(&self) -> Result<Vec<MountOutcome>, HookError> {
+            self.mount_event("stop");
+            Ok(Vec::new())
+        }
+
+        fn forget_started_mounts(&self) -> Result<(), HookError> {
+            self.mount_event("forget");
+            Ok(())
+        }
+    }
+
+    fn srv_mounted() -> MountOutcome {
+        MountOutcome {
+            mountpoint: "/srv".to_owned(),
+            unit: "srv.mount".to_owned(),
+            state: MountState::Mounted,
+            detail: String::new(),
+        }
+    }
+
+    // -- mounts ---------------------------------------------------------------
+
+    fn srv_unit(_previous: &str, _current: &str) -> Vec<MountUnit> {
+        vec![MountUnit {
+            mountpoint: "/srv".to_owned(),
+            unit: "srv.mount".to_owned(),
+        }]
+    }
+
+    impl Fixture {
+        /// The fixture's module as `mounts`: it reloads unit files and
+        /// declares mounts. `activate` is `[mounts] activate_new_entries`.
+        fn allow_mounting(&self, activate: bool) -> Result<Allowlist, AllowlistError> {
+            let module = leak(ModuleDescriptor {
+                reload_unit_files: true,
+                added_mounts: Some(srv_unit),
+                ..*descriptor(&self.target)
+            });
+            Allowlist::from_modules(
+                &[module],
+                &Config {
+                    activate_mounts: activate,
+                    ..Config::with_state_root(&self.state_root)
+                },
+            )
+        }
+    }
+
+    #[test]
+    fn a_mount_with_activation_off_says_so_and_starts_nothing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let services = RecordingServices::new(&fx.target);
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &services,
+        };
+        let mut monitor = greeted(fx.allow_mounting(false)?, hooks);
+        let response = monitor.dispatch(Request::Mount {
+            target: TargetId(0),
+        })?;
+        assert_eq!(
+            response,
+            Response::Mounted {
+                activated: false,
+                units: Vec::new()
+            }
+        );
+        assert!(services.mounts.borrow().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_mount_reaches_the_hook_when_activation_is_on() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let services = RecordingServices::new(&fx.target);
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &services,
+        };
+        let mut monitor = greeted(fx.allow_mounting(true)?, hooks);
+        let response = monitor.dispatch(Request::Mount {
+            target: TargetId(0),
+        })?;
+        assert_eq!(
+            response,
+            Response::Mounted {
+                activated: true,
+                units: vec![srv_mounted()]
+            }
+        );
+        let unknown = monitor.dispatch(Request::Mount {
+            target: TargetId(9),
+        })?;
+        assert!(
+            matches!(
+                unknown,
+                Response::Error(ProtoError::UnknownId {
+                    kind: IdKind::Target,
+                    id: 9
+                })
+            ),
+            "{unknown:?}"
+        );
+        assert_eq!(services.mounts.borrow().len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn a_mount_for_a_module_without_mounts_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let services = RecordingServices::new(&fx.target);
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &services,
+        };
+        let mut monitor = greeted(fx.allow_reloading()?, hooks);
+        let response = monitor.dispatch(Request::Mount {
+            target: TargetId(0),
+        })?;
+        assert_eq!(response, Response::Error(ProtoError::ActionNotAllowed));
+        assert!(services.mounts.borrow().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_mount_hook_is_an_error_response() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow_mounting(true)?, Hooks::default());
+        let response = monitor.dispatch(Request::Mount {
+            target: TargetId(0),
+        })?;
+        assert_eq!(
+            response,
+            Response::Error(ProtoError::Unavailable(
+                "mount units are not available in this build".to_owned()
+            ))
+        );
+        Ok(())
+    }
+
+    /// Every way a pending commit of a mounting module rolls back stops the
+    /// started mounts once, while the file still has the applied contents,
+    /// and reloads after the restore.
+    #[test]
+    fn every_rollback_of_a_mounting_module_stops_started_mounts_before_the_restore()
+    -> Result<(), Box<dyn std::error::Error>> {
+        type Roll = fn(&mut Monitor<'_>, &Fixture) -> Result<(), Box<dyn std::error::Error>>;
+        let ways: [(&str, Roll); 3] = [
+            ("deadline", |monitor, _| {
+                if let Some(pending) = monitor.pending.as_mut() {
+                    pending.deadline = std::time::Instant::now();
+                }
+                Ok(monitor.enforce_deadline()?)
+            }),
+            ("request", |monitor, _| {
+                monitor.dispatch(Request::RollbackCommit {
+                    commit: CommitId(1),
+                })?;
+                Ok(())
+            }),
+            ("exit", |monitor, _| Ok(monitor.rollback_pending_on_exit()?)),
+        ];
+        for (way, roll) in ways {
+            let fx = fixture()?;
+            let services = RecordingServices::new(&fx.target);
+            let hooks = Hooks {
+                checks: &super::NoChecks,
+                services: &services,
+            };
+            let mut monitor = greeted(fx.allow_mounting(true)?, hooks);
+            arm_commit(&mut monitor, None)?;
+            roll(&mut monitor, &fx)?;
+            assert_eq!(
+                *services.mounts.borrow(),
+                vec![("stop", b"v2".to_vec())],
+                "{way}"
+            );
+            assert_eq!(*services.reloads.borrow(), vec![b"v1".to_vec()], "{way}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recover_pending_stops_started_mounts_for_a_mounting_module()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        {
+            let mut monitor = greeted(fx.allow_mounting(true)?, Hooks::default());
+            arm_commit(&mut monitor, None)?;
+        }
+        let services = RecordingServices::new(&fx.target);
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &services,
+        };
+        let monitor = Monitor::new(fx.allow_mounting(true)?, hooks);
+        let recovered = monitor
+            .recover_pending()?
+            .ok_or("expected a recovered commit")?;
+        assert!(recovered.failures.is_empty(), "{:?}", recovered.failures);
+        assert_eq!(*services.mounts.borrow(), vec![("stop", b"v2".to_vec())]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_mount_stop_is_reported_and_the_rollback_still_completes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        {
+            let mut monitor = greeted(fx.allow_mounting(true)?, Hooks::default());
+            arm_commit(&mut monitor, None)?;
+        }
+        let monitor = Monitor::new(fx.allow_mounting(true)?, Hooks::default());
+        let recovered = monitor
+            .recover_pending()?
+            .ok_or("expected a recovered commit")?;
+        assert_eq!(std::fs::read(&fx.target)?, b"v1");
+        assert!(
+            recovered
+                .failures
+                .iter()
+                .any(|failure| failure.contains("mount units are not available")),
+            "{:?}",
+            recovered.failures
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_confirm_forgets_the_started_mounts() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let services = RecordingServices::new(&fx.target);
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &services,
+        };
+        let mut monitor = greeted(fx.allow_mounting(true)?, hooks);
+        arm_commit(&mut monitor, None)?;
+        let response = monitor.dispatch(Request::ConfirmCommit {
+            commit: CommitId(1),
+        })?;
+        assert!(
+            matches!(response, Response::Committed { .. }),
+            "{response:?}"
+        );
+        assert_eq!(*services.mounts.borrow(), vec![("forget", b"v2".to_vec())]);
+        Ok(())
     }
 
     // -- reload_unit_files ----------------------------------------------------
@@ -4977,6 +5325,7 @@ mod tests {
         })?;
         services.assert_replayed_after_restore();
         assert!(services.reloads.borrow().is_empty());
+        assert!(services.mounts.borrow().is_empty());
         Ok(())
     }
 
