@@ -4785,7 +4785,7 @@ mod tests {
 
     #[test]
     fn new_execution_directives_are_detected_per_module() {
-        let cases: [(&str, &[u8], &[u8], bool); 16] = [
+        let cases: [(&str, &[u8], &[u8], bool); 17] = [
             // Comments, blank lines and `;` remarks never count.
             ("samba", b"", b"\n# preexec = /x\n; include = /y\n", false),
             ("dhcp", b"", b"dhcp-script=/bin/sh\n", true),
@@ -4807,10 +4807,18 @@ mod tests {
             ("network", b"", b"up /bin/sh -c 'a b c'\n", true),
             ("network", b"up /bin/true\n", b"up /bin/true\n", false),
             ("network", b"", b"address 192.0.2.2\n", false),
+            // Owner decision 2026-10-07: harmless x-systemd options pass;
+            // ones that run a program (makefs) are refused.
             (
                 "mounts",
                 b"",
                 b"/dev/sda1 /mnt ext4 x-systemd.automount 0 0\n",
+                false,
+            ),
+            (
+                "mounts",
+                b"",
+                b"/dev/sda1 /mnt ext4 x-systemd.makefs 0 0\n",
                 true,
             ),
             ("mounts", b"", b"/dev/sda1 /mnt ext4 defaults 0 0\n", false),
