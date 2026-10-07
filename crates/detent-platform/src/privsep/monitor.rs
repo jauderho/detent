@@ -44,14 +44,15 @@ use serde::{Deserialize, Serialize};
 use super::allowlist::{Allowlist, CANDIDATE_PREFIX};
 use super::proto::{
     BackupId, BackupInfo, BindingId, CheckId, CheckOutcome, CommitId, IdKind, ModuleId,
-    PendingService, ProtoError, Request, Response, ServiceAction, ServiceOutcome, TargetContents,
-    TargetId, WriteReceipt,
+    MountOutcome, PendingService, ProtoError, Request, Response, ServiceAction, ServiceOutcome,
+    TargetContents, TargetId, WriteReceipt,
 };
 use super::transport::{Channel, ChannelError};
 use crate::fs::atomic::{
     AtomicError, BackupEntry, WriteRequest, list_backups, read_with_digest, restore_backup,
     restore_backup_expecting, write_atomic,
 };
+use crate::service::MountUnitState;
 
 /// Name of the crash-recovery marker inside the state root.
 pub const PENDING_COMMIT_MARKER: &str = "pending-commit.json";
@@ -144,6 +145,76 @@ pub trait ServiceControl {
             "service control is not available in this build".to_owned(),
         ))
     }
+
+    /// The state of each mount unit in `units`
+    /// ([`ServiceManager::mount_unit_states`](crate::service::ServiceManager::mount_unit_states)).
+    /// The runner's hooks implement it; the default answers
+    /// [`HookError::Unavailable`].
+    ///
+    /// # Errors
+    ///
+    /// [`HookError::Unavailable`] when no service manager or no mount
+    /// support is available, [`HookError::Failed`] when the query failed.
+    fn mount_unit_states(&self, _units: &[String]) -> Result<Vec<MountUnitState>, HookError> {
+        Err(no_mount_units())
+    }
+
+    /// Start the mount units in `units`
+    /// ([`ServiceManager::start_mount_units`](crate::service::ServiceManager::start_mount_units)).
+    ///
+    /// # Errors
+    ///
+    /// As [`ServiceControl::mount_unit_states`].
+    fn start_mount_units(&self, _units: &[String]) -> Result<Vec<MountUnitState>, HookError> {
+        Err(no_mount_units())
+    }
+
+    /// Stop the mount units in `units`
+    /// ([`ServiceManager::stop_mount_units`](crate::service::ServiceManager::stop_mount_units)).
+    ///
+    /// # Errors
+    ///
+    /// As [`ServiceControl::mount_unit_states`].
+    fn stop_mount_units(&self, _units: &[String]) -> Result<Vec<MountUnitState>, HookError> {
+        Err(no_mount_units())
+    }
+
+    /// Start the mount units of the entries an apply added to `target`
+    /// (`[mounts] activate_new_entries`). The runner client forwards it;
+    /// the runner works out the units itself. The default answers
+    /// [`HookError::Unavailable`].
+    ///
+    /// # Errors
+    ///
+    /// [`HookError::Unavailable`] when the runner or the init system cannot
+    /// do it, [`HookError::Failed`] when it refused or failed.
+    fn start_added_mounts(&self, _target: TargetId) -> Result<Vec<MountOutcome>, HookError> {
+        Err(no_mount_units())
+    }
+
+    /// Stop the mount units the last [`ServiceControl::start_added_mounts`]
+    /// started, for a rollback.
+    ///
+    /// # Errors
+    ///
+    /// As [`ServiceControl::start_added_mounts`].
+    fn stop_started_mounts(&self) -> Result<Vec<MountOutcome>, HookError> {
+        Err(no_mount_units())
+    }
+
+    /// Forget which mount units the last start started, after a confirm.
+    ///
+    /// # Errors
+    ///
+    /// As [`ServiceControl::start_added_mounts`].
+    fn forget_started_mounts(&self) -> Result<(), HookError> {
+        Err(no_mount_units())
+    }
+}
+
+/// The default answer of the mount hooks of [`ServiceControl`].
+fn no_mount_units() -> HookError {
+    HookError::Unavailable("mount units are not available in this build".to_owned())
 }
 
 /// A [`CheckRunner`] that always reports the subsystem as absent.

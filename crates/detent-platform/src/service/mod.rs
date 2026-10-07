@@ -391,6 +391,18 @@ impl ServiceControl for ServiceControlAdapter {
     fn reload_unit_files(&self) -> Result<String, HookError> {
         self.0.reload_unit_files().map_err(HookError::from)
     }
+
+    fn mount_unit_states(&self, units: &[String]) -> Result<Vec<MountUnitState>, HookError> {
+        self.0.mount_unit_states(units).map_err(HookError::from)
+    }
+
+    fn start_mount_units(&self, units: &[String]) -> Result<Vec<MountUnitState>, HookError> {
+        self.0.start_mount_units(units).map_err(HookError::from)
+    }
+
+    fn stop_mount_units(&self, units: &[String]) -> Result<Vec<MountUnitState>, HookError> {
+        self.0.stop_mount_units(units).map_err(HookError::from)
+    }
 }
 
 /// Caches which alternative of a `&'static [&'static str]` list resolved to

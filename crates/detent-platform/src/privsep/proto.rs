@@ -527,6 +527,42 @@ pub struct ServiceOutcome {
     pub detail: String,
 }
 
+/// What happened to one mount unit after a `mounts` apply, or at a
+/// rollback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+pub enum MountState {
+    /// Started, and mounted now.
+    Mounted,
+    /// Already mounted before the apply: not started, and not stopped by a
+    /// rollback.
+    AlreadyMounted,
+    /// Started; the job had not finished when the wait ended (for example
+    /// a network share). It goes on in the init system.
+    Pending,
+    /// The start or the stop failed.
+    Failed,
+    /// Refused: `/`, or an ancestor of `/etc`, `/usr`, `/boot`, the state
+    /// root or the binary's directory. Never started.
+    Protected,
+    /// Stopped by a rollback.
+    Stopped,
+}
+
+/// One mount unit and what happened to it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+pub struct MountOutcome {
+    /// The fstab entry's mount point.
+    pub mountpoint: String,
+    /// The unit, as `systemd-fstab-generator` names it.
+    pub unit: String,
+    /// What happened.
+    pub state: MountState,
+    /// The init system's message for a failure, or empty.
+    pub detail: String,
+}
+
 /// Everything the monitor may answer. Closed set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]

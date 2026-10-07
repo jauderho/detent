@@ -25,9 +25,12 @@
 //! passes the monitor's own trust check (owned by root or the runner's euid,
 //! no group or other write bit, not a symlink). A compromised monitor
 //! can run only the declared validators on such files, the declared
-//! service actions, and a unit-file reload when an enabled module declares
-//! `reload_unit_files` — nothing it could not already ask for through the
-//! protocol.
+//! service actions, a unit-file reload when an enabled module declares
+//! `reload_unit_files`, and, with `[mounts] activate_new_entries`, the start
+//! of the mount units the runner works out itself from an allow-listed
+//! target and a stop of only the units it recorded
+//! ([`mounts`](super::mounts)) — nothing it could not already ask for
+//! through the protocol.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
@@ -42,7 +45,10 @@ use super::allowlist::{Allowlist, CANDIDATE_PREFIX};
 use super::monitor::{
     CheckRunner, DirOwner, HookError, Hooks, ServiceControl, require_trusted_dir,
 };
-use super::proto::{BindingId, CheckId, CheckOutcome, ServiceAction, ServiceOutcome};
+use super::mounts;
+use super::proto::{
+    BindingId, CheckId, CheckOutcome, MountOutcome, ServiceAction, ServiceOutcome, TargetId,
+};
 use super::transport::{Channel, ChannelError};
 
 /// How long either side waits on the runner channel. Longer than any single
@@ -71,6 +77,18 @@ pub enum RunnerRequest {
     /// Ask the init system to re-read its unit files. Allowed only when an
     /// enabled module declares `reload_unit_files`.
     ReloadUnitFiles,
+    /// Start the mount units of the entries an apply added to allow-listed
+    /// target `target`. Allowed only with `[mounts] activate_new_entries`;
+    /// the runner works the units out itself
+    /// ([`mounts`](super::mounts)).
+    StartAddedMounts {
+        /// Index into the allow-list's target table.
+        target: TargetId,
+    },
+    /// Stop the mount units the last start recorded (a rollback).
+    StopStartedMounts,
+    /// Forget the mount units the last start recorded (a confirm).
+    ForgetStartedMounts,
 }
 
 /// The runner's answer.
@@ -82,6 +100,10 @@ pub enum RunnerResponse {
     Serviced(ServiceOutcome),
     /// The unit files were reloaded; a short detail.
     Reloaded(String),
+    /// What a mount start or stop did, one entry per unit.
+    Mounts(Vec<MountOutcome>),
+    /// The record of started mount units is gone.
+    Forgotten,
     /// The subsystem is absent on this host.
     Unavailable(String),
     /// The request was refused or the subsystem failed.
@@ -181,11 +203,32 @@ fn answer(
                 .reload_unit_files()
                 .map(RunnerResponse::Reloaded)
         }
+        RunnerRequest::StartAddedMounts { target } => match mounts::record_dir(staging_dir) {
+            Some(dir) => {
+                mounts::start_added(allow, dir, hooks.services, target).map(RunnerResponse::Mounts)
+            }
+            None => Err(no_record_dir()),
+        },
+        RunnerRequest::StopStartedMounts => match mounts::record_dir(staging_dir) {
+            Some(dir) => {
+                mounts::stop_started(allow, dir, hooks.services).map(RunnerResponse::Mounts)
+            }
+            None => Err(no_record_dir()),
+        },
+        RunnerRequest::ForgetStartedMounts => match mounts::record_dir(staging_dir) {
+            Some(dir) => mounts::forget_started(dir).map(|()| RunnerResponse::Forgotten),
+            None => Err(no_record_dir()),
+        },
     };
     outcome.unwrap_or_else(|err| match err {
         HookError::Unavailable(message) => RunnerResponse::Unavailable(message),
         HookError::Failed(message) => RunnerResponse::Failed(message),
     })
+}
+
+/// The staging directory has no parent to keep the mount record in.
+fn no_record_dir() -> HookError {
+    HookError::Failed("the staging directory has no parent for the mount record".to_owned())
 }
 
 /// `dir/name` when `name` is one plain path component and names a regular
@@ -339,6 +382,30 @@ impl ServiceControl for RunnerClient {
             _ => None,
         })
     }
+
+    fn start_added_mounts(&self, target: TargetId) -> Result<Vec<MountOutcome>, HookError> {
+        let response = self.call(&RunnerRequest::StartAddedMounts { target })?;
+        hook_result(response, |response| match response {
+            RunnerResponse::Mounts(outcomes) => Some(outcomes),
+            _ => None,
+        })
+    }
+
+    fn stop_started_mounts(&self) -> Result<Vec<MountOutcome>, HookError> {
+        let response = self.call(&RunnerRequest::StopStartedMounts)?;
+        hook_result(response, |response| match response {
+            RunnerResponse::Mounts(outcomes) => Some(outcomes),
+            _ => None,
+        })
+    }
+
+    fn forget_started_mounts(&self) -> Result<(), HookError> {
+        let response = self.call(&RunnerRequest::ForgetStartedMounts)?;
+        hook_result(response, |response| match response {
+            RunnerResponse::Forgotten => Some(()),
+            _ => None,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -353,10 +420,14 @@ mod tests {
     use detent_core::diag::MessageId;
 
     use super::{RunnerClient, RunnerRequest, RunnerResponse, answer, serve_runner};
+    use crate::fs::atomic::{WriteRequest, write_atomic};
     use crate::privsep::allowlist::{Allowlist, Config};
     use crate::privsep::monitor::{CheckRunner, HookError, Hooks, ServiceControl};
     use crate::privsep::proto::{BindingId, CheckId, CheckOutcome, ServiceAction, ServiceOutcome};
+    use crate::privsep::proto::{MountState, TargetId};
     use crate::privsep::transport::Channel;
+    use crate::service::{MountUnitState, State};
+    use detent_core::descriptor::MountUnit;
 
     type R = Result<(), Box<dyn std::error::Error>>;
 
@@ -451,6 +522,36 @@ mod tests {
         fn reload_unit_files(&self) -> Result<String, HookError> {
             Ok("reloaded".to_owned())
         }
+
+        fn mount_unit_states(&self, units: &[String]) -> Result<Vec<MountUnitState>, HookError> {
+            Ok(unit_states(units, State::Inactive))
+        }
+
+        fn start_mount_units(&self, units: &[String]) -> Result<Vec<MountUnitState>, HookError> {
+            Ok(unit_states(units, State::Active))
+        }
+
+        fn stop_mount_units(&self, units: &[String]) -> Result<Vec<MountUnitState>, HookError> {
+            Ok(unit_states(units, State::Inactive))
+        }
+    }
+
+    fn unit_states(units: &[String], state: State) -> Vec<MountUnitState> {
+        units
+            .iter()
+            .map(|unit| MountUnitState {
+                unit: unit.clone(),
+                state,
+                detail: String::new(),
+            })
+            .collect()
+    }
+
+    fn one_mount(_previous: &str, _current: &str) -> Vec<MountUnit> {
+        vec![MountUnit {
+            mountpoint: "/srv/x".to_owned(),
+            unit: "srv-x.mount".to_owned(),
+        }]
     }
 
     static FILED_CHECKS: &[ExternalCheck] = &[ExternalCheck {
@@ -658,6 +759,69 @@ mod tests {
             ));
             assert!(matches!(
                 client.service(&stranger_binding, CoreServiceAction::Restart),
+                Err(HookError::Failed(_))
+            ));
+            Ok(())
+        })
+    }
+
+    /// The primary target of `filed` in a fixture whose `filed` declares
+    /// mounts, with activation on and one backup.
+    const MOUNTED_TARGET: TargetId = TargetId(2);
+
+    fn mounted_fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let root = fx.staging.parent().ok_or("staging has a parent")?;
+        let filed = Box::leak(Box::new(ModuleDescriptor {
+            added_mounts: Some(one_mount),
+            ..*filed_module(root)
+        }));
+        let allow = Allowlist::from_modules(
+            &[&MODULE, filed],
+            &Config {
+                activate_mounts: true,
+                ..Config::with_state_root(root.join("s"))
+            },
+        )?;
+        let target = allow.target(MOUNTED_TARGET).ok_or("target")?;
+        std::fs::write(&target.path, b"before")?;
+        write_atomic(&WriteRequest {
+            create_missing: true,
+            ..WriteRequest::new(&target.path, b"after", &target.backup_dir)
+        })?;
+        Ok(Fixture { allow, ..fx })
+    }
+
+    #[test]
+    fn added_mounts_start_stop_and_forget_through_the_runner() -> R {
+        let fx = mounted_fixture()?;
+        with_runner(&fx, |client| {
+            let started = client.start_added_mounts(MOUNTED_TARGET)?;
+            assert_eq!(
+                started
+                    .iter()
+                    .map(|o| (o.unit.as_str(), o.state))
+                    .collect::<Vec<_>>(),
+                vec![("srv-x.mount", MountState::Mounted)]
+            );
+            let stopped = client.stop_started_mounts()?;
+            assert_eq!(
+                stopped.iter().map(|o| o.state).collect::<Vec<_>>(),
+                vec![MountState::Stopped]
+            );
+            client.start_added_mounts(MOUNTED_TARGET)?;
+            client.forget_started_mounts()?;
+            assert!(client.stop_started_mounts()?.is_empty());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn the_runner_refuses_to_start_mounts_when_activation_is_off() -> R {
+        let fx = fixture()?;
+        with_runner(&fx, |client| {
+            assert!(matches!(
+                client.start_added_mounts(MOUNTED_TARGET),
                 Err(HookError::Failed(_))
             ));
             Ok(())
