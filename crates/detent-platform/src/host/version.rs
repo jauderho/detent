@@ -71,6 +71,26 @@ mod tests {
     }
 
     #[test]
+    fn extracts_the_version_from_real_probe_output() {
+        // `chronyd --version` on Debian 12.
+        assert_eq!(
+            first_version_token(
+                "chronyd (chrony) version 4.3 (+CMDMON +NTP +REFCLOCK +RTC +PRIVDROP +SCFILTER +SIGND +ASYNCDNS +NTS +SECHASH +IPV6 -DEBUG)"
+            ),
+            Some("4.3".to_string())
+        );
+        // `smbd -V`: the distribution suffix is not part of the version.
+        assert_eq!(
+            first_version_token("Version 4.19.5-Debian"),
+            Some("4.19.5".to_string())
+        );
+        assert_eq!(
+            first_version_token("Version 4.24.7\n"),
+            Some("4.24.7".to_string())
+        );
+    }
+
+    #[test]
     fn skips_leading_non_version_numbers() {
         // A single lone integer (e.g. a build number) is not a version.
         assert_eq!(
