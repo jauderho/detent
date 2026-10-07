@@ -412,6 +412,14 @@ deferred by the owner.
     `detent-*.profraw` after all tests passed (a forked test process killed
     mid-write, likely); the re-run passed. Make the merge skip or the forking
     tests not write a profile.
+16. **Web/MCP update install has no producer (high):** `UpdateApply` (the
+    Dashboard install button, `POST /api/v1/system/update`, the MCP tool)
+    stages `<state_root>/update/staged/<tag>` and its bundle to the monitor,
+    but nothing in production downloads them there; only tests plant them, so
+    the install answers `ops-unsupported` on a real host. Only `detent update`
+    (CLI) installs today. Fix: the worker fetches and verifies the release
+    (`detent_update` prepare) into its state root before staging (found by
+    the C1-b review, 2026-10-07).
 
 ### Track F — Phase 12 / M4 (v1.0)
 

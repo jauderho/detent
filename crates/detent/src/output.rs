@@ -214,9 +214,9 @@ impl Renderer<'_> {
             OpOutcome::Serviced(ref report) => self.serviced(out, report),
             OpOutcome::Host(ref host) => self.host_report(out, notes, host),
             OpOutcome::Audit(ref records) => self.audit(out, records),
-            // Unreachable: the engine answers `UpdateApply` as `Unsupported`
-            // until the `ReplaceBinary` monitor wiring lands, so this arm only
-            // exists to keep the match exhaustive.
+            // Unreachable: the CLI installs a release with `detent update`
+            // and never sends `UpdateApply` (only the web API and `detent
+            // mcp` do), so this arm only keeps the match exhaustive.
             OpOutcome::UpdateApplied { .. } => {
                 Err(std::io::Error::other("update install is not wired yet"))
             }
