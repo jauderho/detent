@@ -1,5 +1,5 @@
 import { useLocalization } from '@fluent/react'
-import { type ReactNode, useState } from 'react'
+import { type ReactNode, useId, useState } from 'react'
 import { Button } from '@/components/Button'
 import { FieldFrame, useFieldIds } from '@/components/FieldFrame'
 import { Led } from '@/components/Led'
@@ -27,6 +27,7 @@ import { keyItems } from './keys'
 import { joinLines, optionalMessage } from './l10n'
 import { type Control, defaultObject, type FieldNode } from './schema'
 import { TagList } from './TagList'
+import { isTooOld } from './version'
 
 /**
  * Maps one {@link FieldNode} onto a control from `src/components/`.
@@ -510,11 +511,46 @@ export function FieldControl({ node, basePath }: { node: FieldNode; basePath: Mo
   )
 }
 
+/**
+ * One field's badges and control. A field whose `since` the installed service
+ * is too old for sits in a disabled `fieldset`, which disables every control
+ * inside it — a text box, a switch, or a whole row editor — and carries the
+ * reason as its description.
+ */
 function FieldSlot({ hints, children }: { hints: FieldHints; children: ReactNode }) {
+  const { l10n } = useLocalization()
+  const { versionGate } = useFormContext()
+  const noteId = useId()
+  const since = hints.since
+  const installed = versionGate?.installed
+
+  if (
+    versionGate === undefined ||
+    since === undefined ||
+    installed === undefined ||
+    !isTooOld(installed, since)
+  ) {
+    return (
+      <div className="flex flex-col gap-1">
+        <FieldBadges hints={hints} />
+        {children}
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col gap-1">
       <FieldBadges hints={hints} />
-      {children}
+      <fieldset disabled aria-describedby={noteId} className="m-0 min-w-0 border-0 p-0">
+        {children}
+      </fieldset>
+      <p id={noteId} className="field-desc">
+        {l10n.getString('forms-version-unsupported', {
+          service: versionGate.service,
+          since,
+          installed,
+        })}
+      </p>
     </div>
   )
 }

@@ -276,7 +276,8 @@ pub struct HostProfile {
     pub init: InitSystem,
     /// The host's own name, used by defaults such as the `/etc/hosts` entry for it.
     pub hostname: String,
-    /// Installed version per service name, e.g. `{"chronyd": "4.5"}`.
+    /// Installed version per service, keyed by a module's `upstream.project`,
+    /// e.g. `{"chrony": "4.5"}`.
     pub service_versions: BTreeMap<String, String>,
     /// Physical memory in MiB, used to size caches and worker counts.
     pub ram_mib: u64,

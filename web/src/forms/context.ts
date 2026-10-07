@@ -13,6 +13,17 @@ import { type DiagnosticMap, EMPTY_DIAGNOSTIC_MAP } from './diagnostics'
 import type { JsonValue, ModelPath } from './json'
 import type { FieldIssue } from './validate'
 
+/**
+ * What the installed service looks like, for fields whose `x-detent.since` it
+ * may be too old to know. `installed` is `undefined` when detection found
+ * nothing, and an undetected version disables nothing.
+ */
+export type VersionGate = {
+  /** The service's name as the host profile files it, e.g. `chrony`. */
+  readonly service: string
+  readonly installed: string | undefined
+}
+
 export type FormContextValue = {
   readonly model: JsonValue
   /** Replaces one leaf. */
@@ -27,6 +38,8 @@ export type FormContextValue = {
   /** Client-side issues, keyed by `pathKey`. */
   readonly issues: ReadonlyMap<string, readonly FieldIssue[]>
   readonly diagnostics: DiagnosticMap
+  /** The installed service, when the page knows which one the module configures. */
+  readonly versionGate: VersionGate | undefined
 }
 
 const FALLBACK: FormContextValue = {
@@ -36,6 +49,7 @@ const FALLBACK: FormContextValue = {
   showAdvanced: false,
   issues: new Map(),
   diagnostics: EMPTY_DIAGNOSTIC_MAP,
+  versionGate: undefined,
 }
 
 export const FormContext = createContext<FormContextValue>(FALLBACK)

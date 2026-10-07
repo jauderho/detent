@@ -331,6 +331,7 @@ forms-tag-move-down = move {$field} item {$index} down
 forms-tag-move-up = move {$field} item {$index} up
 forms-tag-remove = remove {$field} item {$index}
 forms-unsupported-note = this build cannot edit this value. it is shown as stored and is left unchanged.
+forms-version-unsupported = needs {$service} {$since}, installed {$installed}
 
 ## Form validation
 ## Mirrors the schema constraints for immediate feedback. The server is the

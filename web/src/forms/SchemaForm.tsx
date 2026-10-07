@@ -2,7 +2,7 @@ import { type ReactLocalization, useLocalization } from '@fluent/react'
 import { useCallback, useId, useMemo, useState } from 'react'
 import { Banner } from '@/components/Banner'
 import { TinyButton } from '@/components/TinyButton'
-import { FormContext, type FormContextValue } from './context'
+import { FormContext, type FormContextValue, type VersionGate } from './context'
 import {
   collectFieldPaths,
   type FormDiagnostic,
@@ -51,6 +51,11 @@ export type SchemaFormProps = {
   onChange: (next: JsonValue) => void
   /** Diagnostics from the last `validate` / `plan` / rejected `apply`. */
   diagnostics?: readonly FormDiagnostic[] | undefined
+  /**
+   * The installed service the module configures. A field whose
+   * `x-detent.since` is newer than `installed` is shown disabled with a note.
+   */
+  versionGate?: VersionGate | undefined
   className?: string | undefined
 }
 
@@ -65,7 +70,14 @@ function groupIssues(issues: readonly FieldIssue[]): ReadonlyMap<string, readonl
   return map
 }
 
-export function SchemaForm({ schema, value, onChange, diagnostics, className }: SchemaFormProps) {
+export function SchemaForm({
+  schema,
+  value,
+  onChange,
+  diagnostics,
+  versionGate,
+  className,
+}: SchemaFormProps) {
   const { l10n } = useLocalization()
   const [showAdvanced, setShowAdvanced] = useState(false)
   const advancedId = useId()
@@ -93,8 +105,16 @@ export function SchemaForm({ schema, value, onChange, diagnostics, className }: 
   )
 
   const context: FormContextValue = useMemo(
-    () => ({ model: value, setValue, updateArray, showAdvanced, issues, diagnostics: mapped }),
-    [value, setValue, updateArray, showAdvanced, issues, mapped],
+    () => ({
+      model: value,
+      setValue,
+      updateArray,
+      showAdvanced,
+      issues,
+      diagnostics: mapped,
+      versionGate,
+    }),
+    [value, setValue, updateArray, showAdvanced, issues, mapped, versionGate],
   )
 
   const hasAdvanced = hasGroup(parsed.fields, 'advanced')

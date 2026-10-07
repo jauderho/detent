@@ -37,6 +37,7 @@
  *    control appears on that control; one that does not appears at form level.
  */
 
+export type { VersionGate } from './context'
 export {
   collectFieldPaths,
   type DiagnosticMap,

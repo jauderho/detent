@@ -717,7 +717,10 @@ export interface components {
              * @description Physical memory in MiB, used to size caches and worker counts.
              */
             ram_mib: number;
-            /** @description Installed version per service name, e.g. `{"chronyd": "4.5"}`. */
+            /**
+             * @description Installed version per service, keyed by a module's `upstream.project`,
+             *     e.g. `{"chrony": "4.5"}`.
+             */
             service_versions: {
                 [key: string]: string;
             };

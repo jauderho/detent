@@ -1656,7 +1656,7 @@
           },
           "service_versions": {
             "type": "object",
-            "description": "Installed version per service name, e.g. `{\"chronyd\": \"4.5\"}`.",
+            "description": "Installed version per service, keyed by a module's `upstream.project`,\ne.g. `{\"chrony\": \"4.5\"}`.",
             "additionalProperties": {
               "type": "string"
             },

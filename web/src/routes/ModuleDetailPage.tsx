@@ -24,6 +24,7 @@ import {
   usePlanModule,
   useValidateModule,
 } from '@/api/modules'
+import { useHostProfile } from '@/api/system'
 import { usePendingCommit } from '@/app/PendingCommit'
 import { useWriteGate } from '@/auth/ScopeGate'
 import { Banner } from '@/components/Banner'
@@ -40,6 +41,7 @@ import {
   parseDiagnostics,
   parseSchema,
   SchemaForm,
+  type VersionGate,
 } from '@/forms'
 import { shortDigest } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -129,6 +131,7 @@ export function ModuleDetailPage() {
 function ModuleDetailView({ id }: { id: string }) {
   const { l10n } = useLocalization()
   const query = useModule(id)
+  const hostProfile = useHostProfile()
   const writeGate = useWriteGate()
   const pendingCommit = usePendingCommit()
 
@@ -320,6 +323,13 @@ function ModuleDetailView({ id }: { id: string }) {
 
   const view = query.data
   const descriptor = view.descriptor
+  // The host profile files the detected version under the upstream project
+  // name. A profile that is still loading or failed to load names no version,
+  // and an unknown version disables nothing: the server reports it instead.
+  const versionGate: VersionGate = {
+    service: descriptor.upstream.project,
+    installed: hostProfile.data?.profile.service_versions[descriptor.upstream.project],
+  }
 
   return (
     <section className="wrap" style={PAGE_STYLE}>
@@ -401,6 +411,7 @@ function ModuleDetailView({ id }: { id: string }) {
                 value={model}
                 onChange={onModelChange}
                 diagnostics={diagnostics}
+                versionGate={versionGate}
               />
             )}
 

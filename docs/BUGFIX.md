@@ -300,8 +300,10 @@ deferred by the owner.
      action.
    - **Optional mount** via the monitor: open. It needs `CAP_SYS_ADMIN` and
      the mount syscalls (owner decision).
-2. **Version-gated options** (chrony, samba): detect the installed version so
-   `since`-gated options are offered only when supported.
+2. ~~**Version-gated options** (chrony, samba)~~ Done: `Dyn::validate_json`
+   checks `x-detent.since` against the detected version (error if older,
+   warning if unknown); chrony and samba gate real directives; the web form
+   disables a field that needs a newer service and says why.
 3. **VM acceptance runs** (owner): Phase 7 per-module spikes
    (`docs/spikes/m-<module>.md`) and the Phase 8 matrix (Debian ifupdown +
    NM, Ubuntu netplan, Fedora NM, Arch networkd), including one deliberate

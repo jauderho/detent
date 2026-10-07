@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { type ReactNode, useState } from 'react'
 import { renderWithL10n } from '@/test/l10n'
 import hostsSchemaSource from '../__fixtures__/hosts.schema.json?raw'
+import type { VersionGate } from '../context'
 import type { FormDiagnostic } from '../diagnostics'
 import type { JsonValue } from '../json'
 import { SchemaForm } from '../SchemaForm'
@@ -42,11 +43,13 @@ function Harness({
   schema = hostsSchema,
   initial = HOSTS_MODEL,
   diagnostics,
+  versionGate,
   onModel,
 }: {
   schema?: unknown
   initial?: JsonValue
   diagnostics?: readonly FormDiagnostic[]
+  versionGate?: VersionGate
   onModel?: (next: JsonValue) => void
 }): ReactNode {
   const [model, setModel] = useState<JsonValue>(initial)
@@ -56,6 +59,7 @@ function Harness({
       schema={schema}
       value={model}
       diagnostics={diagnostics}
+      versionGate={versionGate}
       onChange={(next) => {
         setModel(next)
         onModel?.(next)
@@ -471,5 +475,91 @@ describe('SchemaForm — container-level errors', () => {
     expect(
       screen.getByText((content) => content.replace(ISOLATES, '').includes('hosts-row')),
     ).toBeInTheDocument()
+  })
+})
+
+describe('SchemaForm — version-gated fields', () => {
+  const hint = (since: string) => ({
+    group: 'basic',
+    tooltip: 'mod-tip',
+    security_impact: 'none',
+    requires_restart: false,
+    since,
+  })
+  const schema = {
+    type: 'object',
+    properties: {
+      plain: { type: 'string' },
+      tls: { type: 'string', 'x-detent': hint('4.9') },
+      peers: {
+        type: 'array',
+        items: { type: 'object', properties: { host: { type: 'string' } } },
+        'x-detent': hint('4.9'),
+      },
+    },
+    required: ['plain', 'tls', 'peers'],
+  }
+  const model: JsonValue = { plain: 'a', tls: 'on', peers: [{ host: 'h' }] }
+  const note = 'needs chrony 4.9, installed 4.5'
+
+  it('disables a field newer than the installed service and says why', () => {
+    renderWithL10n(
+      <Harness
+        schema={schema}
+        initial={model}
+        versionGate={{ service: 'chrony', installed: '4.5' }}
+      />,
+    )
+
+    expect(screen.getByLabelText('tls')).toBeDisabled()
+    expect(screen.getByLabelText('plain')).toBeEnabled()
+    expect(screen.getAllByText(labelled(note))).toHaveLength(2)
+    expect(screen.getAllByRole('group', { description: labelled(note) })).toHaveLength(2)
+  })
+
+  it('disables the controls inside a gated array too', () => {
+    renderWithL10n(
+      <Harness
+        schema={schema}
+        initial={model}
+        versionGate={{ service: 'chrony', installed: '4.5' }}
+      />,
+    )
+
+    expect(screen.getByRole('button', { name: named('add a row to peers') })).toBeDisabled()
+    expect(screen.getByLabelText('host')).toBeDisabled()
+  })
+
+  it('leaves a field enabled when the installed version is new enough', () => {
+    renderWithL10n(
+      <Harness
+        schema={schema}
+        initial={model}
+        versionGate={{ service: 'chrony', installed: '4.10' }}
+      />,
+    )
+
+    expect(screen.getByLabelText('tls')).toBeEnabled()
+    expect(screen.queryByText(/needs chrony/)).not.toBeInTheDocument()
+  })
+
+  it('leaves a field enabled when the installed version is unknown', () => {
+    renderWithL10n(
+      <Harness
+        schema={schema}
+        initial={model}
+        versionGate={{ service: 'chrony', installed: undefined }}
+      />,
+    )
+
+    expect(screen.getByLabelText('tls')).toBeEnabled()
+    expect(screen.queryByText(/needs chrony/)).not.toBeInTheDocument()
+  })
+
+  it('does not gate anything without a version gate', () => {
+    renderWithL10n(<Harness schema={schema} initial={model} />)
+
+    expect(screen.getByLabelText('tls')).toBeEnabled()
+    expect(screen.queryByText(/needs chrony/)).not.toBeInTheDocument()
   })
 })

@@ -13,6 +13,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { Route, Routes } from 'react-router'
 import type { ApplyReport, ModuleDescriptor, ModuleView, PlanReport } from '@/api/modules'
+import type { HostReport } from '@/api/system'
 import { PendingCommitSlot } from '@/app/PendingCommit'
 import { errorResponse, jsonResponse, renderWithProviders, type StubCall } from '@/test/providers'
 import { ModuleDetailPage } from '../ModuleDetailPage'
@@ -48,6 +49,7 @@ function bodyOf(call: StubCall | undefined): unknown {
 }
 
 const AUTH_ROUTE = '/api/v1/auth/session'
+const PROFILE_ROUTE = '/api/v1/system/profile'
 const MODULE_ROUTE = '/api/v1/modules/hosts'
 const VALIDATE_ROUTE = '/api/v1/modules/hosts/validate'
 const PLAN_ROUTE = '/api/v1/modules/hosts/plan'
@@ -193,6 +195,110 @@ describe('ModuleDetailPage — states', () => {
     expect(screen.getByText('0123456789ab…')).toBeInTheDocument()
     expect(screen.getByText('core-hosts-security-note-lockout')).toBeInTheDocument()
     expect(screen.getByLabelText('hostname')).toHaveValue('box')
+  })
+})
+
+/** Fluent wraps every placeable in bidi isolate marks; strip them to compare text. */
+function plain(text: string | null | undefined): string {
+  return (text ?? '').replace(/[\u2068\u2069]/g, '')
+}
+
+function hostReport(serviceVersions: Record<string, string>): HostReport {
+  return {
+    distro_id: 'debian',
+    distro_version_id: '12',
+    network_backend: 'networkd',
+    notes: [],
+    profile: {
+      hostname: 'nas-01',
+      init: 'systemd',
+      os: 'linux',
+      ram_mib: 8192,
+      service_versions: serviceVersions,
+    },
+    resolver_backend: 'unbound',
+  }
+}
+
+/** A module whose `tls` option needs version 4.9 of the service it configures. */
+const GATED_VIEW: ModuleView = {
+  ...VIEW,
+  descriptor: { ...DESCRIPTOR, upstream: { ...DESCRIPTOR.upstream, project: 'chrony' } },
+  model: arbitraryJson({ hostname: 'box', tls: 'on' }),
+  schema: arbitraryJson({
+    type: 'object',
+    properties: {
+      hostname: { type: 'string' },
+      tls: {
+        type: 'string',
+        'x-detent': {
+          group: 'basic',
+          tooltip: 'mod-tip-tls',
+          security_impact: 'none',
+          requires_restart: false,
+          since: '4.9',
+        },
+      },
+    },
+    required: ['hostname', 'tls'],
+  }),
+}
+
+describe('ModuleDetailPage — version-gated options', () => {
+  it('disables an option newer than the installed service, naming both versions', async () => {
+    renderDetail({
+      [AUTH_ROUTE]: () => WRITE_SESSION,
+      [MODULE_ROUTE]: () => jsonResponse(GATED_VIEW),
+      [PROFILE_ROUTE]: () => jsonResponse(hostReport({ chrony: '4.5' })),
+    })
+
+    const note = await screen.findByText((content) => plain(content).startsWith('needs chrony 4.9'))
+    expect(plain(note.textContent)).toBe('needs chrony 4.9, installed 4.5')
+    expect(screen.getByLabelText('tls')).toBeDisabled()
+    expect(screen.getByLabelText('hostname')).toBeEnabled()
+  })
+
+  it('offers the option when the installed service is new enough', async () => {
+    renderDetail({
+      [AUTH_ROUTE]: () => WRITE_SESSION,
+      [MODULE_ROUTE]: () => jsonResponse(GATED_VIEW),
+      [PROFILE_ROUTE]: () => jsonResponse(hostReport({ chrony: '4.10' })),
+    })
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('tls')).toBeEnabled()
+    })
+    expect(
+      screen.queryByText((content) => plain(content).startsWith('needs')),
+    ).not.toBeInTheDocument()
+  })
+
+  it('offers the option when the host did not report the service version', async () => {
+    renderDetail({
+      [AUTH_ROUTE]: () => WRITE_SESSION,
+      [MODULE_ROUTE]: () => jsonResponse(GATED_VIEW),
+      [PROFILE_ROUTE]: () => jsonResponse(hostReport({})),
+    })
+
+    await screen.findByLabelText('tls')
+    expect(screen.getByLabelText('tls')).toBeEnabled()
+    expect(
+      screen.queryByText((content) => plain(content).startsWith('needs')),
+    ).not.toBeInTheDocument()
+  })
+
+  it('offers the option when the host profile cannot be fetched', async () => {
+    renderDetail({
+      [AUTH_ROUTE]: () => WRITE_SESSION,
+      [MODULE_ROUTE]: () => jsonResponse(GATED_VIEW),
+      [PROFILE_ROUTE]: () => errorResponse(500, 'ops-unknown-module'),
+    })
+
+    await screen.findByLabelText('tls')
+    expect(screen.getByLabelText('tls')).toBeEnabled()
+    expect(
+      screen.queryByText((content) => plain(content).startsWith('needs')),
+    ).not.toBeInTheDocument()
   })
 })
 
