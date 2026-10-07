@@ -8,6 +8,7 @@
 use crate::descriptor::{HostProfile, ModuleDescriptor, ValidationCtx};
 use crate::diag::{Diagnostics, MessageId};
 use crate::doc::Span;
+use crate::version::since_gate;
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -364,7 +365,19 @@ impl<M: ConfigModule> DynModule for Dyn<M> {
         ctx: &ValidationCtx<'_>,
     ) -> Result<Diagnostics, DynError> {
         let model = model_from_json::<M>(model_json)?;
-        Ok(M::validate(&model, ctx))
+        let mut diagnostics = M::validate(&model, ctx);
+        // The version key is the upstream project name: it is also the key
+        // `detent-platform` files the detected version under.
+        let gated = since_gate(
+            &M::schema(),
+            model_json,
+            ctx.profile,
+            M::descriptor().upstream.project,
+        );
+        for finding in gated {
+            diagnostics.push(finding);
+        }
+        Ok(diagnostics)
     }
 
     fn defaults_json(&self, profile: &HostProfile) -> Result<Value, DynError> {

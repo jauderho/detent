@@ -32,6 +32,7 @@ use detent_core::descriptor::{
 use detent_core::diag::{Diagnostic, Diagnostics, FieldPath, MessageId, Severity};
 use detent_core::doc::{Document, LineKind};
 use detent_core::module::{ConfigModule, EditError, EditReport, ModelError, ParseError};
+use detent_core::version::since_diagnostic;
 use std::collections::BTreeSet;
 
 // ------------------------------------------------------------------------- model
@@ -282,6 +283,10 @@ static DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 
 // ------------------------------------------------------------------ schema hints
 
+// Fields of the generic key/value model carry no `since`: every chrony ever
+// shipped has `key value` lines. What a release adds is a *directive*, so
+// version gating lives in `DIRECTIVE_SINCE`, keyed by directive name.
+
 /// UI hints for `settings`.
 ///
 /// Appendix A requires `x-detent` hints on **every** field, and the test below
@@ -295,7 +300,7 @@ static SETTINGS_HINTS: FieldHints = FieldHints {
     tooltip: MessageId::new("chrony-tip-settings"),
     recommendation: None,
     security_impact: SecurityImpact::Low,
-    since: Some("4.9"),
+    since: None,
     deprecated_in: None,
     requires_restart: false,
 };
@@ -306,7 +311,7 @@ static KEY_HINTS: FieldHints = FieldHints {
     tooltip: MessageId::new("chrony-tip-key"),
     recommendation: None,
     security_impact: SecurityImpact::None,
-    since: Some("4.9"),
+    since: None,
     deprecated_in: None,
     requires_restart: false,
 };
@@ -317,7 +322,7 @@ static VALUE_HINTS: FieldHints = FieldHints {
     tooltip: MessageId::new("chrony-tip-value"),
     recommendation: Some(MessageId::new("chrony-rec-value")),
     security_impact: SecurityImpact::High,
-    since: Some("4.9"),
+    since: None,
     deprecated_in: None,
     requires_restart: false,
 };
@@ -367,6 +372,15 @@ const CMDPORT_OPEN: MessageId = MessageId::new("chrony-cmdport-open");
 /// Fluent id: a directive loads external files or runs an external program.
 const EXTERNAL_DIRECTIVE: MessageId = MessageId::new("chrony-external-directive");
 
+/// Directives an older `chronyd` refuses, with the release that introduced
+/// each (chrony NEWS). `validate` reports one that the installed chronyd is too
+/// old for. Add a row when `upstream-watch` finds a directive new in a release.
+const DIRECTIVE_SINCE: &[(&str, &str)] = &[
+    ("ntsdumpdir", "4.0"),
+    ("ntsservercert", "4.0"),
+    ("ntsserverkey", "4.0"),
+];
+
 /// Above this many settings, `validate` recommends drop-in files instead.
 const SETTING_COUNT_ADVICE_THRESHOLD: usize = 100;
 
@@ -381,6 +395,23 @@ fn is_valid_key(key: &str) -> bool {
     !key.is_empty()
         && key.starts_with(|c: char| c.is_ascii_alphabetic())
         && key.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// Reports a directive that the installed chronyd is too old for.
+fn validate_since(item: &Setting, index: usize, ctx: ValidationCtx<'_>, out: &mut Diagnostics) {
+    if let Some((_, since)) = DIRECTIVE_SINCE
+        .iter()
+        .find(|(key, _)| item.key.eq_ignore_ascii_case(key))
+        && let Some(found) = since_diagnostic(
+            ctx.profile,
+            DESCRIPTOR.upstream.project,
+            &item.key,
+            since,
+            FieldPath::new(format!("settings/{index}/key")),
+        )
+    {
+        out.push(found);
+    }
 }
 
 /// Whether the model sets `key` (case-insensitive, chrony is).
@@ -478,9 +509,9 @@ impl ConfigModule for ChronyModule {
     /// * [`Severity::Warning`] — valid, but likely not what the admin meant.
     /// * [`Severity::Recommendation`] — fine, but a better option exists.
     ///
-    /// `ctx` carries the [`HostProfile`]; chrony's own rules are host-agnostic,
-    /// so nothing here branches on it.
-    fn validate(model: &Self::Model, _ctx: &ValidationCtx<'_>) -> Diagnostics {
+    /// `ctx` carries the [`HostProfile`]; only the `DIRECTIVE_SINCE` check
+    /// reads it, to compare the installed chronyd with the directive's release.
+    fn validate(model: &Self::Model, ctx: &ValidationCtx<'_>) -> Diagnostics {
         let mut diagnostics = Diagnostics::new();
         let mut seen: BTreeSet<String> = BTreeSet::new();
         for (index, item) in model.settings.iter().enumerate() {
@@ -501,6 +532,7 @@ impl ConfigModule for ChronyModule {
                         .with_arg("key", item.key.clone()),
                 );
             }
+            validate_since(item, index, *ctx, &mut diagnostics);
             if ["pidfile", "user"]
                 .iter()
                 .any(|key| item.key.eq_ignore_ascii_case(key))
@@ -617,9 +649,9 @@ mod tests {
         render_line, schema_with_hints, setting,
     };
     use detent_core::descriptor::{HostProfile, InitSystem, Os, ValidationCtx};
-    use detent_core::diag::{MessageId, Severity};
+    use detent_core::diag::{Diagnostic, FieldPath, MessageId, Severity};
     use detent_core::doc::LineKind;
-    use detent_core::module::{ConfigModule, EditError, EditReport};
+    use detent_core::module::{ConfigModule, Dyn, DynModule, EditError, EditReport};
 
     /// `locales/en-US/core.ftl` is the source of truth for every user-facing
     /// string (PLAN §4.3). This test is what keeps a raw id from reaching the
@@ -1164,6 +1196,106 @@ mod tests {
                 "missing x-detent hint at {pointer}"
             );
         }
+    }
+
+    // ------------------------------------------------------- version-gated
+
+    /// The version key is the upstream project name: `detent-platform` files
+    /// the `chronyd --version` result under it.
+    #[test]
+    fn the_version_key_is_the_upstream_project() {
+        assert_eq!(DESCRIPTOR.upstream.project, "chrony");
+    }
+
+    fn version_findings(settings: Vec<Setting>, version: Option<&str>) -> Vec<Diagnostic> {
+        let mut host = profile(Os::Linux, "host");
+        if let Some(version) = version {
+            host.service_versions
+                .insert("chrony".to_owned(), version.to_owned());
+        }
+        let ctx = ValidationCtx::new(&host);
+        ChronyModule::validate(&Model { settings }, &ctx)
+            .into_iter()
+            .filter(|d| d.id.as_str().starts_with("core-version-"))
+            .collect()
+    }
+
+    #[test]
+    fn an_nts_server_directive_is_an_error_before_chrony_4_0() {
+        for key in ["ntsservercert", "NTSServerKey", "ntsdumpdir"] {
+            let found = version_findings(
+                vec![setting("makestep", "1 3"), setting(key, "/etc/x")],
+                Some("3.5"),
+            );
+            let expected = Diagnostic::new(Severity::Error, MessageId::new("core-version-too-old"))
+                .with_field(FieldPath::new("settings/1/key"))
+                .with_arg("option", key)
+                .with_arg("since", "4.0")
+                .with_arg("service", "chrony")
+                .with_arg("installed", "3.5");
+            assert_eq!(found, vec![expected], "{key}");
+        }
+    }
+
+    #[test]
+    fn an_nts_server_directive_is_fine_from_chrony_4_0() {
+        for version in ["4.0", "4.5", "4.10"] {
+            let found = version_findings(vec![setting("ntsservercert", "/etc/x")], Some(version));
+            assert_eq!(found, vec![], "{version}");
+        }
+    }
+
+    #[test]
+    fn an_nts_server_directive_only_warns_when_the_version_is_unknown() {
+        let found = version_findings(vec![setting("ntsservercert", "/etc/x")], None);
+        assert_eq!(
+            found
+                .iter()
+                .map(|d| (d.severity, d.id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(Severity::Warning, "core-version-unknown")]
+        );
+    }
+
+    #[test]
+    fn an_ungated_directive_never_reports_a_version() {
+        assert_eq!(
+            version_findings(vec![setting("pool", "a.example nts")], Some("3.0")),
+            vec![]
+        );
+    }
+
+    /// `x-detent.since` is enforced by `Dyn` for every field of the schema. The
+    /// generic key/value fields of this module are not version-gated, so an old
+    /// chrony must still accept the defaults.
+    #[test]
+    fn the_generic_fields_are_not_version_gated() {
+        let schema = schema_with_hints();
+        for pointer in [
+            "/properties/settings",
+            "/$defs/Setting/properties/key",
+            "/$defs/Setting/properties/value",
+        ] {
+            assert_eq!(
+                schema
+                    .pointer(pointer)
+                    .and_then(|v| v.pointer("/x-detent/since")),
+                None,
+                "{pointer}"
+            );
+        }
+        let mut host = profile(Os::Linux, "host");
+        host.service_versions
+            .insert("chrony".to_owned(), "3.5".to_owned());
+        let defaults = serde_json::to_value(ChronyModule::defaults(&host)).unwrap_or_default();
+        let found = Dyn::<ChronyModule>::new()
+            .validate_json(&defaults, &ValidationCtx::new(&host))
+            .map(|all| {
+                all.iter()
+                    .filter(|d| d.id.as_str().starts_with("core-version-"))
+                    .count()
+            });
+        assert_eq!(found.ok(), Some(0));
     }
 
     // -------------------------------------------------- derived trait impls

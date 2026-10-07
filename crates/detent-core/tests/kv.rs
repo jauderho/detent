@@ -11,9 +11,9 @@ use detent_core::conformance::{
     check_injection_rejected, check_not_vacuous, check_render_parse_roundtrip,
 };
 use detent_core::descriptor::{
-    ArgTemplate, CheckExpectation, ExternalCheck, HostProfile, InitSystem, ModuleDescriptor, Os,
-    Owner, PathSpec, ServiceAction, ServiceBinding, Target, TargetKind, UnitNames, Upstream,
-    ValidationCtx,
+    ArgTemplate, CheckExpectation, ExternalCheck, FieldHints, HostProfile, InitSystem,
+    ModuleDescriptor, Os, Owner, PathSpec, SecurityImpact, ServiceAction, ServiceBinding, Target,
+    TargetKind, UiGroup, UnitNames, Upstream, ValidationCtx, apply_hints,
 };
 use detent_core::diag::{Diagnostic, Diagnostics, FieldPath, MessageId, Severity};
 use detent_core::doc::{Document, LineKind};
@@ -337,6 +337,119 @@ impl ConfigModule for BadModule {
         }
         schema
     }
+}
+
+// ------------------------------------------------------------ a version-gated module
+
+/// `KvModule` whose `pairs` field is declared `since` 2.0: proves `Dyn` enforces
+/// `x-detent.since` for every module without the module writing a line of it.
+struct GatedKv;
+
+static GATED_HINTS: FieldHints = FieldHints {
+    group: UiGroup::Basic,
+    tooltip: MessageId::new("kv-tip-pairs"),
+    recommendation: None,
+    security_impact: SecurityImpact::None,
+    since: Some("2.0"),
+    deprecated_in: None,
+    requires_restart: false,
+};
+
+impl ConfigModule for GatedKv {
+    const ID: &'static str = "kv";
+    type Doc = Document;
+    type Model = KvModel;
+
+    fn descriptor() -> &'static ModuleDescriptor {
+        &KV_DESCRIPTOR
+    }
+
+    fn parse(src: &str) -> Result<Self::Doc, ParseError> {
+        KvModule::parse(src)
+    }
+
+    fn render(doc: &Self::Doc) -> String {
+        doc.render()
+    }
+
+    fn to_model(doc: &Self::Doc) -> Result<Self::Model, ModelError> {
+        KvModule::to_model(doc)
+    }
+
+    fn apply(doc: &mut Self::Doc, model: &Self::Model) -> Result<EditReport, EditError> {
+        KvModule::apply(doc, model)
+    }
+
+    fn validate(model: &Self::Model, ctx: &ValidationCtx<'_>) -> Diagnostics {
+        KvModule::validate(model, ctx)
+    }
+
+    fn defaults(profile: &HostProfile) -> Self::Model {
+        KvModule::defaults(profile)
+    }
+
+    fn schema() -> serde_json::Value {
+        let mut schema = schemars::schema_for!(KvModel).to_value();
+        let applied = apply_hints(&mut schema, "/properties/pairs", &GATED_HINTS);
+        assert!(applied, "the hint must attach to `pairs`");
+        schema
+    }
+}
+
+fn host_with_kv(version: Option<&str>) -> HostProfile {
+    HostProfile {
+        service_versions: version
+            .map(|v| BTreeMap::from([("kv".to_owned(), v.to_owned())]))
+            .unwrap_or_default(),
+        ..profile()
+    }
+}
+
+fn gate_findings(version: Option<&str>, model: &serde_json::Value) -> Vec<(Severity, String)> {
+    let host = host_with_kv(version);
+    let module: Box<dyn DynModule> = Box::new(Dyn::<GatedKv>::new());
+    let diagnostics = module.validate_json(model, &ValidationCtx::new(&host));
+    diagnostics
+        .map(|all| {
+            all.iter()
+                .filter(|d| d.id.as_str().starts_with("core-version-"))
+                .map(|d| (d.severity, d.id.as_str().to_owned()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn dyn_validate_rejects_an_option_newer_than_the_installed_service() {
+    let found = gate_findings(Some("1.0"), &serde_json::json!({"pairs": {"a": "1"}}));
+    assert_eq!(
+        found,
+        vec![(Severity::Error, "core-version-too-old".to_owned())]
+    );
+}
+
+#[test]
+fn dyn_validate_accepts_an_option_the_installed_service_has() {
+    let model = serde_json::json!({"pairs": {"a": "1"}});
+    assert_eq!(gate_findings(Some("2.0"), &model), vec![]);
+    assert_eq!(gate_findings(Some("10.1"), &model), vec![]);
+}
+
+#[test]
+fn dyn_validate_only_warns_when_the_version_was_not_detected() {
+    let found = gate_findings(None, &serde_json::json!({"pairs": {"a": "1"}}));
+    assert_eq!(
+        found,
+        vec![(Severity::Warning, "core-version-unknown".to_owned())]
+    );
+}
+
+#[test]
+fn dyn_validate_ignores_a_gated_option_that_is_not_set() {
+    assert_eq!(
+        gate_findings(Some("1.0"), &serde_json::json!({"pairs": null})),
+        vec![]
+    );
 }
 
 // ------------------------------------------------------------------------- tests

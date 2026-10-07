@@ -47,6 +47,7 @@ use detent_core::descriptor::{
 use detent_core::diag::{Diagnostic, Diagnostics, FieldPath, MessageId, Severity};
 use detent_core::doc::{Document, LineKind};
 use detent_core::module::{ConfigModule, EditError, EditReport, ModelError, ParseError};
+use detent_core::version::since_diagnostic;
 
 // ------------------------------------------------------------------------- model
 
@@ -369,13 +370,18 @@ static DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 
 // ------------------------------------------------------------------ schema hints
 
+// Fields of the generic entry model carry no `since`: every samba ever shipped
+// has `key = value` lines and `[section]` headers. What a release adds is a
+// *parameter*, so version gating lives in `PARAMETER_SINCE`, keyed by
+// normalised parameter name.
+
 /// UI hints for `entries`.
 static ENTRIES_HINTS: FieldHints = FieldHints {
     group: UiGroup::Basic,
     tooltip: MessageId::new("samba-tip-entries"),
     recommendation: None,
     security_impact: SecurityImpact::Low,
-    since: Some("4.24"),
+    since: None,
     deprecated_in: None,
     requires_restart: false,
 };
@@ -386,7 +392,7 @@ static SECTION_HINTS: FieldHints = FieldHints {
     tooltip: MessageId::new("samba-tip-section"),
     recommendation: None,
     security_impact: SecurityImpact::Low,
-    since: Some("4.24"),
+    since: None,
     deprecated_in: None,
     requires_restart: false,
 };
@@ -397,7 +403,7 @@ static KEY_HINTS: FieldHints = FieldHints {
     tooltip: MessageId::new("samba-tip-key"),
     recommendation: None,
     security_impact: SecurityImpact::High,
-    since: Some("4.24"),
+    since: None,
     deprecated_in: None,
     requires_restart: true,
 };
@@ -408,7 +414,7 @@ static VALUE_HINTS: FieldHints = FieldHints {
     tooltip: MessageId::new("samba-tip-value"),
     recommendation: Some(MessageId::new("samba-rec-value")),
     security_impact: SecurityImpact::High,
-    since: Some("4.24"),
+    since: None,
     deprecated_in: None,
     requires_restart: true,
 };
@@ -475,6 +481,15 @@ const CLIENT_COMMAND: MessageId = MessageId::new("samba-client-command");
 const USERSHARE_GUESTS: MessageId = MessageId::new("samba-usershare-guests");
 /// Fluent id: `wide links` lets symbolic links lead out of a share.
 const WIDE_LINKS: MessageId = MessageId::new("samba-wide-links");
+
+/// Parameters an older samba refuses, with the release that introduced each
+/// (smb.conf(5), release notes), as [`normalise`]d names. `validate` reports
+/// one that the installed samba is too old for. Add a row when `upstream-watch`
+/// finds a parameter new in a release.
+const PARAMETER_SINCE: &[(&str, &str)] = &[
+    ("clientsmbtransports", "4.22"),
+    ("serversmbtransports", "4.22"),
+];
 
 /// Parameters whose value is a command samba runs as root (smb.conf(5)), as
 /// [`normalise`]d names.
@@ -559,6 +574,22 @@ fn validate_entry(entry: &Entry, index: usize, out: &mut Diagnostics) {
                     .with_arg("value", entry.value.clone()),
             );
         }
+    }
+}
+
+/// Reports a directive that the installed samba is too old for.
+fn validate_since(entry: &Entry, index: usize, ctx: ValidationCtx<'_>, out: &mut Diagnostics) {
+    let name = normalise(&entry.key);
+    if let Some((_, since)) = PARAMETER_SINCE.iter().find(|(key, _)| *key == name)
+        && let Some(found) = since_diagnostic(
+            ctx.profile,
+            DESCRIPTOR.upstream.project,
+            &entry.key,
+            since,
+            FieldPath::new(format!("entries/{index}/key")),
+        )
+    {
+        out.push(found);
     }
 }
 
@@ -856,10 +887,11 @@ impl ConfigModule for SambaModule {
     /// warnings mean valid-but-likely-not-what-you-meant; recommendations mean
     /// fine-but-better-exists. Findings about one field carry a [`FieldPath`]
     /// (`entries/{i}/...`) so the UI can point at the control.
-    fn validate(model: &Self::Model, _ctx: &ValidationCtx<'_>) -> Diagnostics {
+    fn validate(model: &Self::Model, ctx: &ValidationCtx<'_>) -> Diagnostics {
         let mut diagnostics = Diagnostics::new();
         for (index, item) in model.entries.iter().enumerate() {
             validate_entry(item, index, &mut diagnostics);
+            validate_since(item, index, *ctx, &mut diagnostics);
         }
         validate_values(&model.entries, &mut diagnostics);
         diagnostics
@@ -887,18 +919,18 @@ impl ConfigModule for SambaModule {
 #[cfg(test)]
 mod tests {
     use super::{
-        BAD_KEY, BAD_SECTION, BAD_VALUE, CLIENT_COMMAND, EMPTY_KEY, EMPTY_SECTION, Entry, GUEST_OK,
-        MAP_TO_GUEST, MIN_PROTOCOL, Model, REC_INTERFACES, REC_LOAD_PRINTERS, REC_SERVER_SIGNING,
-        RESTRICT_ANONYMOUS, ROOT_COMMAND, SMB_ENCRYPT, SambaModule, USERSHARE_GUESTS, WIDE_LINKS,
-        WRITABLE_EXPOSURE, classify, entry, hardened_global, parse_entry, protocol_rank,
-        render_line, schema_with_hints, value_of_in_section,
+        BAD_KEY, BAD_SECTION, BAD_VALUE, CLIENT_COMMAND, DESCRIPTOR, EMPTY_KEY, EMPTY_SECTION,
+        Entry, GUEST_OK, MAP_TO_GUEST, MIN_PROTOCOL, Model, REC_INTERFACES, REC_LOAD_PRINTERS,
+        REC_SERVER_SIGNING, RESTRICT_ANONYMOUS, ROOT_COMMAND, SMB_ENCRYPT, SambaModule,
+        USERSHARE_GUESTS, WIDE_LINKS, WRITABLE_EXPOSURE, classify, entry, hardened_global,
+        parse_entry, protocol_rank, render_line, schema_with_hints, value_of_in_section,
     };
     use detent_core::descriptor::{
         ArgTemplate, CheckExpectation, ExternalCheck, HostProfile, InitSystem, Os, ValidationCtx,
     };
-    use detent_core::diag::{MessageId, Severity};
+    use detent_core::diag::{Diagnostic, FieldPath, MessageId, Severity};
     use detent_core::doc::LineKind;
-    use detent_core::module::{ConfigModule, EditError, EditReport};
+    use detent_core::module::{ConfigModule, Dyn, DynModule, EditError, EditReport};
 
     /// `locales/en-US/core.ftl` is the source of truth for every user-facing
     /// string (PLAN §4.3). Read it directly so the test holds the landed
@@ -1756,6 +1788,113 @@ mod tests {
                 "missing x-detent hint at {pointer}"
             );
         }
+    }
+
+    // ------------------------------------------------------- version-gated
+
+    /// The version key is the upstream project name: `detent-platform` files
+    /// the `smbd -V` result under it.
+    #[test]
+    fn the_version_key_is_the_upstream_project() {
+        assert_eq!(DESCRIPTOR.upstream.project, "samba");
+    }
+
+    fn version_findings(entries: Vec<Entry>, version: Option<&str>) -> Vec<Diagnostic> {
+        let mut host = profile(Os::Linux);
+        if let Some(version) = version {
+            host.service_versions
+                .insert("samba".to_owned(), version.to_owned());
+        }
+        let ctx = ValidationCtx::new(&host);
+        SambaModule::validate(&model(entries), &ctx)
+            .into_iter()
+            .filter(|d| d.id.as_str().starts_with("core-version-"))
+            .collect()
+    }
+
+    #[test]
+    fn an_smb_transports_parameter_is_an_error_before_samba_4_22() {
+        for key in ["server smb transports", "Client  SMB Transports"] {
+            let found = version_findings(
+                vec![entry(Some("global"), "", ""), entry(None, key, "tcp, quic")],
+                Some("4.19.5"),
+            );
+            let expected = Diagnostic::new(Severity::Error, MessageId::new("core-version-too-old"))
+                .with_field(FieldPath::new("entries/1/key"))
+                .with_arg("option", key)
+                .with_arg("since", "4.22")
+                .with_arg("service", "samba")
+                .with_arg("installed", "4.19.5");
+            assert_eq!(found, vec![expected], "{key}");
+        }
+    }
+
+    #[test]
+    fn an_smb_transports_parameter_is_fine_from_samba_4_22() {
+        for version in ["4.22", "4.22.1", "4.24.7"] {
+            let found = version_findings(
+                vec![entry(None, "server smb transports", "tcp")],
+                Some(version),
+            );
+            assert_eq!(found, vec![], "{version}");
+        }
+    }
+
+    #[test]
+    fn an_smb_transports_parameter_only_warns_when_the_version_is_unknown() {
+        let found = version_findings(vec![entry(None, "server smb transports", "tcp")], None);
+        assert_eq!(
+            found
+                .iter()
+                .map(|d| (d.severity, d.id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(Severity::Warning, "core-version-unknown")]
+        );
+    }
+
+    #[test]
+    fn an_ungated_parameter_never_reports_a_version() {
+        assert_eq!(
+            version_findings(
+                vec![entry(Some("global"), "", ""), entry(None, "guest ok", "no")],
+                Some("4.0")
+            ),
+            vec![]
+        );
+    }
+
+    /// `x-detent.since` is enforced by `Dyn` for every field of the schema. The
+    /// generic entry fields of this module are not version-gated, so an old
+    /// samba must still accept the defaults.
+    #[test]
+    fn the_generic_fields_are_not_version_gated() {
+        let schema = schema_with_hints();
+        for pointer in [
+            "/properties/entries",
+            "/$defs/Entry/properties/section",
+            "/$defs/Entry/properties/key",
+            "/$defs/Entry/properties/value",
+        ] {
+            assert_eq!(
+                schema
+                    .pointer(pointer)
+                    .and_then(|v| v.pointer("/x-detent/since")),
+                None,
+                "{pointer}"
+            );
+        }
+        let mut host = profile(Os::Linux);
+        host.service_versions
+            .insert("samba".to_owned(), "4.19.5".to_owned());
+        let defaults = serde_json::to_value(SambaModule::defaults(&host)).unwrap_or_default();
+        let found = Dyn::<SambaModule>::new()
+            .validate_json(&defaults, &ValidationCtx::new(&host))
+            .map(|all| {
+                all.iter()
+                    .filter(|d| d.id.as_str().starts_with("core-version-"))
+                    .count()
+            });
+        assert_eq!(found.ok(), Some(0));
     }
 
     // ------------------------------------------------------- derived trait impls

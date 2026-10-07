@@ -236,6 +236,10 @@ core-edit-line-break = a value may not contain a line break or a null byte; `{$v
 core-edit-index-out-of-range = internal error: line {$index} is outside a file of {$len} lines.
 core-edit-unsupported = this edit cannot be expressed in the file's format: {$reason}
 
+## detent-core — version-gated options
+core-version-too-old = `{$option}` needs {$service} {$since} or later; this host has {$installed}.
+core-version-unknown = the installed {$service} version is unknown, so `{$option}` (needs {$service} {$since} or later) may not work.
+
 ## operations layer — errors surfaced by detent-ops
 ops-unknown-module = there is no module named `{$module}` in this build.
 ops-invalid-model = the configuration for `{$module}` is not valid: {$reason}
