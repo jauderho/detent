@@ -17,6 +17,32 @@
 //! 6. Write, `fsync` the file, `rename` over the target, `fsync` the directory.
 //!
 //! Any failure after the temp file exists unlinks it.
+//!
+//! # In-place fallback (read-only directory)
+//!
+//! The packaged unit runs with `ProtectSystem=strict` and lists target
+//! *files* such as `/etc/fstab` in `ReadWritePaths=`, so `/etc` itself is
+//! read-only: step 5 fails with `EROFS` (or `EACCES` without write
+//! permission on the directory). Only then, only for an existing regular
+//! file, and only when the caller passes [`InPlace::Marker`] (or
+//! [`InPlace::Guarded`]), the write goes to the same inode instead:
+//!
+//! 1. Steps 1–4 as above (no symlink, expected digest, backup).
+//! 2. Write an [`InPlaceMarker`] (target, backup, previous and new digest)
+//!    to the marker path with `O_EXCL`, `fsync` it and its directory. A
+//!    marker left by an earlier write refuses the new one.
+//! 3. Open the target `O_WRONLY | O_TRUNC | O_NOFOLLOW`, check with `fstat`
+//!    that it is the regular file (same device and inode) that was hashed,
+//!    write the full contents, `fsync`.
+//! 4. Remove the marker and `fsync` its directory.
+//!
+//! Owner, mode, extended attributes and the inode stay as they are. The
+//! write is not crash-atomic: between the open (which truncates) and the end
+//! of the write, the file is empty or partial. The marker covers that
+//! window: at the next start the monitor compares the target with the two
+//! digests and restores the backup when it matches neither
+//! (`Monitor::recover_pending`). `O_TRUNC` is used, not `ftruncate`, because
+//! the monitor's seccomp table has no `ftruncate`.
 
 use std::fmt;
 use std::fs::File;
@@ -282,6 +308,39 @@ pub struct WriteRequest<'a> {
     /// Mode applied when the file did not exist yet, for example `0o644`.
     /// Ignored when the file exists: its mode is preserved.
     pub create_mode: u32,
+    /// Whether, and how, an existing target may be written in place when no
+    /// temp file can be created beside it (see the module documentation).
+    pub in_place: InPlace<'a>,
+}
+
+/// Whether [`write_atomic`] may write an existing target in place when its
+/// directory refuses a temp file (`EROFS` or `EACCES`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum InPlace<'a> {
+    /// Never: the temp-file error is returned.
+    #[default]
+    Never,
+    /// Yes, after writing an [`InPlaceMarker`] at this path (`O_EXCL`);
+    /// it is removed when the write is on disk. Needs a backup.
+    Marker(&'a Path),
+    /// Yes, with no marker of its own: a marker already covers this target
+    /// (the monitor's recovery of a torn in-place write).
+    Guarded,
+}
+
+/// The write-in-progress record of an in-place write. A leftover one means
+/// the write may be torn (see the module documentation).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InPlaceMarker {
+    /// The target being written.
+    pub path: PathBuf,
+    /// The backup taken of its previous contents.
+    pub backup: Option<PathBuf>,
+    /// Digest of the previous contents.
+    pub prev: Sha256Digest,
+    /// Digest of the new contents.
+    pub new: Sha256Digest,
 }
 
 impl<'a> WriteRequest<'a> {
@@ -298,6 +357,7 @@ impl<'a> WriteRequest<'a> {
             keep_backups: DEFAULT_KEEP_BACKUPS,
             create_missing: false,
             create_mode: 0o644,
+            in_place: InPlace::Never,
         }
     }
 }
@@ -393,7 +453,7 @@ pub fn write_atomic(req: &WriteRequest<'_>) -> Result<WriteOutcome, AtomicError>
         .as_ref()
         .map_or(req.create_mode, |found| found.mode);
     let owner = existing.as_ref().map(|found| (found.uid, found.gid));
-    let owner_preserved = replace_contents(
+    let replaced = replace_contents(
         &dir_fd,
         &name,
         req.path,
@@ -401,7 +461,41 @@ pub fn write_atomic(req: &WriteRequest<'_>) -> Result<WriteOutcome, AtomicError>
         mode,
         owner,
         existing.as_ref().map(|found| &found.file),
-    )?;
+    );
+    let owner_preserved = match (replaced, existing.as_ref()) {
+        (Err(err), Some(found)) if temp_refused(&err) => match req.in_place {
+            InPlace::Never => return Err(err),
+            InPlace::Marker(marker) => {
+                let Some(backup) = backup.clone() else {
+                    return Err(err);
+                };
+                let record = InPlaceMarker {
+                    path: req.path.to_path_buf(),
+                    backup: Some(backup),
+                    prev: found.digest,
+                    new: Sha256Digest::of(req.contents),
+                };
+                write_marker(marker, &record)?;
+                match write_in_place(&dir_fd, &name, req.path, found, req.contents) {
+                    Ok(()) => remove_marker(marker)?,
+                    // The open failed, so nothing was truncated: the
+                    // marker has nothing to cover.
+                    Err(err @ AtomicError::Io { op: "openat", .. }) => {
+                        remove_marker(marker)?;
+                        return Err(err);
+                    }
+                    // The target may be torn: the marker stays for recovery.
+                    Err(err) => return Err(err),
+                }
+                true
+            }
+            InPlace::Guarded => {
+                write_in_place(&dir_fd, &name, req.path, found, req.contents)?;
+                true
+            }
+        },
+        (replaced, _) => replaced?,
+    };
 
     Ok(WriteOutcome {
         prev_digest: existing.as_ref().map(|found| found.digest),
@@ -475,12 +569,28 @@ pub fn restore_backup_expecting(
     target: &Path,
     expected_prev: Option<Sha256Digest>,
 ) -> Result<WriteOutcome, AtomicError> {
+    restore_backup_with(backup, target, expected_prev, InPlace::Never)
+}
+
+/// [`restore_backup_expecting`] that may write in place as
+/// [`WriteRequest::in_place`] says.
+///
+/// # Errors
+///
+/// Same as [`restore_backup_expecting`].
+pub fn restore_backup_with(
+    backup: &Path,
+    target: &Path,
+    expected_prev: Option<Sha256Digest>,
+    in_place: InPlace<'_>,
+) -> Result<WriteOutcome, AtomicError> {
     let backup_dir = backup.parent().ok_or_else(|| AtomicError::RelativePath {
         path: backup.to_path_buf(),
     })?;
     let (contents, _) = read_with_digest(backup)?;
     let mut request = WriteRequest::new(target, &contents, backup_dir);
     request.expected_prev = expected_prev;
+    request.in_place = in_place;
     write_atomic(&request)
 }
 
@@ -665,6 +775,82 @@ fn replace_contents(
 
     fsync(dir_fd).map_err(|err| io_error("fsync", path, err))?;
     Ok(owner_preserved)
+}
+
+/// Whether `err` is the temp file of step 5 refused by its directory: a
+/// read-only file system or no write permission.
+fn temp_refused(err: &AtomicError) -> bool {
+    matches!(err, AtomicError::Io { op: "openat", source, .. }
+    if matches!(
+        source.kind(),
+        std::io::ErrorKind::ReadOnlyFilesystem | std::io::ErrorKind::PermissionDenied
+    ))
+}
+
+/// Write `record` to `marker` (`O_EXCL`, `0600`), then `fsync` it and its
+/// directory.
+fn write_marker(marker: &Path, record: &InPlaceMarker) -> Result<(), AtomicError> {
+    let (dir, name) = split_path(marker)?;
+    let dir_fd = open_dir(dir)?;
+    let json = serde_json::to_vec(record).map_err(|err| io_error("serialize", marker, err))?;
+    let fd = openat(
+        &dir_fd,
+        name.as_str(),
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        to_mode(BACKUP_FILE_MODE),
+    )
+    .map_err(|err| io_error("openat", marker, err))?;
+    let mut file = File::from(fd);
+    file.write_all(&json)
+        .map_err(|err| io_error("write", marker, err))?;
+    fsync(&file).map_err(|err| io_error("fsync", marker, err))?;
+    fsync(&dir_fd).map_err(|err| io_error("fsync", dir, err))
+}
+
+/// Remove `marker` and `fsync` its directory.
+///
+/// # Errors
+///
+/// [`AtomicError::Io`] when it cannot be removed.
+pub fn remove_marker(marker: &Path) -> Result<(), AtomicError> {
+    let (dir, name) = split_path(marker)?;
+    let dir_fd = open_dir(dir)?;
+    unlinkat(&dir_fd, name.as_str(), AtFlags::empty())
+        .map_err(|err| io_error("unlinkat", marker, err))?;
+    fsync(&dir_fd).map_err(|err| io_error("fsync", dir, err))
+}
+
+/// Write `contents` over the existing target `found` on the same inode:
+/// open `O_WRONLY | O_TRUNC | O_NOFOLLOW`, check it is the regular file
+/// that was hashed, write, `fsync`.
+fn write_in_place(
+    dir_fd: &OwnedFd,
+    name: &str,
+    path: &Path,
+    found: &Existing,
+    contents: &[u8],
+) -> Result<(), AtomicError> {
+    let fd = openat(
+        dir_fd,
+        name,
+        OFlags::WRONLY | OFlags::TRUNC | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|err| io_error("openat", path, err))?;
+    let mut file = File::from(fd);
+    let now = fstat(&file).map_err(|err| io_error("fstat", path, err))?;
+    let then = fstat(&found.file).map_err(|err| io_error("fstat", path, err))?;
+    if FileType::from_raw_mode(now.st_mode) != FileType::RegularFile
+        || now.st_dev != then.st_dev
+        || now.st_ino != then.st_ino
+    {
+        return Err(AtomicError::NotRegularFile {
+            path: path.to_path_buf(),
+        });
+    }
+    file.write_all(contents)
+        .map_err(|err| io_error("write", path, err))?;
+    fsync(&file).map_err(|err| io_error("fsync", path, err))
 }
 
 /// Create a file with `O_EXCL | O_NOFOLLOW`, retrying on name collisions.

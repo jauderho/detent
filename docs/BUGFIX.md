@@ -297,6 +297,15 @@ deferred by the owner.
    looks there itself; an untrusted target directory is still refused.
    Residual: a validator with an AppArmor profile whose target sits
    directly in `/etc` would meet the A5 denial again in staging.
+   Pre-existing, found by the D1 testhost run (2026-10-06), fixed: the
+   packaged unit could not write any target file directly in `/etc`
+   (`/etc/fstab`, `/etc/hosts`, `/etc/resolv.conf`, `/etc/exports`; every
+   apply failed `ops-privsep-failed`), because the atomic write creates its
+   temp file in `/etc`, which `ProtectSystem=strict` keeps read-only.
+   Owner decision: write in place with a recovery marker. On `EROFS` or
+   `EACCES` for the temp file the monitor writes the same inode
+   (`O_TRUNC`, no seccomp change) under `write-in-progress.json`; every
+   start finishes or restores a torn write (`recover_in_place`).
 
 ### Track D — Phase 7/8 gaps
 

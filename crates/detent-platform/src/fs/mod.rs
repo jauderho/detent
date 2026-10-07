@@ -4,6 +4,6 @@ pub mod atomic;
 pub mod private_dir;
 
 pub use atomic::{
-    AtomicError, BackupEntry, DEFAULT_KEEP_BACKUPS, Sha256Digest, WriteOutcome, WriteRequest,
-    list_backups, read_with_digest, restore_backup, write_atomic,
+    AtomicError, BackupEntry, DEFAULT_KEEP_BACKUPS, InPlace, InPlaceMarker, Sha256Digest,
+    WriteOutcome, WriteRequest, list_backups, read_with_digest, restore_backup, write_atomic,
 };

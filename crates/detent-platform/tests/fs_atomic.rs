@@ -14,8 +14,8 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use detent_platform::fs::atomic::{
-    AtomicError, DEFAULT_KEEP_BACKUPS, Sha256Digest, WriteRequest, list_backups, read_with_digest,
-    restore_backup, write_atomic,
+    AtomicError, DEFAULT_KEEP_BACKUPS, InPlace, InPlaceMarker, Sha256Digest, WriteRequest,
+    list_backups, read_with_digest, restore_backup, write_atomic,
 };
 use tempfile::TempDir;
 
@@ -594,5 +594,173 @@ fn temp_files_are_recognizable() -> TestResult {
     let mut junk = fs::File::create(fx.dir.join(".detent-tmp-0123456789abcdef"))?;
     junk.write_all(b"junk")?;
     assert_eq!(temp_debris(&fx.dir), 1);
+    Ok(())
+}
+
+// --- in-place fallback (read-only target directory) -------------------------
+
+/// A target `etc/conf` (`0640`, `old`) in a `0555` directory, so no temp file
+/// can be created beside it, plus a writable backup directory and a marker
+/// path in a writable state directory. `None` as root, which ignores the
+/// mode: these tests then prove nothing and return early.
+struct ReadOnlyDir {
+    _dir: TempDir,
+    etc: PathBuf,
+    target: PathBuf,
+    backups: PathBuf,
+    marker: PathBuf,
+}
+
+impl ReadOnlyDir {
+    fn new(old: &[u8]) -> Result<Option<Self>, Box<dyn std::error::Error>> {
+        if rustix::process::geteuid().is_root() {
+            return Ok(None);
+        }
+        let dir = TempDir::new()?;
+        let etc = dir.path().join("etc");
+        fs::create_dir(&etc)?;
+        let target = etc.join("conf");
+        fs::write(&target, old)?;
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640))?;
+        fs::set_permissions(&etc, fs::Permissions::from_mode(0o555))?;
+        let state = dir.path().join("state");
+        fs::create_dir(&state)?;
+        Ok(Some(Self {
+            backups: dir.path().join("backups"),
+            marker: state.join("write-in-progress.json"),
+            etc,
+            target,
+            _dir: dir,
+        }))
+    }
+
+    fn request<'a>(&'a self, contents: &'a [u8], in_place: InPlace<'a>) -> WriteRequest<'a> {
+        let mut request = WriteRequest::new(&self.target, contents, &self.backups);
+        request.in_place = in_place;
+        request
+    }
+}
+
+impl Drop for ReadOnlyDir {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.etc, fs::Permissions::from_mode(0o755));
+    }
+}
+
+fn inode_of(path: &Path) -> Result<u64, Box<dyn std::error::Error>> {
+    Ok(std::os::unix::fs::MetadataExt::ino(&fs::symlink_metadata(
+        path,
+    )?))
+}
+
+#[test]
+fn a_read_only_directory_is_written_in_place_with_a_marker() -> TestResult {
+    let Some(ro) = ReadOnlyDir::new(b"a much longer previous file\n")? else {
+        return Ok(());
+    };
+    let inode = inode_of(&ro.target)?;
+    let mut request = ro.request(b"short\n", InPlace::Marker(&ro.marker));
+    request.expected_prev = Some(Sha256Digest::of(b"a much longer previous file\n"));
+    let outcome = write_atomic(&request)?;
+    assert_eq!(fs::read(&ro.target)?, b"short\n", "written and truncated");
+    assert_eq!(inode_of(&ro.target)?, inode, "same inode");
+    assert_eq!(mode_of(&ro.target)?, 0o640, "same mode");
+    assert_eq!(outcome.new_digest, Sha256Digest::of(b"short\n"));
+    assert!(outcome.owner_preserved);
+    let backup = outcome.backup.ok_or("a backup was taken")?;
+    assert_eq!(fs::read(&backup)?, b"a much longer previous file\n");
+    assert!(!ro.marker.exists(), "the marker is removed after the fsync");
+    assert_eq!(temp_debris(&ro.etc), 0);
+    Ok(())
+}
+
+#[test]
+fn the_in_place_path_keeps_the_expected_hash_refusal() -> TestResult {
+    let Some(ro) = ReadOnlyDir::new(b"old\n")? else {
+        return Ok(());
+    };
+    let mut request = ro.request(b"new\n", InPlace::Marker(&ro.marker));
+    request.expected_prev = Some(Sha256Digest::of(b"something else"));
+    assert!(matches!(
+        write_atomic(&request),
+        Err(AtomicError::Conflict { .. })
+    ));
+    assert_eq!(fs::read(&ro.target)?, b"old\n");
+    assert!(!ro.marker.exists());
+    Ok(())
+}
+
+#[test]
+fn without_a_marker_a_read_only_directory_is_still_an_error() -> TestResult {
+    let Some(ro) = ReadOnlyDir::new(b"old\n")? else {
+        return Ok(());
+    };
+    let result = write_atomic(&ro.request(b"new\n", InPlace::Never));
+    assert!(
+        matches!(&result, Err(AtomicError::Io { op: "openat", .. })),
+        "{result:?}"
+    );
+    assert_eq!(fs::read(&ro.target)?, b"old\n");
+    Ok(())
+}
+
+/// A marker left by an earlier write means a recovery is due: no second
+/// in-place write starts over it.
+#[test]
+fn a_leftover_marker_refuses_another_in_place_write() -> TestResult {
+    let Some(ro) = ReadOnlyDir::new(b"old\n")? else {
+        return Ok(());
+    };
+    fs::write(&ro.marker, b"{}")?;
+    let result = write_atomic(&ro.request(b"new\n", InPlace::Marker(&ro.marker)));
+    assert!(result.is_err(), "{result:?}");
+    assert_eq!(fs::read(&ro.target)?, b"old\n");
+    Ok(())
+}
+
+#[test]
+fn the_marker_names_the_target_the_backup_and_both_digests() -> TestResult {
+    let Some(ro) = ReadOnlyDir::new(b"old\n")? else {
+        return Ok(());
+    };
+    let marker = InPlaceMarker {
+        path: ro.target.clone(),
+        backup: Some(ro.backups.join("b")),
+        prev: Sha256Digest::of(b"old\n"),
+        new: Sha256Digest::of(b"new\n"),
+    };
+    let json = serde_json::to_string(&marker)?;
+    assert_eq!(serde_json::from_str::<InPlaceMarker>(&json)?, marker);
+    // A guarded write (recovery: a marker already covers the target) needs
+    // no marker of its own.
+    write_atomic(&ro.request(b"new\n", InPlace::Guarded))?;
+    assert_eq!(fs::read(&ro.target)?, b"new\n");
+    assert!(!ro.marker.exists());
+    Ok(())
+}
+
+#[test]
+fn the_in_place_path_refuses_a_symlink_target() -> TestResult {
+    if rustix::process::geteuid().is_root() {
+        return Ok(());
+    }
+    let dir = TempDir::new()?;
+    let etc = dir.path().join("etc");
+    fs::create_dir(&etc)?;
+    fs::write(dir.path().join("real"), b"old\n")?;
+    std::os::unix::fs::symlink(dir.path().join("real"), etc.join("conf"))?;
+    fs::set_permissions(&etc, fs::Permissions::from_mode(0o555))?;
+    let marker = dir.path().join("marker.json");
+    let link = etc.join("conf");
+    let mut request = WriteRequest::new(&link, b"new\n", dir.path());
+    request.in_place = InPlace::Marker(&marker);
+    let result = write_atomic(&request);
+    fs::set_permissions(&etc, fs::Permissions::from_mode(0o755))?;
+    assert!(
+        matches!(result, Err(AtomicError::Symlink { .. })),
+        "{result:?}"
+    );
+    assert_eq!(fs::read(dir.path().join("real"))?, b"old\n");
+    assert!(!marker.exists());
     Ok(())
 }

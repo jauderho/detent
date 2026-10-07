@@ -52,13 +52,17 @@ use super::proto::{
 };
 use super::transport::{Channel, ChannelError};
 use crate::fs::atomic::{
-    AtomicError, BackupEntry, WriteRequest, list_backups, read_with_digest, restore_backup,
-    restore_backup_expecting, write_atomic,
+    AtomicError, BackupEntry, InPlace, InPlaceMarker, WriteRequest, list_backups, read_with_digest,
+    remove_marker, restore_backup_with, write_atomic,
 };
 use crate::service::MountUnitState;
 
 /// Name of the crash-recovery marker inside the state root.
 pub const PENDING_COMMIT_MARKER: &str = "pending-commit.json";
+
+/// Name of the write-in-progress marker of an in-place write
+/// ([`InPlaceMarker`]) inside the state root.
+pub const IN_PLACE_MARKER: &str = "write-in-progress.json";
 
 /// Exclusive monitor-lifetime lock inside the state root.
 pub const MONITOR_LOCK: &str = "monitor.lock";
@@ -410,6 +414,32 @@ pub struct Recovered {
     pub failures: Vec<String>,
 }
 
+/// What [`Monitor::recover_in_place`] did with a leftover in-place marker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct InPlaceRecovered {
+    /// The target the marker named.
+    pub path: PathBuf,
+    /// What was done.
+    pub outcome: InPlaceOutcome,
+}
+
+/// The outcome of [`Monitor::recover_in_place`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum InPlaceOutcome {
+    /// The target had the new or the previous contents; only the marker
+    /// was removed.
+    Whole,
+    /// The target was torn; its backup was restored.
+    Restored,
+    /// The restore failed; the marker stays.
+    Failed(String),
+    /// The marker named no allow-listed target or backup; it was removed
+    /// and nothing else was touched.
+    Refused,
+}
+
 #[derive(Debug)]
 struct Pending {
     commit: CommitId,
@@ -662,7 +692,7 @@ impl<'a> Monitor<'a> {
         if let Err(err) = self.stop_started_mounts(&pending.entries) {
             tracing::error!(error = %err, "stopping the started mounts before rollback failed");
         }
-        let restored = roll_back(&pending.entries);
+        let restored = roll_back(&pending.entries, &self.in_place_marker());
         if let Err(err) = self.replay_reload(&pending.entries) {
             tracing::error!(error = %err, "unit-file reload after rollback failed");
         }
@@ -872,6 +902,7 @@ impl<'a> Monitor<'a> {
         if let Err(response) = self.revalidate(entry.module, &previous, bytes) {
             return response;
         }
+        let marker = self.in_place_marker();
         let request = WriteRequest {
             path: &entry.path,
             contents: bytes,
@@ -880,6 +911,7 @@ impl<'a> Monitor<'a> {
             keep_backups: self.allow.keep_backups(),
             create_missing: false,
             create_mode: entry.create_mode,
+            in_place: InPlace::Marker(&marker),
         };
         let outcome = match write_atomic(&request) {
             Ok(outcome) => outcome,
@@ -1160,7 +1192,8 @@ impl<'a> Monitor<'a> {
         else {
             return unknown(IdKind::Backup, backup.get());
         };
-        match restore_backup(source, target_path) {
+        let marker = self.in_place_marker();
+        match restore_backup_with(source, target_path, None, InPlace::Marker(&marker)) {
             Ok(outcome) => Response::Restored {
                 target: info.target,
                 new_digest: outcome.new_digest,
@@ -1314,7 +1347,7 @@ impl<'a> Monitor<'a> {
         if let Err(err) = self.stop_started_mounts(&pending.entries) {
             tracing::error!(error = %err, "stopping the started mounts before rollback failed");
         }
-        let restored = roll_back(&pending.entries);
+        let restored = roll_back(&pending.entries, &self.in_place_marker());
         if let Err(err) = self.replay_reload(&pending.entries) {
             tracing::error!(error = %err, "unit-file reload after rollback failed");
         }
@@ -1349,7 +1382,7 @@ impl<'a> Monitor<'a> {
         if let Err(err) = self.stop_started_mounts(&pending.entries) {
             tracing::error!(error = %err, "stopping the started mounts before rollback failed");
         }
-        let restored = roll_back(&pending.entries);
+        let restored = roll_back(&pending.entries, &self.in_place_marker());
         if let Err(err) = self.replay_reload(&pending.entries) {
             tracing::error!(error = %err, "unit-file reload after rollback failed");
         }
@@ -1363,6 +1396,101 @@ impl<'a> Monitor<'a> {
             "commit-confirm expired; rolled back"
         );
         Ok(())
+    }
+
+    // -- in-place write recovery ----------------------------------------------
+
+    fn in_place_marker(&self) -> PathBuf {
+        self.allow.state_root().join(IN_PLACE_MARKER)
+    }
+
+    /// Finish an in-place write a previous monitor left behind
+    /// ([`IN_PLACE_MARKER`]; see `fs::atomic`). Called at the start of
+    /// [`Self::recover_pending`].
+    ///
+    /// A marker whose target or backup is not an allow-listed target and its
+    /// backup directory is removed with nothing else touched. A target that
+    /// has the new or the previous contents is whole: the marker goes. Any
+    /// other contents (a torn write, or none) are replaced by the backup
+    /// through the normal restore path, then the marker goes. When that
+    /// restore fails, the marker stays, so in-place writes stay refused
+    /// until a later start succeeds.
+    ///
+    /// # Errors
+    ///
+    /// [`MonitorError::CorruptMarker`] when the marker is unparseable, and
+    /// [`MonitorError::State`] when it cannot be read or removed.
+    pub fn recover_in_place(&self) -> Result<Option<InPlaceRecovered>, MonitorError> {
+        let marker_path = self.in_place_marker();
+        let raw = match std::fs::read(&marker_path) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(MonitorError::State { op: "read", source }),
+        };
+        let marker: InPlaceMarker =
+            serde_json::from_slice(&raw).map_err(|_| MonitorError::CorruptMarker)?;
+        let remove = || {
+            remove_marker(&marker_path).map_err(|err| MonitorError::State {
+                op: "remove_file",
+                source: std::io::Error::other(err.to_string()),
+            })
+        };
+        let entry = (0..self.allow.target_count())
+            .filter_map(|index| u16::try_from(index).ok())
+            .filter_map(|index| self.allow.target(TargetId(index)))
+            .find(|entry| {
+                entry.path == marker.path
+                    && entry.kind == super::proto::PathKind::File
+                    && marker
+                        .backup
+                        .as_deref()
+                        .and_then(Path::parent)
+                        .is_some_and(|dir| dir == entry.backup_dir)
+            });
+        // `entry` matched only with a backup in its backup directory.
+        let outcome = if let (Some(_), Some(backup)) = (entry, marker.backup.as_deref()) {
+            let now = read_with_digest(&marker.path)
+                .ok()
+                .map(|(_, digest)| digest);
+            if now == Some(marker.new) || now == Some(marker.prev) {
+                remove()?;
+                InPlaceOutcome::Whole
+            } else {
+                match restore_backup_with(backup, &marker.path, None, InPlace::Guarded) {
+                    Ok(_) => {
+                        remove()?;
+                        InPlaceOutcome::Restored
+                    }
+                    Err(err) => InPlaceOutcome::Failed(err.to_string()),
+                }
+            }
+        } else {
+            remove()?;
+            InPlaceOutcome::Refused
+        };
+        match &outcome {
+            InPlaceOutcome::Whole => tracing::info!(
+                path = %marker.path.display(),
+                "an in-place write from a previous monitor was complete"
+            ),
+            InPlaceOutcome::Restored => tracing::warn!(
+                path = %marker.path.display(),
+                "restored the backup over a torn in-place write from a previous monitor"
+            ),
+            InPlaceOutcome::Failed(error) => tracing::error!(
+                path = %marker.path.display(),
+                error,
+                "a torn in-place write could not be restored; the marker stays"
+            ),
+            InPlaceOutcome::Refused => tracing::error!(
+                path = %marker.path.display(),
+                "ignored an in-place marker that names no allow-listed target"
+            ),
+        }
+        Ok(Some(InPlaceRecovered {
+            path: marker.path,
+            outcome,
+        }))
     }
 
     // -- marker file --------------------------------------------------------
@@ -1479,6 +1607,9 @@ impl<'a> Monitor<'a> {
     /// [`MonitorError::CorruptMarker`] when the marker is unparseable, and
     /// [`MonitorError::State`] when it cannot be read or removed.
     pub fn recover_pending(&self) -> Result<Option<Recovered>, MonitorError> {
+        // First a torn in-place write, so a commit rollback below reads the
+        // target as it was meant to be.
+        self.recover_in_place()?;
         let path = self.marker_path();
         let raw = match std::fs::read(&path) {
             Ok(raw) => raw,
@@ -1493,9 +1624,15 @@ impl<'a> Monitor<'a> {
         if let Err(err) = self.stop_started_mounts(&marker.entries) {
             failures.push(err.to_string());
         }
+        let in_place = self.in_place_marker();
         let mut restored = 0_usize;
         for entry in marker.entries.iter().rev() {
-            match restore_backup_expecting(&entry.backup, &entry.path, entry.new_digest) {
+            match restore_backup_with(
+                &entry.backup,
+                &entry.path,
+                entry.new_digest,
+                InPlace::Marker(&in_place),
+            ) {
                 Ok(_) => restored = restored.saturating_add(1),
                 Err(err) => failures.push(err.to_string()),
             }
@@ -1573,10 +1710,15 @@ fn unavailable_when_denied(
 /// counted; one unreadable backup must not abandon the rest. A target that no
 /// longer holds the contents detent wrote was edited during the confirm
 /// window: it is skipped, logged, and not counted as restored.
-fn roll_back(entries: &[RollbackEntry]) -> usize {
+fn roll_back(entries: &[RollbackEntry], marker: &Path) -> usize {
     let mut restored = 0_usize;
     for entry in entries.iter().rev() {
-        match restore_backup_expecting(&entry.backup, &entry.path, entry.new_digest) {
+        match restore_backup_with(
+            &entry.backup,
+            &entry.path,
+            entry.new_digest,
+            InPlace::Marker(marker),
+        ) {
             Ok(_) => restored = restored.saturating_add(1),
             Err(err @ AtomicError::Conflict { .. }) => tracing::warn!(
                 error = %err,
@@ -2243,12 +2385,13 @@ fn finish_send_error(err: ChannelError) -> Result<ExitReason, MonitorError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CheckRunner, DirOwner, ExitReason, HookError, Hooks, MAX_CONFIRM_TIMEOUT_S, MONITOR_LOCK,
-        Monitor, PENDING_COMMIT_MARKER, PREVIOUS_SUFFIX, PendingCommitMarker, STAGED_DIR,
-        ServiceControl, StateLock, finish_send_error, materialize_staged, read_staged_verified,
-        staged_path, swap_running_binary, write_temp_and_swap,
+        CheckRunner, DirOwner, ExitReason, HookError, Hooks, InPlaceOutcome, MAX_CONFIRM_TIMEOUT_S,
+        MONITOR_LOCK, Monitor, MonitorError, PENDING_COMMIT_MARKER, PREVIOUS_SUFFIX,
+        PendingCommitMarker, STAGED_DIR, ServiceControl, StateLock, finish_send_error,
+        materialize_staged, read_staged_verified, staged_path, swap_running_binary,
+        write_temp_and_swap,
     };
-    use crate::fs::atomic::{AtomicError, Sha256Digest};
+    use crate::fs::atomic::{AtomicError, InPlaceMarker, Sha256Digest};
     use crate::privsep::allowlist::{Allowlist, AllowlistError, Config};
     use crate::privsep::proto::{
         BackupId, BindingId, CheckId, CheckOutcome, CommitId, IdKind, ModuleId, MountOutcome,
@@ -3294,6 +3437,9 @@ mod tests {
         Ok(())
     }
 
+    /// With the target directory not writable, a restore goes in place on
+    /// the target file; only when the file itself is not writable either is
+    /// it an error, and then no in-place marker is left.
     #[test]
     fn restore_reports_io_error_when_the_target_directory_is_not_writable()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -3311,14 +3457,32 @@ mod tests {
             })?,
             Response::Written(_)
         ));
-        assert!(std::fs::set_permissions(&fx.root, std::fs::Permissions::from_mode(0o500)).is_ok());
-        let response = monitor.dispatch(Request::Restore {
-            module: ModuleId(0),
-            backup: BackupId(0),
-        });
-        assert!(std::fs::set_permissions(&fx.root, std::fs::Permissions::from_mode(0o700)).is_ok());
-        let response = response?;
-        assert!(matches!(response, Response::Error(ProtoError::Io(_))));
+        let restore = |monitor: &mut Monitor<'_>, file_mode: u32, backup: u32| {
+            std::fs::set_permissions(&fx.target, std::fs::Permissions::from_mode(file_mode))?;
+            std::fs::set_permissions(&fx.root, std::fs::Permissions::from_mode(0o500))?;
+            let response = monitor.dispatch(Request::Restore {
+                module: ModuleId(0),
+                backup: BackupId(backup),
+            });
+            std::fs::set_permissions(&fx.root, std::fs::Permissions::from_mode(0o700))?;
+            std::fs::set_permissions(&fx.target, std::fs::Permissions::from_mode(0o644))?;
+            Ok::<_, Box<dyn std::error::Error>>(response?)
+        };
+        let refused = restore(&mut monitor, 0o444, 0)?;
+        assert!(
+            matches!(refused, Response::Error(ProtoError::Io(_))),
+            "{refused:?}"
+        );
+        assert_eq!(std::fs::read(&fx.target)?, b"v2");
+        assert!(!fx.state_root.join(super::IN_PLACE_MARKER).exists());
+        // The refused attempt kept a backup of `v2` first: `v1` is now the
+        // second newest.
+        let restored = restore(&mut monitor, 0o644, 1)?;
+        assert!(
+            matches!(restored, Response::Restored { .. }),
+            "{restored:?}"
+        );
+        assert_eq!(std::fs::read(&fx.target)?, b"v1");
         Ok(())
     }
 
@@ -4976,6 +5140,169 @@ mod tests {
             state: MountState::Mounted,
             detail: String::new(),
         }
+    }
+
+    // -- in-place writes ------------------------------------------------------
+
+    /// Under the packaged unit `/etc` is read-only and only the target file
+    /// is writable. A `0555` directory stands in for that (unprivileged runs
+    /// only; root ignores the mode): the write and the rollback both go to
+    /// the same inode, and no marker is left.
+    #[test]
+    fn a_read_only_target_directory_is_written_and_rolled_back_in_place()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if rustix::process::geteuid().is_root() {
+            return Ok(());
+        }
+        let work = TempDir::new()?;
+        let etc = work.path().join("etc");
+        std::fs::create_dir(&etc)?;
+        let target = etc.join("target.conf");
+        std::fs::write(&target, b"v1")?;
+        std::fs::set_permissions(&etc, std::fs::Permissions::from_mode(0o555))?;
+        let inode = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&target)?);
+        let state = work.path().join("state");
+        let allow =
+            Allowlist::from_modules(&[descriptor(&target)], &Config::with_state_root(&state))?;
+        let mut monitor = greeted(allow, Hooks::default());
+        let armed = arm_commit(&mut monitor, None);
+        let written = std::fs::read(&target);
+        let rolled = monitor.dispatch(Request::RollbackCommit {
+            commit: CommitId(1),
+        });
+        std::fs::set_permissions(&etc, std::fs::Permissions::from_mode(0o755))?;
+        armed?;
+        assert_eq!(written?, b"v2");
+        assert!(matches!(rolled?, Response::RolledBack { restored: 1, .. }));
+        assert_eq!(std::fs::read(&target)?, b"v1");
+        assert_eq!(
+            std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&target)?),
+            inode
+        );
+        assert!(!state.join(super::IN_PLACE_MARKER).exists());
+        Ok(())
+    }
+
+    /// A fixture with a backup `v1` in the target's backup directory and an
+    /// in-place marker naming `path` and `backup`, `v1` → `v2`.
+    fn in_place_fixture(
+        path: Option<&Path>,
+        backup_elsewhere: bool,
+    ) -> Result<(Fixture, Allowlist, PathBuf), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let allow = fx.allow()?;
+        let entry = allow.target(TargetId(0)).ok_or("target")?;
+        let backup_dir = if backup_elsewhere {
+            fx.root.join("elsewhere")
+        } else {
+            entry.backup_dir.clone()
+        };
+        std::fs::create_dir_all(&backup_dir)?;
+        let backup = backup_dir.join("2026-10-06T00:00:00.000000000Z-00000000");
+        std::fs::write(&backup, b"v1")?;
+        std::fs::create_dir_all(&fx.state_root)?;
+        let marker = InPlaceMarker {
+            path: path.map_or_else(|| fx.target.clone(), Path::to_path_buf),
+            backup: Some(backup),
+            prev: Sha256Digest::of(b"v1"),
+            new: Sha256Digest::of(b"v2"),
+        };
+        let marker_path = fx.state_root.join(super::IN_PLACE_MARKER);
+        std::fs::write(&marker_path, serde_json::to_vec(&marker)?)?;
+        Ok((fx, allow, marker_path))
+    }
+
+    #[test]
+    fn a_whole_in_place_write_only_loses_its_marker() -> Result<(), Box<dyn std::error::Error>> {
+        for contents in [&b"v2"[..], b"v1"] {
+            let (fx, allow, marker) = in_place_fixture(None, false)?;
+            std::fs::write(&fx.target, contents)?;
+            let monitor = Monitor::new(allow, Hooks::default());
+            let recovered = monitor.recover_in_place()?.ok_or("a recovery")?;
+            assert_eq!(recovered.outcome, InPlaceOutcome::Whole);
+            assert_eq!(std::fs::read(&fx.target)?, contents);
+            assert!(!marker.exists());
+        }
+        Ok(())
+    }
+
+    /// A start after a crash inside an in-place write restores the backup
+    /// (through `recover_pending`, which every start calls).
+    #[test]
+    fn a_torn_in_place_write_is_restored_at_start() -> Result<(), Box<dyn std::error::Error>> {
+        for torn in [&b""[..], b"v"] {
+            let (fx, allow, marker) = in_place_fixture(None, false)?;
+            std::fs::write(&fx.target, torn)?;
+            let monitor = Monitor::new(allow, Hooks::default());
+            assert_eq!(monitor.recover_pending()?, None);
+            assert_eq!(std::fs::read(&fx.target)?, b"v1");
+            assert!(!marker.exists());
+        }
+        let (fx, allow, _) = in_place_fixture(None, false)?;
+        std::fs::write(&fx.target, b"torn")?;
+        let recovered = Monitor::new(allow, Hooks::default())
+            .recover_in_place()?
+            .ok_or("a recovery")?;
+        assert_eq!(recovered.outcome, InPlaceOutcome::Restored);
+        Ok(())
+    }
+
+    #[test]
+    fn an_in_place_marker_outside_the_allow_list_touches_nothing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // A path that is not an allow-listed target.
+        let outside = TempDir::new()?;
+        let stranger = outside.path().join("passwd");
+        std::fs::write(&stranger, b"root:x:0:0")?;
+        let (_fx, allow, marker) = in_place_fixture(Some(&stranger), false)?;
+        let recovered = Monitor::new(allow, Hooks::default())
+            .recover_in_place()?
+            .ok_or("a recovery")?;
+        assert_eq!(recovered.outcome, InPlaceOutcome::Refused);
+        assert_eq!(std::fs::read(&stranger)?, b"root:x:0:0");
+        assert!(!marker.exists());
+
+        // An allow-listed target with a backup outside its backup directory.
+        let (fx, allow, marker) = in_place_fixture(None, true)?;
+        std::fs::write(&fx.target, b"torn")?;
+        let recovered = Monitor::new(allow, Hooks::default())
+            .recover_in_place()?
+            .ok_or("a recovery")?;
+        assert_eq!(recovered.outcome, InPlaceOutcome::Refused);
+        assert_eq!(std::fs::read(&fx.target)?, b"torn");
+        assert!(!marker.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_corrupt_in_place_marker_stops_recovery() -> Result<(), Box<dyn std::error::Error>> {
+        let (_fx, allow, marker) = in_place_fixture(None, false)?;
+        std::fs::write(&marker, b"not json")?;
+        let monitor = Monitor::new(allow, Hooks::default());
+        assert!(matches!(
+            monitor.recover_in_place(),
+            Err(MonitorError::CorruptMarker)
+        ));
+        assert!(marker.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_restore_of_a_torn_write_keeps_the_marker() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (fx, allow, marker) = in_place_fixture(None, false)?;
+        std::fs::write(&fx.target, b"torn")?;
+        let entry = allow.target(TargetId(0)).ok_or("target")?;
+        // The backup the marker names is gone.
+        std::fs::remove_dir_all(&entry.backup_dir)?;
+        std::fs::create_dir_all(&entry.backup_dir)?;
+        let recovered = Monitor::new(allow.clone(), Hooks::default())
+            .recover_in_place()?
+            .ok_or("a recovery")?;
+        assert!(matches!(recovered.outcome, InPlaceOutcome::Failed(_)));
+        assert!(marker.exists());
+        assert_eq!(std::fs::read(&fx.target)?, b"torn");
+        Ok(())
     }
 
     // -- mounts ---------------------------------------------------------------
