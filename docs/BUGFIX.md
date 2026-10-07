@@ -165,10 +165,9 @@ Follow-ups found while reviewing Track A (not yet scheduled):
   `hashedrekord` entry embeds the Fulcio certificate. Production bundles use
   `dsse`, so updates are not blocked; a real `hashedrekord` bundle would
   fail body agreement. Fix with a captured real fixture (Track E, R1).
-- **Owner of the staged file itself.** `open_staged_input` (used for the
-  update binary and, since B4, its bundle) checks the owner of each
-  directory, not of the file. Consider requiring the file's owner to be the
-  worker uid (root-confined mode) as a second barrier.
+- ~~**Owner of the staged file itself.**~~ Moot since C1-b (2026-10-07):
+  `open_staged_input` is removed; the monitor reads no worker-written
+  update file.
 - **Legacy syscalls in `MONITOR`, not yet traced.** The confined monitor
   now uses only the `*at` forms on the request paths (`unlinkat`, `fchmod`,
   `renameat`; a read and write copy in place of `copy_file_range`; owner
@@ -446,7 +445,10 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   path the monitor reads. The interim (`4b098d0`, `95f6b01`) copies into
   monitor staging with no-follow opens and owner checks. — proposed: confirm
   the interim, defer chunking — owner answer (2026-10-06): do chunked
-  `StageUpdate` now (open).
+  `StageUpdate` now. Done 2026-10-07 (`PROGRESS.md`): `StageBegin` and
+  `StageUpdate` over the socket into the monitor's own stage; the interim
+  code is removed. Unproven until a Linux run: the two `enforce_mode_*`
+  update tests.
 - D4: remove build toolchains from testhost. — proposed: after Track C A1–A3 —
   owner answer:
 - libbz2 on testhost: `libbz2-1.0` was downgraded to `1.0.8-6build2` by an earlier

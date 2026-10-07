@@ -17,9 +17,12 @@ One binary splits into a small privileged **monitor** and an unprivileged
 fixed, versioned, `postcard`-encoded message protocol. The monitor never runs
 tokio, TLS, or HTTP; it only serves a closed request set (`ReadTarget`,
 `WriteTarget`, `RunCheck`, `Service`, `ListBackups`, `Restore`, `Mount`,
-`ReplaceBinary`, `Shutdown`) indexed by allow-listed ids computed at startup
-from enabled modules — no path, unit name, or program name ever crosses the
-socket (§2.4, Appendix B). The worker holds all network-facing code (TLS,
+`StageBegin`, `StageUpdate`, `ReplaceBinary`, `Shutdown`) indexed by
+allow-listed ids computed at startup from enabled modules — no path, unit
+name, or program name ever crosses the socket (§2.4, Appendix B). An update
+image crosses the socket in chunks into the monitor's own staging file; the
+monitor never reads update bytes from a path the worker can write (STAGE3
+C1-b). The worker holds all network-facing code (TLS,
 HTTP, ACME, update, UI) and drops to an unprivileged user, capabilities, and
 sandboxing after fork. No setuid binary is used. (ACME moved to its own
 confined process: see ADR-015.)
@@ -52,7 +55,7 @@ Negative:
 - In capability-user mode (`packaging/systemd/detent.service.d/capability-user.conf`,
   `User=detent`) the monitor and the worker run as the same uid, `detent`.
   Every check that a staged file or directory is owned by the monitor's uid
-  (update staging, the monitor staging directory, audit directories) then
+  (the update stage, the monitor staging directory, audit directories) then
   separates nothing between the two. What still separates them: Landlock
   (absent on some kernels, see `SECURITY_HARDENING.md` Gaps), seccomp, the
   capability drop in the worker, and the Sigstore check of an update before

@@ -302,13 +302,19 @@ client ─▶ worker: /api/v1 handler ─▶ Operation::Apply ─▶ OpsEngine (
 1. The worker fetches release metadata and assets (one hyper-rustls client,
    `fetch.rs`), applies the selection policy (no downgrade, `policy.rs`), and
    writes the binary and its `<tag>.sigstore.json` bundle under
-   `<state_root>/update/staged`.
-2. `ReplaceBinary { tag, len, sha256 }`: the monitor copies the bytes into
-   its private staging base `/run/detent/staging` (digest-named, checked
-   owner and mode), verifies the Sigstore bundle against the embedded trust
-   root with the in-tree verifier, and only then renames the file over the
-   running binary.
-3. A verification failure answers `VerificationFailed`; nothing is swapped.
+   `<state_root>/update/staged`. Only the worker reads them there.
+2. `StageBegin { tag, len, sha256, bundle }` and `StageUpdate { offset,
+   chunk }` (C1-b): the engine sends the bundle and the image, in chunks of
+   at most 512 KiB, over the socket. The monitor writes one stage,
+   `/run/detent/staging/update.stage` (`O_EXCL`, `O_NOFOLLOW`, checked
+   directory owner and mode), in order, up to the declared length (at most
+   64 MiB), and discards it on any refusal, a new begin, or shutdown.
+3. `ReplaceBinary { tag, len, sha256 }`: the monitor checks that the
+   request names its complete stage, reads it back (owner, one link,
+   length, digest), refuses a tag that is not newer, verifies the Sigstore
+   bundle against the embedded trust root with the in-tree verifier, and
+   only then renames the image over the running binary.
+4. A verification failure answers `VerificationFailed`; nothing is swapped.
 
 Known open item: the Rekor signed-entry-timestamp verification gap (STAGE3
 H17, `docs/stage4-wip/h17-set-partial.patch`).
@@ -340,9 +346,9 @@ any degraded step (`report_confinement`, `serve.rs`).
 | `…/audit/detent-auth.jsonl` | worker | login, token and session events |
 | `…/users.json`, `…/tokens.json` | `detent setup`, `detent user`, `detent token` (local operator) | Argon2id hashes; token SHA-256 digests |
 | `…/pending-commit.json` | monitor | commit-confirm marker, replayed at start |
-| `…/update/staged/` | worker | downloaded release and bundle (untrusted until verified) |
+| `…/update/staged/` | worker | downloaded release and bundle; read only by the worker, which sends them to the monitor over the socket |
 | `/var/lib/detent/certs` | worker | TLS pair, `0600` in a `0700` dir |
-| `/run/detent/staging` | monitor | candidate files for validators of modules with no file target; verified update bytes |
+| `/run/detent/staging` | monitor | candidate files for validators of modules with no file target; the update stage `update.stage` (one at a time, at most 64 MiB) |
 | target's directory, `.detent-candidate-*` | monitor | candidate file for a module's validators, removed after the check |
 
 ## 11. Residual risks an auditor should weigh
