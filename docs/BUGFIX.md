@@ -441,6 +441,19 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   Needs `CAP_SYS_ADMIN` and the mount syscalls in the monitor. — owner
   answer (2026-10-06): yes, behind a config flag (PLAN §2.4: the capability
   only when mount apply is enabled) (open).
+- D1 mount route (2026-10-06, after the design report): use systemd, not
+  `CAP_SYS_ADMIN` — the monitor's Landlock forbids `mount(2)` and the unit's
+  private mount namespace would hide the mount. `[mounts]
+  activate_new_entries = false` by default; when on, after apply and
+  daemon-reload the runner starts the `.mount`/`.automount` units of new or
+  changed entries (names computed from the allow-listed file, never sent over
+  the socket); non-systemd hosts: Unsupported with a note. A failed or pending
+  mount is reported and the commit stays pending. Rollback stops only the
+  units this apply started, then restores and reloads; nothing else is ever
+  unmounted. No remount on option-only changes. Never mount over `/` or an
+  ancestor of `/etc`, `/usr`, `/boot`, the state root or the binary
+  directory. Phase 12 capability-user polkit rule: allow start/stop of
+  `.mount`/`.automount` units. (open)
 
 ---
 
