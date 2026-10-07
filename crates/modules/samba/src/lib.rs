@@ -482,13 +482,17 @@ const USERSHARE_GUESTS: MessageId = MessageId::new("samba-usershare-guests");
 /// Fluent id: `wide links` lets symbolic links lead out of a share.
 const WIDE_LINKS: MessageId = MessageId::new("samba-wide-links");
 
-/// Parameters an older samba refuses, with the release that introduced each
-/// (smb.conf(5), release notes), as [`normalise`]d names. `validate` reports
-/// one that the installed samba is too old for. Add a row when `upstream-watch`
-/// finds a parameter new in a release.
+/// Parameters an older samba refuses, with the release that introduced each,
+/// as [`normalise`]d names. `validate` reports one that the installed samba is
+/// too old for. Add a row when `upstream-watch` finds a parameter new in a
+/// release, and cite its source.
+///
+/// * `client`/`server smb transports`: Samba 4.23 WHATSNEW "Add support for
+///   SMB3 over QUIC" and its new-parameters table (`v4-23-stable`); absent from
+///   `lib/param/loadparm.c` in `v4-22-stable`.
 const PARAMETER_SINCE: &[(&str, &str)] = &[
-    ("clientsmbtransports", "4.22"),
-    ("serversmbtransports", "4.22"),
+    ("clientsmbtransports", "4.23"),
+    ("serversmbtransports", "4.23"),
 ];
 
 /// Parameters whose value is a command samba runs as root (smb.conf(5)), as
@@ -1813,25 +1817,28 @@ mod tests {
     }
 
     #[test]
-    fn an_smb_transports_parameter_is_an_error_before_samba_4_22() {
-        for key in ["server smb transports", "Client  SMB Transports"] {
+    fn an_smb_transports_parameter_is_an_error_before_samba_4_23() {
+        for (key, installed) in [
+            ("server smb transports", "4.19.5"),
+            ("Client  SMB Transports", "4.22.4"),
+        ] {
             let found = version_findings(
                 vec![entry(Some("global"), "", ""), entry(None, key, "tcp, quic")],
-                Some("4.19.5"),
+                Some(installed),
             );
             let expected = Diagnostic::new(Severity::Error, MessageId::new("core-version-too-old"))
                 .with_field(FieldPath::new("entries/1/key"))
                 .with_arg("option", key)
-                .with_arg("since", "4.22")
+                .with_arg("since", "4.23")
                 .with_arg("service", "samba")
-                .with_arg("installed", "4.19.5");
+                .with_arg("installed", installed);
             assert_eq!(found, vec![expected], "{key}");
         }
     }
 
     #[test]
-    fn an_smb_transports_parameter_is_fine_from_samba_4_22() {
-        for version in ["4.22", "4.22.1", "4.24.7"] {
+    fn an_smb_transports_parameter_is_fine_from_samba_4_23() {
+        for version in ["4.23", "4.23.1", "4.24.7"] {
             let found = version_findings(
                 vec![entry(None, "server smb transports", "tcp")],
                 Some(version),

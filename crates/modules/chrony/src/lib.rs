@@ -373,8 +373,12 @@ const CMDPORT_OPEN: MessageId = MessageId::new("chrony-cmdport-open");
 const EXTERNAL_DIRECTIVE: MessageId = MessageId::new("chrony-external-directive");
 
 /// Directives an older `chronyd` refuses, with the release that introduced
-/// each (chrony NEWS). `validate` reports one that the installed chronyd is too
-/// old for. Add a row when `upstream-watch` finds a directive new in a release.
+/// each. `validate` reports one that the installed chronyd is too old for. Add
+/// a row when `upstream-watch` finds a directive new in a release, and cite its
+/// source.
+///
+/// * `nts*`: chrony NEWS, "New in version 4.0": "Add support for Network Time
+///   Security (NTS) authentication".
 const DIRECTIVE_SINCE: &[(&str, &str)] = &[
     ("ntsdumpdir", "4.0"),
     ("ntsservercert", "4.0"),
