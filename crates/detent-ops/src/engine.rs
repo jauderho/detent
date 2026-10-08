@@ -27,7 +27,6 @@
 //! commit still rolls back on its own deadline whether or not anything ever
 //! calls [`Operation::RollbackCommit`].
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use detent_core::descriptor::{ModuleDescriptor, ValidationCtx};
@@ -103,11 +102,6 @@ pub struct OpsEngine {
     host: Detected,
     audit: Box<dyn AuditSink>,
     services: Box<dyn ServiceManager>,
-    /// Root of the monitor's mutable state. `None` means the engine cannot
-    /// derive paths the request asks for (e.g. `UpdateApply`'s staged
-    /// binary) — set via [`OpsEngine::set_state_root`] from the binary's
-    /// settings before issuing those operations.
-    state_root: Option<PathBuf>,
     next_commit: u32,
     /// Last commit-confirm window armed by this engine, used to rehydrate its
     /// full report without inventing fields from the protocol's id-only query.
@@ -145,7 +139,6 @@ impl OpsEngine {
             host,
             audit,
             services,
-            state_root: None,
             next_commit: 1,
             pending_commit: None,
             cert: None,
@@ -155,16 +148,6 @@ impl OpsEngine {
     /// Let `hook` answer [`Operation::CertStatus`] and [`Operation::CertRenew`].
     pub fn set_cert_front_end(&mut self, hook: Box<dyn CertFrontEnd>) {
         self.cert = Some(hook);
-    }
-
-    /// Tell the engine where the monitor's state directory lives.
-    ///
-    /// `UpdateApply` reads the worker's downloaded release
-    /// `<state_root>/update/staged/<tag>` and its `<tag>.sigstore.json`, and
-    /// sends both to the monitor ([`Client::stage_update`]); without this
-    /// set, the operation is refused up front as `Unsupported`.
-    pub fn set_state_root(&mut self, state_root: impl Into<PathBuf>) {
-        self.state_root = Some(state_root.into());
     }
 
     /// What was detected about this host.
@@ -379,13 +362,12 @@ impl OpsEngine {
                 Some(hook) => hook.renew().map(|()| OpOutcome::CertRenewRequested),
                 None => Err(OpsError::Unsupported { what: "cert_renew" }),
             },
-            // The worker cannot swap a binary it does not own, so this goes
-            // through the monitor's stage and `ReplaceBinary`
-            // (`ops-unsupported` when the release or its bundle is missing,
-            // like `CertRenew`).
+            // The confined worker can neither download nor swap a binary, so
+            // the runner starts the CLI updater in its own transient unit
+            // (`StartUpdate`, E16); the answer comes once the unit runs.
             Operation::UpdateApply { version } => self
-                .update_apply(&version, hashes)
-                .map(|()| OpOutcome::UpdateApplied { version }),
+                .update_apply(&version)
+                .map(|()| OpOutcome::UpdateStarted { version }),
         }
     }
 
@@ -424,44 +406,29 @@ impl OpsEngine {
         })))
     }
 
-    /// Send the worker's downloaded release and its bundle to the monitor's
-    /// own staging over the socket (`StageBegin`/`StageUpdate`, C1-b), then
-    /// ask it to authenticate the stage and swap it over the running binary.
-    /// The monitor never reads the worker's files.
-    /// On success `hashes.new` is the digest of the installed binary.
-    fn update_apply(&mut self, version: &str, hashes: &mut Hashes) -> Result<(), OpsError> {
-        let Some(state_root) = self.state_root.as_ref() else {
-            return Err(OpsError::Unsupported {
-                what: "update_apply",
-            });
-        };
-        if !is_staged_name(version) {
-            tracing::warn!("staged version refused");
-            return Err(OpsError::Unsupported {
-                what: "update_apply",
-            });
-        }
-        let staged = state_root.join("update").join("staged");
-        let read = |name: &str| {
-            let path = staged.join(name);
-            std::fs::read(&path).map_err(|err| {
-                tracing::warn!(path = %path.display(), error = %err, "staged release missing");
-                OpsError::Unsupported {
+    /// Ask the monitor to start the CLI updater for `version`
+    /// (`StartUpdate`, E16): the runner runs `detent update --tag
+    /// <version>` in the transient unit `detent-update`, which downloads,
+    /// verifies, self-tests, swaps, restarts, checks `/healthz` and rolls
+    /// back. This returns once the unit runs; the result is the running
+    /// version afterwards.
+    fn update_apply(&mut self, version: &str) -> Result<(), OpsError> {
+        match self.client.start_update(version) {
+            Ok(detail) => {
+                tracing::info!(%detail, "update started");
+                Ok(())
+            }
+            Err(ClientError::Remote(ProtoError::UpdateRunning)) => Err(OpsError::UpdateRunning),
+            Err(ClientError::Remote(
+                ProtoError::Unavailable(note) | ProtoError::Unsupported(note),
+            )) => {
+                tracing::warn!(%note, "the update cannot be started on this host");
+                Err(OpsError::Unsupported {
                     what: "update_apply",
-                }
-            })
-        };
-        let bytes = read(version)?;
-        let bundle = read(&format!("{version}.sigstore.json"))?;
-        let sha256 = self
-            .client
-            .stage_update(version, &bytes, bundle)
-            .map_err(map_client)?;
-        self.client
-            .replace_binary(version, bytes.len() as u64, sha256)
-            .map_err(map_client)?;
-        hashes.new = Some(sha256);
-        Ok(())
+                })
+            }
+            Err(err) => Err(map_client(err)),
+        }
     }
 
     fn plan(&mut self, id: &str, model: &Value) -> Result<PlanReport, OpsError> {
@@ -906,17 +873,6 @@ impl OpsEngine {
     }
 }
 
-/// True when `name` is a safe single path component for the staged layout:
-/// a release tag (`v1.2.3`) or a hex digest — never a path.
-fn is_staged_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 128
-        && !name.bytes().all(|b| b == b'.')
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
-}
-
 /// Look one module up in the injected registry.
 fn find_module<'a>(
     modules: &'a [Box<dyn DynModule>],
@@ -1130,7 +1086,7 @@ mod tests {
         );
     }
 
-    use super::{Hashes, command, deadline_rfc3339, decode, is_staged_name, map_client};
+    use super::{Hashes, command, deadline_rfc3339, decode, map_client};
     use crate::op::ServiceCommand;
     use detent_platform::fs::atomic::Sha256Digest;
     use detent_platform::privsep::proto::{IdKind, ProtoError, ServiceAction as WireServiceAction};
@@ -1213,19 +1169,5 @@ mod tests {
         assert_eq!(hashes.prev, None);
         assert_eq!(hashes.new, None);
         assert!(format!("{hashes:?}").contains("Hashes"));
-    }
-
-    #[test]
-    fn staged_names_are_single_components_never_dots() {
-        assert!(is_staged_name("v1.2.3"));
-        assert!(is_staged_name(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        ));
-        assert!(!is_staged_name(""));
-        assert!(!is_staged_name("."));
-        assert!(!is_staged_name(".."));
-        assert!(!is_staged_name("..."));
-        assert!(!is_staged_name("../../etc/shadow"));
-        assert!(!is_staged_name("v1.2.3/.."));
     }
 }

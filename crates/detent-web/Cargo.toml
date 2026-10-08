@@ -63,7 +63,9 @@ zeroize = { workspace = true }
 utoipa = { workspace = true }
 detent-core = { path = "../detent-core", features = ["openapi"] }
 detent-ops = { path = "../detent-ops", features = ["openapi"] }
-detent-platform = { path = "../detent-platform", features = ["openapi"] }
+# `update`: the monitor in the API tests starts the update unit
+# (`StartUpdate`), as the `detent` binary's monitor does.
+detent-platform = { path = "../detent-platform", features = ["openapi", "update"] }
 
 # Contract fuzz test (PLAN Phase 4 task 4): generate arbitrary/malformed
 # bodies for each endpoint that takes one and assert 4xx, never 5xx.

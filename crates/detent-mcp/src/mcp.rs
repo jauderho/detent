@@ -350,7 +350,7 @@ impl From<AuditQueryParams> for AuditQuery {
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateApplyParams {
-    /// The update version to install, e.g. `v1.2.3`.
+    /// The release tag to install, e.g. `v1.2.3`.
     pub version: String,
 }
 
@@ -941,7 +941,14 @@ mod tools {
             "update_apply".into()
         }
         fn description() -> Option<Cow<'static, str>> {
-            Some("Install a verified update.".into())
+            Some(
+                "Start installing a release in the background (`detent update --tag` in a \
+                 transient systemd unit). The answer comes when the update starts, not when \
+                 it ends: the service restarts if the release installs, and the update rolls \
+                 back if the restarted service is not healthy. The running detent version \
+                 shows the result."
+                    .into(),
+            )
         }
     }
     impl SyncTool<McpServer> for UpdateApply {

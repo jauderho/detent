@@ -124,6 +124,10 @@ pub enum OpsError {
         /// Which operation, in one short phrase for the log.
         what: &'static str,
     },
+    /// `UpdateApply` was refused: an update already runs (its transient
+    /// unit is there).
+    #[error("an update is already running")]
+    UpdateRunning,
 }
 
 impl OpsError {
@@ -153,6 +157,7 @@ impl OpsError {
             Self::TargetMissing => MessageId::new("ops-target-missing"),
             Self::Cert { id, .. } => id,
             Self::Unsupported { .. } => MessageId::new("ops-unsupported"),
+            Self::UpdateRunning => MessageId::new("ops-update-running"),
         }
     }
 }
@@ -269,6 +274,7 @@ mod tests {
                 },
                 "ops-unsupported",
             ),
+            (OpsError::UpdateRunning, "ops-update-running"),
         ];
         // user. `detent-i18n`'s parity test compares locales to each other; it
         // cannot see ids that exist only in Rust.

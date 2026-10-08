@@ -47,7 +47,9 @@ use detent_platform::privsep::proto::{
 };
 use detent_platform::privsep::transport::Channel;
 use detent_platform::privsep::worker::{Client, ClientError};
-use detent_platform::service::{ActionOutcome, ServiceError, ServiceManager, ServiceStatus, State};
+use detent_platform::service::{
+    ActionOutcome, ServiceError, ServiceManager, ServiceStatus, State, UpdateStart,
+};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -321,6 +323,8 @@ struct ReloadingServices {
     fail_reload: bool,
     mount_starts: AtomicUsize,
     fail_mounts: bool,
+    /// Every tag `start_update` was asked for.
+    update_starts: std::sync::Mutex<Vec<String>>,
 }
 
 impl ServiceControl for ReloadingServices {
@@ -354,6 +358,21 @@ impl ServiceControl for ReloadingServices {
             state: MountState::Mounted,
             detail: String::new(),
         }])
+    }
+
+    /// `v98.0.0` is already running and `v97.0.0` finds no systemd; every
+    /// other tag starts.
+    fn start_update(&self, tag: &str) -> Result<UpdateStart, HookError> {
+        if let Ok(mut starts) = self.update_starts.lock() {
+            starts.push(tag.to_owned());
+        }
+        match tag {
+            "v98.0.0" => Ok(UpdateStart::AlreadyRunning),
+            "v97.0.0" => Err(HookError::Unavailable(
+                "starting an update needs systemd".to_owned(),
+            )),
+            _ => Ok(UpdateStart::Started(format!("started {tag}"))),
+        }
     }
 
     fn stop_started_mounts(&self) -> Result<Vec<MountOutcome>, HookError> {
@@ -559,6 +578,15 @@ impl Harness {
         self.services.reloads.load(Ordering::SeqCst)
     }
 
+    /// Every tag the monitor asked the runner hook to start an update for.
+    fn update_starts(&self) -> Vec<String> {
+        self.services
+            .update_starts
+            .lock()
+            .map(|starts| starts.clone())
+            .unwrap_or_default()
+    }
+
     /// How often the monitor asked the runner hook to start mounts.
     fn mount_starts(&self) -> usize {
         self.services.mount_starts.load(Ordering::SeqCst)
@@ -618,6 +646,7 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
         fail_reload: setup.fail_reload,
         mount_starts: AtomicUsize::new(0),
         fail_mounts: setup.fail_mounts,
+        update_starts: std::sync::Mutex::new(Vec::new()),
     });
     let handle = thread::spawn(move || {
         let mut channel = monitor_end;
@@ -730,8 +759,6 @@ fn proxy(mut engine: Channel, mut monitor: Channel, fail_arm: bool, fail_restore
 /// a mismatch.
 const MODULE: &str = "fake";
 
-const UPDATE_FIXTURE_TAG: &str = "v99.0.0";
-
 fn update_fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../detent-update/tests/fixtures")
 }
@@ -741,18 +768,6 @@ fn update_trust() -> Result<detent_update::trust::TrustRoot, Box<dyn std::error:
     let rekor = std::fs::read_to_string(update_fixtures().join("rekor-pub.pem"))?;
     let ct = std::fs::read_to_string(update_fixtures().join("ctfe-pub.pem"))?;
     Ok(detent_update::trust::from_pems_with_ct(&root, &rekor, &ct)?)
-}
-
-fn plant_update(state_root: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let bytes = std::fs::read(update_fixtures().join("binary.bin"))?;
-    let dir = state_root.join("update").join("staged");
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join(UPDATE_FIXTURE_TAG), &bytes)?;
-    std::fs::copy(
-        update_fixtures().join("valid.json"),
-        dir.join(format!("{UPDATE_FIXTURE_TAG}.sigstore.json")),
-    )?;
-    Ok(bytes)
 }
 
 fn apply(text: &str, expected: Option<Sha256Digest>) -> Operation {
@@ -2877,86 +2892,63 @@ fn update_status_is_unsupported_in_the_engine_and_writes_no_audit_record() -> Te
     assert!(fx.records().is_empty());
     fx.finish()
 }
-#[test]
-fn update_apply_returns_unsupported_when_state_root_is_not_set() -> TestResult {
-    let mut fx = harness(b"v1\n", Setup::default())?;
-    let err = fx.run(Operation::UpdateApply {
-        version: "v1.2.3".to_owned(),
-    });
-    assert!(matches!(
-        err,
-        Err(OpsError::Unsupported {
-            what: "update_apply"
-        })
-    ));
-    // Mutating, so the failure is audited exactly once (PLAN §2.5) — the
-    // contrast to `UpdateStatus` above, which is read-only and skips audit.
+/// The two audit records of one `UpdateApply`: started, then `result`
+/// with `error_id`.
+fn assert_update_audited(fx: &Harness, result: AuditResult, error_id: Option<&str>) -> TestResult {
     let records = fx.records();
     assert_eq!(records.len(), 2);
     assert_eq!(
         records.first().map(|r| r.result),
         Some(AuditResult::Started)
     );
-    let first = records.get(1).ok_or("the failure was audited")?;
-    assert_eq!(first.op, OpKind::UpdateApply);
-    assert_eq!(first.result, AuditResult::Error);
-    assert_eq!(first.error_id.as_deref(), Some("ops-unsupported"));
-    fx.finish()
+    let last = records.get(1).ok_or("the outcome was audited")?;
+    assert_eq!(last.op, OpKind::UpdateApply);
+    assert_eq!(last.result, result);
+    assert_eq!(last.error_id.as_deref(), error_id);
+    Ok(())
+}
+
+fn hooked() -> Setup {
+    Setup {
+        hooks: true,
+        ..Setup::default()
+    }
 }
 
 #[test]
-fn update_apply_is_swapped_through_the_monitor_and_audited_once() -> TestResult {
-    let mut fx = harness(b"v1\n", Setup::default())?;
-    // The harness's tempdir is `_dir`; we need a state_root the engine can
-    // hand to the monitor via `set_state_root`. The harness already built a
-    // state root at `<root>/state`, which we now reuse.
-    let state_root = fx
-        .target
-        .parent()
-        .ok_or("harness missing parent")?
-        .join("state");
-    fx.engine.set_state_root(&state_root);
-
-    let staged = plant_update(&state_root)?;
-
+fn update_apply_starts_the_update_unit_and_is_audited_once() -> TestResult {
+    let mut fx = harness(b"v1\n", hooked())?;
     let outcome = fx.run(Operation::UpdateApply {
-        version: UPDATE_FIXTURE_TAG.to_owned(),
+        version: "v99.0.0".to_owned(),
     })?;
-    let OpOutcome::UpdateApplied { version } = outcome else {
-        return Err("expected UpdateApplied outcome".into());
+    let OpOutcome::UpdateStarted { version } = outcome else {
+        return Err("expected UpdateStarted outcome".into());
     };
-    assert_eq!(version, UPDATE_FIXTURE_TAG);
-
-    let records = fx.records();
-    assert_eq!(records.len(), 2);
-    assert_eq!(
-        records.first().map(|r| r.result),
-        Some(AuditResult::Started)
-    );
-    let first = records.get(1).ok_or("the success was audited")?;
-    assert_eq!(first.op, OpKind::UpdateApply);
-    assert_eq!(first.result, AuditResult::Ok);
-    // The record names the digest of the binary that was installed, which
-    // is what is now on disk at the swapped path.
-    let installed = Sha256Digest::of(&staged).to_string();
-    assert_eq!(first.new_hash.as_deref(), Some(installed.as_str()));
-    assert_eq!(first.after_hash, first.new_hash);
-    assert_eq!(fx.digest()?.to_string(), installed);
+    assert_eq!(version, "v99.0.0");
+    assert_eq!(fx.update_starts(), ["v99.0.0"]);
+    assert_update_audited(&fx, AuditResult::Ok, None)?;
+    // Nothing is swapped here: the unit does that, later.
+    assert_eq!(fx.contents()?, "v1\n");
     fx.finish()
 }
+
 #[test]
-fn update_apply_refuses_a_path_traversal_version() -> TestResult {
-    let mut fx = harness(b"v1\n", Setup::default())?;
-    let state_root = fx
-        .target
-        .parent()
-        .ok_or("harness missing parent")?
-        .join("state");
-    fx.engine.set_state_root(&state_root);
-    // A caller-controlled `version` must never escape `update/staged`: the
-    // engine answers Unsupported instead of reading `../../…` as root.
+fn update_apply_refuses_while_an_update_runs() -> TestResult {
+    let mut fx = harness(b"v1\n", hooked())?;
     let err = fx.run(Operation::UpdateApply {
-        version: "../../etc/shadow".to_owned(),
+        version: "v98.0.0".to_owned(),
+    });
+    assert!(matches!(err, Err(OpsError::UpdateRunning)));
+    assert_update_audited(&fx, AuditResult::Error, Some("ops-update-running"))?;
+    fx.finish()
+}
+
+#[test]
+fn update_apply_is_unsupported_without_systemd_or_a_runner() -> TestResult {
+    // A host without systemd: the runner's answer.
+    let mut fx = harness(b"v1\n", hooked())?;
+    let err = fx.run(Operation::UpdateApply {
+        version: "v97.0.0".to_owned(),
     });
     assert!(matches!(
         err,
@@ -2964,29 +2956,12 @@ fn update_apply_refuses_a_path_traversal_version() -> TestResult {
             what: "update_apply"
         })
     ));
-    // Mutating, so the refusal is audited exactly once.
-    let records = fx.records();
-    assert_eq!(records.len(), 2);
-    assert_eq!(
-        records.first().map(|r| r.result),
-        Some(AuditResult::Started)
-    );
-    fx.finish()
-}
-
-#[test]
-fn update_apply_refuses_a_valid_name_with_no_staged_file() -> TestResult {
+    assert_update_audited(&fx, AuditResult::Error, Some("ops-unsupported"))?;
+    fx.finish()?;
+    // No service hook at all (the monitor's default).
     let mut fx = harness(b"v1\n", Setup::default())?;
-    let state_root = fx
-        .target
-        .parent()
-        .ok_or("harness missing parent")?
-        .join("state");
-    fx.engine.set_state_root(&state_root);
-    // A well-formed tag with nothing staged under it must fail the same way
-    // as traversal: Unsupported, audited once, target untouched.
     let err = fx.run(Operation::UpdateApply {
-        version: "v9.9.9".to_owned(),
+        version: "v99.0.0".to_owned(),
     });
     assert!(matches!(
         err,
@@ -2994,167 +2969,36 @@ fn update_apply_refuses_a_valid_name_with_no_staged_file() -> TestResult {
             what: "update_apply"
         })
     ));
-    let records = fx.records();
-    assert_eq!(records.len(), 2);
-    assert_eq!(
-        records.first().map(|r| r.result),
-        Some(AuditResult::Started)
-    );
+    assert_update_audited(&fx, AuditResult::Error, Some("ops-unsupported"))?;
     fx.finish()
 }
 
 #[test]
-fn update_apply_refuses_dot_only_versions() -> TestResult {
-    let mut fx = harness(b"v1\n", Setup::default())?;
-    let state_root = fx
-        .target
-        .parent()
-        .ok_or("harness missing parent")?
-        .join("state");
-    fx.engine.set_state_root(&state_root);
-    // "." and ".." pass a naive char filter but are never staged names;
-    // joined they resolve to the staged dir itself / its parent.
-    for version in [".", ".."] {
+fn update_apply_refuses_a_version_that_is_not_a_newer_release_tag() -> TestResult {
+    let mut fx = harness(b"v1\n", hooked())?;
+    for version in [
+        "../../etc/shadow",
+        ".",
+        "..",
+        "",
+        "-x",
+        "v99.0.0 x",
+        "v0.0.1",
+    ] {
         let err = fx.run(Operation::UpdateApply {
             version: version.to_owned(),
         });
         assert!(
             matches!(
                 err,
-                Err(OpsError::Unsupported {
-                    what: "update_apply"
-                })
+                Err(OpsError::Privsep(ClientError::Remote(ProtoError::Io(_))))
             ),
-            "dot-only version must be refused: {version}"
+            "{version:?} must be refused: {err:?}"
         );
     }
-    // Mutating, so each refusal is audited Started+Error. Two versions => 4 records. H7
-    let records = fx.records();
-    assert_eq!(records.len(), 4);
-    assert_eq!(
-        records.first().map(|r| r.result),
-        Some(AuditResult::Started)
-    );
-    assert_eq!(records.get(1).map(|r| r.result), Some(AuditResult::Error));
-    assert_eq!(records.get(2).map(|r| r.result), Some(AuditResult::Started));
-    assert_eq!(records.get(3).map(|r| r.result), Some(AuditResult::Error));
-    fx.finish()
-}
-
-#[test]
-fn update_apply_stages_the_release_in_the_monitor() -> TestResult {
-    let mut fx = harness(b"v1\n", Setup::default())?;
-    let root = fx.target.parent().ok_or("harness missing parent")?;
-    let state_root = root.join("state");
-    let stage = root.join("monitor-staging").join("update.stage");
-    fx.engine.set_state_root(&state_root);
-    let bytes = plant_update(&state_root)?;
-
-    let outcome = fx.run(Operation::UpdateApply {
-        version: UPDATE_FIXTURE_TAG.to_owned(),
-    })?;
-    let OpOutcome::UpdateApplied { version } = outcome else {
-        return Err("expected UpdateApplied outcome".into());
-    };
-    assert_eq!(version, UPDATE_FIXTURE_TAG);
-    assert!(!stage.exists(), "the monitor consumed its stage");
-    assert_eq!(std::fs::read(&fx.target)?, bytes);
-    let file_name = fx
-        .target
-        .file_name()
-        .map_or_else(|| "target".to_owned(), |n| n.to_string_lossy().into_owned());
-    let prev = fx.target.with_file_name(format!("{file_name}.prev"));
-    assert_eq!(std::fs::read(prev)?, b"v1\n");
-    fx.finish()
-}
-
-#[test]
-fn update_apply_discards_a_leftover_stage() -> TestResult {
-    let mut fx = harness(b"v1\n", Setup::default())?;
-    let root = fx.target.parent().ok_or("harness missing parent")?;
-    let state_root = root.join("state");
-    let staging_dir = root.join("monitor-staging");
-    fx.engine.set_state_root(&state_root);
-    let bytes = plant_update(&state_root)?;
-    std::fs::create_dir_all(&staging_dir)?;
-    std::fs::set_permissions(
-        &staging_dir,
-        std::os::unix::fs::PermissionsExt::from_mode(0o700),
-    )?;
-    std::fs::write(staging_dir.join("update.stage"), b"an abandoned stage")?;
-
-    let outcome = fx.run(Operation::UpdateApply {
-        version: UPDATE_FIXTURE_TAG.to_owned(),
-    })?;
-    assert!(matches!(outcome, OpOutcome::UpdateApplied { .. }));
-    assert_eq!(std::fs::read(&fx.target)?, bytes);
-    assert!(!staging_dir.join("update.stage").exists());
-    fx.finish()
-}
-
-#[test]
-fn update_apply_refuses_a_staged_binary_without_its_bundle() -> TestResult {
-    let mut fx = harness(b"v1\n", Setup::default())?;
-    let state_root = fx
-        .target
-        .parent()
-        .ok_or("harness missing parent")?
-        .join("state");
-    fx.engine.set_state_root(&state_root);
-    plant_update(&state_root)?;
-    std::fs::remove_file(
-        state_root
-            .join("update")
-            .join("staged")
-            .join(format!("{UPDATE_FIXTURE_TAG}.sigstore.json")),
-    )?;
-    let err = fx.run(Operation::UpdateApply {
-        version: UPDATE_FIXTURE_TAG.to_owned(),
-    });
-    assert!(matches!(
-        err,
-        Err(OpsError::Unsupported {
-            what: "update_apply"
-        })
-    ));
-    assert_eq!(std::fs::read(&fx.target)?, b"v1\n");
-    let records = fx.records();
-    assert_eq!(records.len(), 2);
-    assert_eq!(records.get(1).map(|r| r.result), Some(AuditResult::Error));
-    fx.finish()
-}
-
-#[test]
-fn update_apply_refuses_when_the_digest_file_cannot_be_written() -> TestResult {
-    let mut fx = harness(b"v1\n", Setup::default())?;
-    let state_root = fx
-        .target
-        .parent()
-        .ok_or("harness missing parent")?
-        .join("state");
-    fx.engine.set_state_root(&state_root);
-    let bytes = b"unwritable-digest-bytes";
-    let staged_dir = state_root.join("update").join("staged");
-    std::fs::create_dir_all(&staged_dir)?;
-    std::fs::write(staged_dir.join("v9.9.11"), bytes)?;
-    // A regular file where the staged directory must be: the tag read fails,
-    // so the run refuses without reaching the monitor.
-    let _ = std::fs::remove_dir_all(&staged_dir);
-    std::fs::write(&staged_dir, b"not-a-directory")?;
-    let err = fx.run(Operation::UpdateApply {
-        version: "v9.9.11".to_owned(),
-    });
-    assert!(matches!(
-        err,
-        Err(OpsError::Unsupported {
-            what: "update_apply"
-        })
-    ));
-    let records = fx.records();
-    assert_eq!(records.len(), 2);
-    assert_eq!(
-        records.first().map(|r| r.result),
-        Some(AuditResult::Started)
+    assert!(
+        fx.update_starts().is_empty(),
+        "the runner must not be asked"
     );
     fx.finish()
 }

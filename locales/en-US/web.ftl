@@ -51,6 +51,7 @@ ops-service-failed = the service action did not complete.
 ops-unknown-module = there is no module by that name in this build.
 ops-unsupported = that is not supported in this build.
 ops-commit-pending = another commit-confirm window is already pending.
+ops-update-running = an update is already running; wait for it to finish, then check the running version.
 ops-no-backup = commit-confirm requires a retained backup; nothing was changed.
 ops-arm-failed-restored = commit-confirm could not be armed, so the change was undone; the previous contents are back.
 ops-arm-failed-unrestored = commit-confirm could not be armed and the change could NOT be undone; the new contents are still on disk. Restore the previous backup now.
@@ -179,10 +180,10 @@ dashboard-update-available = release {$tag} is available for this build.
 dashboard-update-security = this release is flagged as a security update; it bypasses the age gate.
 dashboard-update-install = install {$tag}
 dashboard-update-confirm-title = install this update?
-dashboard-update-confirm-body = this installs {$tag} and restarts the detent service. the page may disconnect and reconnect while it restarts.
+dashboard-update-confirm-body = this starts installing {$tag} in the background. if it installs, the detent service restarts and the page may disconnect and reconnect; if the restarted service is not healthy, the update rolls back.
 dashboard-update-confirm-action = install
 dashboard-update-confirm-cancel = cancel
-dashboard-update-installed = release {$version} is installed. the service restarts; the page may reconnect.
+dashboard-update-started = the update to {$version} started in the background. the service restarts if it installs and rolls back if it is not healthy; the running version shows the result.
 
 ## Modules
 modules-panel-label = installed modules

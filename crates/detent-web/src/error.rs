@@ -177,15 +177,17 @@ impl From<OpsError> for ApiError {
                     .with_diagnostics(*diagnostics)
             }
             // The target changed since the caller's `expected_hash` was read:
-            // optimistic-concurrency conflict, not a client mistake.
-            OpsError::HashConflict { .. } => Self::new(StatusCode::CONFLICT, message_id),
-            // The module exists but declares no writable target or no service
+            // optimistic-concurrency conflict, not a client mistake. The
+            // module exists but declares no writable target or no service
             // binding on this host — a module/allow-list mismatch — or its
-            // file is missing: the requested action conflicts with the host's
-            // state rather than naming an absent API resource.
-            OpsError::NoTarget { .. } | OpsError::NoService { .. } | OpsError::TargetMissing => {
-                Self::new(StatusCode::CONFLICT, message_id)
-            }
+            // file is missing, or an update already runs: the requested
+            // action conflicts with the host's state rather than naming an
+            // absent API resource.
+            OpsError::HashConflict { .. }
+            | OpsError::NoTarget { .. }
+            | OpsError::NoService { .. }
+            | OpsError::TargetMissing
+            | OpsError::UpdateRunning => Self::new(StatusCode::CONFLICT, message_id),
             // A stale or already-settled commit id: see `is_unknown_wire_id`.
             OpsError::Privsep(ref client) if is_unknown_wire_id(client) => {
                 Self::new(StatusCode::CONFLICT, message_id)
@@ -390,6 +392,7 @@ mod tests {
                 StatusCode::CONFLICT,
             ),
             (OpsError::TargetMissing, StatusCode::CONFLICT),
+            (OpsError::UpdateRunning, StatusCode::CONFLICT),
             (
                 // A stale or already-settled commit/backup id.
                 OpsError::from(ClientError::Remote(ProtoError::UnknownId {

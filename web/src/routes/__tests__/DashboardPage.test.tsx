@@ -346,8 +346,10 @@ describe('DashboardPage — install update', () => {
 
     await user.click(await screen.findByRole('button', { name: /install.*v0\.0\.2/ }))
     const dialog = await screen.findByRole('dialog')
+    expect(dialog).toHaveTextContent(/in the background/)
     expect(dialog).toHaveTextContent(/restarts/)
     expect(dialog).toHaveTextContent(/reconnect/)
+    expect(dialog).toHaveTextContent(/rolls back/)
     expect(posts(stub)).toHaveLength(0)
 
     await user.click(screen.getByRole('button', { name: 'cancel' }))
@@ -367,15 +369,20 @@ describe('DashboardPage — install update', () => {
     expect(posts(stub)).toHaveLength(0)
   })
 
-  it('posts the tag on confirm and shows the success banner', async () => {
+  it('posts the tag on confirm and says the update started', async () => {
     const user = userEvent.setup()
-    const stub = stubFetchByUrl(installHandlers(SESSION, () => jsonResponse({ version: 'v0.0.2' })))
+    const stub = stubFetchByUrl(
+      installHandlers(SESSION, () => jsonResponse({ version: 'v0.0.2' }, { status: 202 })),
+    )
     renderWithProviders(<DashboardPage />, { fetch: stub.fetch })
 
     await user.click(await screen.findByRole('button', { name: /install.*v0\.0\.2/ }))
     await user.click(await screen.findByRole('button', { name: 'install' }))
 
-    expect(await screen.findByText(/v0\.0\.2.* is installed/)).toBeInTheDocument()
+    expect(
+      await screen.findByText(/update to .*v0\.0\.2.* started in the background/),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/is installed/)).not.toBeInTheDocument()
     await waitFor(() => {
       expect(posts(stub)).toHaveLength(1)
     })
@@ -385,6 +392,23 @@ describe('DashboardPage — install update', () => {
       (call) => call.url.includes('/system/update') && call.init.method !== 'POST',
     )
     expect(gets.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('says so when an update is already running', async () => {
+    const user = userEvent.setup()
+    const stub = stubFetchByUrl(
+      installHandlers(SESSION, () => errorResponse(409, 'ops-update-running')),
+    )
+    renderWithProviders(<DashboardPage />, { fetch: stub.fetch })
+
+    await user.click(await screen.findByRole('button', { name: /install.*v0\.0\.2/ }))
+    await user.click(await screen.findByRole('button', { name: 'install' }))
+
+    expect(
+      await screen.findByText(
+        'an update is already running; wait for it to finish, then check the running version.',
+      ),
+    ).toBeInTheDocument()
   })
 
   it('shows the mapped server message when the install fails', async () => {

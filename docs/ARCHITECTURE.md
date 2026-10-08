@@ -305,24 +305,26 @@ client ─▶ worker: /api/v1 handler ─▶ Operation::Apply ─▶ OpsEngine (
 
 ## 8. The update path
 
-`crates/detent-update`, ADR-005, ADR-014.
+`crates/detent-update`, ADR-005, ADR-014. One installer: the CLI.
 
-1. The worker fetches release metadata and assets (one hyper-rustls client,
-   `fetch.rs`), applies the selection policy (no downgrade, `policy.rs`), and
-   writes the binary and its `<tag>.sigstore.json` bundle under
-   `<state_root>/update/staged`. Only the worker reads them there.
-2. `StageBegin { tag, len, sha256, bundle }` and `StageUpdate { offset,
-   chunk }` (C1-b): the engine sends the bundle and the image, in chunks of
-   at most 512 KiB, over the socket. The monitor writes one stage,
-   `/run/detent/staging/update.stage` (`O_EXCL`, `O_NOFOLLOW`, checked
-   directory owner and mode), in order, up to the declared length (at most
-   64 MiB), and discards it on any refusal, a new begin, or shutdown.
-3. `ReplaceBinary { tag, len, sha256 }`: the monitor checks that the
-   request names its complete stage, reads it back (owner, one link,
-   length, digest), refuses a tag that is not newer, verifies the Sigstore
-   bundle against the embedded trust root with the in-tree verifier, and
-   only then renames the image over the running binary.
-4. A verification failure answers `VerificationFailed`; nothing is swapped.
+1. `detent update [--tag <tag>]` (`run_update`, `crates/detent/src/run.rs`)
+   fetches release metadata and assets (one hyper-rustls client,
+   `fetch.rs`) and applies the selection policy (`policy.rs`: no downgrade,
+   `[update] min_age_days`, `bad.json`); with `--tag` the release is exactly
+   that tag, still judged by the policy (`update::select_tag`).
+2. It checks the binary against `SHA256SUMS`, verifies the Sigstore bundle
+   against the embedded trust root with the in-tree verifier, and runs the
+   candidate's `--self-test` (feature set must cover the running one).
+3. It renames the candidate over its own executable (`install::swap`,
+   previous binary at `<binary>.prev`), restarts `detent.service`, waits
+   for `/healthz`, and on failure puts the previous binary back, restarts
+   again and adds the tag to `bad.json`.
+4. The web and MCP install (`Operation::UpdateApply`, E16) do not install
+   anything in the service: `StartUpdate { tag }` asks the runner to run
+   `systemd-run --unit=detent-update --collect <installed detent> update
+   --tag <tag>` (§5.3). The transient unit is outside `detent.service`, so
+   the updater lives through the restart it does. The request answers when
+   the unit runs; the running version shows the result.
 
 Known open item: the Rekor signed-entry-timestamp verification gap (STAGE3
 H17, `docs/stage4-wip/h17-set-partial.patch`).

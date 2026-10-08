@@ -74,10 +74,14 @@ export function requestCertRenew(client: ApiClient): Promise<ApiResult<RenewRequ
   return client.post('/api/v1/system/cert/renew', {})
 }
 
-export type UpdateApplied = components['schemas']['UpdateAppliedView']
+export type UpdateStarted = components['schemas']['UpdateStartedView']
 
-/** `POST /api/v1/system/update`. Needs `write`. Installs `version`, e.g. `v1.2.3`. */
-export function applyUpdate(client: ApiClient, version: string): Promise<ApiResult<UpdateApplied>> {
+/**
+ * `POST /api/v1/system/update`. Needs `write`. Starts installing `version`,
+ * e.g. `v1.2.3`, in the background; `202` means it started, not that it
+ * installed.
+ */
+export function applyUpdate(client: ApiClient, version: string): Promise<ApiResult<UpdateStarted>> {
   return client.post('/api/v1/system/update', { body: { version } })
 }
 
@@ -136,11 +140,14 @@ export function useRequestCertRenew(): UseMutationResult<RenewRequested, ApiRequ
 }
 
 /**
- * Install the named update. The server restarts the service after the swap,
- * so the update status is invalidated on success and the page may lose its
- * connection until the new process answers.
+ * Start installing the named update. Success means the update started in the
+ * background (a transient systemd unit runs `detent update --tag`), not that
+ * it installed: if it installs, the service restarts and the page may lose
+ * its connection until the new process answers; if the restarted service is
+ * not healthy, the update rolls back. The running version shows the result,
+ * so the update status is invalidated on success.
  */
-export function useApplyUpdate(): UseMutationResult<UpdateApplied, ApiRequestError, string> {
+export function useApplyUpdate(): UseMutationResult<UpdateStarted, ApiRequestError, string> {
   const client = useApiClient()
   const queryClient = useQueryClient()
   return useMutation({

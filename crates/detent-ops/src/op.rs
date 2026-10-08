@@ -206,10 +206,11 @@ pub enum Operation {
     /// front end installs none: it authorizes this operation and asks the
     /// acme process to renew.
     CertRenew,
-    /// Install a verified update: the engine sends the worker's downloaded
-    /// release and its bundle to the monitor's own staging over the privsep
-    /// socket and asks the monitor's `ReplaceBinary` to swap it over the
-    /// running binary.
+    /// Start installing a release: the monitor asks the runner to run
+    /// `detent update --tag <version>` in the transient systemd unit
+    /// `detent-update`, which downloads, verifies, self-tests, swaps,
+    /// restarts the service, checks `/healthz` and rolls back if it is not
+    /// healthy. The operation answers once the unit runs.
     UpdateApply {
         /// The update version to install, e.g. `v1.2.3`.
         version: String,

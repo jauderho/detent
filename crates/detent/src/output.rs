@@ -217,9 +217,9 @@ impl Renderer<'_> {
             // Unreachable: the CLI installs a release with `detent update`
             // and never sends `UpdateApply` (only the web API and `detent
             // mcp` do), so this arm only keeps the match exhaustive.
-            OpOutcome::UpdateApplied { .. } => {
-                Err(std::io::Error::other("update install is not wired yet"))
-            }
+            OpOutcome::UpdateStarted { .. } => Err(std::io::Error::other(
+                "the CLI installs a release with `detent update` itself",
+            )),
             // Unreachable: the CLI asks the server itself (`detent cert
             // status`, `detent cert renew`); only the `detent mcp` engine has
             // a certificate hook, and it renders JSON.
@@ -1226,10 +1226,10 @@ mod tests {
         Ok(())
     }
 
-    /// `UpdateApplied` has no text rendering yet: it is an error, never a
+    /// `UpdateStarted` has no text rendering: it is an error, never a
     /// blank line that would read as success.
     #[test]
-    fn an_update_applied_outcome_is_not_rendered_as_text() {
+    fn an_update_started_outcome_is_not_rendered_as_text() {
         let messages = Messages::new(Some("en-US"));
         let renderer = Renderer {
             messages: &messages,
@@ -1241,7 +1241,7 @@ mod tests {
         let result = renderer.outcome(
             &mut out,
             &mut notes,
-            &OpOutcome::UpdateApplied {
+            &OpOutcome::UpdateStarted {
                 version: "0.0.2".to_owned(),
             },
         );

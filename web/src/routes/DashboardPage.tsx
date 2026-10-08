@@ -278,9 +278,10 @@ function UpdateGrid({ report, l10n }: { report: UpdateReport; l10n: ReactLocaliz
 type InstallBanner = { tone: BannerTone; text: string }
 
 /**
- * Install the offered release. Hidden for a read-only session. The service
- * restarts after the swap, so the confirmation says so before anything is
- * sent. The result sits in a live region so it is announced.
+ * Install the offered release. Hidden for a read-only session. The install
+ * runs in the background and restarts the service if it installs, so the
+ * confirmation says so before anything is sent. The result sits in a live
+ * region so it is announced.
  */
 function InstallUpdate({ tag, l10n }: { tag: string; l10n: ReactLocalization }) {
   const gate = useWriteGate()
@@ -294,10 +295,10 @@ function InstallUpdate({ tag, l10n }: { tag: string; l10n: ReactLocalization }) 
   function install(): void {
     setConfirming(false)
     apply.mutate(tag, {
-      onSuccess: (applied) => {
+      onSuccess: (started) => {
         setBanner({
           tone: 'blue',
-          text: l10n.getString('dashboard-update-installed', { version: applied.version }),
+          text: l10n.getString('dashboard-update-started', { version: started.version }),
         })
       },
       onError: (error) => {

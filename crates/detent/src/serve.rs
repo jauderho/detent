@@ -1045,8 +1045,7 @@ fn prepare_worker(
     hostnames.push(host.profile.hostname.clone());
 
     let audit: Box<dyn AuditSink> = Box::new(FileAudit::under_state_root(&settings.state_root));
-    let mut engine = OpsEngine::new(registry, client, host, audit, service::for_host(init));
-    engine.set_state_root(settings.state_root.clone());
+    let engine = OpsEngine::new(registry, client, host, audit, service::for_host(init));
     let (engine_handle, engine_thread) = detent_web::spawn_engine(engine);
 
     let auth_state =

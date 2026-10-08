@@ -35,7 +35,7 @@ use detent_ops::{NullAudit, OpOutcome, OpsEngine};
 use detent_platform::fs::atomic::Sha256Digest;
 use detent_platform::host::{Detected, HostFacts};
 use detent_platform::privsep::allowlist::{Allowlist, Config as AllowlistConfig};
-use detent_platform::privsep::monitor::{Hooks, Monitor};
+use detent_platform::privsep::monitor::{HookError, Hooks, Monitor, ServiceControl};
 use detent_platform::privsep::transport::Channel;
 use detent_platform::privsep::worker::Client;
 use detent_platform::service;
@@ -64,6 +64,14 @@ struct Live {
 impl Live {
     /// A live stack with no modules registered — see the module doc for why.
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        Self::with_services(None)
+    }
+
+    /// As [`Live::new`], with `services` as the monitor's service hook
+    /// instead of none.
+    fn with_services(
+        services: Option<&'static (dyn ServiceControl + Sync)>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut fixture = test_state()?;
         let dir = TempDir::new()?;
         let allow_config = AllowlistConfig::with_state_root(dir.path().join("state"));
@@ -71,7 +79,11 @@ impl Live {
         let (monitor_end, worker_end) = Channel::pair()?;
         let monitor = thread::spawn(move || {
             let mut channel = monitor_end;
-            let _ = Monitor::new(allow, Hooks::default()).serve(&mut channel);
+            let hooks = services.map_or_else(Hooks::default, |services| Hooks {
+                services,
+                ..Hooks::default()
+            });
+            let _ = Monitor::new(allow, hooks).serve(&mut channel);
         });
         let mut client = Client::new(worker_end);
         client.hello()?;
@@ -1071,12 +1083,83 @@ async fn system_apply_needs_write_and_reports_the_stub() -> R {
     assert_eq!(wrong_scope.status(), StatusCode::FORBIDDEN);
     assert_eq!(error_body(wrong_scope).await?.1, "web-denied-scope");
 
-    // Without a staged binary the engine answers `UpdateApply` as
-    // `Unsupported`: 500 with the `ops-unsupported` id and a reason, never
-    // a silent no-op.
+    // Without a service hook (no runner, no systemd) the engine answers
+    // `UpdateApply` as `Unsupported`: 500 with the `ops-unsupported` id,
+    // never a silent no-op.
     let stub = post(live.state(), "/api/v1/system/update", Some(&write), body).await?;
     assert_eq!(stub.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(error_body(stub).await?.1, "ops-unsupported");
+
+    live.shutdown();
+    Ok(())
+}
+
+/// The runner's answer to a `StartUpdate`: `v98.0.0` is already running,
+/// every other tag starts.
+struct UpdateUnits;
+
+impl ServiceControl for UpdateUnits {
+    fn service(
+        &self,
+        _binding: &detent_core::descriptor::ServiceBinding,
+        _action: detent_core::descriptor::ServiceAction,
+    ) -> Result<detent_platform::privsep::proto::ServiceOutcome, HookError> {
+        Err(HookError::Failed("not used".to_owned()))
+    }
+
+    fn start_update(&self, tag: &str) -> Result<service::UpdateStart, HookError> {
+        Ok(if tag == "v98.0.0" {
+            service::UpdateStart::AlreadyRunning
+        } else {
+            service::UpdateStart::Started(format!("started {tag}"))
+        })
+    }
+}
+
+#[tokio::test]
+async fn system_apply_starts_the_update_or_reports_one_running() -> R {
+    static UNITS: UpdateUnits = UpdateUnits;
+    assert!(
+        UNITS
+            .service(
+                &detent_core::descriptor::ServiceBinding {
+                    units: detent_core::descriptor::UnitNames {
+                        systemd: &[],
+                        openrc: &[],
+                        bsdrc: &[],
+                    },
+                    actions: &[],
+                },
+                detent_core::descriptor::ServiceAction::Restart,
+            )
+            .is_err()
+    );
+    let live = Live::with_services(Some(&UNITS))?;
+    let (_read, write) = tokens(live.state())?;
+
+    let started = post(
+        live.state(),
+        "/api/v1/system/update",
+        Some(&write),
+        r#"{"version":"v99.0.0"}"#,
+    )
+    .await?;
+    assert_eq!(started.status(), StatusCode::ACCEPTED);
+    let bytes = axum::body::to_bytes(started.into_body(), usize::MAX).await?;
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&bytes)?,
+        serde_json::json!({ "version": "v99.0.0" })
+    );
+
+    let running = post(
+        live.state(),
+        "/api/v1/system/update",
+        Some(&write),
+        r#"{"version":"v98.0.0"}"#,
+    )
+    .await?;
+    assert_eq!(running.status(), StatusCode::CONFLICT);
+    assert_eq!(error_body(running).await?.1, "ops-update-running");
 
     live.shutdown();
     Ok(())

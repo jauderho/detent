@@ -360,26 +360,30 @@ where
 }
 /// `POST /api/v1/system/update`.
 ///
-/// Installs the named update: the engine sends the staged release and its
-/// bundle to the monitor over the privsep socket and drives the monitor's
-/// `ReplaceBinary` swap. Refused as `Unsupported` (`ops-unsupported`, 500
-/// with a reason) when the staged file is missing or the request is unsafe; the route,
-/// authz (`write`), and audit record are the stable shape the UI builds on.
+/// Starts installing the named release in the background: the monitor asks
+/// the runner to run `detent update --tag <version>` in the transient
+/// systemd unit `detent-update`, which downloads and verifies the release,
+/// swaps it in, restarts the service, and rolls back if the restarted
+/// service is not healthy. `202` means the unit runs, not that the release
+/// is installed; `GET` shows the running version afterwards. `409`
+/// (`ops-update-running`) while an update runs; `500` (`ops-unsupported`)
+/// on a host without systemd.
 #[cfg_attr(test, utoipa::path(
     post,
     path = UPDATE_PATH,
     tag = "system",
     request_body = UpdateApplyRequest,
     responses(
-        (status = 200, description = "The update was installed", body = UpdateAppliedView),
-        (status = 500, description = "No staged binary to install", body = crate::error::ErrorBody),
+        (status = 202, description = "The update started in the background", body = UpdateStartedView),
+        (status = 409, description = "An update is already running", body = crate::error::ErrorBody),
+        (status = 500, description = "The update could not be started on this host", body = crate::error::ErrorBody),
     ),
 ))]
 pub(super) async fn apply_update(
     State(state): State<AppState>,
     caller: WriteCaller,
     body: Result<Json<UpdateApplyRequest>, JsonRejection>,
-) -> Result<Json<UpdateAppliedView>, ApiError> {
+) -> Result<(StatusCode, Json<UpdateStartedView>), ApiError> {
     let Json(request) = body.map_err(json_rejection)?;
     let op = Operation::UpdateApply {
         version: request.version,
@@ -393,7 +397,7 @@ pub(super) async fn apply_update(
             caller.caller().authz(),
         )
         .await?;
-    render_applied(outcome)
+    render_started(outcome)
 }
 
 /// The body of `POST /api/v1/system/update`.
@@ -405,19 +409,22 @@ pub struct UpdateApplyRequest {
     pub version: String,
 }
 
-/// Answer to `UpdateApply`.
+/// Answer to `UpdateApply`: the update started; it says nothing about its
+/// outcome.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(utoipa::ToSchema))]
-pub struct UpdateAppliedView {
-    /// The version that was installed.
+pub struct UpdateStartedView {
+    /// The version being installed.
     pub version: String,
 }
 
-/// The `OpOutcome::UpdateApplied` branch, pulled out of [`apply_update`] so
+/// The `OpOutcome::UpdateStarted` branch, pulled out of [`apply_update`] so
 /// the mismatch arm can be exercised with a synthetic outcome.
-fn render_applied(outcome: OpOutcome) -> Result<Json<UpdateAppliedView>, ApiError> {
+fn render_started(outcome: OpOutcome) -> Result<(StatusCode, Json<UpdateStartedView>), ApiError> {
     match outcome {
-        OpOutcome::UpdateApplied { version } => Ok(Json(UpdateAppliedView { version })),
+        OpOutcome::UpdateStarted { version } => {
+            Ok((StatusCode::ACCEPTED, Json(UpdateStartedView { version })))
+        }
         _ => Err(unexpected_outcome()),
     }
 }
@@ -585,8 +592,8 @@ fn render_audit(outcome: OpOutcome) -> Result<Json<Vec<AuditRecord>>, ApiError> 
 #[cfg(test)]
 mod tests {
     use super::{
-        AuditQueryParams, FAILED_CHECK_BACKOFF, MAX_AUDIT_LIMIT, MAX_FILTER_LEN, UpdateAppliedView,
-        UpdateReport, guarded_live_check, render_applied, render_audit, render_host,
+        AuditQueryParams, FAILED_CHECK_BACKOFF, MAX_AUDIT_LIMIT, MAX_FILTER_LEN, UpdateReport,
+        UpdateStartedView, guarded_live_check, render_audit, render_host, render_started,
         update_check_failed, update_report,
     };
     use detent_core::descriptor::HostProfile;
@@ -910,20 +917,21 @@ mod tests {
     // -- POST /api/v1/system/update ------------------------------------------
 
     #[test]
-    fn render_applied_maps_the_matching_outcome_and_rejects_any_other() -> R {
-        let view = render_applied(OpOutcome::UpdateApplied {
+    fn render_started_maps_the_matching_outcome_and_rejects_any_other() -> R {
+        let (status, view) = render_started(OpOutcome::UpdateStarted {
             version: "v1.2.3".to_owned(),
         })
-        .map(|axum::Json(view)| view)
+        .map(|(status, axum::Json(view))| (status, view))
         .map_err(|_| "matching outcome must render")?;
+        assert_eq!(status, axum::http::StatusCode::ACCEPTED);
         assert_eq!(view.version, "v1.2.3");
         assert_eq!(
-            serde_json::to_value(UpdateAppliedView {
+            serde_json::to_value(UpdateStartedView {
                 version: "v1.2.3".to_owned()
             })?,
             serde_json::json!({ "version": "v1.2.3" })
         );
-        assert!(render_applied(wrong_outcome()).is_err());
+        assert!(render_started(wrong_outcome()).is_err());
         Ok(())
     }
 

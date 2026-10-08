@@ -371,11 +371,14 @@ export interface paths {
         put?: never;
         /**
          * `POST /api/v1/system/update`.
-         * @description Installs the named update: the engine sends the staged release and its
-         *     bundle to the monitor over the privsep socket and drives the monitor's
-         *     `ReplaceBinary` swap. Refused as `Unsupported` (`ops-unsupported`, 500
-         *     with a reason) when the staged file is missing or the request is unsafe; the route,
-         *     authz (`write`), and audit record are the stable shape the UI builds on.
+         * @description Starts installing the named release in the background: the monitor asks
+         *     the runner to run `detent update --tag <version>` in the transient
+         *     systemd unit `detent-update`, which downloads and verifies the release,
+         *     swaps it in, restarts the service, and rolls back if the restarted
+         *     service is not healthy. `202` means the unit runs, not that the release
+         *     is installed; `GET` shows the running version afterwards. `409`
+         *     (`ops-update-running`) while an update runs; `500` (`ops-unsupported`)
+         *     on a host without systemd.
          */
         post: operations["apply_update"];
         delete?: never;
@@ -1138,11 +1141,6 @@ export interface components {
             /** @description systemd unit names. */
             systemd: string[];
         };
-        /** @description Answer to `UpdateApply`. */
-        UpdateAppliedView: {
-            /** @description The version that was installed. */
-            version: string;
-        };
         /** @description The body of `POST /api/v1/system/update`. */
         UpdateApplyRequest: {
             /** @description The update version to install, e.g. `v1.2.3`. */
@@ -1168,6 +1166,14 @@ export interface components {
             tag?: string | null;
             /** @description Whether a qualifying release exists. */
             update_available: boolean;
+        };
+        /**
+         * @description Answer to `UpdateApply`: the update started; it says nothing about its
+         *     outcome.
+         */
+        UpdateStartedView: {
+            /** @description The version being installed. */
+            version: string;
         };
         /** @description The upstream project whose configuration format a module tracks. */
         Upstream: {
@@ -1913,16 +1919,25 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The update was installed */
-            200: {
+            /** @description The update started in the background */
+            202: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["UpdateAppliedView"];
+                    "application/json": components["schemas"]["UpdateStartedView"];
                 };
             };
-            /** @description No staged binary to install */
+            /** @description An update is already running */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The update could not be started on this host */
             500: {
                 headers: {
                     [name: string]: unknown;

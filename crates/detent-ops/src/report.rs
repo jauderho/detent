@@ -397,9 +397,10 @@ pub enum OpOutcome {
     Host(Box<HostReport>),
     /// Answer to `AuditQuery`.
     Audit(Vec<AuditRecord>),
-    /// Answer to `UpdateApply`: the monitor's `ReplaceBinary` swap landed.
-    UpdateApplied {
-        /// The version that was installed.
+    /// Answer to `UpdateApply`: the update unit runs. It says nothing about
+    /// the outcome; the running version shows it afterwards.
+    UpdateStarted {
+        /// The version being installed.
         version: String,
     },
     /// Answer to `CertStatus`, from the front end's certificate hook. The
