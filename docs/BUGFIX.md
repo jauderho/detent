@@ -422,10 +422,15 @@ deferred by the owner.
     update --tag <tag>`, and the CLI updater does download, verification,
     self-test, swap, restart, `/healthz` and rollback; the web answers 202
     (409 while an update runs). The monitor's stage and swap path is
-    removed. **Unproven until a Linux/testhost run:** `systemd-run` from the
-    runner under the packaged unit, and a full web install. Not fixed here:
-    `GET /api/v1/system/update` 503 without `update/check.json` (inferred);
-    capability-user mode needs a polkit rule for the unit (Phase 12).
+    removed. Proven on testhost (2026-10-08, PROGRESS): `systemd-run` from the
+    runner under the packaged unit, a full web install `v0.1.0` → `v0.1.1`
+    (202, restart, `/healthz`, digest) and 409 for a second start. Not
+    proven: rollback through the web path (the CLI rollback is proven by
+    M3). Open: `GET /api/v1/system/update` 503 on the confined host (worker
+    seccomp has no `connect`/`poll`; a root-written `check.json` is `0600`;
+    the stamp is not cleared after an install); a refused tag answers 500
+    `ops-privsep-failed`, not a 4xx; capability-user mode needs a polkit
+    rule for the unit (Phase 12).
 
 ### Track F — Phase 12 / M4 (v1.0)
 
