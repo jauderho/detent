@@ -212,7 +212,6 @@ const MONITOR: &[&str] = &[
     "pread64",
     "pwrite64",
     "renameat",
-    "linkat", // Was for `swap_running_binary` (retired by E16); kept for now.
     "fsync",
     "unlinkat",
     "mkdirat",
@@ -637,7 +636,6 @@ const SYSCALL_NUMBERS: &[(&str, i64, i64)] = &[
     ("open", 2, -1),
     ("openat", 257, 56),
     ("renameat", 264, 38),
-    ("linkat", 265, 37),
     ("unlinkat", 263, 35),
     ("mkdirat", 258, 34),
     ("getdents64", 217, 61),
@@ -931,6 +929,18 @@ mod tests {
         }
         assert_eq!(super::number("stat", Arch::X86_64), Some(4));
         assert_eq!(super::number("lstat", Arch::X86_64), Some(6));
+    }
+
+    /// E16 retired the monitor's binary swap, the only caller of `linkat`.
+    /// No table lists it.
+    #[test]
+    fn no_table_allows_linkat() {
+        for role in [Role::Monitor, Role::Worker, Role::Acme] {
+            assert!(
+                !syscalls_for(role).contains(&"linkat"),
+                "{role:?} allows linkat"
+            );
+        }
     }
 
     /// W1: `fdatasync` (the audit writers' `File::sync_data()`) resolves on
