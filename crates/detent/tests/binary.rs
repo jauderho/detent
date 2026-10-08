@@ -195,8 +195,21 @@ fn mcp_stdio_answers_initialize() -> TestResult {
                 "mcp stdio did not answer initialize within 10s (deadlocked stdio?)".into()
             })?;
 
-    let _ = child.kill();
-    let _ = child.wait();
+    // The stdin thread closed stdin, so the server exits by itself. Wait for
+    // it: a SIGKILL while it writes its coverage profile at exit leaves a
+    // truncated `.profraw`, and `cargo llvm-cov report` then fails to merge.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            break child.wait()?;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(status.success(), "the server did not exit 0: {status:?}");
     if let Some(h) = stdin_thread.take() {
         let _ = h.join();
     }
