@@ -237,10 +237,9 @@ impl Policy {
     /// The monitor's policy: write access to every enabled target's parent
     /// directory, each target's backup directory, the state root
     /// (`Allowlist::state_root`, which also covers the check-tmp and
-    /// pending-commit-marker paths), the monitor-only staging base, and the
-    /// running binary's own directory. The last one was for `ReplaceBinary`'s
-    /// swap, which E16 retired (the CLI updater installs now); it stays until
-    /// the owner decides to narrow the policy.
+    /// pending-commit-marker paths), and the monitor-only staging base. It
+    /// grants no write on the running binary's directory: the CLI updater
+    /// installs releases, outside the monitor (E16).
     #[must_use]
     pub fn monitor(allowlist: &Allowlist) -> Self {
         let mut paths: BTreeSet<PathBuf> = BTreeSet::new();
@@ -252,15 +251,6 @@ impl Policy {
         }
         paths.insert(allowlist.state_root().to_path_buf());
         paths.insert(PathBuf::from(DEFAULT_STAGING_DIR));
-        // Was for the monitor's binary swap (`ReplaceBinary`), retired by
-        // E16: the monitor no longer writes here. Kept unchanged until the
-        // owner decides to narrow the Landlock policy.
-        if let Ok(exe) = std::env::current_exe()
-            && let Some(parent) = exe.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            paths.insert(parent.to_path_buf());
-        }
         Self {
             writable_paths: paths.into_iter().collect(),
             retained_caps: vec![
@@ -594,6 +584,24 @@ mod tests {
         Ok(())
     }
 
+    /// E16 retired the monitor's binary swap, so no policy grants a write on
+    /// the directory of the running binary.
+    #[test]
+    fn no_policy_grants_a_write_on_the_binary_directory() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let root = Path::new("/tmp/detent-sandbox-test-binary-dir");
+        let allow = fixture(root)?;
+        let exe = std::env::current_exe()?;
+        let dir = exe.parent().ok_or("the running binary has no directory")?;
+        for policy in [Policy::monitor(&allow), Policy::worker(&allow)] {
+            assert!(
+                !policy.writable_paths.iter().any(|path| path == dir),
+                "{dir:?} is writable"
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn only_the_monitor_policy_grants_the_runtime_staging_base()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -654,15 +662,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let root = Path::new("/tmp/detent-sandbox-test-empty");
         let allow = Allowlist::from_modules(&[], &Config::with_state_root(root))?;
-        // Plus the running binary's own directory, kept from the retired
-        // `ReplaceBinary` swap (E16) until the owner narrows the policy.
         let mut expected = vec![root.to_path_buf(), PathBuf::from(DEFAULT_STAGING_DIR)];
-        if let Ok(exe) = std::env::current_exe()
-            && let Some(parent) = exe.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            expected.push(parent.to_path_buf());
-        }
         expected.sort();
         expected.dedup();
         assert_eq!(Policy::monitor(&allow).writable_paths, expected);
