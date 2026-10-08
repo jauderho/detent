@@ -886,7 +886,6 @@ dependencies = [
  "caps",
  "detent-core",
  "detent-modules",
- "detent-update",
  "http-body-util",
  "hyper",
  "hyper-rustls",

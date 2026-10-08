@@ -212,7 +212,7 @@ const MONITOR: &[&str] = &[
     "pread64",
     "pwrite64",
     "renameat",
-    "linkat", // `swap_running_binary` hard-links the previous binary.
+    "linkat", // Was for `swap_running_binary` (retired by E16); kept for now.
     "fsync",
     "unlinkat",
     "mkdirat",

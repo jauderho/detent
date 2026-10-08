@@ -60,29 +60,16 @@ use detent_core::descriptor::{ServiceAction as CoreServiceAction, TargetKind};
 ///
 /// [`Request::StartUpdate`], [`Response::UpdateStarted`] and
 /// [`ProtoError::UpdateRunning`] (E16) are appended variants too; the
-/// version stays `2`.
+/// version stays `2`. E16 also retired [`Request::StageBegin`],
+/// [`Request::StageUpdate`] and [`Request::ReplaceBinary`]: the monitor
+/// refuses them, and they stay in the enum so no discriminant moves.
 pub const PROTO_VERSION: u16 = 2;
 /// Largest encoded message accepted in either direction, in bytes.
 ///
 /// The largest legitimate payload is a configuration file, and 1 MiB is far
 /// above any file `detent` manages. Enforcing it before allocation makes a
-/// length header from a hostile peer harmless. A release image is larger, so
-/// it crosses in [`MAX_STAGE_CHUNK`] pieces ([`Request::StageUpdate`]).
+/// length header from a hostile peer harmless.
 pub const MAX_FRAME: usize = 1024 * 1024;
-
-/// Largest release image the monitor stages, in bytes (C1-b): 64 MiB, five
-/// times the 12 MiB budget of the largest build (PLAN §4.1). The monitor
-/// refuses a [`Request::StageBegin`] that declares more, so a worker cannot
-/// fill the monitor's staging directory.
-pub const MAX_UPDATE_BYTES: u64 = 64 * 1024 * 1024;
-
-/// Largest `chunk` of one [`Request::StageUpdate`], in bytes: half of
-/// [`MAX_FRAME`], so a chunk and its framing always fit in one frame.
-pub const MAX_STAGE_CHUNK: usize = MAX_FRAME / 2;
-
-/// Largest Sigstore bundle a [`Request::StageBegin`] carries, in bytes. A
-/// release bundle is about 11 KiB.
-pub const MAX_STAGE_BUNDLE: usize = 256 * 1024;
 
 /// Longest release tag [`Request::StartUpdate`] carries, in bytes. Real
 /// tags are about 15 (`v0.0.1-rc.2`).
@@ -347,18 +334,13 @@ pub enum Request {
         /// Which target.
         target: TargetId,
     },
-    /// Replace the running binary with the release staged by
-    /// [`Request::StageBegin`] and [`Request::StageUpdate`].
+    /// Was: replace the running binary with the staged release (C1-b).
     ///
-    /// `tag`, `len` and `sha256` must equal the stage's, and the stage must
-    /// be complete. The monitor reads the image back from its own staging
-    /// file, checks its length and digest, authenticates it against the
-    /// stage's Sigstore bundle, refuses a tag that is not newer than the
-    /// running version (C1-e), and atomically swaps it into place. It never
-    /// reads a path the worker can write (C1-b). The stage is consumed
-    /// whatever the answer.
+    /// Retired by E16: the monitor installs no release itself and answers
+    /// [`ProtoError::Unsupported`]. The CLI updater installs, in the unit
+    /// [`Request::StartUpdate`] starts. Kept so no discriminant moves.
     ReplaceBinary {
-        /// Release tag, as in [`Request::StageBegin`].
+        /// Release tag.
         tag: String,
         /// Length of the replacement image.
         len: u64,
@@ -401,13 +383,11 @@ pub enum Request {
         /// Which module was written.
         module: ModuleId,
     },
-    /// Begin staging a release image in the monitor's own staging
-    /// directory (C1-b), so the monitor never reads update bytes from a
-    /// path the worker can write. The monitor discards any earlier stage
-    /// (one at a time), refuses a `len` of 0 or over [`MAX_UPDATE_BYTES`], a
-    /// `bundle` that is empty or over [`MAX_STAGE_BUNDLE`], and a `tag`
-    /// that is not a newer semver version (C1-e), and answers
-    /// [`Response::Staged`] with `received: 0`.
+    /// Was: begin staging a release image in the monitor (C1-b).
+    ///
+    /// Retired by E16: the monitor installs no release itself and answers
+    /// [`ProtoError::Unsupported`]. The CLI updater installs, in the unit
+    /// [`Request::StartUpdate`] starts. Kept so no discriminant moves.
     ///
     /// Appended after [`Request::ReloadUnitFiles`] to preserve every
     /// existing discriminant; see [`PROTO_VERSION`]'s doc comment.
@@ -421,11 +401,11 @@ pub enum Request {
         /// The release's Sigstore bundle (`<asset>.sigstore.json`).
         bundle: Vec<u8>,
     },
-    /// The next piece of the image begun by [`Request::StageBegin`]. Chunks
-    /// come in order, without gaps or overlap: `offset` must equal the
-    /// bytes received so far, `chunk` must hold 1 to [`MAX_STAGE_CHUNK`]
-    /// bytes and must not run past the declared length. The monitor
-    /// discards the whole stage on any refusal.
+    /// Was: the next piece of the image begun by [`Request::StageBegin`].
+    ///
+    /// Retired by E16: the monitor installs no release itself and answers
+    /// [`ProtoError::Unsupported`]. The CLI updater installs, in the unit
+    /// [`Request::StartUpdate`] starts. Kept so no discriminant moves.
     ///
     /// Appended after [`Request::StageBegin`] to preserve every existing
     /// discriminant; see [`PROTO_VERSION`]'s doc comment.
@@ -728,11 +708,11 @@ pub enum Response {
         /// How many targets were actually restored.
         restored: u16,
     },
-    /// Answer to [`Request::ReplaceBinary`].
+    /// Was the answer to [`Request::ReplaceBinary`]; no monitor sends it
+    /// since E16. Kept so no discriminant moves.
     ///
     /// Appended after [`Response::RolledBack`] so every prior discriminant
-    /// keeps its value; this is the release-swap path described at
-    /// [`PROTO_VERSION`].
+    /// keeps its value.
     Replaced {
         /// The version that was installed (hex sha256 of the staged image).
         version: String,
@@ -762,7 +742,9 @@ pub enum Response {
         /// What happened to each unit of an added or changed entry.
         units: Vec<MountOutcome>,
     },
-    /// Answer to [`Request::StageBegin`] and [`Request::StageUpdate`].
+    /// Was the answer to [`Request::StageBegin`] and
+    /// [`Request::StageUpdate`]; no monitor sends it since E16. Kept so no
+    /// discriminant moves.
     ///
     /// Appended after [`Response::Mounted`] to preserve every existing
     /// discriminant; see [`PROTO_VERSION`]'s doc comment.
@@ -840,7 +822,9 @@ pub enum ProtoError {
     /// A syscall failed. The message is a short summary with no path in it.
     #[error("i/o error: {0}")]
     Io(String),
-    /// The staged release failed authenticity verification.
+    /// The staged release failed authenticity verification. No monitor
+    /// sends it since E16 retired `ReplaceBinary`; kept so no discriminant
+    /// moves.
     #[error("staged release verification failed")]
     VerificationFailed,
     /// The allow-listed target does not exist. The worker already knows the
@@ -983,11 +967,10 @@ impl<'a> arbitrary::Arbitrary<'a> for Sha256Digest {
 mod tests {
     use super::{
         BackupId, BackupInfo, BindingId, BindingInfo, CheckId, CheckInfo, CheckOutcome, CodecError,
-        CommitId, HelloAck, IdKind, MAX_FRAME, MAX_RELEASE_TAG_LEN, MAX_STAGE_BUNDLE,
-        MAX_STAGE_CHUNK, MAX_UPDATE_BYTES, ModuleId, ModuleInfo, MountOutcome, MountState,
-        PROTO_VERSION, PathKind, PendingService, ProtoError, Request, Response, ServiceAction,
-        ServiceOutcome, TargetContents, TargetId, TargetInfo, WriteReceipt, decode, encode,
-        is_release_tag,
+        CommitId, HelloAck, IdKind, MAX_FRAME, MAX_RELEASE_TAG_LEN, ModuleId, ModuleInfo,
+        MountOutcome, MountState, PROTO_VERSION, PathKind, PendingService, ProtoError, Request,
+        Response, ServiceAction, ServiceOutcome, TargetContents, TargetId, TargetInfo,
+        WriteReceipt, decode, encode, is_release_tag,
     };
     use crate::fs::atomic::Sha256Digest;
     use detent_core::descriptor::{ServiceAction as CoreServiceAction, TargetKind};
@@ -1508,22 +1491,6 @@ mod tests {
         let longest = format!("v1.2.3-{}", "a".repeat(MAX_RELEASE_TAG_LEN - 7));
         assert_eq!(longest.len(), MAX_RELEASE_TAG_LEN);
         assert!(is_release_tag(&longest));
-    }
-
-    #[test]
-    fn a_full_stage_chunk_fits_in_one_frame() {
-        let request = Request::StageUpdate {
-            offset: MAX_UPDATE_BYTES,
-            chunk: vec![0xff_u8; MAX_STAGE_CHUNK],
-        };
-        assert!(encode(&request).is_ok());
-        let begin = Request::StageBegin {
-            tag: "v1.2.3".to_owned(),
-            len: MAX_UPDATE_BYTES,
-            sha256: digest(),
-            bundle: vec![0xff_u8; MAX_STAGE_BUNDLE],
-        };
-        assert!(encode(&begin).is_ok());
     }
 
     #[test]

@@ -169,7 +169,7 @@ access (`docs/FFI.md`).
 | TB2 | Worker → monitor socket | the worker (assume compromised) | closed request enum, 1 MiB frames, ids into the allow-list, content re-validation (§5, §6) |
 | TB3 | Monitor → runner socket | the monitor (assume compromised) | ids into the runner's own allow-list copy, staged file name only, a release tag checked again for the fixed update argv (§5.3) |
 | TB4 | Candidate content → root daemons | bytes the worker sends | module parser + validator + per-daemon execution deny-list in the monitor (§6) |
-| TB5 | Release feed → running binary | GitHub and the network | Sigstore bundle verification in the monitor before the swap (§8) |
+| TB5 | Release feed → running binary | GitHub and the network | Sigstore bundle verification in the CLI updater before the swap (§8) |
 | TB6 | Local operator → CLI / MCP | the local user | Unix permissions: the CLI needs the privilege it uses (§3.2) |
 
 ## 5. The privsep protocol
@@ -192,7 +192,7 @@ connection (`transport.rs`). `Hello` must come first and carries
 | `Service { binding, action }` | id; action declared by the binding; run through the runner |
 | `ListBackups`, `Restore` | module id; backup index into the monitor's own listing |
 | `StartConfirmTimer`, `ConfirmCommit`, `RollbackCommit`, `PendingCommit` | one pending commit at a time; journal of this commit's writes only |
-| `ReplaceBinary { tag, len, sha256 }` | digest and length; Sigstore verification (§8) |
+| `StageBegin`, `StageUpdate`, `ReplaceBinary` | retired by E16: always `Unsupported` |
 | `Mount` | reserved; answers `Unsupported` |
 | `StartUpdate { tag }` | `v` + semver tag, no build metadata, at most 64 bytes, `[0-9A-Za-z.-]` (`is_release_tag`); newer than the running version; run through the runner (§8) |
 | `Shutdown` | — |
@@ -356,9 +356,9 @@ any degraded step (`report_confinement`, `serve.rs`).
 | `…/audit/detent-auth.jsonl` | worker | login, token and session events |
 | `…/users.json`, `…/tokens.json` | `detent setup`, `detent user`, `detent token` (local operator) | Argon2id hashes; token SHA-256 digests |
 | `…/pending-commit.json` | monitor | commit-confirm marker, replayed at start |
-| `…/update/staged/` | worker | downloaded release and bundle; read only by the worker, which sends them to the monitor over the socket |
 | `/var/lib/detent/certs` | worker | TLS pair, `0600` in a `0700` dir |
-| `/run/detent/staging` | monitor | candidate files for validators of modules with no file target; the update stage `update.stage` (one at a time, at most 64 MiB) |
+| `/run/detent/staging` | monitor | candidate files for validators of modules with no file target or a read-only target directory |
+| `…/update/check.json`, `…/update/bad.json` | the update check; `detent update` | cached check report; tags rolled back on this host |
 | target's directory, `.detent-candidate-*` | monitor | candidate file for a module's validators, removed after the check |
 
 ## 11. Residual risks an auditor should weigh

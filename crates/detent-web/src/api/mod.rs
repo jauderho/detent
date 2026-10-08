@@ -393,7 +393,7 @@ mod tests {
         // The 13 `Operation` endpoints PLAN Phase 4 lists, plus cert status
         // (read-only, served from the live `CertStore`), the update check
         // (read-only, served from `detent-update`), the update install
-        // (`POST`, refused as `Unsupported` without a staged binary), the
+        // (`POST`, starts the update unit, E16), the
         // pending commit read, the renewal request (`POST`, answered by the
         // acme process), and `/api/v1/openapi.json` itself.
         assert_eq!(table().len(), 19, "{:?}", table());

@@ -400,7 +400,7 @@ fn mount_for_a_module_without_mounts_is_refused() -> TestResult {
 }
 
 #[test]
-fn replace_binary_rejects_a_missing_staged_file() -> TestResult {
+fn replace_binary_is_refused_since_the_monitor_installs_no_release() -> TestResult {
     let fx = fixture(b"v1")?;
     let (mut client, handle) = spawn_client(fx.allow()?)?;
 
@@ -410,7 +410,10 @@ fn replace_binary_rejects_a_missing_staged_file() -> TestResult {
         sha256: Sha256Digest::of(b"binary"),
     })?;
     let response: Response = client.channel_mut().recv()?;
-    assert!(matches!(response, Response::Error(ProtoError::Io(_))));
+    assert!(matches!(
+        response,
+        Response::Error(ProtoError::Unsupported(_))
+    ));
 
     client.shutdown()?;
     join_shutdown(handle);

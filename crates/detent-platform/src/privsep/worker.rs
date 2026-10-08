@@ -13,9 +13,8 @@ use crate::fs::atomic::Sha256Digest;
 
 use super::proto::{
     BackupId, BackupInfo, BindingId, BindingInfo, CheckId, CheckOutcome, CommitId, HelloAck,
-    MAX_STAGE_CHUNK, ModuleId, MountOutcome, PROTO_VERSION, PathKind, PendingService, ProtoError,
-    Request, Response, ServiceAction, ServiceOutcome, TargetContents, TargetId, TargetInfo,
-    WriteReceipt,
+    ModuleId, MountOutcome, PROTO_VERSION, PathKind, PendingService, ProtoError, Request, Response,
+    ServiceAction, ServiceOutcome, TargetContents, TargetId, TargetInfo, WriteReceipt,
 };
 use super::transport::{Channel, ChannelError};
 
@@ -371,74 +370,6 @@ impl Client {
         match self.checked_call(&Request::RollbackCommit { commit })? {
             Response::RolledBack { commit, restored } => Ok((commit, restored)),
             other => Err(unexpected("RolledBack", &other)),
-        }
-    }
-
-    /// Ask the monitor to authenticate and atomically install the release
-    /// [`Client::stage_update`] staged.
-    ///
-    /// `tag`, `len` and `sha256` must name that stage. The monitor hashes
-    /// the bytes it reads back from its own staging file before it verifies
-    /// the stage's Sigstore bundle and swaps.
-    ///
-    /// # Errors
-    ///
-    /// As [`Client::read_target`]. Authenticity failures are reported coarsely
-    /// as [`ProtoError::VerificationFailed`].
-    pub fn replace_binary(
-        &mut self,
-        tag: &str,
-        len: u64,
-        sha256: Sha256Digest,
-    ) -> Result<String, ClientError> {
-        match self.checked_call(&Request::ReplaceBinary {
-            tag: tag.to_owned(),
-            len,
-            sha256,
-        })? {
-            Response::Replaced { version } => Ok(version),
-            other => Err(unexpected("Replaced", &other)),
-        }
-    }
-
-    /// Stage a release image in the monitor's own staging directory (C1-b):
-    /// a [`Request::StageBegin`] that declares the tag, the length, the
-    /// digest and the Sigstore `bundle`, then the image in
-    /// [`MAX_STAGE_CHUNK`] pieces ([`Request::StageUpdate`]). Returns the
-    /// image's digest, for [`Client::replace_binary`].
-    ///
-    /// # Errors
-    ///
-    /// As [`Client::read_target`]. The monitor refuses an image over
-    /// [`MAX_UPDATE_BYTES`](super::proto::MAX_UPDATE_BYTES), a bundle over
-    /// [`MAX_STAGE_BUNDLE`](super::proto::MAX_STAGE_BUNDLE) and a tag that
-    /// is not newer than the running version.
-    pub fn stage_update(
-        &mut self,
-        tag: &str,
-        image: &[u8],
-        bundle: Vec<u8>,
-    ) -> Result<Sha256Digest, ClientError> {
-        let sha256 = Sha256Digest::of(image);
-        let mut received = self.stage_call(&Request::StageBegin {
-            tag: tag.to_owned(),
-            len: image.len() as u64,
-            sha256,
-            bundle,
-        })?;
-        for chunk in image.chunks(MAX_STAGE_CHUNK) {
-            received = self.stage_call(&Request::StageUpdate {
-                offset: received,
-                chunk: chunk.to_vec(),
-            })?;
-        }
-        Ok(sha256)
-    }
-
-    fn stage_call(&mut self, request: &Request) -> Result<u64, ClientError> {
-        match self.checked_call(request)? {
-            Response::Staged { received } => Ok(received),
-            other => Err(unexpected("Staged", &other)),
         }
     }
 
@@ -989,38 +920,6 @@ mod tests {
     }
 
     #[test]
-    fn replace_binary_reports_unexpected_for_a_wrong_response()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let (mut client, handle) = client_with_scripted_reply(Response::Pending(None))?;
-        assert!(matches!(
-            client.replace_binary("v1.0.0", 5, Sha256Digest::of(b"image")),
-            Err(ClientError::Unexpected {
-                want: "Replaced",
-                got: "Pending"
-            })
-        ));
-        drop(client);
-        let _ = handle.join();
-        Ok(())
-    }
-
-    #[test]
-    fn stage_update_reports_unexpected_for_a_wrong_response()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let (mut client, handle) = client_with_scripted_reply(Response::Pending(None))?;
-        assert!(matches!(
-            client.stage_update("v1.0.0", b"image", b"{}".to_vec()),
-            Err(ClientError::Unexpected {
-                want: "Staged",
-                got: "Pending"
-            })
-        ));
-        drop(client);
-        let _ = handle.join();
-        Ok(())
-    }
-
-    #[test]
     fn a_staged_answer_to_another_request_is_unexpected() -> Result<(), Box<dyn std::error::Error>>
     {
         let (mut client, handle) = client_with_scripted_reply(Response::Staged { received: 0 })?;
@@ -1037,15 +936,18 @@ mod tests {
     }
 
     #[test]
-    fn replace_binary_returns_the_version_the_monitor_installed()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn a_replaced_answer_to_another_request_is_unexpected() -> Result<(), Box<dyn std::error::Error>>
+    {
         let (mut client, handle) = client_with_scripted_reply(Response::Replaced {
             version: "abc".to_owned(),
         })?;
-        assert_eq!(
-            client.replace_binary("v1.0.0", 5, Sha256Digest::of(b"image"))?,
-            "abc"
-        );
+        assert!(matches!(
+            client.pending_commit(),
+            Err(ClientError::Unexpected {
+                want: "Pending",
+                got: "Replaced"
+            })
+        ));
         drop(client);
         let _ = handle.join();
         Ok(())

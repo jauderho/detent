@@ -629,12 +629,6 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
     let allow = Allowlist::from_modules(&[allow_descriptor], &config)?;
 
     let (monitor_end, worker_end) = Channel::pair()?;
-    // Point the in-test swap at this harness's own temp target instead of the
-    // real test binary: the monitor swaps `current_exe` by default, and these
-    // tests run in parallel, so a global override would steer every monitor
-    // at once. A per-monitor field keeps each swap inside its own tempdir.
-    let binary_target = target.clone();
-    let trust = update_trust()?;
     // Leaked so the monitor thread can borrow it for `'static`, one per
     // harness so parallel tests do not share a run count.
     let checks: &'static FakeChecks = leak(FakeChecks {
@@ -663,8 +657,6 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
             descriptor: allow_descriptor,
         })]);
         monitor.set_staging_dir(staging_dir);
-        monitor.set_binary_override(binary_target);
-        monitor.set_update_trust(trust);
         monitor.serve(&mut channel)
     });
 
@@ -758,17 +750,6 @@ fn proxy(mut engine: Channel, mut monitor: Channel, fail_arm: bool, fail_restore
 /// The id the registry advertises, which is `fake` unless the setup asked for
 /// a mismatch.
 const MODULE: &str = "fake";
-
-fn update_fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../detent-update/tests/fixtures")
-}
-
-fn update_trust() -> Result<detent_update::trust::TrustRoot, Box<dyn std::error::Error>> {
-    let root = std::fs::read_to_string(update_fixtures().join("fulcio-root.pem"))?;
-    let rekor = std::fs::read_to_string(update_fixtures().join("rekor-pub.pem"))?;
-    let ct = std::fs::read_to_string(update_fixtures().join("ctfe-pub.pem"))?;
-    Ok(detent_update::trust::from_pems_with_ct(&root, &rekor, &ct)?)
-}
 
 fn apply(text: &str, expected: Option<Sha256Digest>) -> Operation {
     Operation::Apply {

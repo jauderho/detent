@@ -237,9 +237,10 @@ impl Policy {
     /// The monitor's policy: write access to every enabled target's parent
     /// directory, each target's backup directory, the state root
     /// (`Allowlist::state_root`, which also covers the check-tmp and
-    /// pending-commit-marker paths), the monitor-only update staging base,
-    /// and the running binary's own directory so `ReplaceBinary`'s final
-    /// `rename(staged → current_exe)` can succeed under Landlock confinement.
+    /// pending-commit-marker paths), the monitor-only staging base, and the
+    /// running binary's own directory. The last one was for `ReplaceBinary`'s
+    /// swap, which E16 retired (the CLI updater installs now); it stays until
+    /// the owner decides to narrow the policy.
     #[must_use]
     pub fn monitor(allowlist: &Allowlist) -> Self {
         let mut paths: BTreeSet<PathBuf> = BTreeSet::new();
@@ -251,13 +252,9 @@ impl Policy {
         }
         paths.insert(allowlist.state_root().to_path_buf());
         paths.insert(PathBuf::from(DEFAULT_STAGING_DIR));
-        // The binary swap (PLAN §2.9 step 5b) renames the staged file over
-        // `current_exe`. Without its parent in the writable set the rename
-        // fails with EACCES once the Landlock ruleset is installed — and
-        // nothing in the test world exercises Landlock, so all tests still
-        // pass. The parent is derived from the real exe (engine tests point
-        // each monitor at its own temp target via `set_binary_override` and
-        // are not confined).
+        // Was for the monitor's binary swap (`ReplaceBinary`), retired by
+        // E16: the monitor no longer writes here. Kept unchanged until the
+        // owner decides to narrow the Landlock policy.
         if let Ok(exe) = std::env::current_exe()
             && let Some(parent) = exe.parent()
             && !parent.as_os_str().is_empty()
@@ -657,9 +654,8 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let root = Path::new("/tmp/detent-sandbox-test-empty");
         let allow = Allowlist::from_modules(&[], &Config::with_state_root(root))?;
-        // Plus the running binary's own directory (PLAN §2.9 step 5b): the
-        // swap renames the staged file over `current_exe`, which Landlock
-        // would otherwise deny.
+        // Plus the running binary's own directory, kept from the retired
+        // `ReplaceBinary` swap (E16) until the owner narrows the policy.
         let mut expected = vec![root.to_path_buf(), PathBuf::from(DEFAULT_STAGING_DIR)];
         if let Ok(exe) = std::env::current_exe()
             && let Some(parent) = exe.parent()
