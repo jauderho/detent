@@ -85,6 +85,7 @@ fn prepare_stages_an_executable_binary() -> Result<(), Box<dyn std::error::Error
         &trust,
         staging_parent.path(),
         &[],
+        None,
     )?;
 
     let mode = std::fs::metadata(&candidate.binary_path)?
@@ -104,5 +105,42 @@ fn prepare_stages_an_executable_binary() -> Result<(), Box<dyn std::error::Error
         0,
         "the staged binary is writable by others (mode {mode:o})"
     );
+    Ok(())
+}
+
+#[test]
+fn prepare_with_a_tag_stages_exactly_that_release() -> Result<(), Box<dyn std::error::Error>> {
+    let root = std::fs::read_to_string(fixtures().join("fulcio-root.pem"))?;
+    let rekor = std::fs::read_to_string(fixtures().join("rekor-pub.pem"))?;
+    let ct = std::fs::read_to_string(fixtures().join("ctfe-pub.pem"))?;
+    let trust = detent_update::trust::from_pems_with_ct(&root, &rekor, &ct)?;
+    let feed = FixtureFeed {
+        binary: std::fs::read(fixtures().join("binary.bin"))?,
+    };
+    let staging_parent = tempfile::tempdir()?;
+    let now = time::OffsetDateTime::parse(
+        "2026-01-01T00:00:00Z",
+        &time::format_description::well_known::Rfc3339,
+    )?;
+    let prepare = |tag| {
+        detent_update::update::prepare(
+            &feed,
+            &semver::Version::new(0, 0, 1),
+            &detent_update::Policy::default(),
+            now,
+            &trust,
+            staging_parent.path(),
+            &[],
+            Some(tag),
+        )
+    };
+
+    let candidate = prepare("v99.0.0")?;
+    assert_eq!(candidate.tag, "v99.0.0");
+    assert!(candidate.binary_path.is_file());
+    assert!(matches!(
+        prepare("v98.0.0"),
+        Err(detent_update::UpdateError::NotOffered(tag)) if tag == "v98.0.0"
+    ));
     Ok(())
 }

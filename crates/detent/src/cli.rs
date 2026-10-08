@@ -494,6 +494,13 @@ pub struct UpdateArgs {
     /// on-disk stamp is still fresh. Only meaningful with `--check`.
     #[arg(long)]
     pub force: bool,
+    /// Install exactly this release (e.g. `v1.2.3`) instead of the newest
+    /// one. The policy still applies: the tag must be offered, past the age
+    /// gate, not rolled back on this host, and newer than the running
+    /// version unless `--allow-downgrade`. The web and MCP install run
+    /// `detent update --tag <tag>` in a transient systemd unit.
+    #[arg(long, value_name = "TAG", conflicts_with_all = ["check", "force"])]
+    pub tag: Option<String>,
 }
 
 /// `detent verify-bundle …`: the release workflow's own gate on an updater

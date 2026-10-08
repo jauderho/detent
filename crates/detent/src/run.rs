@@ -755,6 +755,7 @@ fn run_update(
         &stamp,
         &bad,
         force,
+        args.tag.as_deref(),
         &staging_parent,
         &|path| detent_update::update::confirm_features(path, &current_features()),
         // The swap runs in this process, with whatever privileges the
@@ -978,6 +979,7 @@ fn run_update_on(
     stamp: &std::path::Path,
     bad: &std::path::Path,
     force: bool,
+    tag: Option<&str>,
     staging_parent: &std::path::Path,
     probe: &FeatureProbe,
     swap: &BinarySwap<'_>,
@@ -998,6 +1000,7 @@ fn run_update_on(
         trust,
         staging_parent,
         bad,
+        tag,
         probe,
         swap,
         restart,
@@ -1125,6 +1128,7 @@ fn apply_update(
     trust: &detent_update::TrustRoot,
     staging_parent: &std::path::Path,
     bad: &std::path::Path,
+    tag: Option<&str>,
     probe: &FeatureProbe,
     swap: &BinarySwap<'_>,
     restart: &RestartCheck<'_>,
@@ -1140,6 +1144,7 @@ fn apply_update(
         trust,
         staging_parent,
         &bad_tags,
+        tag,
     ) {
         Ok(candidate) => {
             // §2.9 step 5's first half: the verified candidate must run and
@@ -2189,6 +2194,82 @@ mod tests {
 
     #[cfg(feature = "update")]
     #[test]
+    fn update_tag_installs_the_offered_tag() -> R {
+        let swaps = probe_log();
+        let (_home, target) = install_target()?;
+        let run = run_update_hermetic(
+            &verified_feed()?,
+            &semver::Version::new(0, 0, 1),
+            &detent_update::Policy::default(),
+            &fixture_trust()?,
+            &recording_ok_probe(&probe_log(), &["hosts", "web", "update"]),
+            &recording_swap(&swaps, &target),
+            &healthy_restart(),
+            Mode::Tag("v99.0.0"),
+        )?;
+        assert_eq!(run.exit, Exit::Ok, "{}", run.notes);
+        assert!(run.out.contains("installed v99.0.0"), "{}", run.out);
+        assert_eq!(swaps.borrow().len(), 1);
+        assert_eq!(std::fs::read(&target)?, binary_fixture()?);
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn update_tag_refuses_what_the_policy_refuses() -> R {
+        let current = semver::Version::new(0, 0, 1);
+        let young = fixed_now()? - time::Duration::days(1);
+        let young_feed = VerifiableFeed {
+            when: young.format(&time::format_description::well_known::Rfc3339)?,
+            ..verified_feed()?
+        };
+        let older_feed = VerifiableFeed {
+            tag: "v0.0.0".to_owned(),
+            ..verified_feed()?
+        };
+        let cases: [(&VerifiableFeed, Mode, &str); 4] = [
+            (
+                &verified_feed()?,
+                Mode::Tag("v98.0.0"),
+                "release v98.0.0 is not offered",
+            ),
+            (&young_feed, Mode::Tag("v99.0.0"), "younger than 2 day"),
+            (
+                &verified_feed()?,
+                Mode::RejectedTag("v99.0.0"),
+                "v99.0.0 was rolled back on this host",
+            ),
+            (&older_feed, Mode::Tag("v0.0.0"), "refusing downgrade"),
+        ];
+        for (feed, mode, reason) in cases {
+            let probes = probe_log();
+            let swaps = probe_log();
+            let run = run_update_hermetic(
+                feed,
+                &current,
+                &detent_update::Policy::default(),
+                &fixture_trust()?,
+                &recording_ok_probe(&probes, &[]),
+                &unreachable_swap(&swaps),
+                &healthy_restart(),
+                mode,
+            )?;
+            assert_eq!(run.exit, Exit::Failed);
+            assert!(run.notes.contains(reason), "{reason}: {}", run.notes);
+            assert!(
+                probes.borrow().is_empty(),
+                "{reason}: nothing may be probed"
+            );
+            assert!(
+                swaps.borrow().is_empty(),
+                "{reason}: nothing may be swapped"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
     fn a_fully_verified_candidate_is_installed() -> R {
         // End to end over the synthetic-but-real Sigstore fixtures: policy
         // pass, SUMS match, bundle verifies, the candidate's own path is
@@ -2653,6 +2734,25 @@ mod tests {
         dir: tempfile::TempDir,
     }
 
+    /// What a hermetic run does. `true` and `false` are `--check` and the
+    /// bare `update`, so most tests pass a plain bool.
+    #[cfg(feature = "update")]
+    #[derive(Clone, Copy)]
+    enum Mode {
+        Check,
+        Bare,
+        Tag(&'static str),
+        /// `--tag` for a tag this host already rolled back (`bad.json`).
+        RejectedTag(&'static str),
+    }
+
+    #[cfg(feature = "update")]
+    impl From<bool> for Mode {
+        fn from(check_only: bool) -> Self {
+            if check_only { Self::Check } else { Self::Bare }
+        }
+    }
+
     /// Runs the bare-`update` flow with a fixed clock and no subprocesses.
     #[cfg(feature = "update")]
     #[allow(clippy::too_many_arguments)]
@@ -2664,8 +2764,9 @@ mod tests {
         probe: &super::FeatureProbe,
         swap: &super::BinarySwap<'_>,
         restart: &super::RestartCheck<'_>,
-        check_only: bool,
+        mode: impl Into<Mode>,
     ) -> Result<BareRun, Box<dyn std::error::Error>> {
+        let mode = mode.into();
         let messages = crate::i18n::Messages::new(Some("en-US"));
         let renderer = crate::output::Renderer {
             messages: &messages,
@@ -2679,16 +2780,23 @@ mod tests {
         let tmp = tempfile::TempDir::new()?;
         let stamp = detent_update::update::stamp_path(tmp.path());
         let bad = detent_update::update::bad_path(tmp.path());
+        if let Mode::RejectedTag(tag) = mode {
+            detent_update::update::mark_bad(&bad, tag);
+        }
         let exit = super::run_update_on(
             feed,
             current,
             policy,
             fixed_now()?,
             trust,
-            check_only,
+            matches!(mode, Mode::Check),
             &stamp,
             &bad,
             false,
+            match mode {
+                Mode::Tag(tag) | Mode::RejectedTag(tag) => Some(tag),
+                Mode::Check | Mode::Bare => None,
+            },
             &std::env::temp_dir(),
             probe,
             swap,
@@ -3106,6 +3214,19 @@ mod tests {
         assert!(String::from_utf8(notes)?.contains("offline"));
         Ok(())
     }
+    #[cfg(feature = "update")]
+    #[test]
+    fn update_tag_parses_and_excludes_check_and_force() -> R {
+        let cli = parse(&["detent", "update", "--tag", "v1.2.3"])?;
+        let Some(crate::cli::Command::Update(args)) = cli.command else {
+            return Err("expected the update command".into());
+        };
+        assert_eq!(args.tag.as_deref(), Some("v1.2.3"));
+        assert!(parse(&["detent", "update", "--tag", "v1.2.3", "--check"]).is_err());
+        assert!(parse(&["detent", "update", "--tag", "v1.2.3", "--force"]).is_err());
+        Ok(())
+    }
+
     #[cfg(feature = "update")]
     #[test]
     fn update_and_dispatch_only_arms_map_without_side_effects() -> R {

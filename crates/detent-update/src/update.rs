@@ -113,6 +113,21 @@ pub enum UpdateError {
     /// Nothing qualified, and nothing was installed.
     #[error("no update to install")]
     NoUpdate,
+    /// `detent update --tag`: the feed has no published release with that
+    /// tag and this build's assets.
+    #[error("release {0} is not offered for this build")]
+    NotOffered(String),
+    /// `detent update --tag`: this host rolled the tag back (`bad.json`).
+    #[error("release {0} was rolled back on this host and is refused")]
+    Rejected(String),
+    /// `detent update --tag`: the tag is the running version.
+    #[error("release {tag} is not newer than the running version {current}")]
+    NotNewer {
+        /// The requested tag.
+        tag: String,
+        /// The running version.
+        current: String,
+    },
 }
 
 /// A verified release, staged and ready for the swap.
@@ -282,10 +297,57 @@ pub fn check(
     })
 }
 
+/// The policy decision for `detent update --tag`: the one release `tag`,
+/// judged by [`policy::select`] alone. [`prepare`] calls it when it is
+/// given a tag.
+///
+/// # Errors
+///
+/// [`UpdateError::NotOffered`] when no release in `releases` has the tag,
+/// [`UpdateError::Rejected`] when it is in `bad`, [`UpdateError::Policy`]
+/// for a non-semver tag, a refused downgrade or the age gate, and
+/// [`UpdateError::NotNewer`] for the running version.
+pub fn select_tag(
+    releases: &[fetch::Release],
+    tag: &str,
+    current: &Version,
+    now: time::OffsetDateTime,
+    policy: &Policy,
+    bad: &[String],
+) -> Result<policy::Candidate, UpdateError> {
+    let release = releases
+        .iter()
+        .find(|release| release.candidate.tag == tag)
+        .ok_or_else(|| UpdateError::NotOffered(tag.to_owned()))?;
+    if bad.iter().any(|bad_tag| bad_tag == tag) {
+        return Err(UpdateError::Rejected(tag.to_owned()));
+    }
+    if policy::version_of(tag).is_none() {
+        return Err(policy::PolicyError::BadTag(tag.to_owned()).into());
+    }
+    match policy::select(
+        std::slice::from_ref(&release.candidate),
+        current,
+        now,
+        policy,
+    ) {
+        Ok(chosen) => Ok(chosen),
+        Err(policy::PolicyError::NoUpdate) => Err(UpdateError::NotNewer {
+            tag: tag.to_owned(),
+            current: current.to_string(),
+        }),
+        Err(err) => Err(err.into()),
+    }
+}
+
 /// Downloads and fully verifies the release a policy run selected
 /// (PLAN §2.9 steps 2–5a): binary + bundle + SHA256SUMS, SUMS cross-check,
 /// Sigstore verification, all into a staging directory next to the running
 /// binary.
+///
+/// With `tag` (`detent update --tag`, which the web and MCP install start)
+/// the release is exactly that tag, still judged by the policy
+/// ([`select_tag`]); without it, the newest qualifying release.
 ///
 /// The caller then runs [`confirm_features`] on
 /// [`Candidate::binary_path`] against the running feature set, and only then
@@ -303,15 +365,19 @@ pub fn prepare(
     trust: &crate::trust::TrustRoot,
     staging_parent: &std::path::Path,
     bad: &[String],
+    tag: Option<&str>,
 ) -> Result<Candidate, UpdateError> {
     let releases = fetch::list_releases(transport, &fetch::target_triple())?;
-    let candidates: Vec<policy::Candidate> = releases
-        .iter()
-        .map(|release| release.candidate.clone())
-        .filter(|c| !bad.contains(&c.tag))
-        .collect();
-    let chosen =
-        policy::select(&candidates, current, now, policy).map_err(|_| UpdateError::NoUpdate)?;
+    let chosen = if let Some(tag) = tag {
+        select_tag(&releases, tag, current, now, policy, bad)?
+    } else {
+        let candidates: Vec<policy::Candidate> = releases
+            .iter()
+            .map(|release| release.candidate.clone())
+            .filter(|c| !bad.contains(&c.tag))
+            .collect();
+        policy::select(&candidates, current, now, policy).map_err(|_| UpdateError::NoUpdate)?
+    };
     let release = releases
         .iter()
         .find(|release| release.candidate.tag == chosen.tag)
@@ -840,6 +906,95 @@ mod tests {
         assert!(read_cached(&stamp).is_none(), "mark_bad deletes check.json");
         std::fs::write(&bad, b"not json").expect("corrupt bad list");
         assert!(read_bad(&bad).is_empty(), "corrupt file is empty");
+    }
+
+    fn release(tag: &str, published_days_ago: i64) -> crate::fetch::Release {
+        crate::fetch::Release {
+            candidate: policy::Candidate {
+                tag: tag.to_owned(),
+                published: Some(now().saturating_sub(time::Duration::days(published_days_ago))),
+                body: String::new(),
+            },
+            binary_url: "https://example.invalid/b".to_owned(),
+            bundle_url: "https://example.invalid/j".to_owned(),
+            sums_url: "https://example.invalid/s".to_owned(),
+        }
+    }
+
+    #[test]
+    fn select_tag_takes_an_offered_tag_even_when_a_newer_one_exists() {
+        let current = semver::Version::new(0, 0, 1);
+        let releases = [release("v0.0.3", 10), release("v0.0.2", 10)];
+        let chosen = select_tag(
+            &releases,
+            "v0.0.2",
+            &current,
+            now(),
+            &Policy::default(),
+            &[],
+        )
+        .expect("offered");
+        assert_eq!(chosen.tag, "v0.0.2");
+    }
+
+    #[test]
+    fn select_tag_refuses_what_the_policy_refuses() {
+        let current = semver::Version::new(0, 0, 2);
+        let policy = Policy::default();
+        let releases = [
+            release("v0.0.3", 10),
+            release("v0.0.4", 1),
+            release("v0.0.2", 10),
+            release("v0.0.1", 10),
+            release("latest", 10),
+        ];
+        let select = |tag: &str, policy: &Policy, bad: &[String]| {
+            select_tag(&releases, tag, &current, now(), policy, bad)
+        };
+        assert!(matches!(
+            select("v0.0.9", &policy, &[]),
+            Err(UpdateError::NotOffered(tag)) if tag == "v0.0.9"
+        ));
+        assert!(matches!(
+            select("v0.0.3", &policy, &["v0.0.3".to_owned()]),
+            Err(UpdateError::Rejected(tag)) if tag == "v0.0.3"
+        ));
+        assert!(matches!(
+            select("v0.0.4", &policy, &[]),
+            Err(UpdateError::Policy(policy::PolicyError::TooYoung { .. }))
+        ));
+        assert!(matches!(
+            select("v0.0.2", &policy, &[]),
+            Err(UpdateError::NotNewer { tag, current }) if tag == "v0.0.2" && current == "0.0.2"
+        ));
+        assert!(matches!(
+            select("v0.0.1", &policy, &[]),
+            Err(UpdateError::Policy(
+                policy::PolicyError::DowngradeRefused { .. }
+            ))
+        ));
+        assert!(matches!(
+            select("latest", &policy, &[]),
+            Err(UpdateError::Policy(policy::PolicyError::BadTag(_)))
+        ));
+        let downgrade = Policy {
+            allow_downgrade: true,
+            ..policy
+        };
+        assert_eq!(
+            select("v0.0.1", &downgrade, &[]).expect("allowed").tag,
+            "v0.0.1"
+        );
+        for refused in [
+            UpdateError::NotOffered("v9.9.9".to_owned()),
+            UpdateError::Rejected("v9.9.9".to_owned()),
+            UpdateError::NotNewer {
+                tag: "v9.9.9".to_owned(),
+                current: "9.9.9".to_owned(),
+            },
+        ] {
+            assert!(refused.to_string().contains("v9.9.9"), "{refused}");
+        }
     }
 
     #[test]
