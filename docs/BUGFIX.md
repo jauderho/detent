@@ -407,11 +407,15 @@ deferred by the owner.
     verify-bundle` (hidden, `update` feature) runs the device verifier on a
     binary and its bundle; the publish job calls it from the x86_64 musl
     build after `cosign verify-blob-attestation`. Unproven until the next tag.
-15. **Flaky coverage merge:** run 37590569498's coverage job failed once with
+15. ~~**Flaky coverage merge:** run 37590569498's coverage job failed once with
     "invalid instrumentation profile data (file header is corrupt)" for one
-    `detent-*.profraw` after all tests passed (a forked test process killed
-    mid-write, likely); the re-run passed. Make the merge skip or the forking
-    tests not write a profile.
+    `detent-*.profraw` after all tests passed.~~ Done (`0f46c0a`): not the root
+    sandbox step. `mcp_stdio_answers_initialize` (`crates/detent/tests/binary.rs`)
+    closed stdin and then killed the instrumented `detent mcp` child; the child
+    exits by itself on EOF and a SIGKILL during its exit-time profile write
+    leaves a truncated `.profraw`. The test now waits for the exit (kill only
+    after 10 s) and asserts exit 0. Unproven until a CI coverage run; the
+    forking sandbox tests were checked and write no profile when confined.
 16. **Web/MCP update install has no producer (high):** `UpdateApply` (the
     Dashboard install button, `POST /api/v1/system/update`, the MCP tool)
     stages `<state_root>/update/staged/<tag>` and its bundle to the monitor,
