@@ -442,6 +442,24 @@ impl Client {
         }
     }
 
+    /// Start the CLI updater for release `tag` in its transient unit
+    /// ([`Request::StartUpdate`]). Returns the monitor's detail once the
+    /// unit runs; the update's own outcome is the running version later.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::read_target`]; [`ProtoError::UpdateRunning`] when an
+    /// update already runs, [`ProtoError::Unavailable`] on a host without
+    /// systemd.
+    pub fn start_update(&mut self, tag: &str) -> Result<String, ClientError> {
+        match self.checked_call(&Request::StartUpdate {
+            tag: tag.to_owned(),
+        })? {
+            Response::UpdateStarted { detail } => Ok(detail),
+            other => Err(unexpected("UpdateStarted", &other)),
+        }
+    }
+
     /// Ask the monitor to exit.
     ///
     /// # Errors
@@ -508,6 +526,7 @@ const fn variant_name(response: &Response) -> &'static str {
         Response::UnitFilesReloaded { .. } => "UnitFilesReloaded",
         Response::Mounted { .. } => "Mounted",
         Response::Staged { .. } => "Staged",
+        Response::UpdateStarted { .. } => "UpdateStarted",
     }
 }
 
@@ -894,6 +913,40 @@ mod tests {
             client.reload_unit_files(ModuleId(0)),
             Err(ClientError::Unexpected {
                 want: "UnitFilesReloaded",
+                got: "Pending"
+            })
+        ));
+        drop(client);
+        let _ = handle.join();
+        Ok(())
+    }
+
+    #[test]
+    fn start_update_returns_the_monitor_detail() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut client, handle) = client_with_scripted_reply(Response::UpdateStarted {
+            detail: "started".to_owned(),
+        })?;
+        assert_eq!(client.start_update("v1.2.3")?, "started");
+        assert!(matches!(
+            client.pending_commit(),
+            Err(ClientError::Unexpected {
+                want: "Pending",
+                got: "UpdateStarted"
+            })
+        ));
+        drop(client);
+        let _ = handle.join();
+        Ok(())
+    }
+
+    #[test]
+    fn start_update_reports_unexpected_for_a_wrong_response()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut client, handle) = client_with_scripted_reply(Response::Pending(None))?;
+        assert!(matches!(
+            client.start_update("v1.2.3"),
+            Err(ClientError::Unexpected {
+                want: "UpdateStarted",
                 got: "Pending"
             })
         ));

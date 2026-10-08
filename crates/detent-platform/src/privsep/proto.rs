@@ -57,6 +57,10 @@ use detent_core::descriptor::{ServiceAction as CoreServiceAction, TargetKind};
 /// version stays `2`. [`Request::ReplaceBinary`] keeps its fields but now
 /// installs only the monitor's own stage, so a worker that does not stage
 /// first is refused: it fails closed.
+///
+/// [`Request::StartUpdate`], [`Response::UpdateStarted`] and
+/// [`ProtoError::UpdateRunning`] (E16) are appended variants too; the
+/// version stays `2`.
 pub const PROTO_VERSION: u16 = 2;
 /// Largest encoded message accepted in either direction, in bytes.
 ///
@@ -79,6 +83,30 @@ pub const MAX_STAGE_CHUNK: usize = MAX_FRAME / 2;
 /// Largest Sigstore bundle a [`Request::StageBegin`] carries, in bytes. A
 /// release bundle is about 11 KiB.
 pub const MAX_STAGE_BUNDLE: usize = 256 * 1024;
+
+/// Longest release tag [`Request::StartUpdate`] carries, in bytes. Real
+/// tags are about 15 (`v0.0.1-rc.2`).
+pub const MAX_RELEASE_TAG_LEN: usize = 64;
+
+/// True when `tag` is a release tag the update unit may be started for:
+/// `v`, then a semver version with an optional pre-release and no build
+/// metadata, at most [`MAX_RELEASE_TAG_LEN`] bytes, only `[0-9A-Za-z.-]`.
+///
+/// The tag becomes one argument of a fixed argv ([`Request::StartUpdate`]),
+/// so the charset and the leading `v` keep out spaces, `/`, `..`, shell
+/// metacharacters and a leading `-` (an option). The monitor and the runner
+/// both check it.
+#[must_use]
+pub fn is_release_tag(tag: &str) -> bool {
+    tag.len() <= MAX_RELEASE_TAG_LEN
+        && tag
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-')
+        && tag
+            .strip_prefix('v')
+            .and_then(|version| semver::Version::parse(version).ok())
+            .is_some_and(|version| version.build.is_empty())
+}
 
 // ---------------------------------------------------------------------------
 // Identifiers
@@ -407,6 +435,25 @@ pub enum Request {
         /// The bytes.
         chunk: Vec<u8>,
     },
+    /// Start the CLI updater for release `tag` outside detent's own
+    /// service (BUGFIX E16): the runner runs `systemd-run
+    /// --unit=detent-update --collect <installed detent> update --tag
+    /// <tag>`. The argv is fixed in the runner; only `tag` varies, and the
+    /// monitor and the runner both refuse a tag that fails
+    /// [`is_release_tag`]. The monitor also refuses a tag that is not newer
+    /// than the running version. The answer is
+    /// [`Response::UpdateStarted`] as soon as the unit runs: the download,
+    /// verification, swap, restart, `/healthz` check and rollback happen in
+    /// the unit, and the result is the running version afterwards.
+    /// [`ProtoError::UpdateRunning`] when the unit is already there;
+    /// [`ProtoError::Unavailable`] on a host without systemd.
+    ///
+    /// Appended after [`Request::StageUpdate`] to preserve every existing
+    /// discriminant; see [`PROTO_VERSION`]'s doc comment.
+    StartUpdate {
+        /// Release tag, e.g. `v1.2.3`.
+        tag: String,
+    },
 }
 
 impl Request {
@@ -427,7 +474,8 @@ impl Request {
             | Self::ReplaceBinary { .. }
             | Self::ReloadUnitFiles { .. }
             | Self::StageBegin { .. }
-            | Self::StageUpdate { .. } => true,
+            | Self::StageUpdate { .. }
+            | Self::StartUpdate { .. } => true,
             Self::Service { action, .. } => !matches!(action, ServiceAction::Status),
             Self::Hello { .. }
             | Self::ReadTarget { .. }
@@ -723,6 +771,15 @@ pub enum Response {
         /// `offset`.
         received: u64,
     },
+    /// Answer to [`Request::StartUpdate`]: the update unit runs. It says
+    /// nothing about the outcome of the update.
+    ///
+    /// Appended after [`Response::Staged`] to preserve every existing
+    /// discriminant; see [`PROTO_VERSION`]'s doc comment.
+    UpdateStarted {
+        /// A short human-readable result.
+        detail: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -797,6 +854,13 @@ pub enum ProtoError {
     /// discriminant; see [`PROTO_VERSION`]'s doc comment.
     #[error("the monitor does not hold the state lock; state changes are refused")]
     StateLockUnavailable,
+    /// [`Request::StartUpdate`] was refused because the update unit is
+    /// already running.
+    ///
+    /// Appended after [`ProtoError::StateLockUnavailable`] to keep every
+    /// existing discriminant; see [`PROTO_VERSION`]'s doc comment.
+    #[error("an update is already running")]
+    UpdateRunning,
 }
 
 /// Which allow-list table an [`ProtoError::UnknownId`] refers to.
@@ -919,10 +983,11 @@ impl<'a> arbitrary::Arbitrary<'a> for Sha256Digest {
 mod tests {
     use super::{
         BackupId, BackupInfo, BindingId, BindingInfo, CheckId, CheckInfo, CheckOutcome, CodecError,
-        CommitId, HelloAck, IdKind, MAX_FRAME, MAX_STAGE_BUNDLE, MAX_STAGE_CHUNK, MAX_UPDATE_BYTES,
-        ModuleId, ModuleInfo, MountOutcome, MountState, PROTO_VERSION, PathKind, PendingService,
-        ProtoError, Request, Response, ServiceAction, ServiceOutcome, TargetContents, TargetId,
-        TargetInfo, WriteReceipt, decode, encode,
+        CommitId, HelloAck, IdKind, MAX_FRAME, MAX_RELEASE_TAG_LEN, MAX_STAGE_BUNDLE,
+        MAX_STAGE_CHUNK, MAX_UPDATE_BYTES, ModuleId, ModuleInfo, MountOutcome, MountState,
+        PROTO_VERSION, PathKind, PendingService, ProtoError, Request, Response, ServiceAction,
+        ServiceOutcome, TargetContents, TargetId, TargetInfo, WriteReceipt, decode, encode,
+        is_release_tag,
     };
     use crate::fs::atomic::Sha256Digest;
     use detent_core::descriptor::{ServiceAction as CoreServiceAction, TargetKind};
@@ -1007,6 +1072,9 @@ mod tests {
                 offset: 512,
                 chunk: vec![7_u8; 64],
             },
+            Request::StartUpdate {
+                tag: "v1.2.3".to_owned(),
+            },
         ]
     }
 
@@ -1064,6 +1132,8 @@ mod tests {
             Response::Error(ProtoError::Unavailable("no service manager".to_owned())),
             Response::Error(ProtoError::Io("openat failed".to_owned())),
             Response::Error(ProtoError::NotFound),
+            Response::Error(ProtoError::StateLockUnavailable),
+            Response::Error(ProtoError::UpdateRunning),
         ]
     }
 
@@ -1135,6 +1205,9 @@ mod tests {
                 }],
             },
             Response::Staged { received: 512 },
+            Response::UpdateStarted {
+                detail: "started detent-update.service".to_owned(),
+            },
         ];
         responses.extend(every_error_response());
         responses
@@ -1366,6 +1439,75 @@ mod tests {
         let bytes = encode(&staged).unwrap_or_default();
         assert_eq!(bytes.first(), Some(&16));
         assert_eq!(decode::<Response>(&bytes).ok(), Some(staged));
+    }
+
+    #[test]
+    fn start_update_takes_the_next_discriminants() {
+        // Appended after `StageUpdate`, `Staged` and `StateLockUnavailable`:
+        // no existing discriminant moves.
+        let start = Request::StartUpdate {
+            tag: "v1.2.3".to_owned(),
+        };
+        let bytes = encode(&start).unwrap_or_default();
+        assert_eq!(bytes.first(), Some(&17));
+        assert_eq!(decode::<Request>(&bytes).ok(), Some(start));
+
+        let started = Response::UpdateStarted {
+            detail: String::new(),
+        };
+        let bytes = encode(&started).unwrap_or_default();
+        assert_eq!(bytes.first(), Some(&17));
+        assert_eq!(decode::<Response>(&bytes).ok(), Some(started));
+
+        let running = Response::Error(ProtoError::UpdateRunning);
+        let bytes = encode(&running).unwrap_or_default();
+        // `Response::Error` is discriminant 10, `UpdateRunning` the 14th error.
+        assert_eq!(bytes.as_slice(), &[10, 13]);
+        assert_eq!(decode::<Response>(&bytes).ok(), Some(running));
+    }
+
+    #[test]
+    fn release_tags_are_v_and_semver_and_nothing_else() {
+        for good in [
+            "v0.0.1",
+            "v1.2.3",
+            "v0.0.1-rc.2",
+            "v0.1.1-test",
+            "v10.20.30-alpha.1.beta-2",
+        ] {
+            assert!(is_release_tag(good), "{good:?} must be accepted");
+        }
+        let overlong = format!("v1.2.3-{}", "a".repeat(MAX_RELEASE_TAG_LEN));
+        for bad in [
+            "",
+            "v",
+            "1.2.3",
+            "-x",
+            "--help",
+            "v1.2",
+            "v1.2.3 ",
+            " v1.2.3",
+            "v1.2.3 --allow-downgrade",
+            "v1.2.3\n",
+            "v1..2.3",
+            "v1.2.3-..",
+            "v1.2.3/../x",
+            "/usr/bin/x",
+            "v1.2.3+build.1",
+            "v01.2.3",
+            "v1.2.3;reboot",
+            "v1.2.3$(reboot)",
+            "v1.2.3`id`",
+            "v1.2.3|x",
+            "v1.2.3&",
+            "V1.2.3",
+            overlong.as_str(),
+        ] {
+            assert!(!is_release_tag(bad), "{bad:?} must be refused");
+        }
+        let longest = format!("v1.2.3-{}", "a".repeat(MAX_RELEASE_TAG_LEN - 7));
+        assert_eq!(longest.len(), MAX_RELEASE_TAG_LEN);
+        assert!(is_release_tag(&longest));
     }
 
     #[test]

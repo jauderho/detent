@@ -49,13 +49,14 @@ use super::proto::{
     BackupId, BackupInfo, BindingId, CheckId, CheckOutcome, CommitId, IdKind, MAX_STAGE_BUNDLE,
     MAX_STAGE_CHUNK, MAX_UPDATE_BYTES, ModuleId, MountOutcome, PendingService, ProtoError, Request,
     Response, ServiceAction, ServiceOutcome, TargetContents, TargetId, WriteReceipt,
+    is_release_tag,
 };
 use super::transport::{Channel, ChannelError};
 use crate::fs::atomic::{
     AtomicError, BackupEntry, InPlace, InPlaceMarker, WriteRequest, list_backups, read_with_digest,
     remove_marker, restore_backup_with, write_atomic,
 };
-use crate::service::MountUnitState;
+use crate::service::{MountUnitState, UpdateStart};
 
 /// Name of the crash-recovery marker inside the state root.
 pub const PENDING_COMMIT_MARKER: &str = "pending-commit.json";
@@ -216,6 +217,22 @@ pub trait ServiceControl {
     /// As [`ServiceControl::start_added_mounts`].
     fn forget_started_mounts(&self) -> Result<(), HookError> {
         Err(no_mount_units())
+    }
+
+    /// Start the CLI updater for release `tag` in its transient unit
+    /// ([`ServiceManager::start_update`](crate::service::ServiceManager::start_update)).
+    /// The runner client forwards it; the runner validates the tag again
+    /// and finds the binary itself. The default answers
+    /// [`HookError::Unavailable`].
+    ///
+    /// # Errors
+    ///
+    /// [`HookError::Unavailable`] when the runner or the init system cannot
+    /// do it, [`HookError::Failed`] when it refused or failed.
+    fn start_update(&self, _tag: &str) -> Result<UpdateStart, HookError> {
+        Err(HookError::Unavailable(
+            "starting an update is not available in this build".to_owned(),
+        ))
     }
 }
 
@@ -784,6 +801,7 @@ impl<'a> Monitor<'a> {
                 bundle,
             } => self.stage_begin(tag, len, sha256, bundle),
             Request::StageUpdate { offset, chunk } => self.stage_update(offset, &chunk),
+            Request::StartUpdate { tag } => self.start_update(&tag),
         })
     }
 
@@ -926,6 +944,30 @@ impl<'a> Monitor<'a> {
                 version: sha256.to_string(),
             },
             Err(err) => Response::Error(err),
+        }
+    }
+
+    /// Start the CLI updater for `tag` (BUGFIX E16): a valid release tag,
+    /// newer than the running version, then the hook. The update itself
+    /// runs in the transient unit; this answers when the unit runs.
+    fn start_update(&self, tag: &str) -> Response {
+        if !is_release_tag(tag) {
+            return Response::Error(ProtoError::Io("not a release tag".to_owned()));
+        }
+        if let Err(err) = refuse_downgrade(tag) {
+            return Response::Error(err);
+        }
+        if !cfg!(feature = "update") {
+            return Response::Error(ProtoError::Unsupported(
+                "this build has no updater".to_owned(),
+            ));
+        }
+        match self.hooks.services.start_update(tag) {
+            Ok(UpdateStart::Started(detail)) => Response::UpdateStarted {
+                detail: truncate(&detail),
+            },
+            Ok(UpdateStart::AlreadyRunning) => Response::Error(ProtoError::UpdateRunning),
+            Err(err) => Response::Error(err.into()),
         }
     }
 
@@ -7024,6 +7066,130 @@ mod tests {
         assert!(matches!(
             result,
             Err(ProtoError::Io(message)) if message.starts_with("sync target directory")
+        ));
+        Ok(())
+    }
+
+    // -- start update (E16) ---------------------------------------------------
+
+    /// Records each tag it is asked to start and answers by tag: `v98.0.0`
+    /// is already running, `v97.0.0` has no systemd, the rest start.
+    #[derive(Default)]
+    struct UpdateUnits(std::cell::RefCell<Vec<String>>);
+
+    impl ServiceControl for UpdateUnits {
+        fn service(
+            &self,
+            _binding: &ServiceBinding,
+            _action: CoreServiceAction,
+        ) -> Result<ServiceOutcome, HookError> {
+            Err(HookError::Failed("not used".to_owned()))
+        }
+
+        fn start_update(&self, tag: &str) -> Result<crate::service::UpdateStart, HookError> {
+            self.0.borrow_mut().push(tag.to_owned());
+            match tag {
+                "v98.0.0" => Ok(crate::service::UpdateStart::AlreadyRunning),
+                "v97.0.0" => Err(HookError::Unavailable("needs systemd".to_owned())),
+                _ => Ok(crate::service::UpdateStart::Started(format!(
+                    "started {tag}"
+                ))),
+            }
+        }
+    }
+
+    #[test]
+    fn start_update_asks_the_hook_and_maps_its_answer() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let units = UpdateUnits::default();
+        let allow = fx.allow()?;
+        let binding = allow.binding(BindingId(0)).ok_or("no binding")?.binding;
+        assert!(matches!(
+            units.service(binding, CoreServiceAction::Restart),
+            Err(HookError::Failed(_))
+        ));
+        let mut monitor = greeted(
+            fx.allow()?,
+            Hooks {
+                checks: &OkChecks,
+                services: &units,
+            },
+        );
+        let mut start = |tag: &str| {
+            monitor.dispatch(Request::StartUpdate {
+                tag: tag.to_owned(),
+            })
+        };
+        if cfg!(feature = "update") {
+            assert_eq!(
+                start("v99.0.0")?,
+                Response::UpdateStarted {
+                    detail: "started v99.0.0".to_owned()
+                }
+            );
+            assert_eq!(
+                start("v98.0.0")?,
+                Response::Error(ProtoError::UpdateRunning)
+            );
+            assert_eq!(
+                start("v97.0.0")?,
+                Response::Error(ProtoError::Unavailable("needs systemd".to_owned()))
+            );
+            assert_eq!(*units.0.borrow(), ["v99.0.0", "v98.0.0", "v97.0.0"]);
+        } else {
+            assert!(matches!(
+                start("v99.0.0")?,
+                Response::Error(ProtoError::Unsupported(_))
+            ));
+            assert!(units.0.borrow().is_empty());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn start_update_refuses_a_bad_or_old_tag_before_the_hook()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let units = UpdateUnits::default();
+        let mut monitor = greeted(
+            fx.allow()?,
+            Hooks {
+                checks: &OkChecks,
+                services: &units,
+            },
+        );
+        for tag in [
+            "",
+            "-x",
+            "v99.0.0 --allow-downgrade",
+            "v99.0.0/..",
+            "v0.0.1",
+        ] {
+            assert!(
+                matches!(
+                    monitor.dispatch(Request::StartUpdate {
+                        tag: tag.to_owned()
+                    })?,
+                    Response::Error(ProtoError::Io(_))
+                ),
+                "{tag:?} must be refused"
+            );
+        }
+        assert!(units.0.borrow().is_empty(), "the hook must not run");
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn start_update_without_a_service_hook_is_unavailable() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let fx = fixture()?;
+        let mut monitor = greeted(fx.allow()?, Hooks::default());
+        assert!(matches!(
+            monitor.dispatch(Request::StartUpdate {
+                tag: "v99.0.0".to_owned()
+            })?,
+            Response::Error(ProtoError::Unavailable(_))
         ));
         Ok(())
     }

@@ -53,7 +53,7 @@ use detent_core::descriptor::{InitSystem, ServiceAction, ServiceBinding, UnitNam
 
 pub use launchd::LaunchdManager;
 pub use openrc::OpenRcManager;
-pub use systemd::SystemdManager;
+pub use systemd::{SystemdManager, update_unit_args};
 
 use crate::privsep::monitor::{HookError, ServiceControl};
 use crate::privsep::proto::{BindingId, ServiceOutcome};
@@ -112,6 +112,22 @@ pub fn validate_mount_unit_name(name: &str) -> Result<(), ServiceError> {
     } else {
         Err(ServiceError::InvalidUnitName(name.to_owned()))
     }
+}
+
+/// The transient unit [`ServiceManager::start_update`] runs the CLI
+/// updater in (`detent-update.service`).
+pub const UPDATE_UNIT: &str = "detent-update";
+
+/// What every backend but systemd answers for [`ServiceManager::start_update`].
+const UPDATE_NEEDS_SYSTEMD: &str = "starting an update from the web or MCP needs systemd; run `detent update --tag <tag>` on the host";
+
+/// What [`ServiceManager::start_update`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateStart {
+    /// The unit runs; a short detail.
+    Started(String),
+    /// A unit named [`UPDATE_UNIT`] is already there: an update runs.
+    AlreadyRunning,
 }
 
 /// One mount unit and its state, as a [`ServiceManager`] found or left it.
@@ -314,6 +330,56 @@ pub trait ServiceManager: Send + Sync {
             MOUNT_UNITS_NEED_SYSTEMD.to_owned(),
         ))
     }
+
+    /// Starts `binary update --tag <tag>` in the transient unit
+    /// [`UPDATE_UNIT`], outside detent's own service, so the updater lives
+    /// through the service restart it does. Returns once the unit runs; it
+    /// does not wait for the update.
+    ///
+    /// # Errors
+    ///
+    /// [`ServiceError::InvalidUnitName`] before any process runs when `tag`
+    /// fails [`is_release_tag`](crate::privsep::proto::is_release_tag) or
+    /// `binary` is not an absolute UTF-8 path; [`ServiceError::Unsupported`]
+    /// on every backend but systemd; [`ServiceError::Unavailable`] when
+    /// `systemd-run` is absent; [`ServiceError::Failed`] when it failed.
+    fn start_update(
+        &self,
+        _binary: &std::path::Path,
+        _tag: &str,
+    ) -> Result<UpdateStart, ServiceError> {
+        Err(ServiceError::Unsupported(UPDATE_NEEDS_SYSTEMD.to_owned()))
+    }
+}
+
+/// The installed detent binary, from [`std::env::current_exe`]'s answer
+/// `exe`: an absolute path. After the file was replaced under a running
+/// process, Linux names the old inode `<path> (deleted)`; the suffix is
+/// removed, because the path now holds the newer installed binary.
+///
+/// # Errors
+///
+/// [`ServiceError::Failed`] when `exe` is an error or not absolute.
+pub fn installed_binary(
+    exe: std::io::Result<std::path::PathBuf>,
+) -> Result<std::path::PathBuf, ServiceError> {
+    let exe = exe.map_err(|err| {
+        ServiceError::Failed(format!("the installed binary cannot be found: {err}"))
+    })?;
+    let exe = match exe
+        .to_str()
+        .and_then(|path| path.strip_suffix(" (deleted)"))
+    {
+        Some(path) => std::path::PathBuf::from(path),
+        None => exe,
+    };
+    if exe.is_absolute() {
+        Ok(exe)
+    } else {
+        Err(ServiceError::Failed(
+            "the installed binary path is not absolute".to_owned(),
+        ))
+    }
 }
 
 /// A [`ServiceManager`] for hosts with no supported init system.
@@ -405,6 +471,13 @@ impl ServiceControl for ServiceControlAdapter {
     fn stop_mount_units(&self, units: &[String]) -> Result<Vec<MountUnitState>, HookError> {
         self.0.stop_mount_units(units).map_err(HookError::from)
     }
+
+    /// The binary is this process's own executable ([`installed_binary`]),
+    /// never a path from the socket.
+    fn start_update(&self, tag: &str) -> Result<UpdateStart, HookError> {
+        let binary = installed_binary(std::env::current_exe())?;
+        self.0.start_update(&binary, tag).map_err(HookError::from)
+    }
 }
 
 /// Caches which alternative of a `&'static [&'static str]` list resolved to
@@ -433,7 +506,7 @@ impl AltCache {
 mod tests {
     use super::{
         ActionOutcome, NullManager, ServiceControlAdapter, ServiceError, ServiceManager,
-        ServiceStatus, for_host, validate_unit_name,
+        ServiceStatus, UpdateStart, for_host, installed_binary, validate_unit_name,
     };
     use detent_core::descriptor::{InitSystem, ServiceAction, ServiceBinding, UnitNames};
 
@@ -641,6 +714,89 @@ mod tests {
         assert!(matches!(
             NoServices.reload_unit_files(),
             Err(crate::privsep::monitor::HookError::Unavailable(_))
+        ));
+    }
+
+    /// Answers `start_update` with the binary and the tag it was given.
+    struct UpdateEcho;
+
+    impl ServiceManager for UpdateEcho {
+        fn status(&self, _units: &UnitNames) -> Result<ServiceStatus, ServiceError> {
+            Err(ServiceError::Unsupported("not used".to_owned()))
+        }
+
+        fn act(
+            &self,
+            _units: &UnitNames,
+            _action: ServiceAction,
+        ) -> Result<ActionOutcome, ServiceError> {
+            Err(ServiceError::Unsupported("not used".to_owned()))
+        }
+
+        fn reload_unit_files(&self) -> Result<String, ServiceError> {
+            Err(ServiceError::Unsupported("not used".to_owned()))
+        }
+
+        fn start_update(
+            &self,
+            binary: &std::path::Path,
+            tag: &str,
+        ) -> Result<UpdateStart, ServiceError> {
+            Ok(UpdateStart::Started(format!("{} {tag}", binary.display())))
+        }
+    }
+
+    #[test]
+    fn the_adapter_starts_the_update_with_this_process_executable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::privsep::monitor::ServiceControl;
+        let adapter = ServiceControlAdapter(Box::new(UpdateEcho));
+        assert_eq!(
+            adapter.start_update("v1.2.3"),
+            Ok(UpdateStart::Started(format!(
+                "{} v1.2.3",
+                std::env::current_exe()?.display()
+            )))
+        );
+        let units = UnitNames {
+            systemd: &[],
+            openrc: &[],
+            bsdrc: &[],
+        };
+        assert!(adapter.0.status(&units).is_err());
+        assert!(adapter.0.act(&units, ServiceAction::Restart).is_err());
+        assert!(adapter.0.reload_unit_files().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn only_systemd_can_start_an_update() {
+        use crate::privsep::monitor::{HookError, ServiceControl};
+        let null = ServiceControlAdapter(Box::new(NullManager));
+        assert!(matches!(
+            null.start_update("v1.2.3"),
+            Err(HookError::Unavailable(message)) if message.contains("needs systemd")
+        ));
+    }
+
+    #[test]
+    fn the_installed_binary_is_absolute_and_loses_the_deleted_suffix() {
+        use std::path::PathBuf;
+        assert_eq!(
+            installed_binary(Ok(PathBuf::from("/usr/local/bin/detent"))),
+            Ok(PathBuf::from("/usr/local/bin/detent"))
+        );
+        assert_eq!(
+            installed_binary(Ok(PathBuf::from("/usr/local/bin/detent (deleted)"))),
+            Ok(PathBuf::from("/usr/local/bin/detent"))
+        );
+        assert!(matches!(
+            installed_binary(Ok(PathBuf::from("detent"))),
+            Err(ServiceError::Failed(_))
+        ));
+        assert!(matches!(
+            installed_binary(Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
+            Err(ServiceError::Failed(_))
         ));
     }
 

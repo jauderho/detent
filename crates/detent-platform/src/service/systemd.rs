@@ -15,11 +15,31 @@ use detent_core::descriptor::{ServiceAction, UnitNames};
 use super::exec::{self, ACTION_TIMEOUT, ProcessRunner, RealProcessRunner, STATUS_TIMEOUT};
 use super::{
     ActionOutcome, AltCache, MOUNT_WAIT, MountUnitState, ServiceError, ServiceManager,
-    ServiceStatus, State, validate_mount_unit_name, validate_unit_name,
+    ServiceStatus, State, UPDATE_UNIT, UpdateStart, validate_mount_unit_name, validate_unit_name,
 };
+use crate::privsep::proto::is_release_tag;
 
 /// Absolute paths `systemctl` may live at, most common first.
 const SYSTEMCTL_CANDIDATES: &[&str] = &["/usr/bin/systemctl", "/bin/systemctl"];
+
+/// Absolute paths `systemd-run` may live at, most common first.
+const SYSTEMD_RUN_CANDIDATES: &[&str] = &["/usr/bin/systemd-run", "/bin/systemd-run"];
+
+/// The whole `systemd-run` argv for [`ServiceManager::start_update`]: fixed
+/// literals, the installed binary and the tag. `--collect` unloads the unit
+/// when it ends, also after a failure, so a refused update does not keep the
+/// name and block the next start.
+#[must_use]
+pub fn update_unit_args(binary: &str, tag: &str) -> Vec<String> {
+    vec![
+        format!("--unit={UPDATE_UNIT}"),
+        "--collect".to_owned(),
+        binary.to_owned(),
+        "update".to_owned(),
+        "--tag".to_owned(),
+        tag.to_owned(),
+    ]
+}
 
 /// Properties requested from `systemctl show`. A fixed, compile-time
 /// literal: no user input ever reaches this argv position.
@@ -339,6 +359,47 @@ impl ServiceManager for SystemdManager {
             failure_detail("stop", &output, ACTION_TIMEOUT)
         };
         self.read_mount_states(program, units, |state| (state, detail.clone()))
+    }
+
+    fn start_update(
+        &self,
+        binary: &std::path::Path,
+        tag: &str,
+    ) -> Result<UpdateStart, ServiceError> {
+        if !is_release_tag(tag) {
+            return Err(ServiceError::InvalidUnitName(tag.to_owned()));
+        }
+        let Some(binary) = binary.to_str().filter(|_| binary.is_absolute()) else {
+            return Err(ServiceError::InvalidUnitName(binary.display().to_string()));
+        };
+        let program = exec::resolve_program(self.runner.as_ref(), SYSTEMD_RUN_CANDIDATES)
+            .ok_or_else(|| {
+                ServiceError::Unavailable("systemd-run was not found on this host".to_owned())
+            })?;
+        let output = self
+            .runner
+            .run(program, &update_unit_args(binary, tag), ACTION_TIMEOUT)
+            .map_err(|err| ServiceError::Failed(err.to_string()))?;
+        if !output.timed_out && output.status == Some(0) {
+            return Ok(UpdateStart::Started(format!(
+                "started {UPDATE_UNIT}.service for {tag}"
+            )));
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // systemd refuses a second transient unit with a name in use:
+        // "Unit detent-update.service was already loaded or has a fragment
+        // file." (older: "... already exists.").
+        if !output.timed_out
+            && stderr.contains(&format!("{UPDATE_UNIT}.service"))
+            && stderr.contains("already")
+        {
+            return Ok(UpdateStart::AlreadyRunning);
+        }
+        Err(ServiceError::Failed(if output.timed_out {
+            format!("systemd-run timed out after {}s", ACTION_TIMEOUT.as_secs())
+        } else {
+            format!("systemd-run exited {:?}: {}", output.status, stderr.trim())
+        }))
     }
 }
 

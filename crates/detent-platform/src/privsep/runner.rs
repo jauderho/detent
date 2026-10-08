@@ -29,8 +29,11 @@
 //! `reload_unit_files`, and, with `[mounts] activate_new_entries`, the start
 //! of the mount units the runner works out itself from an allow-listed
 //! target and a stop of only the units it recorded
-//! ([`mounts`](super::mounts)) — nothing it could not already ask for
-//! through the protocol.
+//! ([`mounts`](super::mounts)), and the start of the CLI updater for a
+//! valid release tag in the transient unit `detent-update` (the argv is
+//! fixed here, the binary is the runner's own executable; the updater
+//! still applies the release policy and verifies the release) — nothing it
+//! could not already ask for through the protocol.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
@@ -48,8 +51,10 @@ use super::monitor::{
 use super::mounts;
 use super::proto::{
     BindingId, CheckId, CheckOutcome, MountOutcome, ServiceAction, ServiceOutcome, TargetId,
+    is_release_tag,
 };
 use super::transport::{Channel, ChannelError};
+use crate::service::UpdateStart;
 
 /// How long either side waits on the runner channel. Longer than any single
 /// validator or service action (`service::exec::ACTION_TIMEOUT`) plus the
@@ -89,6 +94,13 @@ pub enum RunnerRequest {
     StopStartedMounts,
     /// Forget the mount units the last start recorded (a confirm).
     ForgetStartedMounts,
+    /// Start the CLI updater for release `tag` in the transient unit
+    /// `detent-update` (BUGFIX E16). The runner checks the tag again
+    /// ([`is_release_tag`]) and uses its own executable as the binary.
+    StartUpdate {
+        /// Release tag, e.g. `v1.2.3`.
+        tag: String,
+    },
 }
 
 /// The runner's answer.
@@ -108,6 +120,10 @@ pub enum RunnerResponse {
     Unavailable(String),
     /// The request was refused or the subsystem failed.
     Failed(String),
+    /// The update unit runs; a short detail.
+    UpdateStarted(String),
+    /// The update unit was already there.
+    UpdateRunning,
 }
 
 /// Answer requests on `channel` with `hooks` until the monitor goes away.
@@ -222,6 +238,18 @@ fn answer(
             Some(dir) => mounts::forget_started(dir).map(|()| RunnerResponse::Forgotten),
             None => Err(no_record_dir()),
         },
+        RunnerRequest::StartUpdate { tag } => {
+            if !is_release_tag(&tag) {
+                return RunnerResponse::Failed("not a release tag".to_owned());
+            }
+            hooks
+                .services
+                .start_update(&tag)
+                .map(|started| match started {
+                    UpdateStart::Started(detail) => RunnerResponse::UpdateStarted(detail),
+                    UpdateStart::AlreadyRunning => RunnerResponse::UpdateRunning,
+                })
+        }
     };
     outcome.unwrap_or_else(|err| match err {
         HookError::Unavailable(message) => RunnerResponse::Unavailable(message),
@@ -409,6 +437,17 @@ impl ServiceControl for RunnerClient {
             _ => None,
         })
     }
+
+    fn start_update(&self, tag: &str) -> Result<UpdateStart, HookError> {
+        let response = self.call(&RunnerRequest::StartUpdate {
+            tag: tag.to_owned(),
+        })?;
+        hook_result(response, |response| match response {
+            RunnerResponse::UpdateStarted(detail) => Some(UpdateStart::Started(detail)),
+            RunnerResponse::UpdateRunning => Some(UpdateStart::AlreadyRunning),
+            _ => None,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -429,7 +468,7 @@ mod tests {
     use crate::privsep::proto::{BindingId, CheckId, CheckOutcome, ServiceAction, ServiceOutcome};
     use crate::privsep::proto::{MountState, TargetId};
     use crate::privsep::transport::Channel;
-    use crate::service::{MountUnitState, State};
+    use crate::service::{MountUnitState, State, UpdateStart};
     use detent_core::descriptor::MountUnit;
 
     type R = Result<(), Box<dyn std::error::Error>>;
@@ -536,6 +575,15 @@ mod tests {
 
         fn stop_mount_units(&self, units: &[String]) -> Result<Vec<MountUnitState>, HookError> {
             Ok(unit_states(units, State::Inactive))
+        }
+
+        /// `v98.0.0` is already running; `v97.0.0` fails; the rest start.
+        fn start_update(&self, tag: &str) -> Result<UpdateStart, HookError> {
+            match tag {
+                "v98.0.0" => Ok(UpdateStart::AlreadyRunning),
+                "v97.0.0" => Err(HookError::Failed("systemd-run exited 1".to_owned())),
+                _ => Ok(UpdateStart::Started(format!("started {tag}"))),
+            }
         }
     }
 
@@ -1070,6 +1118,51 @@ mod tests {
     }
 
     #[test]
+    fn an_update_start_is_forwarded_and_its_answer_kept() -> R {
+        let fx = fixture()?;
+        with_runner(&fx, |client| {
+            assert_eq!(
+                client.start_update("v99.0.0"),
+                Ok(UpdateStart::Started("started v99.0.0".to_owned()))
+            );
+            assert_eq!(
+                client.start_update("v98.0.0"),
+                Ok(UpdateStart::AlreadyRunning)
+            );
+            assert_eq!(
+                client.start_update("v97.0.0"),
+                Err(HookError::Failed("systemd-run exited 1".to_owned()))
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn the_runner_refuses_a_tag_that_is_not_a_release_tag() -> R {
+        let fx = fixture()?;
+        let hooks = Hooks {
+            checks: &Fake,
+            services: &Fake,
+        };
+        for tag in ["", "-x", "v1.2.3 x", "v1.2.3/..", "v1.2.3;id", "1.2.3"] {
+            assert_eq!(
+                answer(
+                    &fx.allow,
+                    &fx.staging,
+                    &profile(),
+                    &hooks,
+                    RunnerRequest::StartUpdate {
+                        tag: tag.to_owned()
+                    }
+                ),
+                RunnerResponse::Failed("not a release tag".to_owned()),
+                "{tag:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn a_mismatched_answer_is_a_failure() -> R {
         let fx = fixture()?;
         let (monitor_end, mut runner_end) = Channel::pair()?;
@@ -1092,6 +1185,7 @@ mod tests {
                     exit_code: Some(0),
                     detail: String::new(),
                 }),
+                RunnerResponse::Forgotten,
             ] {
                 if runner_end.recv::<RunnerRequest>().is_err() || runner_end.send(&wrong).is_err() {
                     return;
@@ -1109,6 +1203,10 @@ mod tests {
         ));
         assert!(matches!(
             client.reload_unit_files(),
+            Err(HookError::Failed(_))
+        ));
+        assert!(matches!(
+            client.start_update("v99.0.0"),
             Err(HookError::Failed(_))
         ));
         drop(client);
