@@ -472,7 +472,7 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   and rollback; (b) add `connect` and DNS calls to `WORKER` (reverses an
   ADR-015 control; restart and rollback still missing); (c) MCP only, the
   Dashboard shows the `detent update` command. — proposed: (a) — owner
-  answer:
+  answer (2026-10-07): (a), the runner starts the transient unit.
 - D4: remove build toolchains from testhost. — proposed: after Track C A1–A3 —
   owner answer:
 - libbz2 on testhost: `libbz2-1.0` was downgraded to `1.0.8-6build2` by an earlier
