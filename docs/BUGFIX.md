@@ -420,6 +420,15 @@ deferred by the owner.
     (CLI) installs today. Fix: the worker fetches and verifies the release
     (`detent_update` prepare) into its state root before staging (found by
     the C1-b review, 2026-10-07).
+    **Blocked on the owner (§4 E16).** The confined worker cannot fetch: the
+    `WORKER` seccomp table has no `connect` (ADR-015,
+    `the_acme_table_connects_out_and_never_accepts`). Also found: the web
+    update check (`GET /api/v1/system/update`) answers 503 on a confined
+    host unless the cron wrote `update/check.json` (inferred, not seen on
+    testhost); after a web/MCP swap nothing restarts, checks `/healthz` or rolls
+    back, but the Dashboard copy says the service restarts; a second install
+    before a restart overwrites `<binary>.prev` with the new binary;
+    `detent mcp` never calls `set_state_root`, so its install never worked.
 
 ### Track F — Phase 12 / M4 (v1.0)
 
@@ -457,6 +466,13 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   `StageUpdate` over the socket into the monitor's own stage; the interim
   code is removed. Unproven until a Linux run: the two `enforce_mode_*`
   update tests.
+- E16: how does the web/MCP install get the release? (a) the runner starts
+  one fixed transient unit, `systemd-run --unit=detent-update detent update
+  --tag <tag>`, so the CLI flow does the self-test, swap, restart, `/healthz`
+  and rollback; (b) add `connect` and DNS calls to `WORKER` (reverses an
+  ADR-015 control; restart and rollback still missing); (c) MCP only, the
+  Dashboard shows the `detent update` command. — proposed: (a) — owner
+  answer:
 - D4: remove build toolchains from testhost. — proposed: after Track C A1–A3 —
   owner answer:
 - libbz2 on testhost: `libbz2-1.0` was downgraded to `1.0.8-6build2` by an earlier
