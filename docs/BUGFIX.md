@@ -416,23 +416,16 @@ deferred by the owner.
     leaves a truncated `.profraw`. The test now waits for the exit (kill only
     after 10 s) and asserts exit 0. Unproven until a CI coverage run; the
     forking sandbox tests were checked and write no profile when confined.
-16. **Web/MCP update install has no producer (high):** `UpdateApply` (the
-    Dashboard install button, `POST /api/v1/system/update`, the MCP tool)
-    stages `<state_root>/update/staged/<tag>` and its bundle to the monitor,
-    but nothing in production downloads them there; only tests plant them, so
-    the install answers `ops-unsupported` on a real host. Only `detent update`
-    (CLI) installs today. Fix: the worker fetches and verifies the release
-    (`detent_update` prepare) into its state root before staging (found by
-    the C1-b review, 2026-10-07).
-    **Blocked on the owner (§4 E16).** The confined worker cannot fetch: the
-    `WORKER` seccomp table has no `connect` (ADR-015,
-    `the_acme_table_connects_out_and_never_accepts`). Also found: the web
-    update check (`GET /api/v1/system/update`) answers 503 on a confined
-    host unless the cron wrote `update/check.json` (inferred, not seen on
-    testhost); after a web/MCP swap nothing restarts, checks `/healthz` or rolls
-    back, but the Dashboard copy says the service restarts; a second install
-    before a restart overwrites `<binary>.prev` with the new binary;
-    `detent mcp` never calls `set_state_root`, so its install never worked.
+16. ~~**Web/MCP update install has no producer (high).**~~ Done (owner
+    route (a), §4 E16): `UpdateApply` sends `StartUpdate {tag}`; the runner
+    runs `systemd-run --unit=detent-update --collect <its own executable>
+    update --tag <tag>`, and the CLI updater does download, verification,
+    self-test, swap, restart, `/healthz` and rollback; the web answers 202
+    (409 while an update runs). The monitor's stage and swap path is
+    removed. **Unproven until a Linux/testhost run:** `systemd-run` from the
+    runner under the packaged unit, and a full web install. Not fixed here:
+    `GET /api/v1/system/update` 503 without `update/check.json` (inferred);
+    capability-user mode needs a polkit rule for the unit (Phase 12).
 
 ### Track F — Phase 12 / M4 (v1.0)
 
@@ -476,7 +469,10 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   and rollback; (b) add `connect` and DNS calls to `WORKER` (reverses an
   ADR-015 control; restart and rollback still missing); (c) MCP only, the
   Dashboard shows the `detent update` command. — proposed: (a) — owner
-  answer (2026-10-07): (a), the runner starts the transient unit.
+  answer (2026-10-07): (a), the runner starts the transient unit. Done
+  2026-10-07 (`PROGRESS.md`). Open for the owner: the monitor's Landlock
+  rule for the binary directory and the `MONITOR` row `linkat` served only
+  the removed swap; narrow them?
 - D4: remove build toolchains from testhost. — proposed: after Track C A1–A3 —
   owner answer:
 - libbz2 on testhost: `libbz2-1.0` was downgraded to `1.0.8-6build2` by an earlier
