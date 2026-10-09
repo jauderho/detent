@@ -85,6 +85,11 @@ pub(super) fn holds_capabilities() -> bool {
     )
 }
 
+/// Whether `cap` is in the effective set; a failed read counts as not held.
+pub(super) fn has_capability(cap: Capability) -> bool {
+    caps::has_cap(None, CapSet::Effective, to_caps_capability(cap)).unwrap_or(false)
+}
+
 /// A failed read counts as holding capabilities (fail closed).
 fn sets_hold_capabilities(
     effective: Result<CapsHashSet, caps::errors::CapsError>,

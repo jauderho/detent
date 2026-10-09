@@ -22,6 +22,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use detent_core::diag::MessageId;
+pub use detent_platform::privsep::mode::PrivilegeMode;
 use serde::Deserialize;
 
 /// Port `detent` listens on when the operator has not said otherwise.
@@ -169,10 +170,10 @@ pub enum DnsProviderConfig {
 
 /// The whole of `/etc/detent/detent.toml`.
 ///
-/// Tables this build does not own yet (`[privilege]`, `[secrets]`) are
+/// A table this build does not own yet (`[secrets]`) is
 /// deliberately absent rather than accepted-and-ignored: with
 /// `deny_unknown_fields` an operator who writes one gets told this build does
-/// not read it, which is the truth. They arrive with the phases that use them.
+/// not read it, which is the truth. It arrives with the phase that uses it.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
@@ -192,6 +193,8 @@ pub struct Config {
     pub ui: UiConfig,
     /// What a `mounts` apply does after it writes `/etc/fstab`.
     pub mounts: MountsConfig,
+    /// Which unit the operator installed: root-confined or capability-user.
+    pub privilege: PrivilegeConfig,
 }
 
 impl Config {
@@ -519,6 +522,18 @@ pub struct MountsConfig {
     pub activate_new_entries: bool,
 }
 
+/// `[privilege]` — how the monitor holds its privilege (PLAN §2.4).
+///
+/// The unit file decides who the process is; this states which unit the
+/// operator installed, and `serve` refuses to start when the process does not
+/// match it ([`detent_platform::privsep::mode::check_mode`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PrivilegeConfig {
+    /// `"root-confined"` (default) or `"capability-user"`.
+    pub mode: PrivilegeMode,
+}
+
 /// `[ui]` — presentation defaults for the web UI.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -532,7 +547,7 @@ pub struct UiConfig {
 mod tests {
     use super::{
         AcmeConfig, Argon2Params, Bootstrap, Config, ConfigError, DEFAULT_CERT_DIR, DEFAULT_PORT,
-        DnsProviderConfig, MIN_ARGON2_M_KIB,
+        DnsProviderConfig, MIN_ARGON2_M_KIB, PrivilegeMode,
     };
     use std::path::{Path, PathBuf};
 
@@ -594,6 +609,7 @@ mod tests {
         assert_eq!(config.modules.enabled, None);
         assert_eq!(config.ui.default_locale, None);
         assert!(!config.mounts.activate_new_entries);
+        assert_eq!(config.privilege.mode, PrivilegeMode::RootConfined);
     }
 
     #[test]
@@ -656,6 +672,9 @@ mod tests {
 
             [mounts]
             activate_new_entries = true
+
+            [privilege]
+            mode = "capability-user"
             "#,
         )?;
         assert_eq!(config.listen.addr.to_string(), "127.0.0.1:8443");
@@ -682,6 +701,7 @@ mod tests {
         assert_eq!(config.modules.enabled, Some(vec!["hosts".to_owned()]));
         assert_eq!(config.ui.default_locale, Some("en-US".to_owned()));
         assert!(config.mounts.activate_new_entries);
+        assert_eq!(config.privilege.mode, PrivilegeMode::CapabilityUser);
         Ok(())
     }
 
@@ -698,6 +718,8 @@ mod tests {
             "[modules]\nall = true\n",
             "[ui]\nlocale = \"en\"\n",
             "[mounts]\nactivate = true\n",
+            "[privilege]\nmod = \"capability-user\"\n",
+            "[privilege]\nrequire_landlock = true\n",
         ] {
             let err = Config::parse(text).err().map(|e| e.message_id());
             assert_eq!(
@@ -706,6 +728,27 @@ mod tests {
                 "{text:?} was accepted"
             );
         }
+    }
+
+    #[test]
+    fn a_privilege_mode_outside_the_two_names_is_refused() {
+        for text in [
+            "[privilege]\nmode = \"root\"\n",
+            "[privilege]\nmode = \"capability_user\"\n",
+            "[privilege]\nmode = \"\"\n",
+            "[privilege]\nmode = 1\n",
+        ] {
+            let err = Config::parse(text).err().map(|e| e.message_id());
+            assert_eq!(
+                err.map(|id| id.as_str().to_owned()),
+                Some("web-config-malformed".to_owned()),
+                "{text:?} was accepted"
+            );
+        }
+        assert!(
+            Config::parse("[privilege]\nmode = \"root-confined\"\n")
+                .is_ok_and(|config| config.privilege.mode == PrivilegeMode::RootConfined)
+        );
     }
 
     #[test]

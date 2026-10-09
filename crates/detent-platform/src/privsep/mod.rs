@@ -10,6 +10,7 @@
 pub mod acme;
 pub mod allowlist;
 pub(crate) mod exec_deny;
+pub mod mode;
 pub mod monitor;
 pub(crate) mod mounts;
 pub mod proto;

@@ -192,6 +192,21 @@ pub enum Capability {
     Kill,
 }
 
+impl Capability {
+    /// The kernel's name, e.g. `CAP_DAC_OVERRIDE`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::DacOverride => "CAP_DAC_OVERRIDE",
+            Self::Chown => "CAP_CHOWN",
+            Self::Fowner => "CAP_FOWNER",
+            Self::SetUid => "CAP_SETUID",
+            Self::SetGid => "CAP_SETGID",
+            Self::Kill => "CAP_KILL",
+        }
+    }
+}
+
 /// What [`confine`] should do for one role.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Policy {
@@ -373,6 +388,22 @@ pub fn holds_capabilities() -> bool {
 #[cfg(not(target_os = "linux"))]
 #[must_use]
 pub const fn holds_capabilities() -> bool {
+    false
+}
+
+/// Whether `cap` is in this process's effective set. A failed read counts as
+/// not held.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn has_capability(cap: Capability) -> bool {
+    linux::has_capability(cap)
+}
+
+/// Non-Linux platforms have no capability sets, so this is always `false`.
+#[cfg(not(target_os = "linux"))]
+#[must_use]
+pub const fn has_capability(cap: Capability) -> bool {
+    let _ = cap;
     false
 }
 
