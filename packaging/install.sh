@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # packaging/install.sh — install or uninstall the detent binary, systemd
-# unit, sysusers/tmpfiles snippets, and polkit rule (PLAN §2.4, §2.10,
-# Phase 2 "Packaging" deliverable).
+# unit, sysusers/tmpfiles snippets, and (capability-user mode) the unit
+# drop-in and polkit rule (PLAN §2.4, §2.10, Phase 2 "Packaging", Phase 12).
 #
 # Usage:
 #   install.sh [OPTIONS]
@@ -11,9 +11,12 @@
 #   --binary <path>   Path to the detent binary to install.
 #                      Default: ./target/release/detent
 #   --mode <mode>      root-confined | capability-user (default: root-confined).
-#                      Selects whether the capability-user systemd drop-in
+#                      capability-user also installs the systemd drop-in
 #                      (packaging/systemd/detent.service.d/capability-user.conf)
-#                      is installed alongside detent.service.
+#                      and the polkit rule (packaging/polkit/50-detent.rules).
+#                      root-confined removes both if an earlier install left
+#                      them. Set the same mode in /etc/detent/detent.toml
+#                      ([privilege] mode); `detent serve` refuses a mismatch.
 #   --uninstall         Remove previously installed files instead of installing.
 #   --prefix <dir>      Install under <dir> instead of /. DESTDIR semantics:
 #                        files are placed only — no systemctl, systemd-sysusers,
@@ -86,7 +89,7 @@ log_err() { printf '%s\n' "${C_RED}error:${C_RESET} $*" >&2; }
 log_ok() { printf '%s\n' "${C_GREEN}==>${C_RESET} $*"; }
 
 usage() {
-  sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 # ---------------------------------------------------------------------------
@@ -212,6 +215,17 @@ install_file() {
   fi
 }
 
+# polkit_present: true when a polkit daemon is installed (its path differs by
+# distribution).
+polkit_present() {
+  local path
+  for path in /usr/lib/polkit-1/polkitd /usr/libexec/polkitd \
+    /usr/lib/policykit-1/polkitd /usr/libexec/polkit-1/polkitd; do
+    [[ -x "$path" ]] && return 0
+  done
+  return 1
+}
+
 remove_file() {
   local rel="$1"
   local dest="$DEST_ROOT/$rel"
@@ -258,13 +272,21 @@ do_install() {
   install_file "$SCRIPT_DIR/systemd/detent.service" "$SERVICE_DEST" 0644
   install_file "$SCRIPT_DIR/sysusers.d/detent.conf" "$SYSUSERS_DEST" 0644
   install_file "$SCRIPT_DIR/tmpfiles.d/detent.conf" "$TMPFILES_DEST" 0644
-  install_file "$SCRIPT_DIR/polkit/50-detent.rules" "$POLKIT_DEST" 0644
 
   if [[ "$MODE" == "capability-user" ]]; then
     install_file "$SCRIPT_DIR/systemd/detent.service.d/capability-user.conf" \
       "$DROPIN_DEST" 0644
+    install_file "$SCRIPT_DIR/polkit/50-detent.rules" "$POLKIT_DEST" 0644
+    if ((DRYRUN == 0)) && [[ -z "$PREFIX" ]] && ! polkit_present; then
+      log_warn "no polkit daemon found: capability-user mode needs polkit 0.106 or later for service control"
+    fi
   else
-    log_verbose "root-confined mode: not installing capability-user.conf drop-in"
+    # A root-confined monitor never asks polkit; a rule left by an earlier
+    # capability-user install would only grant the detent user service
+    # control it does not need.
+    log_verbose "root-confined mode: removing any capability-user drop-in and polkit rule"
+    remove_file "$DROPIN_DEST"
+    remove_file "$POLKIT_DEST"
   fi
 
   if ((DRYRUN == 0)) && [[ -z "$PREFIX" ]]; then
@@ -278,6 +300,9 @@ do_install() {
   log_ok "install complete (mode: $MODE)"
   if ((DRYRUN == 0)) && [[ -z "$PREFIX" ]]; then
     log_info "next: run 'sudo -u detent detent setup' to create the admin user and configure listen/ACME"
+  fi
+  if [[ "$MODE" == "capability-user" ]]; then
+    log_info "next: set '[privilege] mode = \"capability-user\"' in /etc/detent/detent.toml, then run 'detent doctor'"
   fi
 }
 

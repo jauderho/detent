@@ -330,3 +330,129 @@ fn the_polkit_rule_protects_the_mount_points_the_runner_protects() {
         )
     );
 }
+
+/// `packaging/install.sh`, from the repository root.
+const INSTALL_SH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../packaging/install.sh");
+
+/// Where `install.sh` puts the capability-user drop-in and the polkit rule.
+const DROPIN: &str = "etc/systemd/system/detent.service.d/capability-user.conf";
+const POLKIT: &str = "etc/polkit-1/rules.d/50-detent.rules";
+/// Every file `install.sh` may place.
+const INSTALLED: &[&str] = &[
+    "usr/local/bin/detent",
+    "etc/systemd/system/detent.service",
+    "etc/sysusers.d/detent.conf",
+    "etc/tmpfiles.d/detent.conf",
+    DROPIN,
+    POLKIT,
+];
+
+/// Run `install.sh` with `args` (no color); its status and stdout.
+fn install_sh(args: &[&str]) -> Result<(bool, String), Box<dyn std::error::Error>> {
+    let output = std::process::Command::new("bash")
+        .arg(INSTALL_SH)
+        .args(args)
+        .env("NO_COLOR", "1")
+        .output()?;
+    Ok((
+        output.status.success(),
+        String::from_utf8(output.stdout)? + &String::from_utf8(output.stderr)?,
+    ))
+}
+
+/// A stand-in for the binary, for `--binary`.
+fn fake_binary(dir: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
+    let path = dir.join("detent");
+    std::fs::write(&path, b"#!/bin/sh\n")?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Capability-user mode needs the drop-in and the polkit rule, and the
+/// operator must set the same mode in `detent.toml`.
+#[test]
+fn install_dryrun_in_capability_user_mode_installs_the_drop_in_and_the_rule()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::TempDir::new()?;
+    let binary = fake_binary(dir.path())?;
+    let (ok, text) = install_sh(&["--dryrun", "--mode", "capability-user", "--binary", &binary])?;
+    assert!(ok, "{text}");
+    assert!(text.contains(&format!("installing {DROPIN}")), "{text}");
+    assert!(text.contains(&format!("installing {POLKIT}")), "{text}");
+    assert!(
+        text.contains("[privilege] mode = \"capability-user\""),
+        "{text}"
+    );
+    Ok(())
+}
+
+/// A root-confined monitor never asks polkit: the rule is not installed.
+#[test]
+fn install_dryrun_in_root_confined_mode_installs_no_polkit_rule()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::TempDir::new()?;
+    let binary = fake_binary(dir.path())?;
+    let (ok, text) = install_sh(&["--dryrun", "--binary", &binary])?;
+    assert!(ok, "{text}");
+    assert!(
+        text.contains("installing etc/systemd/system/detent.service"),
+        "{text}"
+    );
+    assert!(!text.contains(&format!("installing {POLKIT}")), "{text}");
+    assert!(!text.contains(&format!("installing {DROPIN}")), "{text}");
+    assert!(!text.contains("[privilege]"), "{text}");
+    Ok(())
+}
+
+#[test]
+fn install_refuses_an_unknown_mode() -> Result<(), Box<dyn std::error::Error>> {
+    let (ok, text) = install_sh(&["--dryrun", "--mode", "capability_user"])?;
+    assert!(!ok, "{text}");
+    assert!(text.contains("--mode must be"), "{text}");
+    Ok(())
+}
+
+/// Under `--prefix`: a capability-user install places the drop-in and the
+/// rule, a root-confined install over it removes both and keeps the rest,
+/// and `--uninstall` removes everything.
+#[test]
+fn install_prefix_switches_modes_and_uninstalls() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::TempDir::new()?;
+    let binary = fake_binary(dir.path())?;
+    let root = dir.path().join("root");
+    let prefix = root.to_string_lossy().into_owned();
+    let present = |rel: &str| root.join(rel).exists();
+
+    let (ok, text) = install_sh(&[
+        "--prefix",
+        &prefix,
+        "--mode",
+        "capability-user",
+        "--binary",
+        &binary,
+    ])?;
+    assert!(ok, "{text}");
+    for rel in INSTALLED {
+        assert!(
+            present(rel),
+            "{rel} missing after a capability-user install"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join(POLKIT))?,
+        POLKIT_RULE,
+        "the installed rule is not the packaged one"
+    );
+
+    let (ok, text) = install_sh(&["--prefix", &prefix, "--binary", &binary])?;
+    assert!(ok, "{text}");
+    assert!(!present(DROPIN), "{text}");
+    assert!(!present(POLKIT), "{text}");
+    assert!(present("etc/systemd/system/detent.service"), "{text}");
+
+    let (ok, text) = install_sh(&["--prefix", &prefix, "--uninstall"])?;
+    assert!(ok, "{text}");
+    for rel in INSTALLED {
+        assert!(!present(rel), "{rel} left after --uninstall");
+    }
+    Ok(())
+}
