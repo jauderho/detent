@@ -446,6 +446,10 @@ Landed 2026-10-09 (CI only, `PROGRESS.md`): the `core-semver`, `unsafe-report`
 (`cargo geiger`) and weekly `mutants.yml` (`cargo-mutants`) jobs. Their first CI
 runs are still to be seen.
 
+- 2026-10-09: `THREAT_MODEL.md` (98 threats, 18 gaps `TM-G1`…`TM-G18`) and
+  `PENTEST_CHECKLIST.md` (246 ASVS rows, 32 Gap rows from 22 causes) exist.
+  The owner decides which gaps to accept; the rest stay open here.
+
 ### Track G — blocked on the owner or external infrastructure
 
 - `hickory-client` propagation checks (new dependency; ADR-011 cooldown).
