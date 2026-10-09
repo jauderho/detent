@@ -264,6 +264,68 @@ jobs:
       - name: cargo semver-checks on detent-core vs origin/main
         run: cargo semver-checks check-release -p detent-core --baseline-rev origin/main
 
+  unsafe-report:
+    name: Unsafe report (cargo-geiger, advisory)
+    runs-on: ubuntu-26.04
+    # Advisory: a broken or missing tool must not turn the run red.
+    continue-on-error: true
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # `taiki-e/install-action` has no manifest for cargo-geiger, so it
+      # builds from crates.io; the cache step keeps the binary. The vendored
+      # OpenSSL feature (cargo-geiger's own) removes the need for libssl-dev.
+      - name: Install cargo-geiger
+        run: cargo install --locked --version 0.13.0 --features vendored-openssl cargo-geiger
+
+      # Advisory: the report lists `unsafe` use in `detent` and every crate
+      # it links, with the all-features build. cargo-geiger exits 1 when it
+      # prints scan warnings (files it did not read), so the exit code is
+      # recorded, not enforced. The step fails only when no report exists.
+      # `--manifest-path` must be absolute, so the step enters the crate.
+      - name: cargo geiger on detent
+        working-directory: crates/detent
+        run: |
+          set -uo pipefail
+          status=0
+          cargo geiger --all-features --output-format Ascii \
+            > "${RUNNER_TEMP}/geiger.txt" 2> "${RUNNER_TEMP}/geiger-warnings.txt" || status=$?
+          echo "cargo geiger exit code: ${status}"
+          test -s "${RUNNER_TEMP}/geiger.txt"
+          {
+            echo "### cargo-geiger: detent (all features)"
+            echo
+            echo 'Totals (used/total): functions, expressions, impls, traits, methods.'
+            echo
+            echo '```'
+            tail -n 2 "${RUNNER_TEMP}/geiger.txt"
+            echo '```'
+            echo
+            echo "The full tree is in the geiger-detent artifact."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload geiger report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: geiger-detent
+          path: |
+            ${{ runner.temp }}/geiger.txt
+            ${{ runner.temp }}/geiger-warnings.txt
+          retention-days: 30
+          if-no-files-found: error
+
   acme-pebble:
     name: ACME dns-01 (Pebble + challtestsrv)
     runs-on: ubuntu-26.04
