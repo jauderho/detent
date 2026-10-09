@@ -360,8 +360,8 @@ impl ServiceControl for ReloadingServices {
         }])
     }
 
-    /// `v98.0.0` is already running and `v97.0.0` finds no systemd; every
-    /// other tag starts.
+    /// `v98.0.0` is already running, `v97.0.0` finds no systemd and
+    /// `v96.0.0` fails to start; every other tag starts.
     fn start_update(&self, tag: &str) -> Result<UpdateStart, HookError> {
         if let Ok(mut starts) = self.update_starts.lock() {
             starts.push(tag.to_owned());
@@ -371,6 +371,7 @@ impl ServiceControl for ReloadingServices {
             "v97.0.0" => Err(HookError::Unavailable(
                 "starting an update needs systemd".to_owned(),
             )),
+            "v96.0.0" => Err(HookError::Failed("systemd-run exited 1".to_owned())),
             _ => Ok(UpdateStart::Started(format!("started {tag}"))),
         }
     }
@@ -2951,6 +2952,23 @@ fn update_apply_is_unsupported_without_systemd_or_a_runner() -> TestResult {
         })
     ));
     assert_update_audited(&fx, AuditResult::Error, Some("ops-unsupported"))?;
+    fx.finish()
+}
+
+#[test]
+fn update_apply_reports_a_failed_start_as_a_privsep_failure() -> TestResult {
+    let mut fx = harness(b"v1\n", hooked())?;
+    let err = fx.run(Operation::UpdateApply {
+        version: "v96.0.0".to_owned(),
+    });
+    assert!(
+        matches!(
+            err,
+            Err(OpsError::Privsep(ClientError::Remote(ProtoError::Io(_))))
+        ),
+        "{err:?}"
+    );
+    assert_update_audited(&fx, AuditResult::Error, Some("ops-privsep-failed"))?;
     fx.finish()
 }
 
