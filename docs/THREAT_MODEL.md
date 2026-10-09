@@ -355,24 +355,25 @@ above.** If the owner says yes, update this document first. The change adds:
 
 ## 7. Out-of-date statements found during this pass
 
-Not fixed here (docs-only task scope); listed so the next pass can fix them.
+Fixed 2026-10-09 in a docs-only pass, except the last item, which that pass did not cover.
 
 - [SH-I] row "Only one pending commit at a time" and SH Gaps item 9 say no
   negative test exists; `a_second_commit_confirm_apply_while_one_is_pending_writes_nothing`
-  (`detent-ops/tests/engine.rs`) is that test.
+  (`detent-ops/tests/engine.rs`) is that test. **Fixed 2026-10-09.**
 - [SH-S] rows "Reproducible builds", "SBOM", "Provenance / immutable
   releases" and SH Gaps item 11 say "not yet — Phase 9"; see SUP-4 to SUP-7.
+  **Fixed 2026-10-09** (immutable releases are a repository setting, which the row now says).
 - [SH-W] row "Output escaping" and SH Gaps item 13 say the UI is not built;
-  see SPA-1.
+  see SPA-1. **Fixed 2026-10-09.**
 - [SH-L] row "The ACME client …" says there is no renew rate limit; see
-  ACM-5.
+  ACM-5. **Fixed 2026-10-09:** the row now states the one-per-hour limit on forced renewals.
 - [SH-L] row "seccomp allow-list" cites
   `every_table_entry_resolves_on_both_tier_one_architectures`, which does
-  not exist in this tree.
+  not exist in this tree. **Fixed 2026-10-09:** the row now cites `every_table_entry_resolves_or_is_arch_specific`.
 - ARCHITECTURE §11 item 2 says the monitor table still lists
-  `clone`/`execve`; they were removed (`the_monitor_table_has_no_process_creation_calls`).
+  `clone`/`execve`; they were removed (`the_monitor_table_has_no_process_creation_calls`). **Fixed 2026-10-09.**
 - ADR-012 says `recover_pending` has no production caller; it is wired
-  (`run_monitor_recovers_a_leftover_marker`, `detent/src/serve.rs`).
+  (`run_monitor_recovers_a_leftover_marker`, `detent/src/serve.rs`). **Fixed 2026-10-09** (update note added to the ADR).
 - SH Gaps item 7 (Landlock degradation not tied to `doctor`) is partly
   closed: `doctor_reports_the_confinement_each_role_recorded`
   (`detent/src/doctor.rs`), `a_missing_landlock_is_reported_at_startup`

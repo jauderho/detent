@@ -55,3 +55,14 @@ Negative:
 
 PLAN.md §1.3 (ADR-012 row), §2.3 (`ModuleDescriptor.commit_confirm`), §2.5,
 Appendix B (`StartConfirmTimer`, `ConfirmCommit` messages).
+
+## Update (2026-10-09)
+
+The statement above that `recover_pending` has no production caller is out of
+date. It is wired: `Monitor::serve` calls it when the state lock is held
+(`crates/detent-platform/src/privsep/monitor.rs`), `detent serve` reports the
+recovery at start-up (`report_recovery`, `crates/detent/src/serve.rs`), and the
+one-shot CLI path calls it before `serve_locked` (`crates/detent/src/run.rs`).
+A leftover marker is covered by `run_monitor_recovers_a_leftover_marker`
+(`crates/detent/src/serve.rs`). This note corrects only that statement; the
+rest of the decision is unchanged.

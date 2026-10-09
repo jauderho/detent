@@ -368,8 +368,9 @@ any degraded step (`report_confinement`, `serve.rs`).
    name, or a non-exec root write (a log or drift-file path), is not caught.
 2. **The runner is root and unconfined by design.** Its only input is the
    monitor's socket, and it accepts only allow-list ids and staged file
-   names. The monitor seccomp table still lists `clone`/`execve`; removing
-   them needs a traced run.
+   names. The monitor seccomp table no longer lists `clone`/`execve` or any
+   other process-creation call (removed 2026-09-30; guarded by
+   `the_monitor_table_has_no_process_creation_calls`, `crates/detent-platform/src/sandbox/seccomp.rs`).
 3. **One-shot CLI and `detent mcp` are not privilege-separated** (§3.2).
 4. **Landlock is absent on Raspberry Pi OS kernels** (SECURITY_HARDENING
    Gaps). Seccomp and the capability cut still apply.
