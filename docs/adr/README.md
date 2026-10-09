@@ -47,3 +47,4 @@ File naming: `ADR-NNN-<kebab-slug>.md`, zero-padded to three digits.
 | ADR-013 | Platform and architecture tiers | Accepted |
 | ADR-014 | In-tree Sigstore bundle verifier | Accepted |
 | ADR-015 | The ACME client runs in its own confined process | Accepted |
+| ADR-016 | Passkeys (WebAuthn) — defer past v1 | Accepted |
