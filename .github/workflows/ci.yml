@@ -463,10 +463,15 @@ jobs:
         run: |
           set -euo pipefail
           docker network create detent-acme
+          # Pull through Google's Docker Hub mirror first: the anonymous
+          # Docker Hub pull limit failed this job. The digest pins the image
+          # either way.
+          bind9=internetsystemsconsortium/bind9@sha256:f8506cfcbc8fcb44e40b922fa74b481ba23b50f00482bf6693ff8f120709a778
+          if docker pull "mirror.gcr.io/$bind9"; then bind9="mirror.gcr.io/$bind9"; fi
           docker run -d --name bind9 --network detent-acme \
             -p 127.0.0.1:5300:53/tcp -p 127.0.0.1:5300:53/udp \
             -v "$RUNNER_TEMP/dns/etc:/etc/bind:ro" -v "$RUNNER_TEMP/dns/cache:/var/cache/bind" \
-            internetsystemsconsortium/bind9@sha256:f8506cfcbc8fcb44e40b922fa74b481ba23b50f00482bf6693ff8f120709a778 \
+            "$bind9" \
             -g -c /etc/bind/named.conf
           mkdir -p "$RUNNER_TEMP/pebble"
           # One profile only: an order with no "profile" field gets a
@@ -575,8 +580,16 @@ jobs:
         with:
           persist-credentials: false
 
+      # Installed as a binary, not cargo-deny-action: that action builds a
+      # Docker image from Docker Hub when the job starts, and the anonymous
+      # pull limit failed this job.
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: cargo-deny@0.20.2
+
       - name: cargo deny check
-        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        run: cargo deny check
 
       - name: Install cargo-audit
         uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
