@@ -489,6 +489,8 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   only (README "Updates").
 - Track F mTLS: optional client-certificate auth for v1? — owner answer
   (2026-10-09): no; defer past v1.
+- Track F passkeys: ADR-016 recommends deferring past v1 (a WebAuthn RP ID
+  needs a DNS name; the default install is reached by IP). — owner answer:
 - Track F `capability-user` mode for v1 (monitor as `detent` with ambient
   capabilities, polkit for service control, unit drop-in and polkit rule
   changes, doctor checks)? — owner answer (2026-10-09): implement for v1;

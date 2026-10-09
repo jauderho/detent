@@ -160,8 +160,9 @@ verification (UV) must be forced, and the recovery path becomes the weak point.
    attestation, hand-rolled on `p256`/`sha2`**, behind a cargo feature and a
    config switch that is off by default. It is not passwordless. `webauthn-rs`
    stays rejected while it depends on OpenSSL.
-3. Operators who need a phishing-resistant factor in v1 use the optional mTLS
-   client-certificate mode (Q1, Phase 12), which works on a LAN IP.
+3. v1 has no phishing-resistant factor. The owner deferred mTLS past v1
+   (2026-10-09); when it lands it is the cheaper option, since it works on a
+   LAN IP.
 4. `docs/SECURITY_HARDENING.md` may state that passkeys are not supported and
    why (the RP ID needs a DNS name with a trusted certificate).
 
@@ -186,8 +187,8 @@ synced credentials).
 Positive:
 - No new attack surface, dependency, or size change in v1.
 - No OpenSSL, and no change to the cross-build matrix.
-- The owner keeps a cheaper hardening option (mTLS) that fits the IP-address
-  deployment.
+- A cheaper option (mTLS, deferred past v1) stays open and fits the
+  IP-address deployment.
 
 Negative:
 - v1 has no phishing-resistant browser login. TOTP codes can be relayed.
@@ -204,7 +205,7 @@ Negative:
   recovery path becomes the weak point, and the origin constraint blocks the
   default install.
 - `passkey` (`passkey-rs`) — rejected: authenticator side only.
-- mTLS instead — not decided here; it remains the Phase 12 option (Q1).
+- mTLS instead — deferred past v1 by the owner (2026-10-09).
 
 ## References
 

@@ -744,7 +744,7 @@ Both are commit-confirm modules. Network model is backend-neutral (interface →
 - `docs/THREAT_MODEL.md` (STRIDE per component, mapped to tests), `docs/SECURITY_HARDENING.md` (operator checklist: unit hardening, polkit mode, TOTP, mTLS option), `docs/PENTEST_CHECKLIST.md` (OWASP ASVS L2 items mapped to tests; run `security-review` skill on the full diff).
 - `privilege.mode = "capability-user"` + polkit rules; `detent doctor` verifies.
 - Optional mTLS client-cert auth (`tls.client_auth = "required"` with a configured CA) if Q1 answered yes.
-- Passkeys spike decision (ADR‑014) — implement only if cheap.
+- Passkeys spike decision (ADR‑016: deferred past v1) — implement only if cheap.
 - Translations bootstrap: `de`, `ja` (machine-drafted, marked `# needs-review`), pseudo-locale in CI.
 - `cargo-mutants` weekly job (advisory), `cargo geiger` report in CI, `cargo semver-checks` for `detent-core`/`detent-ffi`.
 - Final size/RSS measurements published in README; `improve-it` skill pass on the UI.
