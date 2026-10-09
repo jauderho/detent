@@ -274,15 +274,15 @@ describe('DashboardPage — update status', () => {
     ).toBeInTheDocument()
   })
 
-  it('fails independently: an unreachable release feed blanks only this panel', async () => {
+  it('says so when the update check has not run, and blanks only this panel', async () => {
     const stub = stubFetchByUrl(
-      allHandlers({ update: () => errorResponse(503, 'web-update-check-failed') }),
+      allHandlers({ update: () => errorResponse(404, 'web-update-not-checked') }),
     )
     renderWithProviders(<DashboardPage />, { fetch: stub.fetch })
 
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent(
-      'the update check could not reach the release server; try again later.',
+      'no update check has run on this host yet; run `detent update --check` as root.',
     )
     // The neighbours are untouched.
     expect(await screen.findByText('nas-01')).toBeInTheDocument()
@@ -414,7 +414,7 @@ describe('DashboardPage — install update', () => {
   it('shows the mapped server message when the install fails', async () => {
     const user = userEvent.setup()
     const stub = stubFetchByUrl(
-      installHandlers(SESSION, () => errorResponse(503, 'web-update-check-failed')),
+      installHandlers(SESSION, () => errorResponse(409, 'ops-update-not-newer')),
     )
     renderWithProviders(<DashboardPage />, { fetch: stub.fetch })
 
@@ -423,7 +423,7 @@ describe('DashboardPage — install update', () => {
 
     expect(
       await screen.findByText(
-        'the update check could not reach the release server; try again later.',
+        'that release is not newer than the running version; nothing was started.',
       ),
     ).toBeInTheDocument()
   })

@@ -125,16 +125,18 @@ the other.
 ## Update status
 
 `GET /api/v1/system/update` reports what the update policy says about this
-build, read-only. It performs the same check `detent update --check` does:
-the running version is compared against the release feed under the
-`[update]` policy from `detent.toml` (`min_age_days`), and the answer is
-`update_available`, `current`, `tag`, `published` and `security` — the same
-`UpdateReport` schema the console's dashboard shows. A policy refusal (the
-release is too young, or older than the running build) is folded into the
-report with `update_available: false`, never an error; an unreachable feed
-answers `503` with `message_id: "web-update-check-failed"`, refuse-closed,
-because a check that cannot reach the release server must not be reported as
-"up to date".
+build, read-only. It makes no network request: the confined worker has no
+network (ADR-015). It serves the stamp `<state_root>/update/check.json`,
+which `detent update --check` (run as root, for example from a timer) writes. The
+answer is `update_available`, `current`, `tag`, `published` and `security`
+(the `UpdateReport` schema the console's dashboard shows). `current` is the
+running version, not the one in the stamp, and `update_available` stays
+`true` only while the stamp's tag is newer than the running version and not
+in the bad-release list, so a stamp older than an install does not offer the
+installed release. A release held by the policy (too young, rolled back) is
+`update_available: false`, never an error. With no stamp the answer is `404`
+with `message_id: "web-update-not-checked"`: the check has not run on this
+host yet (run `detent update --check` as root, or schedule it).
 
 `POST /api/v1/system/update` starts installing the named release in the background. It takes a `write`-scoped, CSRF-checked `{"version": ...}` body (`UpdateApplyRequest`, `deny_unknown_fields`), authorizes against `Operation::UpdateApply` (`detent-web/src/authz.rs`), executes through the operations engine, and writes one audit record on success *and* on refusal (PLAN §2.5). The engine sends `Request::StartUpdate { tag }` (`crates/detent-platform/src/privsep/proto.rs`); the monitor refuses a tag that is not a newer `v`-semver release tag and asks the runner, which runs `systemd-run --unit=detent-update --collect <installed detent> update --tag <tag>`. That transient unit, outside `detent.service`, runs the CLI updater: download, Sigstore verification, self-test, swap (the previous binary stays at `<binary>.prev`), service restart, `/healthz`, and rollback when the restarted service is not healthy. The answer is `202` with `{"version": ...}` (`UpdateStartedView`) as soon as the unit runs; it says nothing about the outcome, which the running version shows afterwards (the unit's log is in the journal: `journalctl -u detent-update`). `409` (`ops-update-running`) while the unit is there; `500` (`ops-unsupported`) on a host without systemd. `GET /api/v1/system/update` installs nothing, ever.
 

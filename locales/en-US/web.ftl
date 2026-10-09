@@ -83,7 +83,7 @@ web-cert-renew-not-acme = renewal needs `tls.bootstrap = "acme"` in detent.toml.
 web-cert-renew-unavailable = the acme client did not get the renewal request; try again later.
 web-denied-scope = this credential does not carry the scope that action needs.
 web-engine-stopped = the operations engine is no longer running; retry once the service is back.
-web-update-check-failed = the update check could not reach the release server; try again later.
+web-update-not-checked = no update check has run on this host yet; run `detent update --check` as root.
 web-request-malformed = the request body is not the shape this endpoint expects.
 web-request-too-deep = the request body is nested too deeply.
 

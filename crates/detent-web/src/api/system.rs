@@ -13,12 +13,8 @@ use detent_core::diag::MessageId;
 use detent_ops::Operation;
 use detent_ops::audit::{AuditQuery, AuditRecord, AuditResult};
 use detent_ops::report::{CertReport, HostReport};
-use detent_update::fetch::Transport;
-use detent_update::policy::Policy;
 use detent_update::update::CheckReport;
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant};
-use time::OffsetDateTime;
 
 use crate::auth::audit::{AuthEvent, AuthRecord};
 use crate::auth::extract::{Caller, WriteCaller};
@@ -52,10 +48,11 @@ pub const RENEW_NOT_ACME_ID: &str = "web-cert-renew-not-acme";
 /// Fluent id of a renewal request that did not reach the ACME client.
 pub const RENEW_UNAVAILABLE_ID: &str = "web-cert-renew-unavailable";
 
-/// How long a failed live update check keeps the next one off the network
-/// (L-WEB13). A failed check writes no stamp, so without this every `GET`
-/// would reach the release feed again.
-pub const FAILED_CHECK_BACKOFF: Duration = Duration::from_mins(10);
+/// Fluent id of `GET /api/v1/system/update` when no stamp exists: the
+/// `detent update --check` has not run (or an install removed its
+/// stamp). The confined worker has no network (ADR-015), so it never checks
+/// by itself.
+pub const UPDATE_NOT_CHECKED_ID: &str = "web-update-not-checked";
 
 /// This module's routes.
 #[must_use]
@@ -257,24 +254,23 @@ pub(super) fn cert_report(state: &AppState) -> CertReport {
 }
 /// `GET /api/v1/system/update`.
 ///
-/// The update status the web layer answers directly: `detent-update` owns the
-/// check (release feed over the network), which the operations engine does
-/// not depend on and cannot answer for. Read-only — **installing** an update
-/// is the `write`-scoped, CSRF-checked `POST` on this same path, answered by
-/// [`apply_update`]; nothing here installs anything.
-///
-/// Interval-guarded (PLAN §2.9 steps 5a and 6): `detent update --check`
-/// (the daily cron) writes `<state_root>/update/check.json` at most once
-/// per 24 h; this handler prefers that stamp and only reaches the network
-/// when no stamp exists yet. A read-scoped caller can no longer make this
-/// host poll GitHub in a loop.
+/// The update status the web layer answers directly, from the stamp
+/// `detent update --check` (run as root, for example from a timer) writes to
+/// `<state_root>/update/check.json`. The confined worker has no network
+/// (ADR-015), so this never reaches the release feed; with no stamp it
+/// answers `404` ([`UPDATE_NOT_CHECKED_ID`]) at once. `current` is the
+/// running version and `update_available` is the stamp's offer only while
+/// its tag is newer than that version, so a stamp that is older than an
+/// install does not offer the installed release. Read-only — **installing**
+/// an update is the `write`-scoped, CSRF-checked `POST` on this same path,
+/// answered by [`apply_update`]; nothing here installs anything.
 #[cfg_attr(test, utoipa::path(
     get,
     path = UPDATE_PATH,
     tag = "system",
     responses(
-        (status = 200, description = "The update status under the configured policy", body = UpdateReport),
-        (status = 503, description = "The release feed could not be reached", body = crate::error::ErrorBody),
+        (status = 200, description = "The update status from the last `detent update --check`", body = UpdateReport),
+        (status = 404, description = "`detent update --check` has not run yet", body = crate::error::ErrorBody),
     ),
 ))]
 pub(super) async fn update(
@@ -282,81 +278,51 @@ pub(super) async fn update(
     caller: Caller,
 ) -> Result<Json<UpdateReport>, ApiError> {
     // Gated against this operation's own identity, not `HostProfile`'s: the
-    // engine cannot answer an update check (the feed lives in
+    // engine cannot answer an update status (the stamp lives in
     // `detent-update`), but the policy decision and the audit label for a
     // refusal must still be this endpoint's. No engine call happens, and a
     // read-only operation writes no audit record on success (PLAN §2.5).
     authorize(&state, &caller, &Operation::UpdateStatus)?;
-    let mut last_failure = state.update_check.lock().await;
-    let now = OffsetDateTime::now_utc();
-    let stamp = state.update_stamp();
-    let rejected = state.bad_stamp();
-    let live_stamp = stamp.clone();
-    let (cached, bad) = tokio::task::spawn_blocking(move || {
-        let cached = detent_update::update::read_cached(&stamp);
-        let bad = detent_update::update::read_bad(&rejected);
-        (cached, bad)
-    })
-    .await
-    .map_err(|_| update_check_failed())?;
-    if let Some(cached) = cached
-        && detent_update::update::is_fresh(cached.checked_at, now)
-    {
-        let poisoned = cached
-            .report
-            .tag
-            .as_deref()
-            .is_some_and(|tag| bad.iter().any(|b| b == tag));
-        if !poisoned {
-            return Ok(Json(cached.report.into()));
-        }
-    }
-    let policy = Policy {
-        min_age_days: u64::from(state.config.update.min_age_days),
-        allow_downgrade: false,
-    };
-    // No stamp yet: one live check, unless one failed recently.
-    let report = guarded_live_check(&mut last_failure, Instant::now(), move || {
-        let transport =
-            detent_update::fetch::RealTransport::new().map_err(|_| update_check_failed())?;
-        let report = update_report(&transport, &policy, &bad)?;
-        detent_update::update::write_cached(&live_stamp, &report, now, true)
-            .map_err(|_| update_check_failed())?;
-        Ok(report)
-    })
-    .await?;
-    Ok(Json(report.into()))
+    let cached = detent_update::update::read_cached(&state.update_stamp());
+    let bad = detent_update::update::read_bad(&state.bad_stamp());
+    status_from_stamp(cached.map(|cached| cached.report), &bad, RUNNING_VERSION).map(Json)
 }
 
-/// Run one live update check off the async workers (synchronous network I/O
-/// with a 30 s cap per GET), unless a live check failed less than
-/// [`FAILED_CHECK_BACKOFF`] before `now`. Then answer
-/// `web-update-check-failed` at once, without the network.
-///
-/// `last_failure` is the time of the last failed live check. The caller holds
-/// it under the lock that serializes live checks.
+/// The version of this build, which is the version of the running binary
+/// (a release is refused unless its tag equals the crate version).
+const RUNNING_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The answer for `stamp`, pulled out of [`update`] so tests need no caller.
 ///
 /// # Errors
 ///
-/// [`update_check_failed`] when `check` fails, when it cannot be run, or
-/// while the backoff holds.
-async fn guarded_live_check<F>(
-    last_failure: &mut Option<Instant>,
-    now: Instant,
-    check: F,
-) -> Result<CheckReport, ApiError>
-where
-    F: FnOnce() -> Result<CheckReport, ApiError> + Send + 'static,
-{
-    if last_failure.is_some_and(|at| now.saturating_duration_since(at) < FAILED_CHECK_BACKOFF) {
-        return Err(update_check_failed());
-    }
-    let result = tokio::task::spawn_blocking(check)
-        .await
-        .map_err(|_| update_check_failed())
-        .and_then(|report| report);
-    *last_failure = result.is_err().then_some(now);
-    result
+/// `404` [`UPDATE_NOT_CHECKED_ID`] without a stamp.
+fn status_from_stamp(
+    stamp: Option<CheckReport>,
+    bad: &[String],
+    running: &str,
+) -> Result<UpdateReport, ApiError> {
+    let stamp = stamp.ok_or_else(|| {
+        ApiError::new(StatusCode::NOT_FOUND, MessageId::new(UPDATE_NOT_CHECKED_ID))
+    })?;
+    let running_version = semver::Version::parse(running).ok();
+    let offered_is_newer = stamp
+        .tag
+        .as_deref()
+        .and_then(|tag| semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok())
+        .zip(running_version)
+        .is_some_and(|(offered, running)| offered > running);
+    let rejected = stamp
+        .tag
+        .as_deref()
+        .is_some_and(|tag| bad.iter().any(|b| b == tag));
+    Ok(UpdateReport {
+        update_available: stamp.update_available && offered_is_newer && !rejected,
+        current: running.to_owned(),
+        tag: stamp.tag,
+        published: stamp.published,
+        security: stamp.security,
+    })
 }
 /// `POST /api/v1/system/update`.
 ///
@@ -432,14 +398,6 @@ fn render_started(outcome: OpOutcome) -> Result<(StatusCode, Json<UpdateStartedV
     }
 }
 
-/// `web-update-check-failed` — the release feed could not be reached.
-fn update_check_failed() -> ApiError {
-    ApiError::new(
-        StatusCode::SERVICE_UNAVAILABLE,
-        MessageId::new("web-update-check-failed"),
-    )
-}
-
 /// The answer body of `GET /api/v1/system/update`.
 ///
 /// A mirror of [`CheckReport`], not a re-export: `detent-update` has no
@@ -472,24 +430,6 @@ impl From<CheckReport> for UpdateReport {
             security: report.security,
         }
     }
-}
-
-/// The update answer, pulled out of [`update`] so tests need no caller and no
-/// network: they hand it a mock [`Transport`].
-///
-/// # Errors
-///
-/// [`update_check_failed`] when the release feed cannot be reached
-/// (refuse-closed: an unreachable feed is never folded into "no update").
-pub(super) fn update_report(
-    transport: &dyn Transport,
-    policy: &Policy,
-    bad: &[String],
-) -> Result<CheckReport, ApiError> {
-    let current =
-        semver::Version::parse(env!("CARGO_PKG_VERSION")).map_err(|_| update_check_failed())?;
-    detent_update::update::check(transport, &current, policy, OffsetDateTime::now_utc(), bad)
-        .map_err(|_| update_check_failed())
 }
 
 /// The query string of `GET /api/v1/audit`.
@@ -595,17 +535,15 @@ fn render_audit(outcome: OpOutcome) -> Result<Json<Vec<AuditRecord>>, ApiError> 
 #[cfg(test)]
 mod tests {
     use super::{
-        AuditQueryParams, FAILED_CHECK_BACKOFF, MAX_AUDIT_LIMIT, MAX_FILTER_LEN, UpdateReport,
-        UpdateStartedView, guarded_live_check, render_audit, render_host, render_started,
-        update_check_failed, update_report,
+        AuditQueryParams, MAX_AUDIT_LIMIT, MAX_FILTER_LEN, UPDATE_NOT_CHECKED_ID, UpdateReport,
+        UpdateStartedView, render_audit, render_host, render_started, status_from_stamp,
     };
     use detent_core::descriptor::HostProfile;
     use detent_ops::OpOutcome;
     use detent_ops::audit::AuditQuery;
     use detent_ops::report::HostReport;
     use detent_platform::privsep::proto::CommitId;
-    use detent_update::fetch::{FetchError, Transport, target_triple};
-    use detent_update::policy::Policy;
+    use detent_update::update::CheckReport;
 
     type R = Result<(), Box<dyn std::error::Error>>;
 
@@ -676,61 +614,15 @@ mod tests {
 
     // -- GET /api/v1/system/update -------------------------------------------
 
-    /// A transport that answers every GET with one canned body: the boundary
-    /// `detent-update::fetch` mocks in its own tests, rebuilt here because
-    /// the web tests need only the releases feed.
-    struct Feed(String);
-
-    impl Transport for Feed {
-        fn get(
-            &self,
-            _url: &str,
-            cap: u64,
-            sink: &mut dyn std::io::Write,
-        ) -> Result<u64, FetchError> {
-            sink.write_all(self.0.as_bytes())
-                .map_err(|err| FetchError::Unreachable {
-                    url: String::new(),
-                    reason: err.to_string(),
-                })?;
-            u64::try_from(self.0.len()).map_err(|_| FetchError::TooLarge { cap })
-        }
-    }
-
-    /// A transport that cannot reach anything, for the refuse-closed path.
-    struct Dead;
-
-    impl Transport for Dead {
-        fn get(
-            &self,
-            _url: &str,
-            _cap: u64,
-            _sink: &mut dyn std::io::Write,
-        ) -> Result<u64, FetchError> {
-            Err(FetchError::Unreachable {
-                url: String::new(),
-                reason: "test".to_owned(),
-            })
-        }
-    }
-
-    /// One release in the shape `detent-update::fetch` parses, with the three
-    /// assets `list_releases` requires to keep a release at all.
-    fn feed(tag: &str, body: &str, published: &str) -> String {
-        let triple = target_triple();
-        format!(
-            r#"[{{"tag_name":"{tag}","draft":false,"prerelease":false,"published_at":{published},"body":"{body}","assets":[{{"name":"detent-{triple}","browser_download_url":"u"}},{{"name":"SHA256SUMS","browser_download_url":"u"}},{{"name":"detent-{triple}.sigstore.json","browser_download_url":"u"}}]}}]"#
-        )
-    }
-
     #[test]
-    fn the_update_failure_id_is_catalogued() {
+    fn the_update_not_checked_id_is_catalogued() {
         assert!(
             CATALOGUE.lines().any(|line| line
                 .split('=')
                 .next()
-                .is_some_and(|k| k.trim() == "web-update-check-failed")),
-            "web-update-check-failed is missing from core.ftl"
+                .is_some_and(|k| k.trim() == super::UPDATE_NOT_CHECKED_ID)),
+            "{} is missing from core.ftl",
+            super::UPDATE_NOT_CHECKED_ID
         );
     }
 
@@ -766,119 +658,6 @@ mod tests {
     }
 
     #[test]
-    fn update_report_maps_a_qualifying_release() -> R {
-        let feed = feed("v99.0.0", "", r#""2026-01-01T00:00:00Z""#);
-        let report = update_report(&Feed(feed), &Policy::default(), &[])
-            .map_err(|_| "a newer, old-enough release should qualify")?;
-        assert!(report.update_available);
-        assert_eq!(report.tag.as_deref(), Some("v99.0.0"));
-        assert_eq!(report.current, env!("CARGO_PKG_VERSION"));
-        assert!(report.published.is_some());
-        assert!(!report.security);
-        Ok(())
-    }
-
-    #[test]
-    fn update_report_folds_policy_refusals_into_the_report() -> R {
-        // A release older than the running one is refused, but named, so a
-        // client can explain why it is not offered (detent-update's own
-        // `DowngradeRefused` report).
-        let older = feed("v0.0.0", "", r#""2026-01-01T00:00:00Z""#);
-        let report = update_report(&Feed(older), &Policy::default(), &[])
-            .map_err(|_| "a refusal is a report, not an error")?;
-        assert!(!report.update_available);
-        assert_eq!(report.tag.as_deref(), Some("v0.0.0"));
-        assert_eq!(report.published, None);
-        assert!(!report.security);
-
-        // An empty feed has nothing at all: no tag, no date.
-        let report = update_report(&Feed("[]".to_owned()), &Policy::default(), &[])
-            .map_err(|_| "no candidates is a report, not an error")?;
-        assert!(!report.update_available);
-        assert_eq!(report.tag, None);
-        assert_eq!(report.published, None);
-        assert!(!report.security);
-        Ok(())
-    }
-
-    #[test]
-    fn update_report_carries_the_security_flag() -> R {
-        // `detent-security: true` bypasses the age gate, so an unpublished
-        // release still qualifies — and is reported as a security one.
-        let feed = feed("v99.0.0", "detent-security: true", "null");
-        let report = update_report(&Feed(feed), &Policy::default(), &[])
-            .map_err(|_| "a security release should qualify")?;
-        assert!(report.update_available);
-        assert!(report.security);
-        Ok(())
-    }
-
-    #[test]
-    fn update_report_refuses_closed_when_the_feed_is_unreachable() -> R {
-        let error = match update_report(&Dead, &Policy::default(), &[]) {
-            Ok(report) => {
-                return Err(format!("an unreachable feed must not answer {report:?}").into());
-            }
-            Err(error) => error,
-        };
-        assert_eq!(error.status(), update_check_failed().status());
-        assert_eq!(
-            error.message_id().as_str(),
-            update_check_failed().message_id().as_str()
-        );
-        Ok(())
-    }
-
-    /// L-WEB13: a failed live check writes no stamp, so the next `GET` is
-    /// uncached too. Within the backoff it must answer the failure without
-    /// the network; after the backoff it may try again.
-    #[tokio::test]
-    async fn a_second_uncached_check_does_not_reach_the_network() -> R {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::time::{Duration, Instant};
-
-        let reached = Arc::new(AtomicUsize::new(0));
-        let dead_feed = |reached: &Arc<AtomicUsize>| {
-            let reached = Arc::clone(reached);
-            move || {
-                reached.fetch_add(1, Ordering::SeqCst);
-                update_report(&Dead, &Policy::default(), &[])
-            }
-        };
-        let mut last_failure = None;
-        let start = Instant::now();
-
-        let first = guarded_live_check(&mut last_failure, start, dead_feed(&reached)).await;
-        assert!(first.is_err());
-        assert_eq!(reached.load(Ordering::SeqCst), 1);
-
-        let soon = start
-            .checked_add(Duration::from_secs(1))
-            .ok_or("clock overflow")?;
-        match guarded_live_check(&mut last_failure, soon, dead_feed(&reached)).await {
-            Err(error) => assert_eq!(
-                error.message_id().as_str(),
-                update_check_failed().message_id().as_str()
-            ),
-            Ok(report) => return Err(format!("a dead feed answered {report:?}").into()),
-        }
-        assert_eq!(
-            reached.load(Ordering::SeqCst),
-            1,
-            "the second check reached the network"
-        );
-
-        let later = start
-            .checked_add(FAILED_CHECK_BACKOFF)
-            .ok_or("clock overflow")?;
-        let third = guarded_live_check(&mut last_failure, later, dead_feed(&reached)).await;
-        assert!(third.is_err());
-        assert_eq!(reached.load(Ordering::SeqCst), 2);
-        Ok(())
-    }
-
-    #[test]
     fn update_report_converts_the_check_report_field_for_field() -> R {
         let report = UpdateReport::from(detent_update::update::CheckReport {
             update_available: true,
@@ -901,19 +680,56 @@ mod tests {
         Ok(())
     }
 
+    fn stamp(tag: Option<&str>, available: bool) -> CheckReport {
+        CheckReport {
+            update_available: available,
+            current: "0.0.1".to_owned(),
+            tag: tag.map(str::to_owned),
+            published: Some("2026-01-01T00:00:00Z".to_owned()),
+            security: true,
+            held: None,
+        }
+    }
+
     #[test]
-    fn update_report_skips_a_bad_tag() -> R {
-        let feed = feed("v99.0.0", "", r#""2026-01-01T00:00:00Z""#);
-        let bad = vec!["v99.0.0".to_owned()];
-        let report = update_report(&Feed(feed), &Policy::default(), &bad)
-            .map_err(|_| "a bad tag must not be offered")?;
+    fn no_stamp_is_a_404_that_names_the_missing_check() -> R {
+        let Err(error) = status_from_stamp(None, &[], "0.1.1") else {
+            return Err("no stamp must not answer a report".into());
+        };
+        assert_eq!(error.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(error.message_id().as_str(), UPDATE_NOT_CHECKED_ID);
+        Ok(())
+    }
+
+    #[test]
+    fn the_stamp_offer_counts_only_while_newer_than_the_running_version() -> R {
+        let offered = |tag: &str, running: &str, bad: &[String]| -> Result<bool, &'static str> {
+            status_from_stamp(Some(stamp(Some(tag), true)), bad, running)
+                .map(|report| report.update_available)
+                .map_err(|_| "a stamp must answer")
+        };
+        assert!(offered("v0.2.0", "0.1.1", &[])?);
+        assert!(!offered("v0.1.1", "0.1.1", &[])?, "the running release");
+        assert!(!offered("v0.1.0", "0.1.1", &[])?, "an older release");
+        assert!(!offered("v0.1.1", "0.1.1-rc.1", &["v0.1.1".to_owned()])?);
         assert!(
-            !report.update_available,
-            "bad tag is filtered before select"
+            !offered("v0.2.0", "0.1.1", &["v0.2.0".to_owned()])?,
+            "a rolled-back release"
         );
-        // The newer rolled-back tag is named; the page ignores it unless an
-        // update is available.
-        assert_eq!(report.tag.as_deref(), Some("v99.0.0"));
+        // A tag that is not semver is never an offer.
+        assert!(!offered("latest", "0.1.1", &[])?);
+        Ok(())
+    }
+
+    #[test]
+    fn the_stamp_never_widens_what_it_offered() -> R {
+        // A held release (too young) has no offer in the stamp; a newer tag
+        // alone must not create one.
+        let report = status_from_stamp(Some(stamp(Some("v0.2.0"), false)), &[], "0.1.1")
+            .map_err(|_| "a stamp must answer")?;
+        assert!(!report.update_available);
+        assert_eq!(report.tag.as_deref(), Some("v0.2.0"));
+        assert_eq!(report.current, "0.1.1", "current is the running version");
         Ok(())
     }
 

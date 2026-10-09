@@ -1007,17 +1007,8 @@ async fn openapi_document_needs_a_credential() -> R {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn system_update_needs_a_credential_and_refuses_nothing_else() -> R {
+async fn system_update_needs_a_credential() -> R {
     let live = Live::new()?;
-
-    // The authenticated 200 path fetches the live release feed
-    // (detent_update::update::check), which a test must not do; the report
-    // itself is driven with mock transports in `api::system`'s own tests,
-    // the same split `cert_report` uses. Here: the route is wired and
-    // gated, and a read-scoped credential is *accepted* (scope `read` is
-    // what `authorize` checks, before the network step) — the failure of
-    // the offline fetch would answer 503, never a panic, which the
-    // table-driven sweep below additionally exercises without one.
     let unauthenticated = get(live.state(), "/api/v1/system/update", None).await?;
     assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
 
@@ -1025,12 +1016,31 @@ async fn system_update_needs_a_credential_and_refuses_nothing_else() -> R {
     Ok(())
 }
 
-/// A fresh interval stamp (what the daily `detent update --check` writes)
-/// is served as-is: the answer carries the stamp's own fields, which no live
-/// feed could have produced, so the handler did not reach the network. A
-/// bad-release list that names some *other* tag does not invalidate it.
+/// The confined worker has no network (ADR-015): with no stamp the answer is
+/// at once a 404 that says the check has not run, never a live check.
 #[tokio::test]
-async fn system_update_serves_a_fresh_stamp_without_reaching_the_feed() -> R {
+async fn system_update_without_a_stamp_says_the_check_has_not_run() -> R {
+    let fixture = test_state()?;
+    let state = &fixture.state;
+    let (read, _write) = tokens(state)?;
+    assert!(!state.update_stamp().exists());
+
+    let started = std::time::Instant::now();
+    let response = get(state, "/api/v1/system/update", Some(&read)).await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(error_body(response).await?.1, "web-update-not-checked");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "the answer must not wait for a network attempt"
+    );
+    Ok(())
+}
+
+/// The stamp serves the offered release; `current` is the running version
+/// (the stamp's own `current` may be from before an install), and a stamp
+/// older than a day is still served.
+#[tokio::test]
+async fn system_update_serves_the_stamp_with_the_running_version() -> R {
     let fixture = test_state()?;
     let state = &fixture.state;
     let (read, _write) = tokens(state)?;
@@ -1043,12 +1053,9 @@ async fn system_update_serves_a_fresh_stamp_without_reaching_the_feed() -> R {
         security: true,
         held: None,
     };
-    let written = detent_update::update::write_cached(
-        &state.update_stamp(),
-        &cached,
-        time::OffsetDateTime::now_utc(),
-        true,
-    )?;
+    let two_days_ago = time::OffsetDateTime::now_utc() - time::Duration::days(2);
+    let written =
+        detent_update::update::write_cached(&state.update_stamp(), &cached, two_days_ago, true)?;
     assert!(written.is_some(), "a forced stamp write must happen");
 
     let response = get(state, "/api/v1/system/update", Some(&read)).await?;
@@ -1057,11 +1064,47 @@ async fn system_update_serves_a_fresh_stamp_without_reaching_the_feed() -> R {
         json(response).await?,
         serde_json::json!({
             "update_available": true,
-            "current": "0.0.0-from-the-stamp",
+            "current": env!("CARGO_PKG_VERSION"),
             "tag": "v9.9.9",
             "published": "2026-01-01T00:00:00Z",
             "security": true,
         })
+    );
+    Ok(())
+}
+
+/// After an install the stamp may still name the installed release: it is no
+/// longer an update.
+#[tokio::test]
+async fn system_update_does_not_offer_the_running_release() -> R {
+    let fixture = test_state()?;
+    let state = &fixture.state;
+    let (read, _write) = tokens(state)?;
+    let cached = detent_update::update::CheckReport {
+        update_available: true,
+        current: "0.0.1".to_owned(),
+        tag: Some(format!("v{}", env!("CARGO_PKG_VERSION"))),
+        published: Some("2026-01-01T00:00:00Z".to_owned()),
+        security: false,
+        held: None,
+    };
+    detent_update::update::write_cached(
+        &state.update_stamp(),
+        &cached,
+        time::OffsetDateTime::now_utc(),
+        true,
+    )?;
+
+    let response = get(state, "/api/v1/system/update", Some(&read)).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await?;
+    assert_eq!(
+        body.get("update_available"),
+        Some(&serde_json::json!(false))
+    );
+    assert_eq!(
+        body.get("current"),
+        Some(&serde_json::json!(env!("CARGO_PKG_VERSION")))
     );
     Ok(())
 }

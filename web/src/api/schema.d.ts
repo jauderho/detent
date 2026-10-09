@@ -355,17 +355,16 @@ export interface paths {
         };
         /**
          * `GET /api/v1/system/update`.
-         * @description The update status the web layer answers directly: `detent-update` owns the
-         *     check (release feed over the network), which the operations engine does
-         *     not depend on and cannot answer for. Read-only — **installing** an update
-         *     is the `write`-scoped, CSRF-checked `POST` on this same path, answered by
-         *     [`apply_update`]; nothing here installs anything.
-         *
-         *     Interval-guarded (PLAN §2.9 steps 5a and 6): `detent update --check`
-         *     (the daily cron) writes `<state_root>/update/check.json` at most once
-         *     per 24 h; this handler prefers that stamp and only reaches the network
-         *     when no stamp exists yet. A read-scoped caller can no longer make this
-         *     host poll GitHub in a loop.
+         * @description The update status the web layer answers directly, from the stamp
+         *     `detent update --check` (run as root, for example from a timer) writes to
+         *     `<state_root>/update/check.json`. The confined worker has no network
+         *     (ADR-015), so this never reaches the release feed; with no stamp it
+         *     answers `404` ([`UPDATE_NOT_CHECKED_ID`]) at once. `current` is the
+         *     running version and `update_available` is the stamp's offer only while
+         *     its tag is newer than that version, so a stamp that is older than an
+         *     install does not offer the installed release. Read-only — **installing**
+         *     an update is the `write`-scoped, CSRF-checked `POST` on this same path,
+         *     answered by [`apply_update`]; nothing here installs anything.
          */
         get: operations["update"];
         put?: never;
@@ -1888,7 +1887,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The update status under the configured policy */
+            /** @description The update status from the last `detent update --check` */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1897,8 +1896,8 @@ export interface operations {
                     "application/json": components["schemas"]["UpdateReport"];
                 };
             };
-            /** @description The release feed could not be reached */
-            503: {
+            /** @description `detent update --check` has not run yet */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -900,11 +900,11 @@
           "system"
         ],
         "summary": "`GET /api/v1/system/update`.",
-        "description": "The update status the web layer answers directly: `detent-update` owns the\ncheck (release feed over the network), which the operations engine does\nnot depend on and cannot answer for. Read-only — **installing** an update\nis the `write`-scoped, CSRF-checked `POST` on this same path, answered by\n[`apply_update`]; nothing here installs anything.\n\nInterval-guarded (PLAN §2.9 steps 5a and 6): `detent update --check`\n(the daily cron) writes `<state_root>/update/check.json` at most once\nper 24 h; this handler prefers that stamp and only reaches the network\nwhen no stamp exists yet. A read-scoped caller can no longer make this\nhost poll GitHub in a loop.",
+        "description": "The update status the web layer answers directly, from the stamp\n`detent update --check` (run as root, for example from a timer) writes to\n`<state_root>/update/check.json`. The confined worker has no network\n(ADR-015), so this never reaches the release feed; with no stamp it\nanswers `404` ([`UPDATE_NOT_CHECKED_ID`]) at once. `current` is the\nrunning version and `update_available` is the stamp's offer only while\nits tag is newer than that version, so a stamp that is older than an\ninstall does not offer the installed release. Read-only — **installing**\nan update is the `write`-scoped, CSRF-checked `POST` on this same path,\nanswered by [`apply_update`]; nothing here installs anything.",
         "operationId": "update",
         "responses": {
           "200": {
-            "description": "The update status under the configured policy",
+            "description": "The update status from the last `detent update --check`",
             "content": {
               "application/json": {
                 "schema": {
@@ -913,8 +913,8 @@
               }
             }
           },
-          "503": {
-            "description": "The release feed could not be reached",
+          "404": {
+            "description": "`detent update --check` has not run yet",
             "content": {
               "application/json": {
                 "schema": {

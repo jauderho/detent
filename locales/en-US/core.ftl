@@ -276,7 +276,7 @@ web-tls-acme-pem-rejected = the issued certificate or key was not usable PEM.
 web-engine-stopped = the operations engine is no longer running; retry once the service is back.
 web-cert-renew-not-acme = renewal needs `tls.bootstrap = "acme"` in detent.toml.
 web-cert-renew-unavailable = the acme client did not get the renewal request; try again later.
-web-update-check-failed = the update check could not reach the release server; try again later.
+web-update-not-checked = no update check has run on this host yet; run `detent update --check` as root.
 web-server-bind-failed = `{$addr}` could not be listened on: {$reason}
 web-server-address-unknown = the listening address could not be read back: {$reason}
 

@@ -80,7 +80,7 @@ export const API_MESSAGE_IDS = [
   'web-engine-stopped',
   'web-request-malformed',
   'web-request-too-deep',
-  'web-update-check-failed',
+  'web-update-not-checked',
 ] as const
 
 export type ApiMessageId = (typeof API_MESSAGE_IDS)[number]

@@ -38,7 +38,7 @@ use crate::config::{AuthConfig, Config};
 use crate::csrf::Origin;
 use crate::engine::EngineHandle;
 use crate::tls::CertStore;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Semaphore;
 
 /// Maximum password hashes allowed to run on blocking threads at once.
 pub const MAX_CONCURRENT_ARGON2: usize = 2;
@@ -164,15 +164,9 @@ pub struct AppState {
     /// The resolver the listener answers from; `CertStore::replace` swaps it live.
     pub cert_store: Arc<CertStore>,
     /// Root of `detent`'s mutable state (PLAN §2.10), so the update-status
-    /// endpoint can read the interval-guarded stamp written by `detent
-    /// update --check` without reaching the network on the request path
-    /// (PLAN §2.9 steps 5a and 6).
+    /// endpoint can read the stamp written by `detent update --check`; the
+    /// request path never reaches the network (ADR-015).
     pub state_root: Arc<PathBuf>,
-    /// Serializes the rare uncached update lookup so concurrent GETs cause at
-    /// most one GitHub request; the resulting on-disk stamp serves the rest.
-    /// Holds when the last live check failed, so a failure keeps the next
-    /// one off the network for a while (L-WEB13).
-    pub(crate) update_check: Arc<Mutex<Option<std::time::Instant>>>,
     /// Asks the acme process to renew now; `None` unless `tls.bootstrap =
     /// "acme"` ([`AppState::with_cert_renewer`]).
     pub cert_renewer: Option<Arc<dyn CertRenewer>>,
@@ -196,7 +190,6 @@ impl AppState {
             origin: Arc::new(origin),
             cert_store,
             state_root: Arc::new(state_root),
-            update_check: Arc::new(Mutex::new(None)),
             cert_renewer: None,
         }
     }
@@ -208,9 +201,8 @@ impl AppState {
         self
     }
 
-    /// The interval-guarded update stamp (PLAN §2.9 step 6): the on-disk
-    /// `CachedReport` the read-only `GET /api/v1/system/update` prefers over
-    /// reaching the release feed on every request.
+    /// The update stamp (PLAN §2.9 step 6): the on-disk `CachedReport` the
+    /// read-only `GET /api/v1/system/update` serves.
     #[must_use]
     pub fn update_stamp(&self) -> PathBuf {
         detent_update::update::stamp_path(&self.state_root)

@@ -831,8 +831,7 @@ fn verify_bundle_bytes(
 }
 
 /// The release policy for `detent update`: the age gate from
-/// `[update] min_age_days` in `detent.toml` (PLAN §2.10), the same value
-/// the web update check uses.
+/// `[update] min_age_days` in `detent.toml` (PLAN §2.10).
 #[cfg(feature = "update")]
 fn update_policy(
     settings: &Settings,

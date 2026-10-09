@@ -14,9 +14,9 @@ workspace = true
 detent-core = { path = "../detent-core" }
 detent-ops = { path = "../detent-ops" }
 detent-platform = { path = "../detent-platform" }
-# The update-status check (`GET /api/v1/system/update`, PLAN §2.9): the web
-# layer answers it directly from `detent-update::update::check` — read-only,
-# never the engine, which cannot reach a release feed. `Operation::UpdateStatus`
+# The update status (`GET /api/v1/system/update`, PLAN §2.9): the web layer
+# answers it directly from the stamp `detent-update` writes — read-only, no
+# network, never the engine, which has no stamp. `Operation::UpdateStatus`
 # exists only so the policy decision and the audit label are this endpoint's
 # own; the engine answers it `Unsupported`.
 detent-update = { path = "../detent-update" }
