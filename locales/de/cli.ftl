@@ -97,6 +97,7 @@ cli-serve-worker = der Worker läuft; sein HTTP-Server folgt in Phase 4. Handsha
 cli-serve-failed = Monitor und Worker konnten nicht gestartet werden: {$reason}
 cli-serve-stopped = das Paar wurde unerwartet beendet: {$reason} {$status}
 cli-serve-privileged-port = Port {$port} braucht cap_net_bind_service oder einen vom Monitor übergebenen Socket, was dieser Build beides nicht unterstützt; nutze einen Port ab 1024 oder setze einen Reverse-Proxy davor.
+cli-serve-privilege-mode = der eingestellte Privilegienmodus passt nicht zu diesem Prozess, daher wurde der Dienst nicht gestartet: {$reason}
 cli-serve-acme-unsupported = dieser Build hat keine dns-01-Anbieter (Feature acme-dns-providers) und kann daher keine ACME-Zertifikate beziehen; setze tls.bootstrap in {$path} auf "self-signed".
 cli-serve-acme-setting-missing = tls.bootstrap ist "acme", aber {$setting} ist in {$path} nicht gesetzt.
 cli-serve-acme-path-outside = {$setting} ({$value}) liegt nicht unter dem Zustandsverzeichnis {$root}: die eingesperrten Prozesse schreiben nur dort.

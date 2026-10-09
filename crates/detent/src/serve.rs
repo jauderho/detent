@@ -39,6 +39,8 @@
 use detent_core::descriptor::ModuleDescriptor;
 use detent_core::diag::MessageId;
 use detent_platform::privsep::allowlist::{Allowlist, Config};
+#[cfg(feature = "web")]
+use detent_platform::privsep::mode::{ProcessPrivilege, check_mode};
 use detent_platform::privsep::monitor::{
     DEFAULT_STAGING_DIR, ExitReason, Hooks, Monitor, MonitorError,
 };
@@ -701,6 +703,17 @@ fn preflight_web_config(
             &[("port", &config.listen.addr.port().to_string())],
         )?;
         return Ok(Err(Exit::Failed));
+    }
+    // The unit decides who this process is; the configured mode must say the
+    // same thing (PLAN §2.4), or the operator believes in a mode that is not
+    // running.
+    if let Err(mismatch) = check_mode(config.privilege.mode, &ProcessPrivilege::current()) {
+        renderer.line(
+            streams.notes,
+            MessageId::new("cli-serve-privilege-mode"),
+            &[("reason", &mismatch.to_string())],
+        )?;
+        return Ok(Err(Exit::Privilege));
     }
     let acme = config.tls.bootstrap == detent_web::Bootstrap::Acme;
     if acme && let Err(exit) = preflight_acme(&config, settings, renderer, streams)? {
@@ -1818,6 +1831,39 @@ mod web_tests {
             assert_eq!(outcome.err(), Some(Exit::Failed), "{path:?}");
             assert!(!notes.is_empty(), "{path:?}");
         }
+        Ok(())
+    }
+
+    /// `[privilege] mode = "capability-user"` in a process the unit did not
+    /// start that way (root, or a test run with no capability) is refused
+    /// before anything forks, as a privilege problem that names the mode.
+    #[test]
+    fn preflight_refuses_a_privilege_mode_the_process_does_not_match() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let messages = Messages::new(Some("en-US"));
+        let renderer = renderer(&messages);
+        let path = dir.path().join("detent.toml");
+        std::fs::write(&path, "[privilege]\nmode = \"capability-user\"\n")?;
+        let settings = settings(dir.path(), path);
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let mut input = std::io::empty();
+        let outcome = preflight_web_config(
+            &settings,
+            &renderer,
+            &mut crate::run::Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        assert_eq!(outcome.err(), Some(Exit::Privilege));
+        let notes = String::from_utf8(notes)?;
+        assert!(
+            notes.contains("privilege.mode is capability-user"),
+            "{notes}"
+        );
+        assert!(!notes.contains("cli-serve"), "{notes}");
         Ok(())
     }
 

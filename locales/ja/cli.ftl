@@ -97,6 +97,7 @@ cli-serve-worker = ワーカーは実行中です。HTTP サーバーはフェ�
 cli-serve-failed = モニターとワーカーを起動できませんでした: {$reason}
 cli-serve-stopped = ペアが予期せず停止しました: {$reason} {$status}
 cli-serve-privileged-port = ポート {$port} には cap_net_bind_service またはモニターから渡されたソケットが必要ですが、このビルドはどちらもサポートしていません。1024 以上のポートを使うか、前段にリバースプロキシを置いてください。
+cli-serve-privilege-mode = 設定された特権モードがこのプロセスと一致しないため、サービスを開始しませんでした: {$reason}
 cli-serve-acme-unsupported = このビルドには dns-01 プロバイダー (機能 acme-dns-providers) がないため、ACME 証明書を取得できません。{$path} の tls.bootstrap を "self-signed" に設定してください。
 cli-serve-acme-setting-missing = tls.bootstrap は "acme" ですが、{$path} に {$setting} が設定されていません。
 cli-serve-acme-path-outside = {$setting} ({$value}) は状態ルート {$root} の下にありません。隔離されたプロセスはそこにしか書き込めません。

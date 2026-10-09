@@ -102,6 +102,7 @@ cli-serve-worker = the worker is running; its http server arrives in phase 4. ha
 cli-serve-failed = the monitor and worker could not be started: {$reason}
 cli-serve-stopped = the pair stopped unexpectedly: {$reason} {$status}
 cli-serve-privileged-port = port {$port} needs cap_net_bind_service or a monitor-passed socket, neither of which this build supports; use a port of 1024 or higher, or put a reverse proxy in front.
+cli-serve-privilege-mode = the configured privilege mode does not match this process, so the service did not start: {$reason}
 cli-serve-acme-unsupported = this build has no dns-01 providers (feature acme-dns-providers), so it cannot obtain acme certificates; set tls.bootstrap to "self-signed" in {$path}.
 cli-serve-acme-setting-missing = tls.bootstrap is "acme", but {$setting} is not set in {$path}.
 cli-serve-acme-path-outside = {$setting} ({$value}) is not under the state root {$root}: the confined processes write only there.
