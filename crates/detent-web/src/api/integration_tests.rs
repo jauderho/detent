@@ -1165,6 +1165,49 @@ async fn system_apply_starts_the_update_or_reports_one_running() -> R {
     Ok(())
 }
 
+#[tokio::test]
+async fn system_apply_refuses_a_bad_or_not_newer_tag_with_a_4xx() -> R {
+    static UNITS: UpdateUnits = UpdateUnits;
+    let live = Live::with_services(Some(&UNITS))?;
+    let (_read, write) = tokens(live.state())?;
+    let running = format!(r#"{{"version":"v{}"}}"#, env!("CARGO_PKG_VERSION"));
+
+    for (body, status, id) in [
+        (
+            r#"{"version":"v1.0.0;id"}"#,
+            StatusCode::BAD_REQUEST,
+            "ops-update-tag-invalid",
+        ),
+        (
+            r#"{"version":"../x"}"#,
+            StatusCode::BAD_REQUEST,
+            "ops-update-tag-invalid",
+        ),
+        (
+            r#"{"version":"v99.0.0+meta"}"#,
+            StatusCode::BAD_REQUEST,
+            "ops-update-tag-invalid",
+        ),
+        (
+            running.as_str(),
+            StatusCode::CONFLICT,
+            "ops-update-not-newer",
+        ),
+        (
+            r#"{"version":"v0.0.1"}"#,
+            StatusCode::CONFLICT,
+            "ops-update-not-newer",
+        ),
+    ] {
+        let refused = post(live.state(), "/api/v1/system/update", Some(&write), body).await?;
+        assert_eq!(refused.status(), status, "{body}");
+        assert_eq!(error_body(refused).await?.1, id, "{body}");
+    }
+
+    live.shutdown();
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // POST /api/v1/system/cert/renew
 // ---------------------------------------------------------------------------

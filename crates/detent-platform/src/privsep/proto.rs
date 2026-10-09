@@ -95,6 +95,40 @@ pub fn is_release_tag(tag: &str) -> bool {
             .is_some_and(|version| version.build.is_empty())
 }
 
+/// Why [`check_update_tag`] refused a tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateTagRefusal {
+    /// Not a release tag ([`is_release_tag`]).
+    NotReleaseTag,
+    /// A release tag, but not newer than the running version.
+    NotNewer,
+}
+
+/// Check `tag` for [`Request::StartUpdate`]: a release tag
+/// ([`is_release_tag`]) strictly newer than the running version (the
+/// crate version of this build). The monitor, the worker's engine and the
+/// runner's callers share this one rule; only a CLI-typed operator path may
+/// install an older release.
+///
+/// # Errors
+///
+/// [`UpdateTagRefusal::NotReleaseTag`] or [`UpdateTagRefusal::NotNewer`].
+pub fn check_update_tag(tag: &str) -> Result<(), UpdateTagRefusal> {
+    if !is_release_tag(tag) {
+        return Err(UpdateTagRefusal::NotReleaseTag);
+    }
+    let current = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+        .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
+    match tag
+        .strip_prefix('v')
+        .and_then(|version| semver::Version::parse(version).ok())
+    {
+        Some(version) if version > current => Ok(()),
+        Some(_) => Err(UpdateTagRefusal::NotNewer),
+        None => Err(UpdateTagRefusal::NotReleaseTag),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Identifiers
 // ---------------------------------------------------------------------------
@@ -970,7 +1004,7 @@ mod tests {
         CommitId, HelloAck, IdKind, MAX_FRAME, MAX_RELEASE_TAG_LEN, ModuleId, ModuleInfo,
         MountOutcome, MountState, PROTO_VERSION, PathKind, PendingService, ProtoError, Request,
         Response, ServiceAction, ServiceOutcome, TargetContents, TargetId, TargetInfo,
-        WriteReceipt, decode, encode, is_release_tag,
+        UpdateTagRefusal, WriteReceipt, check_update_tag, decode, encode, is_release_tag,
     };
     use crate::fs::atomic::Sha256Digest;
     use detent_core::descriptor::{ServiceAction as CoreServiceAction, TargetKind};
@@ -1491,6 +1525,29 @@ mod tests {
         let longest = format!("v1.2.3-{}", "a".repeat(MAX_RELEASE_TAG_LEN - 7));
         assert_eq!(longest.len(), MAX_RELEASE_TAG_LEN);
         assert!(is_release_tag(&longest));
+    }
+
+    #[test]
+    fn an_update_tag_must_be_a_release_tag_newer_than_the_running_version() {
+        let running = env!("CARGO_PKG_VERSION");
+        assert_eq!(check_update_tag("v99.0.0"), Ok(()));
+        assert_eq!(
+            check_update_tag(&format!("v{running}")),
+            Err(UpdateTagRefusal::NotNewer)
+        );
+        assert_eq!(check_update_tag("v0.0.1"), Err(UpdateTagRefusal::NotNewer));
+        // A pre-release of the running version is older than it.
+        assert_eq!(
+            check_update_tag(&format!("v{running}-rc.1")),
+            Err(UpdateTagRefusal::NotNewer)
+        );
+        for bad in ["", "v1.0.0;id", "../x", "v99.0.0+meta", "99.0.0", "-x"] {
+            assert_eq!(
+                check_update_tag(bad),
+                Err(UpdateTagRefusal::NotReleaseTag),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

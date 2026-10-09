@@ -48,7 +48,7 @@ use super::allowlist::{Allowlist, CANDIDATE_PREFIX};
 use super::proto::{
     BackupId, BackupInfo, BindingId, CheckId, CheckOutcome, CommitId, IdKind, ModuleId,
     MountOutcome, PendingService, ProtoError, Request, Response, ServiceAction, ServiceOutcome,
-    TargetContents, TargetId, WriteReceipt, is_release_tag,
+    TargetContents, TargetId, UpdateTagRefusal, WriteReceipt, check_update_tag,
 };
 use super::transport::{Channel, ChannelError};
 use crate::fs::atomic::{
@@ -757,11 +757,8 @@ impl<'a> Monitor<'a> {
     /// newer than the running version, then the hook. The update itself
     /// runs in the transient unit; this answers when the unit runs.
     fn start_update(&self, tag: &str) -> Response {
-        if !is_release_tag(tag) {
-            return Response::Error(ProtoError::Io("not a release tag".to_owned()));
-        }
-        if let Err(err) = refuse_downgrade(tag) {
-            return Response::Error(err);
+        if let Err(refusal) = check_update_tag(tag) {
+            return Response::Error(refuse_update_tag(tag, refusal));
         }
         if !cfg!(feature = "update") {
             return Response::Error(ProtoError::Unsupported(
@@ -1717,25 +1714,18 @@ fn unix_millis() -> u128 {
 /// creates this as a private systemd runtime directory.
 pub const DEFAULT_STAGING_DIR: &str = "/run/detent/staging";
 
-/// C1-e: refuse downgrades over privsep ([`Request::StartUpdate`]). The
-/// worker is untrusted; only a CLI-typed operator path may downgrade. Parse `tag` as semver (strip a
-/// leading `v`, same as `detent-update::policy::version_of`) and require it
-/// to be strictly greater than the running version.
-fn refuse_downgrade(tag: &str) -> Result<(), ProtoError> {
-    let current = semver::Version::parse(env!("CARGO_PKG_VERSION"))
-        .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
-    let Ok(tag_version) = semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag)) else {
-        return Err(ProtoError::Io(
-            "release tag is not a semver version".to_owned(),
-        ));
-    };
-    if tag_version <= current {
-        return Err(ProtoError::Io(format!(
+/// C1-e: the monitor refuses a tag that is not a release tag or not newer
+/// than the running version ([`check_update_tag`]). The worker is
+/// untrusted and its engine checks the same rule first; this is the
+/// defense in depth.
+fn refuse_update_tag(tag: &str, refusal: UpdateTagRefusal) -> ProtoError {
+    match refusal {
+        UpdateTagRefusal::NotReleaseTag => ProtoError::Io("not a release tag".to_owned()),
+        UpdateTagRefusal::NotNewer => ProtoError::Io(format!(
             "refusing downgrade to {tag} from {}",
             env!("CARGO_PKG_VERSION")
-        )));
+        )),
     }
-    Ok(())
 }
 
 /// The effective uid of this process, read once and then remembered.

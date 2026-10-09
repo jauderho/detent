@@ -930,7 +930,7 @@
           "system"
         ],
         "summary": "`POST /api/v1/system/update`.",
-        "description": "Starts installing the named release in the background: the monitor asks\nthe runner to run `detent update --tag <version>` in the transient\nsystemd unit `detent-update`, which downloads and verifies the release,\nswaps it in, restarts the service, and rolls back if the restarted\nservice is not healthy. `202` means the unit runs, not that the release\nis installed; `GET` shows the running version afterwards. `409`\n(`ops-update-running`) while an update runs; `500` (`ops-unsupported`)\non a host without systemd.",
+        "description": "Starts installing the named release in the background: the monitor asks\nthe runner to run `detent update --tag <version>` in the transient\nsystemd unit `detent-update`, which downloads and verifies the release,\nswaps it in, restarts the service, and rolls back if the restarted\nservice is not healthy. `202` means the unit runs, not that the release\nis installed; `GET` shows the running version afterwards. `400`\n(`ops-update-tag-invalid`) when the version is not a release tag; `409`\n(`ops-update-not-newer`) when it is not newer than the running version,\n(`ops-update-running`) while an update runs; `500` (`ops-unsupported`)\non a host without systemd.",
         "operationId": "apply_update",
         "requestBody": {
           "content": {
@@ -953,8 +953,18 @@
               }
             }
           },
+          "400": {
+            "description": "The version is not a release tag",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "409": {
-            "description": "An update is already running",
+            "description": "The release is not newer than the running version, or an update is already running",
             "content": {
               "application/json": {
                 "schema": {

@@ -2955,7 +2955,7 @@ fn update_apply_is_unsupported_without_systemd_or_a_runner() -> TestResult {
 }
 
 #[test]
-fn update_apply_refuses_a_version_that_is_not_a_newer_release_tag() -> TestResult {
+fn update_apply_refuses_a_malformed_tag_before_the_monitor() -> TestResult {
     let mut fx = harness(b"v1\n", hooked())?;
     for version in [
         "../../etc/shadow",
@@ -2964,19 +2964,48 @@ fn update_apply_refuses_a_version_that_is_not_a_newer_release_tag() -> TestResul
         "",
         "-x",
         "v99.0.0 x",
-        "v0.0.1",
+        "v1.0.0;id",
+        "../x",
+        "v99.0.0+meta",
     ] {
         let err = fx.run(Operation::UpdateApply {
             version: version.to_owned(),
         });
         assert!(
-            matches!(
-                err,
-                Err(OpsError::Privsep(ClientError::Remote(ProtoError::Io(_))))
-            ),
-            "{version:?} must be refused: {err:?}"
+            matches!(err, Err(OpsError::UpdateTagInvalid)),
+            "{version:?} must be refused as a bad tag: {err:?}"
         );
     }
+    let records = fx.records();
+    let last = records.last().ok_or("the outcome was audited")?;
+    assert_eq!(last.op, OpKind::UpdateApply);
+    assert_eq!(last.result, AuditResult::Error);
+    assert_eq!(last.error_id.as_deref(), Some("ops-update-tag-invalid"));
+    assert!(
+        fx.update_starts().is_empty(),
+        "the runner must not be asked"
+    );
+    fx.finish()
+}
+
+#[test]
+fn update_apply_refuses_a_tag_that_is_not_newer_than_the_running_version() -> TestResult {
+    let mut fx = harness(b"v1\n", hooked())?;
+    let running = format!("v{}", env!("CARGO_PKG_VERSION"));
+    for version in ["v0.0.1", running.as_str()] {
+        let err = fx.run(Operation::UpdateApply {
+            version: version.to_owned(),
+        });
+        assert!(
+            matches!(err, Err(OpsError::UpdateNotNewer)),
+            "{version:?} must be refused as not newer: {err:?}"
+        );
+    }
+    let records = fx.records();
+    let last = records.last().ok_or("the outcome was audited")?;
+    assert_eq!(last.op, OpKind::UpdateApply);
+    assert_eq!(last.result, AuditResult::Error);
+    assert_eq!(last.error_id.as_deref(), Some("ops-update-not-newer"));
     assert!(
         fx.update_starts().is_empty(),
         "the runner must not be asked"

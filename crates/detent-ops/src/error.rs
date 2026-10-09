@@ -128,6 +128,14 @@ pub enum OpsError {
     /// unit is there).
     #[error("an update is already running")]
     UpdateRunning,
+    /// `UpdateApply` was refused: the version is not a release tag
+    /// (`v` and a semver version, no build metadata).
+    #[error("the version is not a release tag")]
+    UpdateTagInvalid,
+    /// `UpdateApply` was refused: the release is not newer than the running
+    /// version. Only the CLI installs an older release.
+    #[error("the release is not newer than the running version")]
+    UpdateNotNewer,
 }
 
 impl OpsError {
@@ -158,6 +166,8 @@ impl OpsError {
             Self::Cert { id, .. } => id,
             Self::Unsupported { .. } => MessageId::new("ops-unsupported"),
             Self::UpdateRunning => MessageId::new("ops-update-running"),
+            Self::UpdateTagInvalid => MessageId::new("ops-update-tag-invalid"),
+            Self::UpdateNotNewer => MessageId::new("ops-update-not-newer"),
         }
     }
 }
@@ -275,6 +285,8 @@ mod tests {
                 "ops-unsupported",
             ),
             (OpsError::UpdateRunning, "ops-update-running"),
+            (OpsError::UpdateTagInvalid, "ops-update-tag-invalid"),
+            (OpsError::UpdateNotNewer, "ops-update-not-newer"),
         ];
         // user. `detent-i18n`'s parity test compares locales to each other; it
         // cannot see ids that exist only in Rust.

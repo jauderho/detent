@@ -182,12 +182,16 @@ impl From<OpsError> for ApiError {
             // binding on this host — a module/allow-list mismatch — or its
             // file is missing, or an update already runs: the requested
             // action conflicts with the host's state rather than naming an
-            // absent API resource.
+            // absent API resource. A release not newer than the running
+            // version conflicts with the host's state the same way.
             OpsError::HashConflict { .. }
             | OpsError::NoTarget { .. }
             | OpsError::NoService { .. }
             | OpsError::TargetMissing
-            | OpsError::UpdateRunning => Self::new(StatusCode::CONFLICT, message_id),
+            | OpsError::UpdateRunning
+            | OpsError::UpdateNotNewer => Self::new(StatusCode::CONFLICT, message_id),
+            // The version is not a release tag: a malformed request.
+            OpsError::UpdateTagInvalid => Self::new(StatusCode::BAD_REQUEST, message_id),
             // A stale or already-settled commit id: see `is_unknown_wire_id`.
             OpsError::Privsep(ref client) if is_unknown_wire_id(client) => {
                 Self::new(StatusCode::CONFLICT, message_id)
@@ -393,6 +397,8 @@ mod tests {
             ),
             (OpsError::TargetMissing, StatusCode::CONFLICT),
             (OpsError::UpdateRunning, StatusCode::CONFLICT),
+            (OpsError::UpdateNotNewer, StatusCode::CONFLICT),
+            (OpsError::UpdateTagInvalid, StatusCode::BAD_REQUEST),
             (
                 // A stale or already-settled commit/backup id.
                 OpsError::from(ClientError::Remote(ProtoError::UnknownId {

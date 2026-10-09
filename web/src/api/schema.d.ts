@@ -376,7 +376,9 @@ export interface paths {
          *     systemd unit `detent-update`, which downloads and verifies the release,
          *     swaps it in, restarts the service, and rolls back if the restarted
          *     service is not healthy. `202` means the unit runs, not that the release
-         *     is installed; `GET` shows the running version afterwards. `409`
+         *     is installed; `GET` shows the running version afterwards. `400`
+         *     (`ops-update-tag-invalid`) when the version is not a release tag; `409`
+         *     (`ops-update-not-newer`) when it is not newer than the running version,
          *     (`ops-update-running`) while an update runs; `500` (`ops-unsupported`)
          *     on a host without systemd.
          */
@@ -1928,7 +1930,16 @@ export interface operations {
                     "application/json": components["schemas"]["UpdateStartedView"];
                 };
             };
-            /** @description An update is already running */
+            /** @description The version is not a release tag */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The release is not newer than the running version, or an update is already running */
             409: {
                 headers: {
                     [name: string]: unknown;

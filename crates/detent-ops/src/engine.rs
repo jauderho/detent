@@ -35,7 +35,7 @@ use detent_platform::fs::atomic::Sha256Digest;
 use detent_platform::host::Detected;
 use detent_platform::privsep::proto::{
     BackupId, BindingId, CheckId, CommitId, ModuleId, PendingService, ProtoError,
-    ServiceAction as WireServiceAction, TargetId, WriteReceipt,
+    ServiceAction as WireServiceAction, TargetId, UpdateTagRefusal, WriteReceipt, check_update_tag,
 };
 use detent_platform::privsep::worker::{Client, ClientError};
 use detent_platform::service::ServiceManager;
@@ -413,6 +413,13 @@ impl OpsEngine {
     /// back. This returns once the unit runs; the result is the running
     /// version afterwards.
     fn update_apply(&mut self, version: &str) -> Result<(), OpsError> {
+        // The monitor checks the same rule; checking here answers a bad
+        // request with its own id instead of a privsep failure.
+        match check_update_tag(version) {
+            Ok(()) => {}
+            Err(UpdateTagRefusal::NotReleaseTag) => return Err(OpsError::UpdateTagInvalid),
+            Err(UpdateTagRefusal::NotNewer) => return Err(OpsError::UpdateNotNewer),
+        }
         match self.client.start_update(version) {
             Ok(detail) => {
                 tracing::info!(%detail, "update started");

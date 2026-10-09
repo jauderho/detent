@@ -365,7 +365,9 @@ where
 /// systemd unit `detent-update`, which downloads and verifies the release,
 /// swaps it in, restarts the service, and rolls back if the restarted
 /// service is not healthy. `202` means the unit runs, not that the release
-/// is installed; `GET` shows the running version afterwards. `409`
+/// is installed; `GET` shows the running version afterwards. `400`
+/// (`ops-update-tag-invalid`) when the version is not a release tag; `409`
+/// (`ops-update-not-newer`) when it is not newer than the running version,
 /// (`ops-update-running`) while an update runs; `500` (`ops-unsupported`)
 /// on a host without systemd.
 #[cfg_attr(test, utoipa::path(
@@ -375,7 +377,8 @@ where
     request_body = UpdateApplyRequest,
     responses(
         (status = 202, description = "The update started in the background", body = UpdateStartedView),
-        (status = 409, description = "An update is already running", body = crate::error::ErrorBody),
+        (status = 400, description = "The version is not a release tag", body = crate::error::ErrorBody),
+        (status = 409, description = "The release is not newer than the running version, or an update is already running", body = crate::error::ErrorBody),
         (status = 500, description = "The update could not be started on this host", body = crate::error::ErrorBody),
     ),
 ))]

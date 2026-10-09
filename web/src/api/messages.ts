@@ -49,7 +49,9 @@ export const API_MESSAGE_IDS = [
   'ops-service-failed',
   'ops-unknown-module',
   'ops-unsupported',
+  'ops-update-not-newer',
   'ops-update-running',
+  'ops-update-tag-invalid',
   // web — the API surface itself
   'web-api-unexpected-outcome',
   'web-auth-ambiguous-credentials',
