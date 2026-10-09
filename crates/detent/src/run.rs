@@ -999,6 +999,7 @@ fn run_update_on(
         now,
         trust,
         staging_parent,
+        stamp,
         bad,
         tag,
         probe,
@@ -1127,6 +1128,7 @@ fn apply_update(
     now: time::OffsetDateTime,
     trust: &detent_update::TrustRoot,
     staging_parent: &std::path::Path,
+    stamp: &std::path::Path,
     bad: &std::path::Path,
     tag: Option<&str>,
     probe: &FeatureProbe,
@@ -1150,7 +1152,9 @@ fn apply_update(
             // §2.9 step 5's first half: the verified candidate must run and
             // cover this build's feature set before anything is installed.
             match probe(&candidate.binary_path) {
-                Ok(_) => install_candidate(&candidate, bad, swap, restart, renderer, streams),
+                Ok(_) => {
+                    install_candidate(&candidate, stamp, bad, swap, restart, renderer, streams)
+                }
                 Err(err) => failed(renderer, streams, &err.to_string()),
             }
         }
@@ -1165,6 +1169,7 @@ fn apply_update(
 #[cfg(feature = "update")]
 fn install_candidate(
     candidate: &detent_update::StagedUpdate,
+    stamp: &std::path::Path,
     bad: &std::path::Path,
     swap: &BinarySwap<'_>,
     restart: &RestartCheck<'_>,
@@ -1183,6 +1188,7 @@ fn install_candidate(
 
     match restart() {
         RestartOutcome::Healthy => {
+            clear_stamp(stamp);
             renderer.line(streams.out, MessageId::new("cli-update-installed"), &args)?;
             Ok(Exit::Ok)
         }
@@ -1190,6 +1196,7 @@ fn install_candidate(
         // under an init system. Rolling back a good binary because the host
         // has no systemd would be wrong, so this succeeds and says so.
         RestartOutcome::NotAService(reason) => {
+            clear_stamp(stamp);
             renderer.line(streams.out, MessageId::new("cli-update-installed"), &args)?;
             renderer.line(
                 streams.notes,
@@ -1203,6 +1210,14 @@ fn install_candidate(
             roll_back(installed, &reason, restart, renderer, streams)
         }
     }
+}
+
+/// Remove the `--check` stamp after an install: it still offers the release
+/// that is now running. Best-effort, like every other stamp write; the next
+/// `--check` writes a fresh one.
+#[cfg(feature = "update")]
+fn clear_stamp(stamp: &std::path::Path) {
+    let _ = std::fs::remove_file(stamp);
 }
 
 /// Puts the previous binary back and restarts again.
@@ -2216,6 +2231,48 @@ mod tests {
 
     #[cfg(feature = "update")]
     #[test]
+    fn an_installed_release_is_no_longer_offered_by_the_stamp() -> R {
+        let (_home, target) = install_target()?;
+        let run = run_update_hermetic(
+            &verified_feed()?,
+            &semver::Version::new(0, 0, 1),
+            &detent_update::Policy::default(),
+            &fixture_trust()?,
+            &recording_ok_probe(&probe_log(), &["hosts", "web", "update"]),
+            &recording_swap(&probe_log(), &target),
+            &healthy_restart(),
+            Mode::Tag("v99.0.0"),
+        )?;
+        assert_eq!(run.exit, Exit::Ok, "{}", run.notes);
+        let stamp = detent_update::update::stamp_path(run.dir.path());
+        assert!(
+            !stamp.exists(),
+            "the stamp still offers the installed release"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn a_refused_install_keeps_the_stamp() -> R {
+        let run = run_update_hermetic(
+            &verified_feed()?,
+            &semver::Version::new(0, 0, 1),
+            &detent_update::Policy::default(),
+            &fixture_trust()?,
+            &recording_ok_probe(&probe_log(), &["hosts", "web", "update"]),
+            &unreachable_swap(&probe_log()),
+            &healthy_restart(),
+            Mode::Tag("v0.0.1"),
+        )?;
+        assert_eq!(run.exit, Exit::Failed, "{}", run.out);
+        let stamp = detent_update::update::stamp_path(run.dir.path());
+        assert!(stamp.exists(), "a refused install must not clear the stamp");
+        Ok(())
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
     fn update_tag_refuses_what_the_policy_refuses() -> R {
         let current = semver::Version::new(0, 0, 1);
         let young = fixed_now()? - time::Duration::days(1);
@@ -2782,6 +2839,19 @@ mod tests {
         let bad = detent_update::update::bad_path(tmp.path());
         if let Mode::RejectedTag(tag) = mode {
             detent_update::update::mark_bad(&bad, tag);
+        }
+        // A prior `--check` left a stamp that offers the release; `update`
+        // never reads it, so only an install may clear it.
+        if !matches!(mode, Mode::Check) {
+            let offering = detent_update::CheckReport {
+                update_available: true,
+                current: "0.0.1".to_owned(),
+                tag: Some("v99.0.0".to_owned()),
+                published: Some("2020-01-01T00:00:00Z".to_owned()),
+                security: false,
+                held: None,
+            };
+            detent_update::update::write_cached(&stamp, &offering, fixed_now()?, true)?;
         }
         let exit = super::run_update_on(
             feed,

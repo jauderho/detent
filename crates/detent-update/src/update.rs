@@ -634,6 +634,14 @@ mod cache {
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
         let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
         tmp.write_all(body)?;
+        // `tempfile` creates 0600. The files hold no secret and the
+        // confined worker (another user) must read them.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            tmp.as_file()
+                .set_permissions(std::fs::Permissions::from_mode(0o644))?;
+        }
         tmp.as_file().sync_all()?;
         tmp.persist(path).map_err(|e| e.error)?;
         Ok(())
@@ -688,6 +696,31 @@ mod tests {
 
     fn now() -> time::OffsetDateTime {
         time::OffsetDateTime::from_unix_timestamp(1_786_780_800).expect("fixed timestamp")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_stamp_and_the_bad_list_are_world_readable() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::TempDir::new().expect("dir");
+        let stamp = stamp_path(dir.path());
+        let bad = bad_path(dir.path());
+        let report = CheckReport {
+            update_available: false,
+            current: "0.0.1".to_owned(),
+            tag: None,
+            published: None,
+            security: false,
+            held: None,
+        };
+        // `mark_bad` removes the stamp, so it goes first.
+        mark_bad(&bad, "v9.9.9");
+        write_cached(&stamp, &report, now(), true).expect("stamp");
+        for path in [&stamp, &bad] {
+            // `tempfile` creates 0600; the worker reads these as another user.
+            let mode = std::fs::metadata(path).expect("file").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o644, "{}", path.display());
+        }
     }
 
     #[test]
