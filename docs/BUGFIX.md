@@ -452,8 +452,7 @@ runs are still to be seen.
 
 Fixes from the threat model, in order (each: test first, one commit):
 
-1. **TM-G1 TOTP cannot be enrolled (medium):** add enrolment (CLI first; the
-   UI after) so `totp_required = true` does not lock every account out.
+1. ~~**TM-G1 TOTP cannot be enrolled (medium)**~~ Done 2026-10-09 (`PROGRESS.md`): `detent user totp enable|disable`; the web UI enrolment is still open.
 2. **TM-G8 / TM-G7 password policy:** at least 12 characters, refuse over 128
    bytes at login, and enforce `must_change_password` at login.
 3. **TM-G3 / TM-G4 / TM-G5 / TM-G6 audit gaps:** audit `setup`, `user` and
