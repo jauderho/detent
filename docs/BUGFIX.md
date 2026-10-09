@@ -480,6 +480,9 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   directory and the `MONITOR` row `linkat` served only the removed swap;
   narrow them? — owner answer (2026-10-08): remove both. Done 2026-10-09
   (`PROGRESS.md`). Unproven until CI or testhost: the root `enforce_mode_*` tests.
+  No packaged schedule runs `detent update --check`, so the console shows no
+  update until it runs; ship a timer? — owner answer (2026-10-09): document
+  only (README "Updates").
 - D4: remove build toolchains from testhost. — proposed: after Track C A1–A3 —
   owner answer:
 - libbz2 on testhost: `libbz2-1.0` was downgraded to `1.0.8-6build2` by an earlier

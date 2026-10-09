@@ -117,6 +117,21 @@ spec is [`docs/openapi.json`](docs/openapi.json), also served at
 `/api/v1/openapi.json`. Every `/api/v1` route needs a credential — only
 `/healthz` and the login endpoint are open.
 
+### Updates
+
+`detent update` installs the newest signed release, restarts the service and
+rolls back if `/healthz` fails. The web console only reads the result of the
+last `detent update --check`; detent ships no timer for it, so schedule it as
+root yourself, for example in root's crontab:
+
+```bash
+17 4 * * * /usr/local/bin/detent update --check >/dev/null
+```
+
+Until it runs once, the console says no update check has run. An install
+from the console runs `detent update --tag <tag>` in a transient
+`detent-update` unit.
+
 ## Security
 
 - **No setuid.** A privileged monitor and an unprivileged worker exchange a
