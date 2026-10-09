@@ -764,7 +764,7 @@ fn read_password(
             detail: String::new(),
         });
     }
-    check_nonempty(first)
+    check_policy(first)
 }
 
 /// Reads a TOTP code on the controlling terminal with echo disabled, or one
@@ -881,7 +881,7 @@ fn prompt_tty(
 
 /// One line from `input`, for the no-controlling-terminal path.
 fn read_password_line(input: &mut dyn Read) -> Result<Zeroizing<String>, UsageError> {
-    check_nonempty(read_secret_line(input).map_err(|err| io_usage_error(&err))?)
+    check_policy(read_secret_line(input).map_err(|err| io_usage_error(&err))?)
 }
 
 /// Reads through the newline without leaving a `BufReader` copy of the
@@ -927,14 +927,19 @@ fn trim_newline(line: &mut String) {
     }
 }
 
-/// Refuses an empty password.
-fn check_nonempty(password: Zeroizing<String>) -> Result<Zeroizing<String>, UsageError> {
+/// Refuses an empty password, and one outside the 12 to 128 character policy
+/// (ASVS 2.1.1, 2.1.2) that `detent_web` applies to every password it sets.
+fn check_policy(password: Zeroizing<String>) -> Result<Zeroizing<String>, UsageError> {
     if password.is_empty() {
         return Err(UsageError {
             id: MessageId::new("cli-password-empty"),
             detail: String::new(),
         });
     }
+    detent_web::auth::check_password(&password).map_err(|err| UsageError {
+        id: err.message_id(),
+        detail: String::new(),
+    })?;
     Ok(password)
 }
 
@@ -985,9 +990,9 @@ mod tests {
     }
 
     #[test]
-    fn check_nonempty_refuses_the_empty_string() {
-        assert!(check_nonempty(Zeroizing::new("x".to_owned())).is_ok());
-        assert!(check_nonempty(Zeroizing::new(String::new())).is_err());
+    fn check_policy_refuses_the_empty_string() {
+        assert!(check_policy(Zeroizing::new("x".repeat(12))).is_ok());
+        assert!(check_policy(Zeroizing::new(String::new())).is_err());
     }
 
     #[test]
@@ -1001,9 +1006,9 @@ mod tests {
     #[test]
     fn read_password_falls_back_to_one_line_of_input_off_a_tty() -> R {
         let messages = messages();
-        let mut input = b"hunter2\n".as_slice();
+        let mut input = b"correct-horse-1\n".as_slice();
         let password = read_password(&messages, &mut input, true).map_err(|err| err.detail)?;
-        assert_eq!(*password, "hunter2");
+        assert_eq!(*password, "correct-horse-1");
         Ok(())
     }
 
@@ -1044,7 +1049,7 @@ mod tests {
         };
 
         // Dry run: nothing written.
-        let mut input = b"hunter22\nhunter22\n".as_slice();
+        let mut input = b"correct-horse-1\ncorrect-horse-1\n".as_slice();
         let mut out = Vec::new();
         let mut notes = Vec::new();
         let exit = setup(
@@ -1062,7 +1067,7 @@ mod tests {
         assert!(UserStore::load(&settings.state_root)?.is_empty());
 
         // A real run creates the account.
-        let mut input = b"hunter22\nhunter22\n".as_slice();
+        let mut input = b"correct-horse-1\ncorrect-horse-1\n".as_slice();
         let mut out = Vec::new();
         let mut notes = Vec::new();
         let exit = setup(
@@ -1118,7 +1123,7 @@ mod tests {
             force: true,
         };
 
-        for password in ["firstpass", "secondpass"] {
+        for password in ["first-password-1", "second-password-2"] {
             let bytes = format!("{password}\n{password}\n").into_bytes();
             let mut input = bytes.as_slice();
             let mut out = Vec::new();
@@ -1148,7 +1153,7 @@ mod tests {
         let messages = messages();
         let renderer = renderer(&messages, true);
 
-        let mut input = b"hunter22\nhunter22\n".as_slice();
+        let mut input = b"correct-horse-1\ncorrect-horse-1\n".as_slice();
         let mut out = Vec::new();
         let mut notes = Vec::new();
         let exit = user(
@@ -1171,7 +1176,7 @@ mod tests {
             Some("alice")
         );
 
-        let mut input = b"newpassword\nnewpassword\n".as_slice();
+        let mut input = b"newpassword-12\nnewpassword-12\n".as_slice();
         let mut out = Vec::new();
         let mut notes = Vec::new();
         let exit = user(
@@ -1900,7 +1905,7 @@ mod tests {
             "token_revoke",
             "token_list",
         ] {
-            let mut input = b"hunter22\nhunter22\n".as_slice();
+            let mut input = b"correct-horse-1\ncorrect-horse-1\n".as_slice();
             let mut out = Vec::new();
             let mut notes = Vec::new();
             let mut streams = Streams {
@@ -1996,7 +2001,7 @@ mod tests {
         };
         let messages = messages();
         let renderer = renderer(&messages, false);
-        let mut input = b"hunter22\nhunter22\n".as_slice();
+        let mut input = b"correct-horse-1\ncorrect-horse-1\n".as_slice();
         let mut out = Vec::new();
         let mut notes = Vec::new();
         let exit = setup(
@@ -2122,7 +2127,7 @@ mod tests {
         let messages = messages();
         let renderer = renderer(&messages, false);
 
-        let mut input = b"hunter22\nhunter22\n".as_slice();
+        let mut input = b"correct-horse-1\ncorrect-horse-1\n".as_slice();
         let mut out = Vec::new();
         let mut notes = Vec::new();
         let exit = user(
@@ -2143,7 +2148,7 @@ mod tests {
         assert!(!notes.is_empty());
         assert!(UserStore::load(&settings.state_root)?.is_empty());
 
-        let mut input = b"hunter22\nhunter22\n".as_slice();
+        let mut input = b"correct-horse-1\ncorrect-horse-1\n".as_slice();
         let mut out = Vec::new();
         let mut notes = Vec::new();
         let exit = user(
@@ -2261,6 +2266,97 @@ mod tests {
         Ok(())
     }
 
+    /// ASVS 2.1.1 and 2.1.2 through all three commands: 11 characters and 129
+    /// characters are usage errors, naming the rule; 12 is accepted. Length is
+    /// in characters, not bytes.
+    #[test]
+    fn a_password_outside_12_to_128_characters_is_a_usage_error_for_all_three_commands() -> R {
+        let messages = messages();
+        let renderer = renderer(&messages, false);
+        let key = "\u{1F511}";
+        for (password, want) in [
+            ("a".repeat(11), Some("web-auth-password-too-short")),
+            (key.repeat(11), Some("web-auth-password-too-short")),
+            ("a".repeat(129), Some("web-auth-password-too-long")),
+            (key.repeat(129), Some("web-auth-password-too-long")),
+            ("a".repeat(12), None),
+            (key.repeat(12), None),
+            (key.repeat(128), None),
+        ] {
+            let bytes = format!("{password}\n{password}\n").into_bytes();
+            for command in ["setup", "add", "passwd"] {
+                let dir = tempfile::TempDir::new()?;
+                let settings = settings(dir.path());
+                if command == "passwd" {
+                    let mut seed = b"old password here\nold password here\n".as_slice();
+                    let (mut out, mut notes) = (Vec::new(), Vec::new());
+                    let exit = user(
+                        &UserAction::Add {
+                            name: "alice".to_owned(),
+                        },
+                        false,
+                        &settings,
+                        &renderer,
+                        &mut Streams {
+                            input: &mut seed,
+                            out: &mut out,
+                            notes: &mut notes,
+                        },
+                    )?;
+                    assert_eq!(exit, Exit::Ok);
+                }
+                let mut input = bytes.as_slice();
+                let mut out = Vec::new();
+                let mut notes = Vec::new();
+                let mut streams = Streams {
+                    input: &mut input,
+                    out: &mut out,
+                    notes: &mut notes,
+                };
+                let exit = match command {
+                    "setup" => setup(
+                        &crate::cli::SetupArgs {
+                            name: "alice".to_owned(),
+                            force: false,
+                        },
+                        false,
+                        &settings,
+                        &renderer,
+                        &mut streams,
+                    )?,
+                    "add" => user(
+                        &UserAction::Add {
+                            name: "alice".to_owned(),
+                        },
+                        false,
+                        &settings,
+                        &renderer,
+                        &mut streams,
+                    )?,
+                    _ => user(
+                        &UserAction::Passwd {
+                            name: "alice".to_owned(),
+                        },
+                        false,
+                        &settings,
+                        &renderer,
+                        &mut streams,
+                    )?,
+                };
+                let shown = String::from_utf8_lossy(&notes).into_owned();
+                let chars = password.chars().count();
+                if want.is_some() {
+                    assert_eq!(exit, Exit::Usage, "{command} {chars} chars: {shown}");
+                    let wanted = messages.get(MessageId::new(want.unwrap_or_default()));
+                    assert!(shown.contains(&wanted), "{command} {chars}: {shown}");
+                } else {
+                    assert_eq!(exit, Exit::Ok, "{command} {chars} chars: {shown}");
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// An empty name is refused by the store itself (`AuthError::NameInvalid`),
     /// which `setup` must surface through its general error arm — the one
     /// `store.create` failure this module's own tests do not otherwise reach,
@@ -2271,7 +2367,7 @@ mod tests {
         let settings = settings(dir.path());
         let messages = messages();
         let renderer = renderer(&messages, false);
-        let mut input = b"hunter22\nhunter22\n".as_slice();
+        let mut input = b"correct-horse-1\ncorrect-horse-1\n".as_slice();
         let mut out = Vec::new();
         let mut notes = Vec::new();
         let exit = setup(
@@ -2386,7 +2482,7 @@ mod tests {
                 name: "alice".to_owned(),
             },
         ] {
-            let mut input = b"hunter22\nhunter22\n".as_slice();
+            let mut input = b"correct-horse-1\ncorrect-horse-1\n".as_slice();
             let mut out = Vec::new();
             let mut notes = Vec::new();
             let exit = user(
@@ -2435,7 +2531,7 @@ mod tests {
                 name: "alice".to_owned(),
             },
         ] {
-            let mut input = b"hunter22\nhunter22\n".as_slice();
+            let mut input = b"correct-horse-1\ncorrect-horse-1\n".as_slice();
             let mut out = Vec::new();
             let mut notes = Vec::new();
             let exit = user(
@@ -2506,7 +2602,7 @@ mod tests {
         let settings = settings(dir.path());
         let messages = messages();
         let renderer = renderer(&messages, false);
-        let mut input = b"hunter22\nhunter22\n".as_slice();
+        let mut input = b"correct-horse-1\ncorrect-horse-1\n".as_slice();
         let mut out = Vec::new();
         let mut notes = Vec::new();
         let exit = user(
@@ -2538,7 +2634,7 @@ mod tests {
         let settings = settings(dir.path());
         let messages = messages();
         let renderer = renderer(&messages, false);
-        let mut input = b"hunter22\nhunter22\n".as_slice();
+        let mut input = b"correct-horse-1\ncorrect-horse-1\n".as_slice();
         let mut out = Vec::new();
         let mut notes = Vec::new();
         let exit = user(
@@ -2581,7 +2677,7 @@ mod tests {
             force: true,
         };
 
-        let mut input = b"hunter22\nhunter22\n".as_slice();
+        let mut input = b"correct-horse-1\ncorrect-horse-1\n".as_slice();
         let mut out = Vec::new();
         let mut notes = Vec::new();
         let exit = setup(
@@ -2605,7 +2701,7 @@ mod tests {
         std::fs::rename(&users_file, &saved)?;
         std::os::unix::fs::symlink(&saved, &users_file)?;
 
-        let mut input = b"secondpass\nsecondpass\n".as_slice();
+        let mut input = b"second-password-2\nsecond-password-2\n".as_slice();
         let mut out = Vec::new();
         let mut notes = Vec::new();
         let exit = setup(

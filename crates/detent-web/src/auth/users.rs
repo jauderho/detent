@@ -106,6 +106,33 @@ pub fn name_is_valid(name: &str) -> bool {
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
 }
 
+/// Fewest characters a new password may have (ASVS 2.1.1).
+pub const MIN_PASSWORD_CHARS: usize = 12;
+
+/// Most characters a password may have (ASVS 2.1.2). Login refuses more.
+pub const MAX_PASSWORD_CHARS: usize = 128;
+
+/// Check a password that is about to be set, or say why not.
+///
+/// Length is counted in Unicode scalar values, not bytes, and there is no
+/// composition rule (ASVS 2.1.9). The policy applies when a password is set,
+/// never when one is verified: an account stored with a shorter password keeps
+/// signing in until its password is changed.
+///
+/// # Errors
+///
+/// [`AuthError::PasswordTooShort`] or [`AuthError::PasswordTooLong`].
+pub fn check_password(password: &str) -> Result<(), AuthError> {
+    let chars = password.chars().count();
+    if chars < MIN_PASSWORD_CHARS {
+        return Err(AuthError::PasswordTooShort);
+    }
+    if chars > MAX_PASSWORD_CHARS {
+        return Err(AuthError::PasswordTooLong);
+    }
+    Ok(())
+}
+
 /// Check a name, or say why not.
 fn check_name(name: &str) -> Result<(), AuthError> {
     if name_is_valid(name) {
@@ -582,7 +609,9 @@ impl UserStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_NAME_LEN, USERS_FILE, USERS_VERSION, UserStore, name_is_valid};
+    use super::{
+        MAX_NAME_LEN, USERS_FILE, USERS_VERSION, UserStore, check_password, name_is_valid,
+    };
     use crate::auth::AuthError;
     use crate::auth::password::Hasher;
     use crate::auth::totp::TotpSecret;
@@ -721,6 +750,41 @@ mod tests {
         }
         assert!(store.is_empty());
         Ok(())
+    }
+
+    /// ASVS 2.1.1 and 2.1.2: 12 to 128 characters, counted as Unicode scalar
+    /// values, and no composition rule (2.1.9).
+    #[test]
+    fn the_password_policy_counts_characters_between_12_and_128() {
+        let too_short = [String::new(), "a".repeat(11), "\u{1F511}".repeat(11)];
+        for password in &too_short {
+            assert!(
+                matches!(check_password(password), Err(AuthError::PasswordTooShort)),
+                "{} chars",
+                password.chars().count()
+            );
+        }
+        // 12 four-byte characters are 48 bytes; 128 are 512. Characters count.
+        let fine = [
+            "a".repeat(12),
+            "\u{1F511}".repeat(12),
+            "\u{00E9}".repeat(128),
+            "a".repeat(128),
+            "            ".to_owned(),
+        ];
+        for password in &fine {
+            assert!(
+                check_password(password).is_ok(),
+                "{} chars",
+                password.chars().count()
+            );
+        }
+        for password in ["a".repeat(129), "\u{1F511}".repeat(129)] {
+            assert!(matches!(
+                check_password(&password),
+                Err(AuthError::PasswordTooLong)
+            ));
+        }
     }
 
     #[test]

@@ -85,9 +85,11 @@ pub const MALFORMED_BODY_ID: &str = "web-request-malformed";
 /// real account.
 pub const MALFORMED_SUBJECT: &str = "<malformed>";
 
-/// Longest password accepted. Well past any passphrase and far short of the
-/// 256 KiB body limit, so a hostile body cannot turn into Argon2 work.
-pub const MAX_PASSWORD_LEN: usize = 1024;
+/// Most characters a submitted password may have (ASVS 2.1.2). The same cap
+/// the policy applies when a password is set, so no stored password is over
+/// it; a longer one is refused before any hashing, so a hostile body cannot
+/// turn into Argon2 work.
+pub const MAX_PASSWORD_LEN: usize = users::MAX_PASSWORD_CHARS;
 
 /// Longest TOTP code accepted. RFC 6238 codes are six digits.
 pub const MAX_TOTP_CODE_LEN: usize = 16;
@@ -176,7 +178,7 @@ impl LoginRequest {
     #[must_use]
     fn within_limits(&self) -> bool {
         self.username.len() <= MAX_NAME_LEN
-            && self.password.len() <= MAX_PASSWORD_LEN
+            && self.password.chars().count() <= MAX_PASSWORD_LEN
             && self
                 .totp_code
                 .as_ref()
@@ -745,6 +747,71 @@ mod tests {
             .await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(fixture.audit.events().is_empty());
+        Ok(())
+    }
+
+    /// ASVS 2.1.2: a submitted password over 128 characters is refused before
+    /// it is hashed, with the same answer as a wrong password. The account
+    /// here holds a 200-character password (written past the policy, as an old
+    /// store could), so only the cap can be what refuses it.
+    #[tokio::test]
+    async fn a_password_over_128_characters_is_refused_generically() -> R {
+        let fixture = test_state()?;
+        let long = "x".repeat(200);
+        fixture
+            .state
+            .auth
+            .users
+            .create(&fixture.state.auth.hasher, "bob", &long, false)?;
+        let response = app(&fixture.state)
+            .oneshot(login_request(&credentials("bob", &long))?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(response.headers().get(header::SET_COOKIE).is_none());
+        assert_eq!(
+            json(response)
+                .await?
+                .pointer("/message_id")
+                .and_then(|v| v.as_str()),
+            Some("web-auth-invalid-credentials")
+        );
+        Ok(())
+    }
+
+    /// The cap counts characters, not bytes: 128 four-byte characters are 512
+    /// bytes and still sign in; 129 do not (both stored past the policy).
+    #[tokio::test]
+    async fn the_login_cap_counts_characters_not_bytes() -> R {
+        let fixture = test_state()?;
+        let at_cap = "\u{1F511}".repeat(128);
+        let over = "\u{1F511}".repeat(129);
+        for (name, password) in [("bob", &at_cap), ("carol", &over)] {
+            fixture
+                .state
+                .auth
+                .users
+                .create(&fixture.state.auth.hasher, name, password, false)?;
+        }
+        let response = app(&fixture.state)
+            .oneshot(login_request(&credentials("bob", &at_cap))?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = app(&fixture.state)
+            .oneshot(login_request(&credentials("carol", &over))?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    /// The policy applies when a password is set, not when it is used: an
+    /// account stored with a short password keeps signing in.
+    #[tokio::test]
+    async fn an_existing_short_password_still_signs_in() -> R {
+        let fixture = fixture_with_alice()?;
+        let response = app(&fixture.state)
+            .oneshot(login_request(&credentials("alice", "hunter2"))?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
         Ok(())
     }
 

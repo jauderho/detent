@@ -54,7 +54,7 @@ pub use secret::Secret;
 pub use session::{COOKIE_NAME, Session, SessionStore, SessionView, set_cookie_value};
 pub use token::{TokenIdentity, TokenRecord, TokenStore, TokenView};
 pub use totp::{OtpAuthUri, TotpSecret};
-pub use users::{UserStore, UserView, VerifiedUser};
+pub use users::{UserStore, UserView, VerifiedUser, check_password};
 
 /// Directory under the state root that holds `users.json` and `tokens.json`
 /// (PLAN §2.10).
@@ -96,6 +96,15 @@ pub enum AuthError {
         /// check that rejected it is a character allow-list.
         name: String,
     },
+    /// A new password has fewer than [`users::MIN_PASSWORD_CHARS`] characters.
+    #[error(
+        "a password must have at least {} characters",
+        users::MIN_PASSWORD_CHARS
+    )]
+    PasswordTooShort,
+    /// A password has more than [`users::MAX_PASSWORD_CHARS`] characters.
+    #[error("a password may have at most {} characters", users::MAX_PASSWORD_CHARS)]
+    PasswordTooLong,
     /// A user by that name is already on file.
     #[error("that user already exists")]
     UserExists,
@@ -183,6 +192,8 @@ impl AuthError {
             Self::Params(_) => MessageId::new("web-auth-argon2-params"),
             Self::Hash => MessageId::new("web-auth-hash-failed"),
             Self::NameInvalid { .. } => MessageId::new("web-auth-user-name-invalid"),
+            Self::PasswordTooShort => MessageId::new("web-auth-password-too-short"),
+            Self::PasswordTooLong => MessageId::new("web-auth-password-too-long"),
             Self::UserExists => MessageId::new("web-auth-user-exists"),
             Self::UnknownUser => MessageId::new("web-auth-user-unknown"),
             Self::InvalidCredentials => MessageId::new("web-auth-invalid-credentials"),
@@ -218,6 +229,8 @@ impl AuthError {
             Self::UserExists | Self::TokenLimit => S::CONFLICT,
             Self::UnknownUser | Self::UnknownToken => S::NOT_FOUND,
             Self::NameInvalid { .. }
+            | Self::PasswordTooShort
+            | Self::PasswordTooLong
             | Self::AmbiguousCredentials
             | Self::TotpSecretInvalid
             | Self::StoreMalformed { .. } => S::BAD_REQUEST,
