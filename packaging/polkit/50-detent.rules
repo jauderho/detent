@@ -1,47 +1,99 @@
 // packaging/polkit/50-detent.rules
 //
-// Used only in Phase 12 "capability-user" privilege mode (PLAN §2.4). In
-// that mode the monitor runs as the unprivileged `detent` user instead of
-// root, so it cannot call systemd's manage-units D-Bus method directly the
-// way the root-confined monitor can. This rule grants the `detent` user
-// exactly enough polkit authority to start/stop/restart/reload the units
-// that tier-1 modules bind services to (PLAN Phase 7/8 tables) — nothing
-// else. It has no effect in root-confined mode (root already bypasses
-// polkit) and is harmless to install even if capability-user mode is never
-// enabled.
+// Used only in the "capability-user" privilege mode (PLAN §2.4, Phase 12).
+// In that mode the whole service runs as the unprivileged `detent` user, so
+// its runner's `systemctl` calls go through polkit. This rule grants the
+// `detent` user exactly what the runner asks for, and nothing else:
 //
-// Installed to /etc/polkit-1/rules.d/50-detent.rules by install.sh.
+//   1. org.freedesktop.systemd1.manage-units for the units that tier-1
+//      modules bind services to, each with only the verbs its module binding
+//      allows (ServiceBinding.actions in the module descriptors).
+//   2. org.freedesktop.systemd1.manage-units "start" and "stop" of
+//      .mount/.automount units, for `[mounts] activate_new_entries` (Track D
+//      1, D1 mount route). polkit cannot see which units detent itself
+//      started, so every mount unit is allowed except the ones over the paths
+//      the runner also protects: `/` and every ancestor of /etc, /usr,
+//      /boot, the state root /var/lib/detent and the binary directory
+//      /usr/local/bin. The runner itself stops only the units it recorded.
+//   3. org.freedesktop.systemd1.reload-daemon (`systemctl daemon-reload`
+//      after an fstab write; systemd gives this action no details).
+//
+// Not granted: starting the transient detent-update.service (E16). polkit
+// sees only the unit name and verb of a StartTransientUnit call, not the
+// command it runs or its User=, so a grant for that name would let any
+// process of the `detent` user run any command as root. In this mode a web
+// or MCP update install is refused by polkit; run `detent update` as root.
+//
+// Installed to /etc/polkit-1/rules.d/50-detent.rules by
+// `install.sh --mode capability-user` only. JavaScript rules need polkit
+// 0.106 or later.
 
 polkit.addRule(function (action, subject) {
-  if (action.id != "org.freedesktop.systemd1.manage-units") {
-    return polkit.Result.NOT_HANDLED;
-  }
   if (subject.user != "detent") {
     return polkit.Result.NOT_HANDLED;
   }
 
-  // Unit alternatives per PLAN Phase 7/8 tables (resolver, chrony, mounts,
-  // nfs, samba, network, dhcp) plus their init-system alternatives.
-  var ALLOWED_UNITS = [
-    "chronyd.service",
-    "chrony.service",
-    "smb.service",
-    "smbd.service",
-    "nmb.service",
-    "nfs-server.service",
-    "dnsmasq.service",
-    "kea-dhcp4-server.service",
-    "systemd-networkd.service",
-    "systemd-resolved.service",
-    "unbound.service",
-    "NetworkManager.service",
-  ];
-  var ALLOWED_VERBS = ["start", "stop", "restart", "reload"];
+  if (action.id == "org.freedesktop.systemd1.reload-daemon") {
+    return polkit.Result.YES;
+  }
+  if (action.id != "org.freedesktop.systemd1.manage-units") {
+    return polkit.Result.NOT_HANDLED;
+  }
 
   var unit = action.lookup("unit");
   var verb = action.lookup("verb");
+  if (typeof unit !== "string" || typeof verb !== "string") {
+    return polkit.Result.NOT_HANDLED;
+  }
 
-  if (ALLOWED_UNITS.indexOf(unit) !== -1 && ALLOWED_VERBS.indexOf(verb) !== -1) {
+  // Unit -> verbs, from the module descriptors' service bindings.
+  var UNIT_VERBS = {
+    "NetworkManager.service": ["reload", "restart"],
+    "chrony.service": ["reload", "restart"],
+    "chronyd.service": ["reload", "restart"],
+    "dnsmasq.service": ["reload", "restart"],
+    "kea-dhcp4-server.service": ["restart"],
+    "kea-dhcp6-server.service": ["restart"],
+    "networking.service": ["reload", "restart"],
+    "nfs-server.service": ["reload", "restart"],
+    "samba.service": ["reload", "restart"],
+    "smb.service": ["reload", "restart"],
+    "systemd-networkd.service": ["reload", "restart"],
+    "systemd-resolved.service": ["restart"],
+    "unbound.service": ["reload", "restart"],
+  };
+  if (Object.prototype.hasOwnProperty.call(UNIT_VERBS, unit)) {
+    return UNIT_VERBS[unit].indexOf(verb) !== -1
+      ? polkit.Result.YES
+      : polkit.Result.NOT_HANDLED;
+  }
+
+  // Mount units of fstab entries: what `systemd-escape --path` writes, never
+  // the root mount ("-.mount") or a mount over a protected path.
+  var MOUNT_UNIT = /^[A-Za-z0-9:_.\\][A-Za-z0-9:_.\\-]*\.(mount|automount)$/;
+  var PROTECTED_MOUNT_UNITS = [
+    "boot.automount",
+    "boot.mount",
+    "etc.automount",
+    "etc.mount",
+    "usr-local-bin.automount",
+    "usr-local-bin.mount",
+    "usr-local.automount",
+    "usr-local.mount",
+    "usr.automount",
+    "usr.mount",
+    "var-lib-detent.automount",
+    "var-lib-detent.mount",
+    "var-lib.automount",
+    "var-lib.mount",
+    "var.automount",
+    "var.mount",
+  ];
+  if (
+    MOUNT_UNIT.test(unit) &&
+    PROTECTED_MOUNT_UNITS.indexOf(unit) === -1 &&
+    (verb == "start" || verb == "stop")
+  ) {
     return polkit.Result.YES;
   }
 

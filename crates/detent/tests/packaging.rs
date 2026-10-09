@@ -159,3 +159,174 @@ fn the_unit_keeps_setuid_for_the_worker_drop() {
         );
     }
 }
+
+const POLKIT_RULE: &str = include_str!("../../../packaging/polkit/50-detent.rules");
+
+/// The rule's code, without its comment lines.
+fn polkit_code() -> String {
+    POLKIT_RULE
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Every double-quoted string on `line`.
+fn quoted(line: &str) -> Vec<String> {
+    line.split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The lines of the rule after the line holding `start`, up to the line that
+/// closes it.
+fn polkit_block(start: &str) -> Vec<String> {
+    polkit_code()
+        .lines()
+        .skip_while(|line| !line.contains(start))
+        .skip(1)
+        .take_while(|line| {
+            let line = line.trim_start();
+            !line.starts_with(']') && !line.starts_with('}')
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `UNIT_VERBS`: unit -> verbs, as the rule grants them.
+fn polkit_unit_verbs() -> std::collections::BTreeMap<String, Vec<String>> {
+    polkit_block("var UNIT_VERBS = {")
+        .iter()
+        .filter_map(|line| {
+            let mut strings = quoted(line).into_iter();
+            let unit = strings.next()?;
+            let mut verbs: Vec<String> = strings.collect();
+            verbs.sort();
+            Some((unit, verbs))
+        })
+        .collect()
+}
+
+/// The `systemctl` verb of a module's service action (the same mapping as
+/// `action_verb` in `detent_platform::service::systemd`).
+const fn verb(action: detent_core::descriptor::ServiceAction) -> &'static str {
+    use detent_core::descriptor::ServiceAction;
+    match action {
+        ServiceAction::Restart => "restart",
+        ServiceAction::Reload => "reload",
+        ServiceAction::Start => "start",
+        ServiceAction::Stop => "stop",
+    }
+}
+
+/// The unit -> verbs map the compiled modules' service bindings need.
+fn module_unit_verbs() -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut map: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for module in detent_modules::modules() {
+        for binding in module.descriptor().services {
+            for unit in binding.units.systemd {
+                let verbs = map.entry((*unit).to_owned()).or_default();
+                verbs.extend(
+                    binding
+                        .actions
+                        .iter()
+                        .map(|action| verb(*action).to_owned()),
+                );
+                verbs.sort();
+                verbs.dedup();
+            }
+        }
+    }
+    map
+}
+
+/// Capability-user mode: the runner's `systemctl` goes through polkit. Each
+/// unit a compiled module binds must be granted with exactly the verbs its
+/// binding allows: a missing unit makes the service action fail, an extra
+/// verb grants more than detent ever asks for.
+#[test]
+fn the_polkit_rule_grants_each_module_unit_its_binding_verbs() {
+    let granted = polkit_unit_verbs();
+    for (unit, verbs) in module_unit_verbs() {
+        assert_eq!(granted.get(&unit), Some(&verbs), "{unit}");
+    }
+}
+
+/// With every module compiled in, the rule grants no unit that no module
+/// binds.
+#[cfg(all(
+    feature = "module-resolver",
+    feature = "module-chrony",
+    feature = "module-mounts",
+    feature = "module-nfs",
+    feature = "module-samba",
+    feature = "module-dhcp",
+    feature = "module-network"
+))]
+#[test]
+fn the_polkit_rule_grants_no_unit_that_no_module_binds() {
+    assert_eq!(polkit_unit_verbs(), module_unit_verbs());
+}
+
+/// The rule names only the two systemd actions detent needs, and never
+/// grants the update unit: polkit sees only the name of a transient unit,
+/// not what it runs.
+#[test]
+fn the_polkit_rule_handles_only_two_actions_and_not_the_update_unit() {
+    let code = polkit_code();
+    let actions: Vec<String> = code
+        .lines()
+        .flat_map(quoted)
+        .filter(|text| text.starts_with("org.freedesktop."))
+        .collect();
+    assert_eq!(
+        actions,
+        [
+            "org.freedesktop.systemd1.reload-daemon",
+            "org.freedesktop.systemd1.manage-units"
+        ]
+    );
+    assert!(
+        !code.contains("detent-update"),
+        "the update unit is granted"
+    );
+    assert!(code.contains("subject.user != \"detent\""));
+    assert!(code.contains("(verb == \"start\" || verb == \"stop\")"));
+}
+
+/// The mount units the rule refuses are the ones over the paths the runner
+/// protects (`privsep::mounts`: `/etc`, `/usr`, `/boot`, the state root, the
+/// binary directory and every ancestor of them), for the packaged state root
+/// and binary directory. `/` itself: the pattern refuses a leading `-`.
+#[test]
+fn the_polkit_rule_protects_the_mount_points_the_runner_protects() {
+    let mut expected = Vec::new();
+    for path in ["/etc", "/usr", "/boot", "/var/lib/detent", "/usr/local/bin"] {
+        for ancestor in std::path::Path::new(path).ancestors() {
+            let name = ancestor
+                .to_string_lossy()
+                .trim_start_matches('/')
+                .replace('/', "-");
+            if !name.is_empty() {
+                expected.push(format!("{name}.mount"));
+                expected.push(format!("{name}.automount"));
+            }
+        }
+    }
+    expected.sort();
+    expected.dedup();
+    let mut refused: Vec<String> = polkit_block("var PROTECTED_MOUNT_UNITS = [")
+        .iter()
+        .flat_map(|line| quoted(line))
+        .collect();
+    refused.sort();
+    assert_eq!(refused, expected);
+    assert!(
+        polkit_code().contains(
+            r"var MOUNT_UNIT = /^[A-Za-z0-9:_.\\][A-Za-z0-9:_.\\-]*\.(mount|automount)$/;"
+        )
+    );
+}
