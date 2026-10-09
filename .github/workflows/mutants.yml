@@ -1,0 +1,106 @@
+name: Mutants
+
+# Advisory. cargo-mutants changes the source one operator at a time and runs
+# the tests. A "missed" mutant is a change that no test noticed. The run lists
+# them and never blocks anything: it is not a required check and has no
+# pull_request trigger. Scope is detent-core and detent-update, the crates
+# whose logic (planning, version policy, update verification) tests must pin
+# down.
+
+on:
+  schedule:
+    - cron: "41 4 * * 0"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: stable
+
+jobs:
+  mutants:
+    name: cargo-mutants (${{ matrix.slug }})
+    runs-on: ubuntu-26.04
+    # The hosted-runner limit is 360 minutes. Stop earlier.
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 239 mutants.
+          - package: detent-core
+            shard: "0/1"
+            slug: detent-core
+          # 616 mutants, split three ways.
+          - package: detent-update
+            shard: "0/3"
+            slug: detent-update-0
+          - package: detent-update
+            shard: "1/3"
+            slug: detent-update-1
+          - package: detent-update
+            shard: "2/3"
+            slug: detent-update-2
+    steps:
+      # Audit mode, like every other job here: the egress list of a job that
+      # downloads crates and a tool binary has not been measured yet. Switch
+      # to block mode with `allowed-endpoints` after one run shows the list.
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: cargo-mutants@27.1.0
+
+      # Exit 2 means missed mutants and 3 means timeouts: both are findings,
+      # not failures. Any other non-zero code (usage error, failing baseline)
+      # is a real fault and fails the job.
+      - name: cargo mutants
+        env:
+          PACKAGE: ${{ matrix.package }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -uo pipefail
+          status=0
+          cargo mutants -p "${PACKAGE}" --all-features --shard "${SHARD}" \
+            --timeout-multiplier 3 --no-shuffle || status=$?
+          case "${status}" in
+            0 | 2 | 3) ;;
+            *) exit "${status}" ;;
+          esac
+          {
+            echo "### cargo-mutants: ${PACKAGE} shard ${SHARD}"
+            echo
+            echo "exit code: ${status} (0 clean, 2 missed mutants, 3 timeouts)"
+            echo
+            echo '```'
+            jq -r '[.outcomes[].summary] | group_by(.) | map("\(.[0]): \(length)") | .[]' mutants.out/outcomes.json
+            echo '```'
+            echo
+            echo "The missed mutants are in missed.txt in the artifact."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload mutants.out
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants-${{ matrix.slug }}
+          path: mutants.out
+          retention-days: 30
+          if-no-files-found: ignore

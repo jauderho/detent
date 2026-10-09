@@ -442,6 +442,10 @@ mode = "capability-user"` with polkit and the doctor check, optional mTLS,
 `cargo geiger` jobs, `cargo semver-checks` for `detent-core`, final size/RSS
 numbers in the README, then v1.0.0. Acceptance is in PLAN Phase 12.
 
+Landed 2026-10-09 (CI only, `PROGRESS.md`): the `core-semver`, `unsafe-report`
+(`cargo geiger`) and weekly `mutants.yml` (`cargo-mutants`) jobs. Their first CI
+runs are still to be seen.
+
 ### Track G — blocked on the owner or external infrastructure
 
 - `hickory-client` propagation checks (new dependency; ADR-011 cooldown).
