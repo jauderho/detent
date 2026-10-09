@@ -4,16 +4,20 @@ import { type ReactNode, useCallback, useEffect, useState } from 'react'
 // Vite `?raw` import: bundled as a string asset, never fetched over the
 // network. Path reaches the repo-root locales/ tree (outside web/), allowed
 // by `server.fs.allow` in vite.config.ts.
+import deSource from '../../../locales/de/web.ftl?raw'
 import enUSSource from '../../../locales/en-US/web.ftl?raw'
+import jaSource from '../../../locales/ja/web.ftl?raw'
 import qpsPlocSource from '../../../locales/qps-ploc/web.ftl?raw'
 import { getItem, setItem } from '../lib/storage'
 
-export const AVAILABLE_LOCALES = ['en-US', 'qps-ploc'] as const
+export const AVAILABLE_LOCALES = ['en-US', 'de', 'ja', 'qps-ploc'] as const
 export type AvailableLocale = (typeof AVAILABLE_LOCALES)[number]
 export const DEFAULT_LOCALE: AvailableLocale = 'en-US'
 
 const RESOURCES: Record<AvailableLocale, string> = {
   'en-US': enUSSource,
+  de: deSource,
+  ja: jaSource,
   'qps-ploc': qpsPlocSource,
 }
 

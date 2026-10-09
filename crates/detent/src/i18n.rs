@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn cli_ids_come_from_the_cli_catalogue() {
-        let messages = Messages::new(None);
+        let messages = Messages::new(Some("en-US"));
         let text = messages.format(
             MessageId::new("cli-applied"),
             &[("module", "hosts"), ("path", "/etc/hosts")],
@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn an_unknown_id_degrades_to_the_id_itself() {
-        let messages = Messages::new(None);
+        let messages = Messages::new(Some("en-US"));
         assert_eq!(
             messages.get(MessageId::new("no-such-id-anywhere")),
             "no-such-id-anywhere"
@@ -188,25 +188,51 @@ mod tests {
 
     #[test]
     fn a_requested_locale_negotiates_and_an_unusable_one_falls_back() {
-        // The only compiled-in locale is en-US, so everything negotiates to it;
-        // what this proves is that the tag is parsed and passed through rather
-        // than ignored, and that neither an unknown tag nor a malformed one
-        // panics or changes the result.
-        for tag in [Some("en-US"), Some("de-DE"), Some("!!!"), None] {
-            let messages = Messages::new(tag);
-            assert_eq!(messages.locale(), "en-US");
+        // A shipped locale (exact tag or a regional variant) negotiates to
+        // itself, and so proves the tag is parsed and passed through rather
+        // than ignored; a locale this build does not ship falls back to en-US.
+        for (tag, expected) in [
+            ("en-US", "en-US"),
+            ("de", "de"),
+            ("de-DE", "de"),
+            ("ja-JP", "ja"),
+            ("fr-FR", "en-US"),
+        ] {
+            let messages = Messages::new(Some(tag));
+            assert_eq!(messages.locale(), expected, "{tag}");
             assert!(
                 !messages
                     .get(MessageId::new("cli-severity-error"))
                     .is_empty()
             );
         }
-        assert!(format!("{:?}", Messages::new(None)).contains("en-US"));
+        // A malformed tag falls through to the environment (`LANG` and
+        // friends), whatever that is, without panicking or rendering blanks.
+        let messages = Messages::new(Some("!!!"));
+        assert!(!messages.locale().is_empty());
+        assert!(
+            !messages
+                .get(MessageId::new("cli-severity-error"))
+                .is_empty()
+        );
+        assert!(format!("{:?}", Messages::new(Some("en-US"))).contains("en-US"));
+    }
+
+    #[test]
+    fn the_shipped_translations_render_cli_messages() {
+        let de = Messages::new(Some("de"));
+        assert_eq!(de.get(MessageId::new("cli-severity-error")), "Fehler");
+        assert_eq!(
+            de.format(MessageId::new("cli-token-revoked"), &[("id", "t1")]),
+            "Token t1 wurde widerrufen."
+        );
+        let ja = Messages::new(Some("ja"));
+        assert_eq!(ja.get(MessageId::new("cli-severity-error")), "エラー");
     }
 
     #[test]
     fn diagnostics_are_rendered_with_a_localized_severity() -> R {
-        let messages = Messages::new(None);
+        let messages = Messages::new(Some("en-US"));
         let diagnostics: Diagnostics = [
             Diagnostic::new(Severity::Error, MessageId::new("hosts-no-hostnames")),
             Diagnostic::new(Severity::Warning, MessageId::new("hosts-invalid-hostname"))
@@ -231,7 +257,7 @@ mod tests {
 
     #[test]
     fn severity_ids_are_distinct_and_all_defined() {
-        let messages = Messages::new(None);
+        let messages = Messages::new(Some("en-US"));
         let ids = [
             severity_id(Severity::Error),
             severity_id(Severity::Warning),
@@ -246,7 +272,7 @@ mod tests {
 
     #[test]
     fn rendered_text_never_carries_bidi_isolation_marks() {
-        let messages = Messages::new(None);
+        let messages = Messages::new(Some("en-US"));
         let text = messages.format(
             MessageId::new("cli-applied"),
             &[("module", "hosts"), ("path", "/etc/hosts")],

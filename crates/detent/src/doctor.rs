@@ -765,7 +765,7 @@ mod tests {
 
     #[test]
     fn every_check_name_has_a_message_and_a_status_word() {
-        let messages = Messages::new(None);
+        let messages = Messages::new(Some("en-US"));
         for name in [
             "modules",
             "state-root",

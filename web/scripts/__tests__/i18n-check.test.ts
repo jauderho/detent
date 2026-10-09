@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'bun:test'
 import {
+  compareLocale,
   findHardcodedJsxText,
   findIdLiterals,
   findReferencedIds,
   loadFtlIdsFrom,
+  loadPlaceablesFrom,
 } from '../i18n-check.ts'
 
 describe('findReferencedIds', () => {
@@ -79,5 +81,67 @@ describe('findHardcodedJsxText', () => {
   it('does not flag single-letter or symbol-only nodes', () => {
     expect(findHardcodedJsxText('<span>x</span>')).toEqual([])
     expect(findHardcodedJsxText('<span>—</span>')).toEqual([])
+  })
+})
+
+describe('loadPlaceablesFrom', () => {
+  it('collects variables per message, including a selector head', () => {
+    const ftl = [
+      'a = {$x} and {$y} and {$x}',
+      'b = no variables',
+      'c = {$count ->',
+      '    [one] one thing',
+      '   *[other] {$count} things in {$where}',
+      '}',
+      '## comment {$ignored}',
+    ].join('\n')
+
+    expect([...loadPlaceablesFrom(ftl)]).toEqual([
+      ['a', ['x', 'y']],
+      ['b', []],
+      ['c', ['count', 'where']],
+    ])
+  })
+})
+
+describe('compareLocale', () => {
+  const source = ['a = hi {$name}', 'b = plain', 'c = {$n ->', '   *[other] {$n} items', '}'].join(
+    '\n',
+  )
+
+  it('accepts a faithful translation', () => {
+    const translation = [
+      '# needs-review',
+      'a = hallo {$name}',
+      'b = einfach',
+      'c = {$n ->',
+      '   *[other] {$n} Dinge',
+      '}',
+    ].join('\n')
+
+    expect(compareLocale(source, translation)).toEqual({ missing: [], extra: [], placeables: [] })
+  })
+
+  it('reports a missing id, an extra id and a changed placeable', () => {
+    const translation = [
+      'a = hallo {$nom}',
+      'z = extra',
+      'c = {$n ->',
+      '   *[other] Dinge',
+      '}',
+    ].join('\n')
+    const drift = compareLocale(source, translation)
+
+    expect(drift.missing).toEqual(['b'])
+    expect(drift.extra).toEqual(['z'])
+    expect(drift.placeables).toEqual([{ id: 'a', expected: ['name'], actual: ['nom'] }])
+  })
+
+  it('reports a placeable dropped from a selector arm', () => {
+    const translation = ['a = hallo {$name}', 'b = einfach', 'c = Dinge'].join('\n')
+
+    expect(compareLocale(source, translation).placeables).toEqual([
+      { id: 'c', expected: ['n'], actual: [] },
+    ])
   })
 })

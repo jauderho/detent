@@ -12,17 +12,32 @@ Contribution flow (`docs/PLAN.md` §4.3):
    `include_str!` per `.ftl` file you copied. Until a locale is registered
    there, the CLI/daemon binaries cannot select it, even though the `.ftl`
    files exist on disk — see "The Rust loader" below.
-4. Run `bun run i18n:check` to report missing or extra ids against `en-US`
-   (web strings) — the Rust-side equivalent is
-   `cargo test -p detent-i18n catalogue_locales_have_id_parity_with_en_us`,
-   which runs automatically in CI and fails with the exact missing/extra ids
-   for every locale registered in `CATALOGUE`.
+   The web console registers its locales separately: add the locale to
+   `AVAILABLE_LOCALES` and `RESOURCES` in `web/src/i18n/index.tsx` (one
+   `?raw` import of `web.ftl`), and to `TRANSLATED_LOCALES` in
+   `web/scripts/i18n-check.ts`.
+4. Run `bun run i18n:check` to report missing or extra ids, and changed
+   placeables (`{$var}`), against `en-US` (web strings) — the Rust-side
+   equivalents are
+   `cargo test -p detent-i18n catalogue_locales_have_id_parity_with_en_us` and
+   `catalogue_locales_use_the_same_placeables_as_en_us`, which run
+   automatically in CI and fail with the exact ids for every locale
+   registered in `CATALOGUE`.
 5. Check plurals and selectors render correctly for your language's rules,
    not just English's two-form plural.
 6. Open a PR. CI runs the pseudo-locale (`locales/qps-ploc/`) and the same
    `i18n:check` to catch anything missed.
 7. Layout stays Weblate-compatible so translators can work outside a PR flow
    later.
+
+## Review status: `# needs-review`
+
+A machine-drafted translation starts with the comment line
+`# needs-review: …` at the top of each `.ftl` file. The marker is per file.
+`de` and `ja` shipped this way (2026-10-09). A native speaker who has checked
+a whole file removes its first line in the same PR; a partial review leaves
+the marker in place. Keep code-like tokens (`detent update --check`, paths,
+unit names, HTTP codes, flags, option values) untranslated.
 
 ## The Rust loader (`detent-i18n`)
 
@@ -39,6 +54,12 @@ contributor touching Rust code:
   see the crate-level doc comment in `crates/detent-i18n/src/lib.rs` for the
   full rationale. Functionally this is the same "compiled in, fallback to
   `en-US`" contract §4.3 describes; it is a smaller mechanism to get there.
+- **`web.ftl` is feature-gated**: `CATALOGUE` includes each locale's `web.ftl`
+  only with the `web` feature of `detent-i18n` (enabled by `detent`'s `web`).
+  Only the web server and its API look those ids up, and a build without it
+  (the CLI-only size row) would otherwise carry about 60 KB of unused text.
+  `cargo test -p detent-i18n` runs without the feature and
+  `cargo test -p detent-i18n --features web` with it; both must pass.
 - **Locale selection**: `Localizer::new` takes an explicit requested-locale
   list and negotiates it against `CATALOGUE` (exact match, then language-only
   match, e.g. `de-AT` matches a compiled `de`), falling back to `en-US`.

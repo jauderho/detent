@@ -17,6 +17,11 @@
  *   3. No JSX text node containing a letter appears outside test files and
  *      outside the fallback children of a <Localized> element (which
  *      intentionally mirror the message text per @fluent/react convention).
+ *   4. Every shipped translation (locales/<lang>/web.ftl for each of
+ *      TRANSLATED_LOCALES) defines exactly the ids en-US defines, and every
+ *      message uses exactly the placeables (`{$var}`) its en-US source uses.
+ *      A missing id silently falls back to English; a missing or misspelled
+ *      placeable renders as a literal `{$var}` to the operator.
  *
  * Exits non-zero and prints violations if any check fails.
  */
@@ -27,7 +32,10 @@ import { fileURLToPath } from 'node:url'
 
 const WEB_ROOT = new URL('..', import.meta.url).pathname
 const SRC_DIR = join(WEB_ROOT, 'src')
-const FTL_PATH = join(WEB_ROOT, '..', 'locales', 'en-US', 'web.ftl')
+const LOCALES_DIR = join(WEB_ROOT, '..', 'locales')
+const FTL_PATH = join(LOCALES_DIR, 'en-US', 'web.ftl')
+/** Shipped translations checked against en-US. The generated qps-ploc is not one. */
+const TRANSLATED_LOCALES = ['de', 'ja'] as const
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
@@ -53,6 +61,59 @@ export function loadFtlIdsFrom(text: string): Set<string> {
     if (m?.[1]) ids.add(m[1])
   }
   return ids
+}
+
+/**
+ * The set of placeable variable names (`{$var}`, including selector heads such
+ * as `{$count ->`) each message uses, keyed by message id, sorted. A message's
+ * text runs from its `id =` line through the indented or closing-brace lines
+ * that follow it.
+ */
+export function loadPlaceablesFrom(text: string): Map<string, string[]> {
+  const blocks = new Map<string, string[]>()
+  let current: string | null = null
+  for (const line of text.split('\n')) {
+    const m = /^([a-zA-Z][a-zA-Z0-9_-]*)\s*=/.exec(line)
+    if (m?.[1]) {
+      current = m[1]
+      blocks.set(current, [line])
+    } else if (current !== null && /^(\s|\})/.test(line) && line.trim() !== '') {
+      blocks.get(current)?.push(line)
+    } else {
+      current = null
+    }
+  }
+  const out = new Map<string, string[]>()
+  for (const [id, lines] of blocks) {
+    const vars = new Set<string>()
+    for (const v of lines.join('\n').matchAll(/\{\s*\$([a-zA-Z][a-zA-Z0-9_-]*)/g)) {
+      if (v[1]) vars.add(v[1])
+    }
+    out.set(id, [...vars].sort())
+  }
+  return out
+}
+
+export interface LocaleDrift {
+  missing: string[]
+  extra: string[]
+  placeables: { id: string; expected: string[]; actual: string[] }[]
+}
+
+/** How a translation differs from its en-US source: ids and placeables. */
+export function compareLocale(source: string, translation: string): LocaleDrift {
+  const want = loadPlaceablesFrom(source)
+  const have = loadPlaceablesFrom(translation)
+  const missing = [...want.keys()].filter((id) => !have.has(id)).sort()
+  const extra = [...have.keys()].filter((id) => !want.has(id)).sort()
+  const placeables: LocaleDrift['placeables'] = []
+  for (const [id, expected] of want) {
+    const actual = have.get(id)
+    if (actual !== undefined && actual.join(',') !== expected.join(',')) {
+      placeables.push({ id, expected, actual })
+    }
+  }
+  return { missing, extra, placeables }
 }
 
 export function findReferencedIds(text: string): string[] {
@@ -197,12 +258,26 @@ function main(): number {
     }
   }
 
+  const source = readFileSync(FTL_PATH, 'utf8')
+  for (const lang of TRANSLATED_LOCALES) {
+    const path = join(LOCALES_DIR, lang, 'web.ftl')
+    const drift = compareLocale(source, readFileSync(path, 'utf8'))
+    if (drift.missing.length + drift.extra.length + drift.placeables.length === 0) continue
+    failed = true
+    console.error(`i18n-check: ${relative(WEB_ROOT, path)} differs from locales/en-US/web.ftl:`)
+    for (const id of drift.missing) console.error(`  missing: "${id}"`)
+    for (const id of drift.extra) console.error(`  extra (absent from en-US): "${id}"`)
+    for (const { id, expected, actual } of drift.placeables) {
+      console.error(`  placeables of "${id}": expected [${expected}], found [${actual}]`)
+    }
+  }
+
   if (failed) {
     return 1
   }
 
   console.log(
-    `i18n-check: OK — ${ftlIds.size} message ids defined, all referenced, all references resolved.`,
+    `i18n-check: OK — ${ftlIds.size} message ids defined, all referenced, all references resolved; ${TRANSLATED_LOCALES.join(', ')} match en-US.`,
   )
   return 0
 }

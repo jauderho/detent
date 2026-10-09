@@ -155,7 +155,10 @@ list and the known gaps.
 Each module is a cargo feature (`module-hosts`, `module-resolver`, …), as are
 the init system (`init-systemd`, `init-openrc`, `init-bsdrc`), the crypto
 backend (`crypto-aws-lc`, `crypto-ring`), and the optional `web`, `ui`,
-`acme-dns01` and `update` features. Build only what the host needs.
+`acme-dns01` and `update` features. Build only what the host needs. The
+`web` feature also compiles in the web console's message catalogue
+(`web.ftl`, every shipped locale); a build without it carries only the CLI and
+diagnostic messages.
 
 ## Development
 

@@ -22,11 +22,17 @@ describe('negotiateLocales', () => {
   it('matches qps-ploc when requested', () => {
     expect(negotiateLocales(['qps-ploc'])).toEqual(['qps-ploc'])
   })
+
+  it('matches the shipped translations when requested', () => {
+    expect(negotiateLocales(['de', 'ja'])).toEqual(['de', 'ja'])
+  })
 })
 
 describe('AVAILABLE_LOCALES', () => {
-  it('includes both en-US and qps-ploc', () => {
+  it('includes en-US, de, ja and qps-ploc', () => {
     expect(AVAILABLE_LOCALES).toContain('en-US')
+    expect(AVAILABLE_LOCALES).toContain('de')
+    expect(AVAILABLE_LOCALES).toContain('ja')
     expect(AVAILABLE_LOCALES).toContain('qps-ploc')
   })
 })
@@ -36,6 +42,18 @@ describe('createLocalization', () => {
     const l10n = createLocalization(['qps-ploc'])
     expect(l10n).toBeDefined()
     expect(l10n.getString('status-brand')).toBe('[detent]')
+  })
+
+  it('renders the shipped translations, with plural selectors and placeables', () => {
+    const de = createLocalization(['de'])
+    expect(de.getString('nav-modules')).toBe('Module')
+    expect(de.getString('dashboard-modules-count', { count: 1 })).toContain('ein Modul')
+    expect(de.getString('dashboard-update-install', { tag: 'v1.2.3' })).toContain('v1.2.3')
+
+    const ja = createLocalization(['ja'])
+    expect(ja.getString('nav-modules')).toBe('モジュール')
+    expect(ja.getString('dashboard-modules-count', { count: 1 })).toContain('個のモジュール')
+    expect(ja.getString('dashboard-update-install', { tag: 'v1.2.3' })).toContain('v1.2.3')
   })
 
   it('surfaces Fluent parse errors without throwing', () => {

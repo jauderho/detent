@@ -75,7 +75,7 @@ module-network = ["detent-modules/module-network"]
 
 ## `detent-update` is already built for `web` (detent-web depends on it);
 ## `cert renew` uses its TLS 1.3 client for the listener (`listener.rs`).
-web = ["dep:detent-web", "dep:tokio", "dep:detent-update"]
+web = ["dep:detent-web", "dep:tokio", "dep:detent-update", "detent-i18n/web"]
 ## Embeds the built SPA from web/dist into the binary.
 ui = ["web", "detent-web/ui"]
 

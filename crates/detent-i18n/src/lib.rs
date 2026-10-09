@@ -60,20 +60,42 @@ struct LocaleSource {
 /// ids (`docs/adr/ADR-003-i18n-fluent.md`).
 const EN_US_TAG: &str = "en-US";
 
-/// Every locale compiled into this binary.
+/// Every locale compiled into this binary. `web.ftl` is part of each locale only
+/// with the `web` feature: only the web server and its API look those ids up.
 ///
 /// Adding a locale is a one-line change: add a `LocaleSource` entry here and one
 /// `include_str!` per `.ftl` file under `locales/<tag>/`. `catalogue_locales_have_id_parity_with_en_us`
 /// (below) then enforces that the new locale defines exactly the ids `en-US` defines,
 /// no more and no fewer.
-static CATALOGUE: &[LocaleSource] = &[LocaleSource {
-    tag: EN_US_TAG,
-    files: &[
-        include_str!("../../../locales/en-US/core.ftl"),
-        include_str!("../../../locales/en-US/web.ftl"),
-        include_str!("../../../locales/en-US/cli.ftl"),
-    ],
-}];
+static CATALOGUE: &[LocaleSource] = &[
+    LocaleSource {
+        tag: EN_US_TAG,
+        files: &[
+            include_str!("../../../locales/en-US/core.ftl"),
+            #[cfg(feature = "web")]
+            include_str!("../../../locales/en-US/web.ftl"),
+            include_str!("../../../locales/en-US/cli.ftl"),
+        ],
+    },
+    LocaleSource {
+        tag: "de",
+        files: &[
+            include_str!("../../../locales/de/core.ftl"),
+            #[cfg(feature = "web")]
+            include_str!("../../../locales/de/web.ftl"),
+            include_str!("../../../locales/de/cli.ftl"),
+        ],
+    },
+    LocaleSource {
+        tag: "ja",
+        files: &[
+            include_str!("../../../locales/ja/core.ftl"),
+            #[cfg(feature = "web")]
+            include_str!("../../../locales/ja/web.ftl"),
+            include_str!("../../../locales/ja/cli.ftl"),
+        ],
+    },
+];
 
 /// Looks up the `.ftl` files for the `en-US` catalogue entry.
 fn en_us_files() -> Option<&'static [&'static str]> {
@@ -379,7 +401,7 @@ mod tests {
     };
     use detent_core::diag::{Diagnostic, Diagnostics, MessageId, Severity};
     use fluent_bundle::{FluentArgs, FluentResource};
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use unic_langid::LanguageIdentifier;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -468,6 +490,78 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    /// Placeable variable names (`{$name`) per message id: the variables from the
+    /// message's own line through the indented or closing-brace lines after it.
+    fn message_placeables<'a>(files: &[&'a str]) -> BTreeMap<&'a str, BTreeSet<&'a str>> {
+        let mut out: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for file in files {
+            let mut current: Option<&str> = None;
+            for line in file.lines() {
+                if let Some(id) = message_id_on_line(line) {
+                    current = Some(id);
+                    out.entry(id).or_default();
+                } else if !(line.starts_with(char::is_whitespace) || line.starts_with('}')) {
+                    current = None;
+                }
+                let Some(id) = current else { continue };
+                for part in line.split("{$").skip(1) {
+                    let end = part
+                        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+                        .unwrap_or(part.len());
+                    if let (Some(set), Some(name)) = (out.get_mut(id), part.get(..end)) {
+                        set.insert(name);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn message_placeables_reads_selectors_and_continuation_lines() {
+        let source = "a = {$x} {$y}\nb = plain\nc = {$n ->\n    [one] one\n   *[other] {$n} in {$w}\n}\n## {$no}\n";
+        let got = message_placeables(&[source]);
+        assert_eq!(got.get("a"), Some(&BTreeSet::from(["x", "y"])));
+        assert_eq!(got.get("b"), Some(&BTreeSet::new()));
+        assert_eq!(got.get("c"), Some(&BTreeSet::from(["n", "w"])));
+        assert_eq!(got.len(), 3);
+    }
+
+    #[test]
+    fn catalogue_locales_use_the_same_placeables_as_en_us() -> TestResult {
+        let en_us = CATALOGUE
+            .iter()
+            .find(|l| l.tag == EN_US_TAG)
+            .ok_or("en-US missing from CATALOGUE")?;
+        let reference = message_placeables(en_us.files);
+        for locale in CATALOGUE {
+            let got = message_placeables(locale.files);
+            let drift: Vec<String> = reference
+                .iter()
+                .filter(|(id, vars)| got.get(*id).is_some_and(|other| other != *vars))
+                .map(|(id, vars)| format!("{id}: expected {vars:?}, found {:?}", got.get(id)))
+                .collect();
+            assert!(drift.is_empty(), "{}: {drift:#?}", locale.tag);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn web_messages_are_compiled_in_only_with_the_web_feature() {
+        // `login-title` exists only in web.ftl.
+        let id = MessageId::new("login-title");
+        for tag in ["en-US", "de", "ja"] {
+            let localizer = Localizer::new(&[langid(tag)]);
+            assert_eq!(localizer.has(&id), cfg!(feature = "web"), "{tag}");
+        }
+    }
+
+    #[test]
+    fn catalogue_ships_de_and_ja() {
+        let tags: Vec<&str> = CATALOGUE.iter().map(|l| l.tag).collect();
+        assert_eq!(tags, ["en-US", "de", "ja"]);
     }
 
     #[test]
@@ -616,8 +710,43 @@ mod tests {
 
     #[test]
     fn new_falls_back_to_en_us_when_nothing_compiled_matches() {
-        let localizer = Localizer::new(&[langid("ja-JP"), langid("de")]);
+        let localizer = Localizer::new(&[langid("fr-FR"), langid("es")]);
         assert_eq!(localizer.locale(), "en-US");
+    }
+
+    #[test]
+    fn new_negotiates_the_shipped_translations() {
+        assert_eq!(Localizer::new(&[langid("de")]).locale(), "de");
+        assert_eq!(Localizer::new(&[langid("de-AT")]).locale(), "de");
+        assert_eq!(Localizer::new(&[langid("ja-JP")]).locale(), "ja");
+        // The first requested locale that matches anything wins.
+        assert_eq!(
+            Localizer::new(&[langid("fr-FR"), langid("ja"), langid("de")]).locale(),
+            "ja"
+        );
+    }
+
+    #[test]
+    fn de_and_ja_render_translated_text_with_arguments() {
+        let id = MessageId::new("hosts-invalid-hostname");
+        let mut args = FluentArgs::new();
+        args.set("name", "bad.host");
+        for (tag, needle) in [("de", "Hostname"), ("ja", "ホスト名")] {
+            let localizer = Localizer::new(&[langid(tag)]);
+            let text = localizer.get_args(&id, &args);
+            assert!(text.contains("`bad.host`"), "{tag}: {text:?}");
+            assert!(text.contains(needle), "{tag}: {text:?}");
+        }
+    }
+
+    #[test]
+    fn de_and_ja_keep_the_bare_id_for_an_unknown_id() {
+        for tag in ["de", "ja"] {
+            let localizer = Localizer::new(&[langid(tag)]);
+            let id = MessageId::new("no-such-message-id");
+            assert!(!localizer.has(&id));
+            assert_eq!(localizer.get(&id), "no-such-message-id");
+        }
     }
 
     #[test]

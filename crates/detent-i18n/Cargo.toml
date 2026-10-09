@@ -14,3 +14,8 @@ workspace = true
 detent-core = { path = "../detent-core" }
 fluent-bundle = { workspace = true }
 unic-langid = { workspace = true }
+
+[features]
+## Compiles `web.ftl` into the catalogue. Only the web server and its API look
+## those ids up, so a build without `web` leaves them out.
+web = []
