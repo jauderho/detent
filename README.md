@@ -96,6 +96,20 @@ sudo -u detent detent setup    # prompts for a password; never takes one on argv
 detent serve
 ```
 
+Turn on a second factor (TOTP: SHA-1, 6 digits, 30 s) for an account. The
+command prints an `otpauth://` URI and the base32 key once, then asks for a
+current code from your authenticator and stores the key only if the code is
+valid. The code is read from the terminal, never from argv. Set
+`auth.totp_required = true` in `detent.toml` only after every account has a
+key, because an account without one cannot sign in then. The code that
+confirmed the enrolment is used up, so wait for the next one at the first
+sign-in. Turn it off again with `disable` (`--yes` skips the question):
+
+```bash
+sudo -u detent detent user totp enable admin
+sudo -u detent detent user totp disable admin
+```
+
 API tokens for scripting, read-only unless `--write`:
 
 ```bash
