@@ -438,7 +438,7 @@ deferred by the owner.
 `THREAT_MODEL.md` (STRIDE per component, mapped to tests; it must also cover
 any egress §5 would add), `PENTEST_CHECKLIST.md` (ASVS L2), `[privilege]
 mode = "capability-user"` with polkit and the doctor check, optional mTLS,
-`de`/`ja` translations (marked `# needs-review`), `cargo-mutants` and
+`de`/`ja` translations (marked `# needs-review`; done 2026-10-09, machine-drafted, see PROGRESS), `cargo-mutants` and
 `cargo geiger` jobs, `cargo semver-checks` for `detent-core`, final size/RSS
 numbers in the README, then v1.0.0. Acceptance is in PLAN Phase 12.
 
