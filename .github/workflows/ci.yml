@@ -235,6 +235,35 @@ jobs:
       - name: cargo semver-checks on detent-ffi vs origin/main
         run: cargo semver-checks check-release -p detent-ffi --baseline-rev origin/main
 
+  core-semver:
+    name: Core semver (cargo-semver-checks on detent-core)
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: cargo-semver-checks@0.50.0
+
+      # Same baseline as `ffi-semver`: `detent-core` is `publish = false`, so
+      # `origin/main` is the baseline. Every other crate depends on this
+      # one, so a breaking change to its public API shows here first.
+      - name: cargo semver-checks on detent-core vs origin/main
+        run: cargo semver-checks check-release -p detent-core --baseline-rev origin/main
+
   acme-pebble:
     name: ACME dns-01 (Pebble + challtestsrv)
     runs-on: ubuntu-26.04
