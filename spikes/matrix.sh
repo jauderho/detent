@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Spike 1 build matrix. Usage: matrix.sh   (no switches; verbose by design)
 set -uo pipefail
+REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 export PATH="$REPO_ROOT/spikes/bin:$HOME/.local/bin:$PATH"
-cd $REPO_ROOT/spikes/xbuild
-OUT=$REPO_ROOT/spikes/matrix-results.txt
+cd "$REPO_ROOT/spikes/xbuild" || exit 1
+OUT="$REPO_ROOT/spikes/matrix-results.txt"
 : > "$OUT"
 TARGETS="aarch64-unknown-linux-musl x86_64-unknown-linux-musl armv7-unknown-linux-musleabihf riscv64gc-unknown-linux-musl x86_64-unknown-freebsd"
 for prov in aws-lc ring; do
