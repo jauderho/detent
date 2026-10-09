@@ -4075,6 +4075,8 @@ mod tests {
             (&["user", "add", "bob"][..], "user"),
             (&["user", "passwd", "bob"][..], "user"),
             (&["user", "rm", "bob"][..], "user"),
+            (&["user", "totp", "enable", "bob"][..], "user"),
+            (&["user", "totp", "disable", "bob", "--yes"][..], "user"),
             (&["token", "create", "ci"][..], "token"),
             (&["token", "revoke", "abc"][..], "token"),
             (&["token", "list"][..], "token"),

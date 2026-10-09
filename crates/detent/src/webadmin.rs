@@ -8,7 +8,7 @@
 //!
 //! ```text
 //!   detent setup ──▶ UserStore::create (refuses a non-empty store without --force)
-//!   detent user add|passwd|rm ──▶ UserStore
+//!   detent user add|passwd|rm|totp ──▶ UserStore
 //!   detent token create|revoke|list ──▶ TokenStore
 //!                     │
 //!         password: read_password ──▶ /dev/tty, echo off, confirmed twice
@@ -20,20 +20,22 @@
 //! * **A password never appears on argv.** Every command that takes one reads
 //!   it interactively or from `stdin`; none accepts it as a positional or
 //!   `--flag` argument (PLAN §2.6: argv is world-readable via `/proc`).
-//! * **Nothing secret is printed except the one time a token is minted.** A
+//! * **Nothing secret is printed except a new token or a new TOTP key.** A
 //!   password is never echoed or logged; a freshly issued token is shown
-//!   exactly once, because [`TokenStore`] keeps only its digest.
+//!   exactly once, because [`TokenStore`] keeps only its digest. A TOTP key is
+//!   shown on `out` while `user totp enable` runs, never on `notes`, and is
+//!   stored only after a code made from it is typed back.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write as _};
 
 use detent_core::diag::MessageId;
-use detent_web::auth::{AuthError, Hasher, TokenStore, UserStore};
+use detent_web::auth::{AuthError, Hasher, TokenStore, TotpSecret, UserStore};
 use detent_web::authz::Scope;
 use rustix::termios::{self, LocalModes, OptionalActions};
 use zeroize::Zeroizing;
 
-use crate::cli::{SetupArgs, TokenAction, UserAction};
+use crate::cli::{SetupArgs, TokenAction, TotpAction, UserAction};
 use crate::i18n::Messages;
 use crate::output::{Exit, Renderer};
 use crate::run::{Settings, Streams, UsageError, report_web_config_error};
@@ -129,6 +131,7 @@ pub fn user(
         UserAction::Add { ref name } => user_add(name, dryrun, settings, renderer, streams),
         UserAction::Passwd { ref name } => user_passwd(name, dryrun, settings, renderer, streams),
         UserAction::Rm { ref name } => user_rm(name, dryrun, settings, renderer, streams),
+        UserAction::Totp { ref action } => user_totp(action, dryrun, settings, renderer, streams),
     }
 }
 
@@ -257,6 +260,177 @@ fn user_rm(
         &[("name", name)],
         &serde_json::json!({"action": "rm", "name": name}),
     )
+}
+
+// ---------------------------------------------------------------------------
+// detent user totp …
+// ---------------------------------------------------------------------------
+
+/// `detent user totp enable|disable`.
+fn user_totp(
+    action: &TotpAction,
+    dryrun: bool,
+    settings: &Settings,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Exit> {
+    match *action {
+        TotpAction::Enable { ref name } => totp_enable(name, dryrun, settings, renderer, streams),
+        TotpAction::Disable { ref name, yes } => {
+            totp_disable(name, yes, dryrun, settings, renderer, streams)
+        }
+    }
+}
+
+/// `detent user totp enable <name>`.
+fn totp_enable(
+    name: &str,
+    dryrun: bool,
+    settings: &Settings,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Exit> {
+    let store = match UserStore::load(&settings.state_root) {
+        Ok(store) => store,
+        Err(err) => return credential_failed(&err, renderer, streams),
+    };
+    if let Err(err) = require_user(&store, name) {
+        return credential_failed(&err, renderer, streams);
+    }
+    if dryrun {
+        return render_dryrun(
+            renderer,
+            streams,
+            MessageId::new("cli-dryrun-nothing"),
+            &[("name", name)],
+            &serde_json::json!({"dryrun": true, "action": "totp-enable", "name": name}),
+        );
+    }
+    let secret = match TotpSecret::generate() {
+        Ok(secret) => secret,
+        Err(err) => return credential_failed(&err, renderer, streams),
+    };
+    enrol_totp(&store, name, &secret, &now_secs, renderer, streams)
+}
+
+/// Shows `secret` on `out`, reads a code, and stores the secret only if the
+/// code verifies at the time `now` reports.
+///
+/// The secret goes to `out` and nowhere else: not to `notes`, not to a log.
+/// The code that proved the enrolment is recorded as used, so it cannot be
+/// replayed at the next sign-in.
+fn enrol_totp(
+    store: &UserStore,
+    name: &str,
+    secret: &TotpSecret,
+    now: &dyn Fn() -> u64,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Exit> {
+    let uri = secret.otpauth_uri(name);
+    let base32 = secret.to_base32();
+    if renderer.json {
+        let text = serde_json::to_string_pretty(&serde_json::json!({
+            "name": name,
+            "uri": uri.expose(),
+            "secret": base32.expose(),
+        }))
+        .map_err(std::io::Error::other)?;
+        writeln!(streams.out, "{text}")?;
+    } else {
+        renderer.line(
+            streams.out,
+            MessageId::new("cli-totp-uri"),
+            &[("uri", uri.expose())],
+        )?;
+        renderer.line(
+            streams.out,
+            MessageId::new("cli-totp-secret"),
+            &[("secret", base32.expose())],
+        )?;
+    }
+
+    let code = match read_code(renderer.messages, streams.input) {
+        Ok(code) => code,
+        Err(usage) => return usage_failed(&usage, renderer, streams),
+    };
+    let Some(counter) = secret.verify(code.trim(), now(), None) else {
+        renderer.line(streams.notes, MessageId::new("cli-totp-code-wrong"), &[])?;
+        return Ok(Exit::Usage);
+    };
+    if let Err(err) = store
+        .set_totp(name, Some(secret))
+        .and_then(|()| store.note_totp_counter(name, counter))
+    {
+        return credential_failed(&err, renderer, streams);
+    }
+    render_result(
+        renderer,
+        streams,
+        MessageId::new("cli-user-totp-enabled"),
+        &[("name", name)],
+        &serde_json::json!({"action": "totp-enable", "name": name}),
+    )
+}
+
+/// `detent user totp disable <name> [--yes]`.
+fn totp_disable(
+    name: &str,
+    yes: bool,
+    dryrun: bool,
+    settings: &Settings,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Exit> {
+    let store = match UserStore::load(&settings.state_root) {
+        Ok(store) => store,
+        Err(err) => return credential_failed(&err, renderer, streams),
+    };
+    if let Err(err) = require_user(&store, name) {
+        return credential_failed(&err, renderer, streams);
+    }
+    if dryrun {
+        return render_dryrun(
+            renderer,
+            streams,
+            MessageId::new("cli-dryrun-nothing"),
+            &[("name", name)],
+            &serde_json::json!({"dryrun": true, "action": "totp-disable", "name": name}),
+        );
+    }
+    if !yes {
+        match confirm(renderer.messages, streams.input, name) {
+            Ok(true) => {}
+            Ok(false) => {
+                renderer.line(
+                    streams.notes,
+                    MessageId::new("cli-totp-disable-cancelled"),
+                    &[("name", name)],
+                )?;
+                return Ok(Exit::Usage);
+            }
+            Err(usage) => return usage_failed(&usage, renderer, streams),
+        }
+    }
+    if let Err(err) = store.set_totp(name, None) {
+        return credential_failed(&err, renderer, streams);
+    }
+    render_result(
+        renderer,
+        streams,
+        MessageId::new("cli-user-totp-disabled"),
+        &[("name", name)],
+        &serde_json::json!({"action": "totp-disable", "name": name}),
+    )
+}
+
+/// [`AuthError::UnknownUser`] unless `store` holds an account called `name`.
+fn require_user(store: &UserStore, name: &str) -> Result<(), AuthError> {
+    if store.list().iter().any(|user| user.name == name) {
+        Ok(())
+    } else {
+        Err(AuthError::UnknownUser)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -445,6 +619,11 @@ fn now_unix() -> i64 {
         })
 }
 
+/// [`now_unix`] as the unsigned count TOTP counters use.
+fn now_secs() -> u64 {
+    u64::try_from(now_unix()).unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------
 // Shared rendering
 // ---------------------------------------------------------------------------
@@ -588,6 +767,64 @@ fn read_password(
     check_nonempty(first)
 }
 
+/// Reads a TOTP code on the controlling terminal with echo disabled, or one
+/// line of `input` when there is none.
+///
+/// # Errors
+///
+/// A [`UsageError`] when the line is empty or reading fails.
+fn read_code(messages: &Messages, input: &mut dyn Read) -> Result<Zeroizing<String>, UsageError> {
+    let line = match open_tty() {
+        None => read_secret_line(input).map_err(|err| io_usage_error(&err))?,
+        Some(tty) => {
+            let guard = EchoGuard::new(&tty).map_err(|err| io_usage_error(&err))?;
+            let mut reader = tty.try_clone().map_err(|err| io_usage_error(&err))?;
+            let line = prompt_tty(
+                &tty,
+                &mut reader,
+                messages,
+                MessageId::new("cli-totp-code-prompt"),
+            )
+            .map_err(|err| io_usage_error(&err))?;
+            drop(guard);
+            line
+        }
+    };
+    if line.trim().is_empty() {
+        return Err(UsageError {
+            id: MessageId::new("cli-totp-code-empty"),
+            detail: String::new(),
+        });
+    }
+    Ok(line)
+}
+
+/// Asks whether to turn the second factor of `name` off: `y` or `yes` in any
+/// case is yes, anything else, including no answer, is no. Reads the
+/// controlling terminal, or one line of `input` when there is none.
+///
+/// # Errors
+///
+/// A [`UsageError`] when reading fails.
+fn confirm(messages: &Messages, input: &mut dyn Read, name: &str) -> Result<bool, UsageError> {
+    let answer = match open_tty() {
+        None => read_secret_line(input),
+        Some(tty) => {
+            let mut writer = &tty;
+            write!(
+                writer,
+                "{} ",
+                messages.format(MessageId::new("cli-totp-disable-prompt"), &[("name", name)])
+            )
+            .and_then(|()| writer.flush())
+            .and_then(|()| read_secret_line(&mut writer))
+        }
+    }
+    .map_err(|err| io_usage_error(&err))?;
+    let answer = answer.trim();
+    Ok(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
+}
+
 /// Opens the controlling terminal for both reading and writing, or `None`
 /// when this process has none — piped automation, or a test harness.
 fn open_tty() -> Option<File> {
@@ -715,6 +952,7 @@ mod tests {
     use super::*;
     use crate::cli::Cli;
     use clap::Parser as _;
+    use std::os::unix::fs::PermissionsExt as _;
 
     type R = Result<(), Box<dyn std::error::Error>>;
 
@@ -988,6 +1226,350 @@ mod tests {
             },
         )?;
         assert_eq!(exit, Exit::Usage);
+        Ok(())
+    }
+
+    // -- user totp -----------------------------------------------------------
+
+    /// Base32 of the RFC 6238 key `12345678901234567890`, so the codes in
+    /// these tests are fixed rather than random.
+    const FIXED_SECRET: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+
+    /// A moment inside an arbitrary 30 s step.
+    const NOW: u64 = 1_700_000_010;
+
+    fn fixed_secret() -> Result<TotpSecret, AuthError> {
+        TotpSecret::from_base32(FIXED_SECRET)
+    }
+
+    fn step(secs: u64) -> u64 {
+        secs / detent_web::auth::totp::STEP_SECS
+    }
+
+    /// What one command wrote.
+    struct Ran {
+        exit: Exit,
+        out: String,
+        notes: String,
+    }
+
+    fn run_user(
+        settings: &Settings,
+        json: bool,
+        action: &UserAction,
+        typed: &str,
+    ) -> Result<Ran, Box<dyn std::error::Error>> {
+        let messages = messages();
+        let renderer = renderer(&messages, json);
+        let mut input = typed.as_bytes();
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = user(
+            action,
+            false,
+            settings,
+            &renderer,
+            &mut Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        Ok(Ran {
+            exit,
+            out: String::from_utf8(out)?,
+            notes: String::from_utf8(notes)?,
+        })
+    }
+
+    /// Shows the fixed secret and reads `typed` as the confirming code.
+    fn run_enrol(
+        settings: &Settings,
+        json: bool,
+        typed: &str,
+    ) -> Result<Ran, Box<dyn std::error::Error>> {
+        let store = UserStore::load(&settings.state_root)?;
+        let messages = messages();
+        let renderer = renderer(&messages, json);
+        let mut input = typed.as_bytes();
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = enrol_totp(
+            &store,
+            "alice",
+            &fixed_secret()?,
+            &|| NOW,
+            &renderer,
+            &mut Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        Ok(Ran {
+            exit,
+            out: String::from_utf8(out)?,
+            notes: String::from_utf8(notes)?,
+        })
+    }
+
+    fn add_alice(settings: &Settings) -> R {
+        let ran = run_user(
+            settings,
+            true,
+            &UserAction::Add {
+                name: "alice".to_owned(),
+            },
+            "hunter22\nhunter22\n",
+        )?;
+        assert_eq!(ran.exit, Exit::Ok, "{}", ran.notes);
+        Ok(())
+    }
+
+    fn enrolled(settings: &Settings) -> Result<bool, AuthError> {
+        Ok(UserStore::load(&settings.state_root)?
+            .list()
+            .iter()
+            .any(|user| user.name == "alice" && user.totp_enrolled))
+    }
+
+    #[test]
+    fn totp_enable_stores_the_secret_only_after_a_valid_code() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let settings = settings(dir.path());
+        add_alice(&settings)?;
+        let secret = fixed_secret()?;
+
+        // A code from a step outside the window is refused and nothing is
+        // stored.
+        let stale = secret.code_at(step(NOW) + 5);
+        let ran = run_enrol(&settings, false, &format!("{}\n", stale.expose()))?;
+        assert_eq!(ran.exit, Exit::Usage, "{}", ran.notes);
+        assert!(!enrolled(&settings)?);
+
+        // An empty line is refused too.
+        let ran = run_enrol(&settings, false, "\n")?;
+        assert_eq!(ran.exit, Exit::Usage, "{}", ran.notes);
+        assert!(!enrolled(&settings)?);
+
+        // The current code stores it.
+        let code = secret.code_at(step(NOW));
+        let ran = run_enrol(&settings, false, &format!("{}\n", code.expose()))?;
+        assert_eq!(ran.exit, Exit::Ok, "{}", ran.notes);
+        assert!(enrolled(&settings)?);
+
+        // The key sits in a file only its owner can read.
+        let users_file = UserStore::load(&settings.state_root)?.path().to_path_buf();
+        assert_eq!(
+            std::fs::metadata(users_file)?.permissions().mode() & 0o777,
+            0o600
+        );
+        Ok(())
+    }
+
+    /// The account can then sign in with a code, and the code that proved
+    /// the enrolment cannot be used again.
+    #[test]
+    fn an_account_enrolled_here_verifies_codes_and_refuses_the_confirming_one() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let settings = settings(dir.path());
+        add_alice(&settings)?;
+        let secret = fixed_secret()?;
+        let code = secret.code_at(step(NOW));
+        let ran = run_enrol(&settings, false, &format!("{}\n", code.expose()))?;
+        assert_eq!(ran.exit, Exit::Ok, "{}", ran.notes);
+
+        let hasher = Hasher::new(detent_web::config::Argon2Params::default(), 1024)?;
+        let verified =
+            UserStore::load(&settings.state_root)?.verify_password(&hasher, "alice", "hunter22")?;
+        let stored = verified.totp.ok_or("no secret was stored")?;
+        assert_eq!(stored.to_base32().expose(), FIXED_SECRET);
+        assert_eq!(verified.totp_last_counter, Some(step(NOW)));
+        // Replay of the confirming code.
+        assert_eq!(
+            stored.verify(code.expose(), NOW, verified.totp_last_counter),
+            None
+        );
+        // The next step's code is accepted.
+        let next = secret.code_at(step(NOW) + 1);
+        assert_eq!(
+            stored.verify(next.expose(), NOW + 30, verified.totp_last_counter),
+            Some(step(NOW) + 1)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn totp_enable_shows_the_uri_and_secret_on_out_and_never_on_notes() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let settings = settings(dir.path());
+        add_alice(&settings)?;
+        let wrong = fixed_secret()?.code_at(step(NOW) + 5);
+        let typed = format!("{}\n", wrong.expose());
+
+        for json in [false, true] {
+            let ran = run_enrol(&settings, json, &typed)?;
+            assert_eq!(ran.exit, Exit::Usage);
+            assert!(ran.out.contains(FIXED_SECRET), "{}", ran.out);
+            assert!(
+                ran.out.contains("otpauth://totp/detent:alice?"),
+                "{}",
+                ran.out
+            );
+            assert!(!ran.notes.contains(FIXED_SECRET), "{}", ran.notes);
+            assert!(!ran.notes.contains("otpauth"), "{}", ran.notes);
+        }
+
+        // Under --json the secret is one object and the result another; the
+        // result never repeats it.
+        let code = fixed_secret()?.code_at(step(NOW));
+        let ran = run_enrol(&settings, true, &format!("{}\n", code.expose()))?;
+        assert_eq!(ran.exit, Exit::Ok, "{}", ran.notes);
+        let objects = serde_json::Deserializer::from_str(&ran.out)
+            .into_iter::<serde_json::Value>()
+            .collect::<Result<Vec<_>, _>>()?;
+        let [shown, result] = objects.as_slice() else {
+            return Err(format!("want two objects: {}", ran.out).into());
+        };
+        assert_eq!(
+            shown.pointer("/secret").and_then(serde_json::Value::as_str),
+            Some(FIXED_SECRET)
+        );
+        assert_eq!(
+            result
+                .pointer("/action")
+                .and_then(serde_json::Value::as_str),
+            Some("totp-enable")
+        );
+        assert!(result.pointer("/secret").is_none());
+        assert!(ran.notes.is_empty(), "{}", ran.notes);
+        Ok(())
+    }
+
+    #[test]
+    fn totp_enable_through_the_command_stores_nothing_for_a_wrong_code() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let settings = settings(dir.path());
+        add_alice(&settings)?;
+        let action = UserAction::Totp {
+            action: TotpAction::Enable {
+                name: "alice".to_owned(),
+            },
+        };
+        let ran = run_user(&settings, false, &action, "abcdef\n")?;
+        assert_eq!(ran.exit, Exit::Usage, "{}", ran.notes);
+        assert!(!enrolled(&settings)?);
+        assert!(
+            ran.out.contains("otpauth://totp/detent:alice?"),
+            "{}",
+            ran.out
+        );
+        assert!(!ran.notes.contains("otpauth"), "{}", ran.notes);
+        Ok(())
+    }
+
+    #[test]
+    fn totp_enable_for_an_unknown_user_prints_no_secret() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let settings = settings(dir.path());
+        let action = UserAction::Totp {
+            action: TotpAction::Enable {
+                name: "ghost".to_owned(),
+            },
+        };
+        let ran = run_user(&settings, false, &action, "123456\n")?;
+        assert_eq!(ran.exit, Exit::Usage);
+        assert!(ran.out.is_empty(), "{}", ran.out);
+        assert!(!ran.notes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn totp_enable_dry_run_generates_and_stores_nothing() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let settings = settings(dir.path());
+        add_alice(&settings)?;
+        let messages = messages();
+        let renderer = renderer(&messages, false);
+        let mut input = std::io::empty();
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = user(
+            &UserAction::Totp {
+                action: TotpAction::Enable {
+                    name: "alice".to_owned(),
+                },
+            },
+            true,
+            &settings,
+            &renderer,
+            &mut Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        assert_eq!(exit, Exit::Ok);
+        assert!(out.is_empty());
+        assert!(!String::from_utf8(notes)?.contains("otpauth"));
+        assert!(!enrolled(&settings)?);
+        Ok(())
+    }
+
+    #[test]
+    fn totp_disable_clears_after_confirmation_and_keeps_on_refusal() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let settings = settings(dir.path());
+        add_alice(&settings)?;
+        let code = fixed_secret()?.code_at(step(NOW));
+        let ran = run_enrol(&settings, false, &format!("{}\n", code.expose()))?;
+        assert_eq!(ran.exit, Exit::Ok, "{}", ran.notes);
+        assert!(enrolled(&settings)?);
+
+        let disable = |yes: bool| UserAction::Totp {
+            action: TotpAction::Disable {
+                name: "alice".to_owned(),
+                yes,
+            },
+        };
+        // Anything but y or yes keeps it.
+        for answer in ["n\n", "\n", "maybe\n"] {
+            let ran = run_user(&settings, false, &disable(false), answer)?;
+            assert_eq!(ran.exit, Exit::Usage, "{answer:?}: {}", ran.notes);
+            assert!(enrolled(&settings)?, "{answer:?}");
+        }
+        let ran = run_user(&settings, false, &disable(false), "y\n")?;
+        assert_eq!(ran.exit, Exit::Ok, "{}", ran.notes);
+        assert!(!enrolled(&settings)?);
+
+        // --yes needs no answer.
+        let ran = run_enrol(&settings, false, &format!("{}\n", code.expose()))?;
+        assert_eq!(ran.exit, Exit::Ok, "{}", ran.notes);
+        assert!(enrolled(&settings)?);
+        let ran = run_user(&settings, true, &disable(true), "")?;
+        assert_eq!(ran.exit, Exit::Ok, "{}", ran.notes);
+        assert!(!enrolled(&settings)?);
+        let parsed: serde_json::Value = serde_json::from_str(&ran.out)?;
+        assert_eq!(
+            parsed
+                .pointer("/action")
+                .and_then(serde_json::Value::as_str),
+            Some("totp-disable")
+        );
+
+        // An unknown user is a usage error.
+        let ran = run_user(
+            &settings,
+            false,
+            &UserAction::Totp {
+                action: TotpAction::Disable {
+                    name: "ghost".to_owned(),
+                    yes: true,
+                },
+            },
+            "",
+        )?;
+        assert_eq!(ran.exit, Exit::Usage);
         Ok(())
     }
 
@@ -1267,6 +1849,18 @@ mod tests {
             Cli::try_parse_from(["detent", "user", "add", "alice"])?.command,
             Some(crate::cli::Command::User {
                 action: UserAction::Add { name }
+            }) if name == "alice"
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["detent", "user", "totp", "enable", "alice"])?.command,
+            Some(crate::cli::Command::User {
+                action: UserAction::Totp { action: TotpAction::Enable { name } }
+            }) if name == "alice"
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["detent", "user", "totp", "disable", "alice", "--yes"])?.command,
+            Some(crate::cli::Command::User {
+                action: UserAction::Totp { action: TotpAction::Disable { name, yes: true } }
             }) if name == "alice"
         ));
         assert!(matches!(

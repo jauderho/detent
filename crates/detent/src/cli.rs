@@ -220,6 +220,32 @@ pub enum UserAction {
         /// Login name.
         name: String,
     },
+    /// Manage a user's TOTP second factor.
+    Totp {
+        /// What to do.
+        #[command(subcommand)]
+        action: TotpAction,
+    },
+}
+
+/// `detent user totp …`.
+#[cfg(feature = "web")]
+#[derive(Debug, Subcommand)]
+pub enum TotpAction {
+    /// Enrol a TOTP secret. Prints it once, then stores it only after you
+    /// type a valid code from your authenticator.
+    Enable {
+        /// Login name.
+        name: String,
+    },
+    /// Remove a user's TOTP secret.
+    Disable {
+        /// Login name.
+        name: String,
+        /// Do not ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// `detent token …`.
