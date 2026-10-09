@@ -450,6 +450,23 @@ runs are still to be seen.
   `PENTEST_CHECKLIST.md` (246 ASVS rows, 32 Gap rows from 22 causes) exist.
   The owner decides which gaps to accept; the rest stay open here.
 
+Fixes from the threat model, in order (each: test first, one commit):
+
+1. **TM-G1 TOTP cannot be enrolled (medium):** add enrolment (CLI first; the
+   UI after) so `totp_required = true` does not lock every account out.
+2. **TM-G8 / TM-G7 password policy:** at least 12 characters, refuse over 128
+   bytes at login, and enforce `must_change_password` at login.
+3. **TM-G3 / TM-G4 / TM-G5 / TM-G6 audit gaps:** audit `setup`, `user` and
+   `token` changes (emit `TokenIssued`/`TokenRevoked`), log a bad bearer
+   token or expired session, have the monitor log each `WriteTarget`,
+   `Restore` and `Service`, and add `detent audit verify`.
+4. **Stale statements** in SECURITY_HARDENING, ARCHITECTURE §11 and ADR-012
+   (THREAT_MODEL §7).
+5. **TM-G2 worker UDP egress** (seccomp argument filter on `socket` /
+   `sendto`): owner decision, §4.
+6. **TM-G12 tag push gives a signed release:** the rulesets in
+   `docs/RELEASING.md` (E5, owner).
+
 ### Track G — blocked on the owner or external infrastructure
 
 - `hickory-client` propagation checks (new dependency; ADR-011 cooldown).
@@ -493,6 +510,10 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   only (README "Updates").
 - Track F mTLS: optional client-certificate auth for v1? — owner answer
   (2026-10-09): no; defer past v1.
+- TM-G2: the `WORKER` seccomp table allows `socket` and `sendto` with no
+  argument filter, so a taken worker can send UDP without `connect`. Add an
+  argument filter (for example `socket` only for `AF_UNIX`)? — proposed: yes,
+  after a trace on the test host shows what the worker needs — owner answer:
 - Track F passkeys: ADR-016 recommends deferring past v1 (a WebAuthn RP ID
   needs a DNS name; the default install is reached by IP). — owner answer:
 - Track F `capability-user` mode for v1 (monitor as `detent` with ambient
