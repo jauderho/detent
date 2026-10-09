@@ -407,6 +407,30 @@ pub const fn has_capability(cap: Capability) -> bool {
     false
 }
 
+/// Keep exactly `retain` in the effective, permitted, inheritable and
+/// ambient sets, and nothing else. Lowering capabilities needs no privilege.
+/// The bounding set is not touched: shrinking it needs `CAP_SETPCAP`.
+///
+/// # Errors
+///
+/// The `capset`/`prctl` failure as text, for example when `retain` holds a
+/// capability that is not permitted.
+#[cfg(target_os = "linux")]
+pub fn restrict_capabilities(retain: &[Capability]) -> Result<(), String> {
+    linux::restrict_capabilities(retain)
+}
+
+/// Non-Linux platforms have no capability sets: nothing to restrict.
+///
+/// # Errors
+///
+/// Never on this platform.
+#[cfg(not(target_os = "linux"))]
+pub const fn restrict_capabilities(retain: &[Capability]) -> Result<(), String> {
+    let _ = retain;
+    Ok(())
+}
+
 /// Empty the capability bounding set while the process still has
 /// `CAP_SETPCAP`, before a worker or acme child drops its uid: after
 /// `setuid` it can no longer do so. A refusal is ignored here; [`confine`]

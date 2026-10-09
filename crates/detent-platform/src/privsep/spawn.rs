@@ -18,7 +18,10 @@
 //!    capability bounding set, then `setgroups([])`, `setgid`, `setuid`. When
 //!    not root, this is skipped and reported in [`Spawned::dropped_privileges`]
 //!    rather than failing — an unprivileged developer run is a supported mode
-//!    (spike 02 showed the sandbox works unprivileged).
+//!    (spike 02 showed the sandbox works unprivileged). A child that is not
+//!    root but holds capabilities (capability-user mode, where the unit gives
+//!    the whole service ambient capabilities) clears every capability set
+//!    instead; the bounding set stays as the unit set it.
 //! 5. [`SandboxHooks::confine_worker`].
 //!
 //! The parent calls [`SandboxHooks::confine_monitor`] and keeps its end.
@@ -332,6 +335,9 @@ pub fn spawn_runner(
         }
         Side::Child => {
             drop(monitor_end);
+            if let Err(err) = keep_only(&RUNNER_CAPS) {
+                report_and_abort("runner", &err);
+            }
             let mut channel = runner_end;
             let checks = crate::service::checks::ExternalCheckRunner::new();
             let services =
@@ -514,17 +520,42 @@ fn drop_and_confine(
     confine: impl FnOnce() -> Result<(), SandboxError>,
 ) -> Result<bool, SpawnError> {
     harden()?;
-    let dropped = match credentials {
-        Some((uid, gid)) => {
-            // Still root: after `setuid` the bounding set cannot shrink.
-            crate::sandbox::drop_bounding_set();
-            sys::drop_to(uid, gid).map_err(|source| SpawnError::DropPrivileges { uid, source })?;
-            true
-        }
-        None => false,
+    let dropped = if let Some((uid, gid)) = credentials {
+        // Still root: after `setuid` the bounding set cannot shrink.
+        crate::sandbox::drop_bounding_set();
+        sys::drop_to(uid, gid).map_err(|source| SpawnError::DropPrivileges { uid, source })?;
+        true
+    } else {
+        keep_only(&[])?;
+        false
     };
     confine().map_err(SpawnError::Sandbox)?;
     Ok(dropped)
+}
+
+/// The capabilities the runner keeps in capability-user mode:
+/// `CAP_DAC_OVERRIDE`, to read the root-owned backups it works mount units out
+/// from, and so the validators it starts read root-only included files as
+/// they do under the root runner. It keeps no `CAP_CHOWN` or `CAP_FOWNER`:
+/// it writes nothing it does not own.
+pub const RUNNER_CAPS: [crate::sandbox::Capability; 1] = [crate::sandbox::Capability::DacOverride];
+
+/// In capability-user mode the whole service is uid `detent` and every
+/// child inherits the monitor's ambient capabilities from the unit; a root
+/// process changes uid instead (and an unprivileged run holds nothing). So,
+/// only in a process that is not root and holds a capability, keep exactly
+/// `retain` in the effective, permitted, inheritable and ambient sets. The
+/// bounding set stays as the unit set it (shrinking it needs
+/// `CAP_SETPCAP`); with `no_new_privs` set no `execve` can regain a
+/// capability from it.
+fn keep_only(retain: &[crate::sandbox::Capability]) -> Result<(), SpawnError> {
+    if is_root() || !crate::sandbox::holds_capabilities() {
+        return Ok(());
+    }
+    crate::sandbox::restrict_capabilities(retain).map_err(|reason| SpawnError::Harden {
+        op: "capset",
+        source: std::io::Error::other(reason),
+    })
 }
 
 /// `no_new_privs` and `dumpable = 0`.
@@ -876,6 +907,96 @@ mod tests {
                 assert!(handle.child_pid > 0);
             }
         }
+        Ok(())
+    }
+
+    /// Capability-user mode: neither root nor an unprivileged run changes
+    /// under `keep_only` (a root child drops its uid instead; an unprivileged
+    /// one holds nothing to drop).
+    #[test]
+    fn keep_only_leaves_root_and_an_unprivileged_run_alone() {
+        let before = crate::sandbox::holds_capabilities();
+        assert!(super::keep_only(&[]).is_ok());
+        assert_eq!(crate::sandbox::holds_capabilities(), before);
+    }
+
+    /// Capability-user mode (Track F): the unit starts the service as a
+    /// non-root uid with `CAP_DAC_OVERRIDE`, `CAP_CHOWN`, `CAP_FOWNER` in
+    /// every set, ambient included, and every fork inherits them. The worker
+    /// and the acme process (`drop_and_confine` with no account) must keep
+    /// none, and the runner only `CAP_DAC_OVERRIDE`. Needs root to build that
+    /// process (`PR_SET_KEEPCAPS`, then a uid change); returns early when not
+    /// root, as `spawn_pair_drops_to_the_worker_account_when_root` does.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_capability_user_child_keeps_only_its_own_capabilities()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::sandbox::Capability;
+        use caps::{CapSet, Capability as Cap};
+
+        const NOBODY: u32 = 65534;
+
+        fn as_capability_user() -> bool {
+            caps::securebits::set_keepcaps(true).is_ok()
+                && super::sys::drop_to(NOBODY, NOBODY).is_ok()
+                && crate::sandbox::restrict_capabilities(&[
+                    Capability::DacOverride,
+                    Capability::Chown,
+                    Capability::Fowner,
+                ])
+                .is_ok()
+                && !is_root()
+                && crate::sandbox::holds_capabilities()
+        }
+
+        fn sets_are(expected: &[Cap]) -> bool {
+            [
+                CapSet::Effective,
+                CapSet::Permitted,
+                CapSet::Inheritable,
+                CapSet::Ambient,
+            ]
+            .into_iter()
+            .all(|set| {
+                caps::read(None, set).is_ok_and(|held| {
+                    held.len() == expected.len() && expected.iter().all(|cap| held.contains(cap))
+                })
+            })
+        }
+
+        /// Run `body` in a forked child (`spawn_acme`, as root with no
+        /// account and no sandbox: its own capability step does nothing)
+        /// and return the child's exit status: 0 when `body` held.
+        fn in_child(body: fn() -> bool) -> Result<Option<i32>, Box<dyn std::error::Error>> {
+            let (handle, ()) = spawn_acme(
+                &SpawnConfig::unprivileged(),
+                &NoSandbox,
+                (),
+                move |_channel, ()| i32::from(!body()),
+            )?;
+            Ok(handle.wait()?)
+        }
+
+        if !is_root() {
+            return Ok(());
+        }
+        let worker = in_child(|| {
+            as_capability_user()
+                && super::drop_and_confine(None, || Ok(())).ok() == Some(false)
+                && sets_are(&[])
+                && !crate::sandbox::holds_capabilities()
+        })?;
+        assert_eq!(worker, Some(0), "the worker kept a capability");
+        let runner = in_child(|| {
+            as_capability_user()
+                && super::keep_only(&super::RUNNER_CAPS).is_ok()
+                && sets_are(&[Cap::CAP_DAC_OVERRIDE])
+        })?;
+        assert_eq!(
+            runner,
+            Some(0),
+            "the runner kept more than CAP_DAC_OVERRIDE"
+        );
         Ok(())
     }
 

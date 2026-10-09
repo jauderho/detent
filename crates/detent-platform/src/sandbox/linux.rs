@@ -90,6 +90,23 @@ pub(super) fn has_capability(cap: Capability) -> bool {
     caps::has_cap(None, CapSet::Effective, to_caps_capability(cap)).unwrap_or(false)
 }
 
+/// Keep exactly `retain` in the effective, permitted, inheritable and ambient
+/// sets. Ambient first (it must stay a subset of permitted and inheritable),
+/// then effective before permitted (effective must stay a subset of
+/// permitted), then `retain` is raised in ambient again so it survives an
+/// `execve`.
+pub(super) fn restrict_capabilities(retain: &[Capability]) -> Result<(), String> {
+    let keep: CapsHashSet = retain.iter().copied().map(to_caps_capability).collect();
+    caps::clear(None, CapSet::Ambient).map_err(|err| err.to_string())?;
+    for set in [CapSet::Inheritable, CapSet::Effective, CapSet::Permitted] {
+        caps::set(None, set, &keep).map_err(|err| err.to_string())?;
+    }
+    for cap in keep {
+        caps::raise(None, CapSet::Ambient, cap).map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
 /// A failed read counts as holding capabilities (fail closed).
 fn sets_hold_capabilities(
     effective: Result<CapsHashSet, caps::errors::CapsError>,
