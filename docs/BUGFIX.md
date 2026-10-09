@@ -483,6 +483,12 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   No packaged schedule runs `detent update --check`, so the console shows no
   update until it runs; ship a timer? — owner answer (2026-10-09): document
   only (README "Updates").
+- Track F mTLS: optional client-certificate auth for v1? — owner answer
+  (2026-10-09): no; defer past v1.
+- Track F `capability-user` mode for v1 (monitor as `detent` with ambient
+  capabilities, polkit for service control, unit drop-in and polkit rule
+  changes, doctor checks)? — owner answer (2026-10-09): implement for v1;
+  root-confined stays the default.
 - D4: remove build toolchains from testhost. — proposed: after Track C A1–A3 —
   owner answer:
 - libbz2 on testhost: `libbz2-1.0` was downgraded to `1.0.8-6build2` by an earlier
