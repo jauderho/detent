@@ -426,8 +426,8 @@ deferred by the owner.
     runner under the packaged unit, a full web install `v0.1.0` → `v0.1.1`
     (202, restart, `/healthz`, digest) and 409 for a second start. Not
     proven: rollback through the web path (the CLI rollback is proven by
-    M3). Faults found by that run, fixed 2026-10-09 (PROGRESS), unproven
-    until an testhost run: a refused tag answers 400 `ops-update-tag-invalid` or
+    M3). Faults found by that run, fixed 2026-10-09 and proven on the test
+    host 2026-10-09 (PROGRESS; the Dashboard text is not checked): a refused tag answers 400 `ops-update-tag-invalid` or
     409 `ops-update-not-newer` (F1); the stamp is `0644` and an install
     removes it (F2); `GET /api/v1/system/update` serves only the stamp, 404
     `web-update-not-checked` without one, and no live check remains (F3).
