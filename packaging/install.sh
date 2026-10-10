@@ -17,7 +17,8 @@
 #                      root-confined removes both if an earlier install left
 #                      them. Set the same mode in /etc/detent/detent.toml
 #                      ([privilege] mode); `detent serve` refuses a mismatch.
-#   --uninstall         Remove previously installed files instead of installing.
+#   --uninstall         Stop and disable detent.service, then remove previously
+#                        installed files instead of installing.
 #   --prefix <dir>      Install under <dir> instead of /. DESTDIR semantics:
 #                        files are placed only — no systemctl, systemd-sysusers,
 #                        or systemd-tmpfiles calls are made, and no ownership
@@ -59,7 +60,8 @@ VERBOSE=0
 
 BIN_DEST="usr/local/bin/detent"
 SERVICE_DEST="etc/systemd/system/detent.service"
-DROPIN_DEST="etc/systemd/system/detent.service.d/capability-user.conf"
+DROPIN_DIR="etc/systemd/system/detent.service.d"
+DROPIN_DEST="$DROPIN_DIR/capability-user.conf"
 SYSUSERS_DEST="etc/sysusers.d/detent.conf"
 TMPFILES_DEST="etc/tmpfiles.d/detent.conf"
 POLKIT_DEST="etc/polkit-1/rules.d/50-detent.rules"
@@ -241,10 +243,51 @@ remove_file() {
 # Uninstall
 # ---------------------------------------------------------------------------
 
+# stop_service: a real uninstall stops and disables the unit before any file
+# goes, so the monitor cannot keep running the binary that is removed. A unit
+# that is not installed or not loaded is not an error: uninstall can re-run.
+stop_service() {
+  if [[ -n "$PREFIX" ]]; then
+    log_verbose "skipping systemctl disable --now (--prefix)"
+    return 0
+  fi
+  if ((DRYRUN)); then
+    run "stop and disable detent.service" systemctl disable --now detent.service
+    return 0
+  fi
+  local out
+  log_info "stopping and disabling detent.service"
+  if out="$(LC_ALL=C systemctl disable --now detent.service 2>&1)"; then
+    return 0
+  fi
+  case "$out" in
+    *"not loaded"* | *"does not exist"*)
+      log_verbose "detent.service is not installed: nothing to stop"
+      ;;
+    *)
+      log_err "systemctl disable --now detent.service failed: $out"
+      exit 1
+      ;;
+  esac
+}
+
+# remove_empty_dir <dest-relative-path>: rmdir a directory once it is empty.
+# Never recursive: a directory that still holds another file is kept.
+remove_empty_dir() {
+  local rel="$1"
+  local dest="$DEST_ROOT/$rel"
+  if [[ -d "$dest" && -z "$(ls -A -- "$dest")" ]]; then
+    log_info "removing empty directory $rel"
+    run "rmdir $dest" rmdir "$dest"
+  fi
+}
+
 do_uninstall() {
+  stop_service
   remove_file "$BIN_DEST"
   remove_file "$SERVICE_DEST"
   remove_file "$DROPIN_DEST"
+  remove_empty_dir "$DROPIN_DIR"
   remove_file "$SYSUSERS_DEST"
   remove_file "$TMPFILES_DEST"
   remove_file "$POLKIT_DEST"

@@ -456,3 +456,59 @@ fn install_prefix_switches_modes_and_uninstalls() -> Result<(), Box<dyn std::err
     }
     Ok(())
 }
+
+/// `--uninstall` stops and disables the service before any file is removed:
+/// a monitor left running would keep the old binary alive past its removal.
+#[test]
+fn uninstall_dryrun_stops_the_service_before_removing_files()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (ok, text) = install_sh(&["--dryrun", "--verbose", "--uninstall"])?;
+    assert!(ok, "{text}");
+    let stop = text
+        .find("systemctl disable --now detent.service")
+        .ok_or_else(|| format!("no stop step: {text}"))?;
+    let first_removal = ["rm -f", "already absent:", "removing "]
+        .iter()
+        .filter_map(|needle| text.find(needle))
+        .min();
+    assert!(
+        first_removal.is_some_and(|at| at > stop),
+        "the stop step must come before the first file removal: {text}"
+    );
+    Ok(())
+}
+
+/// `--uninstall` removes the drop-in directory once it is empty, and keeps it
+/// while another file is in it (`rmdir`, never a recursive delete).
+#[test]
+fn uninstall_under_prefix_removes_an_empty_drop_in_dir_and_keeps_a_used_one()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::TempDir::new()?;
+    let binary = fake_binary(dir.path())?;
+    let root = dir.path().join("root");
+    let prefix = root.to_string_lossy().into_owned();
+    let dropin_dir = root.join("etc/systemd/system/detent.service.d");
+
+    let (ok, text) = install_sh(&[
+        "--prefix",
+        &prefix,
+        "--mode",
+        "capability-user",
+        "--binary",
+        &binary,
+    ])?;
+    assert!(ok, "{text}");
+    let (ok, text) = install_sh(&["--prefix", &prefix, "--uninstall"])?;
+    assert!(ok, "{text}");
+    assert!(!dropin_dir.exists(), "empty drop-in dir left: {text}");
+
+    std::fs::create_dir_all(&dropin_dir)?;
+    std::fs::write(dropin_dir.join("local.conf"), b"")?;
+    let (ok, text) = install_sh(&["--prefix", &prefix, "--uninstall"])?;
+    assert!(ok, "{text}");
+    assert!(
+        dropin_dir.join("local.conf").exists(),
+        "a file outside the packaging was removed: {text}"
+    );
+    Ok(())
+}
