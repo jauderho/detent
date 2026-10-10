@@ -282,6 +282,11 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        # Cache the registry and the installed cargo-geiger, not target/: a
+        # restored target/ keeps dep-info for crates the lock dropped, and
+        # cargo-geiger then fails on their missing sources.
+        with:
+          cache-targets: false
 
       # `taiki-e/install-action` has no manifest for cargo-geiger, so it
       # builds from crates.io; the cache step keeps the binary. The vendored
