@@ -33,6 +33,9 @@ use serde::Serialize;
 use crate::output::{Exit, Renderer};
 use crate::run::{Settings, Streams};
 
+#[cfg(feature = "web")]
+mod privilege;
+
 /// Group/other write bits: a genuine misconfiguration on anything detent owns.
 const WRITABLE_BY_OTHERS: u32 = 0o022;
 /// Group/other read bits: worth mentioning, not a fault.
@@ -93,6 +96,13 @@ impl Check {
             "seccomp" => MessageId::new("cli-doctor-seccomp"),
             "serve-confinement" => MessageId::new("cli-doctor-serve-confinement"),
             "mounts" => MessageId::new("cli-doctor-mounts"),
+            "privilege-mode" => MessageId::new("cli-doctor-privilege-mode"),
+            "service-account" => MessageId::new("cli-doctor-service-account"),
+            "state-owner" => MessageId::new("cli-doctor-state-owner"),
+            "backups-dir" => MessageId::new("cli-doctor-backups-dir"),
+            "polkit-rule" => MessageId::new("cli-doctor-polkit-rule"),
+            "polkit-daemon" => MessageId::new("cli-doctor-polkit-daemon"),
+            "unit-capabilities" => MessageId::new("cli-doctor-unit-capabilities"),
             _ => MessageId::new("cli-doctor-confinement"),
         }
     }
@@ -142,6 +152,7 @@ pub fn report(
     {
         checks.push(mounts_check(activate_mounts(settings), host.profile.init));
     }
+    checks.extend(privilege_checks(settings));
     let ok = !checks.iter().any(|check| check.status == Status::Fail);
 
     if renderer.json {
@@ -187,6 +198,28 @@ fn activate_mounts(settings: &Settings) -> bool {
     {
         let _ = settings;
         false
+    }
+}
+
+/// The `[privilege] mode` rows ([`privilege`]). An unreadable file gives
+/// none: the `config` check reports the file itself.
+fn privilege_checks(settings: &Settings) -> Vec<Check> {
+    #[cfg(feature = "web")]
+    {
+        settings.load_web_config().map_or_else(
+            |_| Vec::new(),
+            |config| {
+                privilege::checks(
+                    config.privilege.mode,
+                    &privilege::Host::real(&settings.state_root),
+                )
+            },
+        )
+    }
+    #[cfg(not(feature = "web"))]
+    {
+        let _ = settings;
+        Vec::new()
     }
 }
 
@@ -670,6 +703,46 @@ mod tests {
             detail.is_some_and(|detail| detail.starts_with("on")),
             "{row}"
         );
+        Ok(())
+    }
+
+    /// `[privilege] mode` adds its rows; capability-user on a host without
+    /// the packaged polkit rule fails.
+    #[cfg(feature = "web")]
+    #[test]
+    fn doctor_reads_the_privilege_mode_from_the_config() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let config = dir.path().join("detent.toml");
+        let rows = |text: &str| -> Result<Vec<String>, Box<dyn std::error::Error>> {
+            let parsed: serde_json::Value = serde_json::from_str(text)?;
+            Ok(parsed
+                .pointer("/checks")
+                .and_then(serde_json::Value::as_array)
+                .ok_or("checks")?
+                .iter()
+                .filter_map(|check| check.pointer("/name")?.as_str().map(str::to_owned))
+                .collect())
+        };
+        std::fs::write(&config, b"[listen]\n")?;
+        let (_, text) = run(&settings(dir.path(), config.clone()), true)?;
+        let names = rows(&text)?;
+        assert!(names.contains(&"privilege-mode".to_owned()), "{text}");
+        assert!(!names.contains(&"polkit-rule".to_owned()), "{text}");
+
+        std::fs::write(&config, b"[privilege]\nmode = \"capability-user\"\n")?;
+        let (exit, text) = run(&settings(dir.path(), config), true)?;
+        let names = rows(&text)?;
+        for name in [
+            "service-account",
+            "polkit-rule",
+            "polkit-daemon",
+            "unit-capabilities",
+        ] {
+            assert!(names.contains(&name.to_owned()), "{name}: {text}");
+        }
+        if !std::path::Path::new(super::privilege::POLKIT_RULE).exists() {
+            assert_eq!(exit, Exit::Failed, "{text}");
+        }
         Ok(())
     }
 
