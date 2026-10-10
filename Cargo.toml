@@ -73,6 +73,12 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 unic-langid = "0.9.6"
 
+# Raw DEFLATE for the locale text embedded by detent-i18n: the build script packs
+# each .ftl file, the runtime inflates only the locales it renders. Pure safe Rust
+# (`#![forbid(unsafe_code)]`), no feature but `with-alloc`, one dependency (adler2).
+# 0.9.1 was published 2026-03-13, long past the 7-day cooldown of ADR-011.
+miniz_oxide = { version = "0.9.1", default-features = false, features = ["with-alloc"] }
+
 # Web front (PLAN §2.6, §2.7). Every entry here is pinned to the newest release
 # that clears the 7-day cooldown of §6.4; do not bump one without re-checking
 # its publication date.

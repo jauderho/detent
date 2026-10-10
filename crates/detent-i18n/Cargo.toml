@@ -13,7 +13,11 @@ workspace = true
 [dependencies]
 detent-core = { path = "../detent-core" }
 fluent-bundle = { workspace = true }
+miniz_oxide = { workspace = true }
 unic-langid = { workspace = true }
+
+[build-dependencies]
+miniz_oxide = { workspace = true }
 
 [features]
 ## Compiles `web.ftl` into the catalogue. Only the web server and its API look

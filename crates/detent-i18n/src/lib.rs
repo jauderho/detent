@@ -28,6 +28,14 @@
 //! locale is adding a directory: no Rust edit. The pseudo-locale (`qps-*`) is
 //! left out by rule. `locale_scan.rs` holds the rules and their tests.
 //!
+//! # The text is stored compressed
+//!
+//! `build.rs` packs every `.ftl` file as raw DEFLATE (`miniz_oxide`, safe Rust, one
+//! small dependency) and the binary embeds only the packed bytes. A [`Localizer`]
+//! inflates the negotiated locale and the `en-US` fallback on first use, once per
+//! file; the other locales are never unpacked. Fluent text packs to about a third,
+//! so twelve locales take about the space four would as plain text.
+//!
 //! # Bidi isolation
 //!
 //! Fluent wraps interpolated values in FSI/PDI marks (U+2068, U+2069) by default, so
@@ -42,17 +50,72 @@
 
 use detent_core::diag::{Diagnostic, Diagnostics, MessageId};
 use fluent_bundle::{FluentArgs, FluentBundle, FluentResource, FluentValue};
+use miniz_oxide::inflate::decompress_to_vec_with_limit;
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 use unic_langid::LanguageIdentifier;
 
-/// One compiled-in locale: a BCP‑47 tag and the raw Fluent source of the `.ftl`
-/// files under `locales/<tag>/`, each embedded via [`include_str!`].
-#[derive(Debug)]
+/// One embedded `.ftl` file: its raw DEFLATE bytes and the length of the text.
+///
+/// `build.rs` makes one `static` of this for every file of every locale. The text
+/// is inflated the first time something asks for it and kept, so a process pays
+/// only for the locales it renders (the negotiated one and the `en-US` fallback),
+/// and only once.
+struct Packed {
+    /// Length in bytes of the inflated text; also the cap on the inflater's output.
+    len: usize,
+    /// The file as raw DEFLATE.
+    deflated: &'static [u8],
+    /// The inflated text, set on first use.
+    text: OnceLock<Box<str>>,
+}
+
+impl Packed {
+    /// A file that is still compressed.
+    const fn new(len: usize, deflated: &'static [u8]) -> Self {
+        Self {
+            len,
+            deflated,
+            text: OnceLock::new(),
+        }
+    }
+
+    /// The `.ftl` text. A blob that fails to inflate, to the recorded length or to
+    /// UTF-8, gives an empty text instead of a panic, so that every id of the file
+    /// degrades to its `en-US` text. `build.rs` proves each blob inflates, and
+    /// `embedded_files_inflate_to_the_files_on_disk` proves it again in CI.
+    fn text(&self) -> &str {
+        self.text.get_or_init(|| {
+            decompress_to_vec_with_limit(self.deflated, self.len)
+                .ok()
+                .filter(|bytes| bytes.len() == self.len)
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .unwrap_or_default()
+                .into_boxed_str()
+        })
+    }
+
+    /// Whether the text has been inflated yet.
+    #[cfg(test)]
+    fn is_inflated(&self) -> bool {
+        self.text.get().is_some()
+    }
+}
+
+/// One compiled-in locale: a BCP‑47 tag and the compressed Fluent source of the
+/// `.ftl` files under `locales/<tag>/`.
 struct LocaleSource {
     /// BCP‑47 locale tag, matching the `locales/<tag>/` directory name.
     tag: &'static str,
-    /// The `.ftl` file contents for this locale, in the order added to the bundle.
-    files: &'static [&'static str],
+    /// The `.ftl` files for this locale, in the order added to the bundle.
+    files: &'static [&'static Packed],
+}
+
+impl LocaleSource {
+    /// The text of every file, inflating whatever is not yet.
+    fn texts(&self) -> Vec<&'static str> {
+        self.files.iter().map(|file| file.text()).collect()
+    }
 }
 
 /// The locale tag used as the ultimate fallback and the source of truth for message
@@ -66,12 +129,13 @@ const EN_US_TAG: &str = "en-US";
 // locale defines exactly the ids `en-US` defines, no more and no fewer.
 include!(concat!(env!("OUT_DIR"), "/catalogue.rs"));
 
-/// Looks up the `.ftl` files for the `en-US` catalogue entry.
-fn en_us_files() -> Option<&'static [&'static str]> {
+/// The `.ftl` texts of the `en-US` catalogue entry.
+fn en_us_files() -> Vec<&'static str> {
     CATALOGUE
         .iter()
         .find(|locale| locale.tag == EN_US_TAG)
-        .map(|locale| locale.files)
+        .map(LocaleSource::texts)
+        .unwrap_or_default()
 }
 
 /// Parses `.ftl` sources into a bundle for `tag`, tolerating parse errors in any
@@ -303,12 +367,12 @@ pub struct Localizer {
 impl Localizer {
     /// Builds a `Localizer` whose active locale is `tag`/`files` and whose fallback
     /// is the compiled-in `en-US` (or no fallback, if `tag` already is `en-US`).
-    fn from_files(tag: &'static str, files: &'static [&'static str]) -> Self {
+    fn from_files(tag: &'static str, files: &[&str]) -> Self {
         let active = build_bundle(tag, files);
         let fallback = if tag == EN_US_TAG {
             None
         } else {
-            en_us_files().map(|files| build_bundle(EN_US_TAG, files))
+            Some(build_bundle(EN_US_TAG, &en_us_files()))
         };
         Self {
             tag,
@@ -330,8 +394,9 @@ impl Localizer {
         let files = CATALOGUE
             .iter()
             .find(|locale| locale.tag == tag)
-            .map_or(&[][..], |locale| locale.files);
-        Self::from_files(tag, files)
+            .map(LocaleSource::texts)
+            .unwrap_or_default();
+        Self::from_files(tag, &files)
     }
 
     /// Builds a `Localizer` from `LC_ALL`, `LC_MESSAGES`, `LANG` (in that precedence,
@@ -352,7 +417,7 @@ impl Localizer {
     /// Builds a `Localizer` fixed to `en-US`, with no negotiation.
     #[must_use]
     pub fn en_us() -> Self {
-        Self::from_files(EN_US_TAG, en_us_files().unwrap_or(&[]))
+        Self::from_files(EN_US_TAG, &en_us_files())
     }
 
     /// The negotiated locale tag this `Localizer` renders (e.g. `"en-US"`).
@@ -434,7 +499,7 @@ mod locale_scan;
 #[cfg(test)]
 mod tests {
     use super::{
-        ALIASES, CATALOGUE, EN_US_TAG, Localizer, build_bundle, negotiate,
+        ALIASES, CATALOGUE, EN_US_TAG, Localizer, Packed, build_bundle, negotiate,
         parse_posix_locale_value, resolve_env_locale, strip_bidi_isolation,
     };
     use detent_core::diag::{Diagnostic, Diagnostics, MessageId, Severity};
@@ -491,7 +556,7 @@ mod tests {
         source.lines().filter_map(message_id_on_line).collect()
     }
 
-    fn locale_message_ids<'a>(files: &'a [&'a str]) -> BTreeSet<&'a str> {
+    fn locale_message_ids<'a>(files: &[&'a str]) -> BTreeSet<&'a str> {
         files.iter().flat_map(|f| message_ids(f)).collect()
     }
 
@@ -517,9 +582,9 @@ mod tests {
             .iter()
             .find(|l| l.tag == EN_US_TAG)
             .ok_or("en-US missing from CATALOGUE")?;
-        let reference = locale_message_ids(en_us.files);
+        let reference = locale_message_ids(&en_us.texts());
         for locale in CATALOGUE {
-            let ids = locale_message_ids(locale.files);
+            let ids = locale_message_ids(&locale.texts());
             let (missing, extra) = id_parity(&reference, &ids);
             assert!(
                 missing.is_empty() && extra.is_empty(),
@@ -573,9 +638,9 @@ mod tests {
             .iter()
             .find(|l| l.tag == EN_US_TAG)
             .ok_or("en-US missing from CATALOGUE")?;
-        let reference = message_placeables(en_us.files);
+        let reference = message_placeables(&en_us.texts());
         for locale in CATALOGUE {
-            let got = message_placeables(locale.files);
+            let got = message_placeables(&locale.texts());
             let drift: Vec<String> = reference
                 .iter()
                 .filter(|(id, vars)| got.get(*id).is_some_and(|other| other != *vars))
@@ -628,7 +693,7 @@ mod tests {
     #[test]
     fn all_locales_parse_cleanly() {
         for locale in CATALOGUE {
-            for (idx, file) in locale.files.iter().enumerate() {
+            for (idx, file) in locale.texts().iter().enumerate() {
                 let result = FluentResource::try_new((*file).to_owned());
                 // Computed eagerly (not inside the `assert!` message, which `assert!`
                 // only evaluates on failure) so this line reports covered even on the
@@ -637,6 +702,68 @@ mod tests {
                 assert!(result.is_ok(), "{}[{idx}]: {parse_errors:?}", locale.tag);
             }
         }
+    }
+
+    /// The compressed copy in the binary is the file on disk, byte for byte, for every
+    /// locale: nothing is lost, reordered or cut by the pack and inflate round trip.
+    #[test]
+    fn embedded_files_inflate_to_the_files_on_disk() -> TestResult {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../locales");
+        let names: Vec<&str> = super::locale_scan::REQUIRED_FILES
+            .into_iter()
+            .filter(|name| cfg!(feature = "web") || *name != "web.ftl")
+            .collect();
+        for locale in CATALOGUE {
+            assert_eq!(locale.files.len(), names.len(), "{}", locale.tag);
+            for (packed, name) in locale.files.iter().zip(&names) {
+                let on_disk = std::fs::read_to_string(root.join(locale.tag).join(name))?;
+                assert_eq!(packed.text(), on_disk, "{}/{name}", locale.tag);
+                assert!(
+                    packed.deflated.len() < on_disk.len(),
+                    "{}/{name} did not shrink",
+                    locale.tag
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn leak(bytes: Vec<u8>) -> &'static [u8] {
+        Box::leak(bytes.into_boxed_slice())
+    }
+
+    #[test]
+    fn text_is_inflated_on_first_use_and_only_once() {
+        let source = "hello = Hello, world\n";
+        let packed = Packed::new(
+            source.len(),
+            leak(miniz_oxide::deflate::compress_to_vec(source.as_bytes(), 10)),
+        );
+        assert!(!packed.is_inflated());
+        let first = packed.text();
+        assert_eq!(first, source);
+        assert!(packed.is_inflated());
+        assert!(
+            std::ptr::eq(first, packed.text()),
+            "the text was inflated twice"
+        );
+    }
+
+    #[test]
+    fn a_damaged_blob_gives_empty_text_and_never_panics() {
+        let source = "hello = Hello, world\n";
+        let good = miniz_oxide::deflate::compress_to_vec(source.as_bytes(), 10);
+        // A length that is too short (over the cap) and too long (under-filled).
+        for len in [source.len() - 1, source.len() + 1] {
+            assert_eq!(Packed::new(len, leak(good.clone())).text(), "", "len {len}");
+        }
+        // Bytes that are not DEFLATE, and a truncated stream.
+        assert_eq!(Packed::new(8, &[0xFF; 8]).text(), "");
+        let cut = good.get(..good.len() / 2).unwrap_or_default().to_vec();
+        assert_eq!(Packed::new(source.len(), leak(cut)).text(), "");
+        // DEFLATE that holds bytes which are not UTF-8.
+        let bad = miniz_oxide::deflate::compress_to_vec(&[0xC3, 0x28], 10);
+        assert_eq!(Packed::new(2, leak(bad)).text(), "");
     }
 
     // ---- fixture-based proof that the parity mechanism catches both directions ----
@@ -656,7 +783,7 @@ mod tests {
             .iter()
             .find(|l| l.tag == EN_US_TAG)
             .ok_or("en-US missing from CATALOGUE")?;
-        let reference = locale_message_ids(en_us.files);
+        let reference = locale_message_ids(&en_us.texts());
         let ploc_ids = message_ids(PLOC_FIXTURE);
 
         let (missing, extra) = id_parity(&reference, &ploc_ids);
