@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'bun:test'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   compareLocale,
   findHardcodedJsxText,
   findIdLiterals,
   findReferencedIds,
+  findTranslatedLocales,
   loadFtlIdsFrom,
   loadPlaceablesFrom,
+  pendingLocales,
+  unknownLocales,
 } from '../i18n-check.ts'
 
 describe('findReferencedIds', () => {
@@ -143,5 +149,44 @@ describe('compareLocale', () => {
     expect(compareLocale(source, translation).placeables).toEqual([
       { id: 'c', expected: ['n'], actual: [] },
     ])
+  })
+})
+
+describe('translated locale discovery', () => {
+  function withLocales(names: string[], body: (dir: string) => void): void {
+    const dir = mkdtempSync(join(tmpdir(), 'i18n-check-'))
+    try {
+      for (const name of names) mkdirSync(join(dir, name))
+      writeFileSync(join(dir, 'README.md'), 'not a locale')
+      body(dir)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('finds a directory a translator just added, and skips en-US, the pseudo-locale and files', () => {
+    withLocales(['en-US', 'qps-ploc', 'fr-FR', 'de-DE', '.hidden'], (dir) => {
+      expect(findTranslatedLocales(dir)).toEqual(['de-DE', 'fr-FR'])
+    })
+  })
+
+  it('lists the shipped locales that have no directory yet', () => {
+    expect(pendingLocales(['de-DE', 'ja-JP'])).toEqual([
+      'en-GB',
+      'zh-CN',
+      'zh-TW',
+      'es-ES',
+      'pt-BR',
+      'fr-FR',
+      'ru-RU',
+      'hi-IN',
+      'bn-BD',
+    ])
+    expect(pendingLocales([])).toHaveLength(11)
+  })
+
+  it('names a directory that is not a shipped locale', () => {
+    expect(unknownLocales(['de-DE', 'xx-YY', 'ar-SA'])).toEqual(['xx-YY', 'ar-SA'])
+    expect(unknownLocales(['de-DE'])).toEqual([])
   })
 })

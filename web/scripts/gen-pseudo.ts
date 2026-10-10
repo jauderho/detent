@@ -10,7 +10,7 @@
  *   generates locales/qps-ploc/web.ftl (relative to repo root)
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const WEB_ROOT = new URL('..', import.meta.url).pathname
@@ -88,6 +88,11 @@ function generate(src: string): string {
 }
 
 const src = readFileSync(SRC_PATH, 'utf8')
+const out = generate(src)
 mkdirSync(OUT_DIR, { recursive: true })
-writeFileSync(OUT_PATH, generate(src))
-console.log(`gen-pseudo: wrote ${OUT_PATH} (${src.split('\n').length} lines from en-US)`)
+// Left alone when unchanged: cargo watches `locales/`, and a rewrite with the same
+// text would still rebuild `detent-i18n` and everything above it.
+if (!existsSync(OUT_PATH) || readFileSync(OUT_PATH, 'utf8') !== out) {
+  writeFileSync(OUT_PATH, out)
+}
+console.log(`gen-pseudo: ${OUT_PATH} is current (${src.split('\n').length} lines from en-US)`)

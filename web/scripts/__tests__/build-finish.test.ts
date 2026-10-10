@@ -110,6 +110,15 @@ describe('keepFontSubsets', () => {
     expect(dropped).toEqual([])
   })
 
+  // ru-RU needs `cyrillic`; the shipped default `latin,cyrillic` must not drag in
+  // `cyrillic-ext`, which only Ukrainian, Serbian and the like use.
+  it('keeps cyrillic without cyrillic-ext', () => {
+    const css = face('latin') + face('cyrillic') + face('cyrillic-ext')
+    const { dropped } = keepFontSubsets(css, ['latin', 'cyrillic'])
+
+    expect(dropped).toEqual(['ibm-plex-mono-cyrillic-ext-400-normal-abc.woff2'])
+  })
+
   // Deleting a font because its name is unfamiliar is worse than shipping it.
   it('keeps a face whose subset it cannot identify', () => {
     const odd = '@font-face{font-family:X;src:url(/assets/mystery.woff2)format("woff2")}'

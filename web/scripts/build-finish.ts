@@ -146,7 +146,7 @@ export function dropLegacyWoff(css: string): { css: string; dropped: string[] } 
  * Every subset is embedded in the binary whether or not a browser ever asks
  * for it — `unicode-range` decides what gets *downloaded*, not what gets
  * shipped — and detent targets SBCs and embedded systems. So the bundle
- * carries what the shipped locale needs and nothing else. Adding a locale
+ * carries what the shipped locales need and nothing else. Adding a locale
  * means adding its subset here, deliberately, in the same change.
  */
 const KNOWN_SUBSETS = [
@@ -159,8 +159,20 @@ const KNOWN_SUBSETS = [
   'latin',
 ] as const
 
-/** Subsets en-US needs. See `KNOWN_SUBSETS` for why this is not "all of them". */
-const DEFAULT_SUBSETS = ['latin']
+/**
+ * Subsets the twelve shipped locales need.
+ *
+ * - `latin` covers en-US, en-GB, de-DE, es-ES, fr-FR and pt-BR: it holds all of
+ *   Latin-1 (ä ö ü ß é è ç ã õ ñ ¿ ¡ ÿ) plus Œ œ, so `latin-ext` is not needed.
+ * - `cyrillic` covers ru-RU.
+ * - zh-CN, zh-TW and ja-JP (CJK), hi-IN (Devanagari) and bn-BD (Bengali) have no
+ *   subset: IBM Plex Mono and Archivo carry none of those scripts, and a CJK or
+ *   Indic font would add megabytes to every binary. The browser falls back to
+ *   the system font for those glyphs (`ui-monospace` / `sans-serif` in
+ *   `index.css`). Archivo has no Cyrillic either, so ru-RU headings use the
+ *   system sans-serif; Plex Mono, the body font, does have it.
+ */
+const DEFAULT_SUBSETS = ['latin', 'cyrillic']
 
 function subsetOf(fileName: string): string | null {
   return KNOWN_SUBSETS.find((subset) => fileName.includes(`-${subset}-`)) ?? null

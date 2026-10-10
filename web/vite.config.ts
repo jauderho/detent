@@ -61,6 +61,15 @@ export default defineConfig({
     // the postbuild report.
     reportCompressedSize: true,
 
+    // `src/i18n/index.tsx` imports en-US statically (the fallback every locale
+    // needs, so it is in the first bundle) and the other locales through one
+    // `import(`locales/${tag}/web.ftl?raw`)`, which Vite expands to every
+    // locale directory, en-US included. The en-US half of that is unreachable
+    // by design, and the bundler's warning about it would print on every build.
+    rolldownOptions: {
+      checks: { ineffectiveDynamicImport: false },
+    },
+
     // `spa.rs` serves anything under `assets/` with an immutable cache header
     // on the strength of the content hash in its name, so the hash must stay.
     rollupOptions: {

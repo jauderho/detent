@@ -17,25 +17,52 @@
  *   3. No JSX text node containing a letter appears outside test files and
  *      outside the fallback children of a <Localized> element (which
  *      intentionally mirror the message text per @fluent/react convention).
- *   4. Every shipped translation (locales/<lang>/web.ftl for each of
- *      TRANSLATED_LOCALES) defines exactly the ids en-US defines, and every
- *      message uses exactly the placeables (`{$var}`) its en-US source uses.
- *      A missing id silently falls back to English; a missing or misspelled
- *      placeable renders as a literal `{$var}` to the operator.
+ *   4. Every translation that exists (locales/<lang>/web.ftl for each
+ *      directory under locales/ other than en-US and the pseudo-locale)
+ *      defines exactly the ids en-US defines, and every message uses exactly
+ *      the placeables (`{$var}`) its en-US source uses. A missing id silently
+ *      falls back to English; a missing or misspelled placeable renders as a
+ *      literal `{$var}` to the operator. A locale with no directory yet is not
+ *      a failure (translators add them), but a directory that is not one of the
+ *      SHIPPED_LOCALES in src/i18n/locales.ts is, and so is one with no web.ftl.
  *
  * Exits non-zero and prints violations if any check fails.
  */
 
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { DEFAULT_LOCALE, PSEUDO_LOCALE, SHIPPED_LOCALES } from '../src/i18n/locales.ts'
 
 const WEB_ROOT = new URL('..', import.meta.url).pathname
 const SRC_DIR = join(WEB_ROOT, 'src')
 const LOCALES_DIR = join(WEB_ROOT, '..', 'locales')
 const FTL_PATH = join(LOCALES_DIR, 'en-US', 'web.ftl')
-/** Shipped translations checked against en-US. The generated qps-ploc is not one. */
-const TRANSLATED_LOCALES = ['de-DE', 'ja-JP'] as const
+/**
+ * The translations that exist: every directory under `localesDir` except the
+ * source locale, the generated pseudo-locale and hidden entries. Sorted.
+ */
+export function findTranslatedLocales(localesDir: string): string[] {
+  return readdirSync(localesDir)
+    .filter(
+      (name) =>
+        !name.startsWith('.') &&
+        name !== DEFAULT_LOCALE &&
+        name !== PSEUDO_LOCALE &&
+        statSync(join(localesDir, name)).isDirectory(),
+    )
+    .sort()
+}
+
+/** The shipped locales that have no directory yet. Informational, never a failure. */
+export function pendingLocales(found: readonly string[]): string[] {
+  return SHIPPED_LOCALES.filter((tag) => tag !== DEFAULT_LOCALE && !found.includes(tag))
+}
+
+/** The directories that are not a shipped locale, so would never be offered. */
+export function unknownLocales(found: readonly string[]): string[] {
+  return found.filter((tag) => !(SHIPPED_LOCALES as readonly string[]).includes(tag))
+}
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
@@ -259,8 +286,23 @@ function main(): number {
   }
 
   const source = readFileSync(FTL_PATH, 'utf8')
-  for (const lang of TRANSLATED_LOCALES) {
+  const translated = findTranslatedLocales(LOCALES_DIR)
+  for (const lang of unknownLocales(translated)) {
+    failed = true
+    console.error(
+      `i18n-check: locales/${lang} is not a shipped locale. Add the tag to SHIPPED_LOCALES in ` +
+        'web/src/i18n/locales.ts (the owner decides which locales ship), or rename the directory.',
+    )
+  }
+  for (const lang of translated) {
     const path = join(LOCALES_DIR, lang, 'web.ftl')
+    if (!existsSync(path)) {
+      failed = true
+      console.error(
+        `i18n-check: ${relative(WEB_ROOT, path)} does not exist (a locale needs web.ftl).`,
+      )
+      continue
+    }
     const drift = compareLocale(source, readFileSync(path, 'utf8'))
     if (drift.missing.length + drift.extra.length + drift.placeables.length === 0) continue
     failed = true
@@ -276,9 +318,14 @@ function main(): number {
     return 1
   }
 
+  const pending = pendingLocales(translated)
   console.log(
-    `i18n-check: OK — ${ftlIds.size} message ids defined, all referenced, all references resolved; ${TRANSLATED_LOCALES.join(', ')} match en-US.`,
+    `i18n-check: OK — ${ftlIds.size} message ids defined, all referenced, all references resolved; ` +
+      `${translated.length} translation(s) match en-US${translated.length > 0 ? ` (${translated.join(', ')})` : ''}.`,
   )
+  if (pending.length > 0) {
+    console.log(`i18n-check: no directory yet for ${pending.join(', ')} (shown in English).`)
+  }
   return 0
 }
 
