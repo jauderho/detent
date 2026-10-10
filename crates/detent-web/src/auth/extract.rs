@@ -235,6 +235,32 @@ impl Caller {
             (None, None) => Err(AuthError::Unauthenticated),
         }
     }
+
+    /// [`Caller::resolve`] for a live request, at the current time.
+    ///
+    /// A request that presented exactly one credential and was refused as
+    /// unauthenticated is audited, at most once a minute per client address
+    /// (TM-G4). A request with no credential, or with two, is not: the first
+    /// is a probe of a public route, the second a client mistake.
+    fn resolve_request(state: &AppState, parts: &Parts) -> Result<Self, AuthError> {
+        let now = Instant::now();
+        let resolved = Self::resolve(state, &parts.headers, now, unix_now());
+        if matches!(resolved, Err(AuthError::Unauthenticated))
+            && let Some(kind) = presented_kind(&parts.headers)
+        {
+            state.auth.record_rejected(ClientIp::of(parts).0, kind, now);
+        }
+        resolved
+    }
+}
+
+/// How the request authenticated, if it presented exactly one credential.
+fn presented_kind(headers: &HeaderMap) -> Option<IdentityKind> {
+    match (cookie_id(headers).is_some(), bearer(headers).is_some()) {
+        (true, false) => Some(IdentityKind::Session),
+        (false, true) => Some(IdentityKind::Token),
+        _ => None,
+    }
 }
 
 impl FromRequestParts<AppState> for Caller {
@@ -248,7 +274,7 @@ impl FromRequestParts<AppState> for Caller {
         state: &AppState,
     ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
         std::future::ready(
-            Self::resolve(state, &parts.headers, Instant::now(), unix_now())
+            Self::resolve_request(state, parts)
                 .and_then(Self::require_unrestricted)
                 .map_err(ApiError::from),
         )
@@ -280,7 +306,7 @@ impl FromRequestParts<AppState> for PendingCaller {
         state: &AppState,
     ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
         std::future::ready(
-            Caller::resolve(state, &parts.headers, Instant::now(), unix_now())
+            Caller::resolve_request(state, parts)
                 .map(Self)
                 .map_err(ApiError::from),
         )
@@ -368,13 +394,17 @@ impl<S: Send + Sync> FromRequestParts<S> for ClientIp {
 
 #[cfg(test)]
 mod tests {
-    use super::{Caller, ClientIp, UNKNOWN_CLIENT_IP, WriteCaller, bearer, cookie_id, unix_now};
+    use super::{
+        Caller, ClientIp, PendingCaller, UNKNOWN_CLIENT_IP, WriteCaller, bearer, cookie_id,
+        unix_now,
+    };
     use crate::auth::AuthError;
     use crate::auth::session::COOKIE_NAME;
     use crate::authz::{Scope, Scopes};
     use crate::state::{AppState, TestState, test_state};
     use axum::body::Body;
     use axum::extract::{ConnectInfo, FromRequestParts as _};
+    use axum::http::request::Parts;
     use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, header};
     use detent_ops::identity::IdentityKind;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -688,6 +718,140 @@ mod tests {
             .await
             .map_err(|error| format!("a live session was refused: {error:?}"))?;
         assert_eq!(caller.scopes(), Scopes::read_only());
+        Ok(())
+    }
+
+    /// Request parts from `peer`, carrying `header` when there is one.
+    fn parts_from(
+        peer: [u8; 4],
+        header: Option<(header::HeaderName, String)>,
+    ) -> Result<Parts, Box<dyn std::error::Error>> {
+        let mut builder = Request::builder();
+        if let Some((name, value)) = header {
+            builder = builder.header(name, value);
+        }
+        let mut parts = builder.body(Body::empty())?.into_parts().0;
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::from(peer)), 4444);
+        parts.extensions.insert(ConnectInfo(peer));
+        Ok(parts)
+    }
+
+    fn bearer_header(token: &str) -> (header::HeaderName, String) {
+        (header::AUTHORIZATION, format!("Bearer {token}"))
+    }
+
+    #[tokio::test]
+    async fn a_bad_bearer_token_is_audited_once_per_client_per_window() -> R {
+        let fixture = test_state()?;
+        let secret = "f".repeat(64);
+        for _ in 0..3 {
+            let mut parts = parts_from([198, 51, 100, 7], Some(bearer_header(&secret)))?;
+            let refused = Caller::from_request_parts(&mut parts, &fixture.state)
+                .await
+                .err()
+                .ok_or("a bad token was admitted")?;
+            assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+        }
+        let records = fixture.audit.records();
+        let [record] = records.as_slice() else {
+            return Err(format!("expected one record, got {records:?}").into());
+        };
+        assert_eq!(record.subject, "-");
+        assert_eq!(record.kind, IdentityKind::Token);
+        assert_eq!(record.client_ip.as_deref(), Some("198.51.100.7"));
+        assert_eq!(record.result, detent_ops::audit::AuditResult::Denied);
+        assert_eq!(record.detail.as_deref(), Some("web-auth-unauthenticated"));
+        assert!(!format!("{record:?}").contains(&secret), "{record:?}");
+
+        // Another client is its own key.
+        let mut parts = parts_from([198, 51, 100, 8], Some(bearer_header(&secret)))?;
+        let _ = Caller::from_request_parts(&mut parts, &fixture.state).await;
+        assert_eq!(fixture.audit.records().len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn the_record_after_the_window_counts_what_was_held_back() -> R {
+        let fixture = test_state()?;
+        let auth = &fixture.state.auth;
+        let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+        let start = Instant::now();
+        let at = |secs: u64| {
+            start
+                .checked_add(Duration::from_secs(secs))
+                .unwrap_or(start)
+        };
+        for secs in [0, 10, 20, 59] {
+            auth.record_rejected(ip, IdentityKind::Token, at(secs));
+        }
+        auth.record_rejected(ip, IdentityKind::Session, at(60));
+        auth.record_rejected(ip, IdentityKind::Session, at(120));
+
+        let records = fixture.audit.records();
+        let suppressed: Vec<_> = records.iter().map(|record| record.suppressed).collect();
+        assert_eq!(suppressed, vec![None, Some(3), None]);
+        let json = serde_json::to_string(&records)?;
+        assert!(json.contains("\"suppressed\":3"), "{json}");
+        assert_eq!(json.matches("suppressed").count(), 1, "{json}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_expired_token_and_an_unknown_session_are_audited_with_their_kind() -> R {
+        let fixture = test_state()?;
+        let (token, _view) = fixture
+            .state
+            .auth
+            .tokens
+            .issue("short", Scope::Read, Some(1))?;
+        let mut parts = parts_from([198, 51, 100, 7], Some(bearer_header(token.expose())))?;
+        assert!(
+            Caller::from_request_parts(&mut parts, &fixture.state)
+                .await
+                .is_err()
+        );
+
+        let cookie = Some((header::COOKIE, format!("{COOKIE_NAME}={}", "0".repeat(64))));
+        let mut parts = parts_from([198, 51, 100, 9], cookie)?;
+        assert!(
+            PendingCaller::from_request_parts(&mut parts, &fixture.state)
+                .await
+                .is_err()
+        );
+        let records = fixture.audit.records();
+        let kinds: Vec<_> = records.iter().map(|record| record.kind).collect();
+        assert_eq!(kinds, vec![IdentityKind::Token, IdentityKind::Session]);
+        assert!(!format!("{records:?}").contains(token.expose()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_good_credential_none_at_all_and_an_ambiguous_pair_are_not_audited() -> R {
+        let fixture = test_state()?;
+        let (token, _view) = fixture.state.auth.tokens.issue("ci", Scope::Read, None)?;
+        let mut parts = parts_from([198, 51, 100, 7], Some(bearer_header(token.expose())))?;
+        assert!(
+            Caller::from_request_parts(&mut parts, &fixture.state)
+                .await
+                .is_ok()
+        );
+        let mut parts = parts_from([198, 51, 100, 7], None)?;
+        assert!(
+            Caller::from_request_parts(&mut parts, &fixture.state)
+                .await
+                .is_err()
+        );
+        let mut parts = parts_from([198, 51, 100, 7], Some(bearer_header("x")))?;
+        parts.headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{COOKIE_NAME}=y"))?,
+        );
+        assert!(
+            Caller::from_request_parts(&mut parts, &fixture.state)
+                .await
+                .is_err()
+        );
+        assert!(fixture.audit.records().is_empty());
         Ok(())
     }
 

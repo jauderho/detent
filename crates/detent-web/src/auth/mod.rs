@@ -30,6 +30,7 @@
 
 pub mod audit;
 pub mod base32;
+pub mod coalesce;
 pub mod extract;
 pub mod password;
 pub mod ratelimit;

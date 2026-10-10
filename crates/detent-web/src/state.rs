@@ -24,11 +24,14 @@
 //! * **The `Debug` prints no secret and no name**, because every component's
 //!   own `Debug` is written that way.
 
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::auth::AuthError;
-use crate::auth::audit::{AuthAudit, AuthRecord, FileAuthAudit, emit};
+use crate::auth::audit::{AuthAudit, AuthEvent, AuthRecord, FileAuthAudit, emit};
+use crate::auth::coalesce::Coalescer;
 use crate::auth::password::Hasher;
 use crate::auth::ratelimit::RateLimiter;
 use crate::auth::session::SessionStore;
@@ -38,6 +41,9 @@ use crate::config::{AuthConfig, Config};
 use crate::csrf::Origin;
 use crate::engine::EngineHandle;
 use crate::tls::CertStore;
+use detent_core::diag::MessageId;
+use detent_ops::audit::AuditResult;
+use detent_ops::identity::IdentityKind;
 use tokio::sync::Semaphore;
 
 /// Maximum password hashes allowed to run on blocking threads at once.
@@ -60,6 +66,9 @@ pub struct AuthState {
     pub(crate) argon2_permits: std::sync::Arc<Semaphore>,
     /// Where auth events go.
     pub audit: Box<dyn AuthAudit>,
+    /// Keeps a flood of rejected credentials to one record per address per
+    /// minute.
+    rejections: Coalescer,
     /// Whether a second factor is required of every account
     /// (`auth.totp_required`).
     pub totp_required: bool,
@@ -88,6 +97,7 @@ impl AuthState {
             limiter,
             argon2_permits: std::sync::Arc::new(Semaphore::new(MAX_CONCURRENT_ARGON2)),
             audit: Box::new(FileAuthAudit::under_state_root(state_root)),
+            rejections: Coalescer::new(),
             totp_required: auth.totp_required,
         })
     }
@@ -132,6 +142,25 @@ impl AuthState {
     /// Write one auth event to `tracing` and to the sink.
     pub fn record(&self, record: &AuthRecord) {
         emit(self.audit.as_ref(), record);
+    }
+
+    /// Record a bearer token or session cookie that did not resolve, unless
+    /// `ip` was already recorded in the last minute (TM-G4).
+    ///
+    /// The subject is `-`: the credential is unknown, and it is never logged,
+    /// not even as a fingerprint.
+    pub fn record_rejected(&self, ip: IpAddr, kind: IdentityKind, now: Instant) {
+        let Some(held_back) = self.rejections.admit(ip, now) else {
+            return;
+        };
+        let mut record = AuthRecord::new(AuthEvent::CredentialRejected, "-", AuditResult::Denied)
+            .with_kind(kind)
+            .with_client_ip(ip)
+            .with_detail(MessageId::new("web-auth-unauthenticated"));
+        if held_back > 0 {
+            record = record.with_suppressed(held_back);
+        }
+        self.record(&record);
     }
 }
 

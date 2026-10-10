@@ -92,6 +92,10 @@ pub enum AuthEvent {
     TotpDisabled,
     /// A valid caller attempted an operation without its required scope.
     ScopeDenied,
+    /// A bearer token or session cookie was presented and did not resolve:
+    /// unknown, expired, revoked or ended. At most one record per client
+    /// address per minute; see [`AuthRecord::suppressed`].
+    CredentialRejected,
     /// A caller asked the ACME client to renew the certificate now
     /// (`POST /api/v1/system/cert/renew`). The operations engine cannot
     /// answer `CertRenew`, so the web front end records it here.
@@ -116,6 +120,10 @@ pub struct AuthRecord {
     pub result: AuditResult,
     /// Fluent id of the failure, when it failed.
     pub detail: Option<String>,
+    /// How many like events from this address since the last record were
+    /// counted but not logged. Present only when there were some.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suppressed: Option<u32>,
 }
 
 impl AuthRecord {
@@ -132,7 +140,15 @@ impl AuthRecord {
             client_ip: None,
             result,
             detail: None,
+            suppressed: None,
         }
+    }
+
+    /// Say how many like events were counted but not logged.
+    #[must_use]
+    pub const fn with_suppressed(mut self, count: u32) -> Self {
+        self.suppressed = Some(count);
+        self
     }
 
     /// Say how the subject authenticated.
@@ -181,6 +197,7 @@ pub fn emit(sink: &dyn AuthAudit, record: &AuthRecord) {
         client_ip = ?record.client_ip,
         result = ?record.result,
         error_id = ?record.detail,
+        suppressed = ?record.suppressed,
         "detent audit"
     );
     sink.record(record);
