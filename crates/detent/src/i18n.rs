@@ -193,10 +193,10 @@ mod tests {
         // than ignored; a locale this build does not ship falls back to en-US.
         for (tag, expected) in [
             ("en-US", "en-US"),
-            ("de", "de"),
-            ("de-DE", "de"),
-            ("ja-JP", "ja"),
-            ("fr-FR", "en-US"),
+            ("de", "de-DE"),
+            ("de-DE", "de-DE"),
+            ("ja-JP", "ja-JP"),
+            ("ko-KR", "en-US"),
         ] {
             let messages = Messages::new(Some(tag));
             assert_eq!(messages.locale(), expected, "{tag}");

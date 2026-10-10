@@ -35,7 +35,7 @@ const SRC_DIR = join(WEB_ROOT, 'src')
 const LOCALES_DIR = join(WEB_ROOT, '..', 'locales')
 const FTL_PATH = join(LOCALES_DIR, 'en-US', 'web.ftl')
 /** Shipped translations checked against en-US. The generated qps-ploc is not one. */
-const TRANSLATED_LOCALES = ['de', 'ja'] as const
+const TRANSLATED_LOCALES = ['de-DE', 'ja-JP'] as const
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {

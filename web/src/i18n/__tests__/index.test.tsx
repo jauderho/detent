@@ -16,7 +16,7 @@ describe('negotiateLocales', () => {
   })
 
   it('falls back to en-US when nothing matches', () => {
-    expect(negotiateLocales(['fr-FR', 'de-DE'])).toEqual(['en-US'])
+    expect(negotiateLocales(['ko-KR', 'sv-SE'])).toEqual(['en-US'])
   })
 
   it('matches qps-ploc when requested', () => {
@@ -24,15 +24,15 @@ describe('negotiateLocales', () => {
   })
 
   it('matches the shipped translations when requested', () => {
-    expect(negotiateLocales(['de', 'ja'])).toEqual(['de', 'ja'])
+    expect(negotiateLocales(['de-DE', 'ja-JP'])).toEqual(['de-DE', 'ja-JP'])
   })
 })
 
 describe('AVAILABLE_LOCALES', () => {
-  it('includes en-US, de, ja and qps-ploc', () => {
+  it('includes en-US, de-DE, ja-JP and qps-ploc', () => {
     expect(AVAILABLE_LOCALES).toContain('en-US')
-    expect(AVAILABLE_LOCALES).toContain('de')
-    expect(AVAILABLE_LOCALES).toContain('ja')
+    expect(AVAILABLE_LOCALES).toContain('de-DE')
+    expect(AVAILABLE_LOCALES).toContain('ja-JP')
     expect(AVAILABLE_LOCALES).toContain('qps-ploc')
   })
 })
@@ -45,12 +45,12 @@ describe('createLocalization', () => {
   })
 
   it('renders the shipped translations, with plural selectors and placeables', () => {
-    const de = createLocalization(['de'])
+    const de = createLocalization(['de-DE'])
     expect(de.getString('nav-modules')).toBe('Module')
     expect(de.getString('dashboard-modules-count', { count: 1 })).toContain('ein Modul')
     expect(de.getString('dashboard-update-install', { tag: 'v1.2.3' })).toContain('v1.2.3')
 
-    const ja = createLocalization(['ja'])
+    const ja = createLocalization(['ja-JP'])
     expect(ja.getString('nav-modules')).toBe('モジュール')
     expect(ja.getString('dashboard-modules-count', { count: 1 })).toContain('個のモジュール')
     expect(ja.getString('dashboard-update-install', { tag: 'v1.2.3' })).toContain('v1.2.3')

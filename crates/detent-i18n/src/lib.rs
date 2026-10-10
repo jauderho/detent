@@ -78,21 +78,21 @@ static CATALOGUE: &[LocaleSource] = &[
         ],
     },
     LocaleSource {
-        tag: "de",
+        tag: "de-DE",
         files: &[
-            include_str!("../../../locales/de/core.ftl"),
+            include_str!("../../../locales/de-DE/core.ftl"),
             #[cfg(feature = "web")]
-            include_str!("../../../locales/de/web.ftl"),
-            include_str!("../../../locales/de/cli.ftl"),
+            include_str!("../../../locales/de-DE/web.ftl"),
+            include_str!("../../../locales/de-DE/cli.ftl"),
         ],
     },
     LocaleSource {
-        tag: "ja",
+        tag: "ja-JP",
         files: &[
-            include_str!("../../../locales/ja/core.ftl"),
+            include_str!("../../../locales/ja-JP/core.ftl"),
             #[cfg(feature = "web")]
-            include_str!("../../../locales/ja/web.ftl"),
-            include_str!("../../../locales/ja/cli.ftl"),
+            include_str!("../../../locales/ja-JP/web.ftl"),
+            include_str!("../../../locales/ja-JP/cli.ftl"),
         ],
     },
 ];
@@ -552,7 +552,7 @@ mod tests {
     fn web_messages_are_compiled_in_only_with_the_web_feature() {
         // `login-title` exists only in web.ftl.
         let id = MessageId::new("login-title");
-        for tag in ["en-US", "de", "ja"] {
+        for tag in ["en-US", "de-DE", "ja-JP"] {
             let localizer = Localizer::new(&[langid(tag)]);
             assert_eq!(localizer.has(&id), cfg!(feature = "web"), "{tag}");
         }
@@ -561,7 +561,7 @@ mod tests {
     #[test]
     fn catalogue_ships_de_and_ja() {
         let tags: Vec<&str> = CATALOGUE.iter().map(|l| l.tag).collect();
-        assert_eq!(tags, ["en-US", "de", "ja"]);
+        assert_eq!(tags, ["en-US", "de-DE", "ja-JP"]);
     }
 
     #[test]
@@ -716,13 +716,13 @@ mod tests {
 
     #[test]
     fn new_negotiates_the_shipped_translations() {
-        assert_eq!(Localizer::new(&[langid("de")]).locale(), "de");
-        assert_eq!(Localizer::new(&[langid("de-AT")]).locale(), "de");
-        assert_eq!(Localizer::new(&[langid("ja-JP")]).locale(), "ja");
+        assert_eq!(Localizer::new(&[langid("de")]).locale(), "de-DE");
+        assert_eq!(Localizer::new(&[langid("de-AT")]).locale(), "de-DE");
+        assert_eq!(Localizer::new(&[langid("ja-JP")]).locale(), "ja-JP");
         // The first requested locale that matches anything wins.
         assert_eq!(
             Localizer::new(&[langid("fr-FR"), langid("ja"), langid("de")]).locale(),
-            "ja"
+            "ja-JP"
         );
     }
 
@@ -731,7 +731,7 @@ mod tests {
         let id = MessageId::new("hosts-invalid-hostname");
         let mut args = FluentArgs::new();
         args.set("name", "bad.host");
-        for (tag, needle) in [("de", "Hostname"), ("ja", "ホスト名")] {
+        for (tag, needle) in [("de-DE", "Hostname"), ("ja-JP", "ホスト名")] {
             let localizer = Localizer::new(&[langid(tag)]);
             let text = localizer.get_args(&id, &args);
             assert!(text.contains("`bad.host`"), "{tag}: {text:?}");
@@ -741,7 +741,7 @@ mod tests {
 
     #[test]
     fn de_and_ja_keep_the_bare_id_for_an_unknown_id() {
-        for tag in ["de", "ja"] {
+        for tag in ["de-DE", "ja-JP"] {
             let localizer = Localizer::new(&[langid(tag)]);
             let id = MessageId::new("no-such-message-id");
             assert!(!localizer.has(&id));
