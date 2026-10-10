@@ -19,3 +19,6 @@ unic-langid = { workspace = true }
 ## Compiles `web.ftl` into the catalogue. Only the web server and its API look
 ## those ids up, so a build without `web` leaves them out.
 web = []
+
+[dev-dependencies]
+tempfile = { workspace = true }

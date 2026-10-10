@@ -8,8 +8,9 @@
 //! # `i18n-embed` substitution (ADR‑003 deviation)
 //!
 //! `docs/PLAN.md` §4.3 and `docs/adr/ADR-003-i18n-fluent.md` name `i18n-embed` (with
-//! `rust-embed`) as the Rust-side loader. This crate uses plain [`include_str!`]
-//! over the `locales/` tree instead, for two reasons specific to `detent`:
+//! `rust-embed`) as the Rust-side loader. This crate embeds the `locales/` tree
+//! with its own build script and [`include_str!`] instead, for two reasons
+//! specific to `detent`:
 //!
 //! 1. **No runtime locale directory can be assumed.** `detent` runs as a daemon on
 //!    appliances (`docs/PLAN.md` §1.1) with no guarantee a `locales/` directory
@@ -17,17 +18,15 @@
 //!    loaded from a path.
 //! 2. **Size budget.** `docs/PLAN.md` §4.1 puts this crate in every binary
 //!    (including the CLI-only build with the smallest budget). `rust-embed`'s
-//!    build-time file walk and its own dependency surface adds a second, more
-//!    general embedding mechanism on top of what `include_str!` already does for
-//!    free at zero extra dependency cost.
+//!    derive and its runtime `Cow<[u8]>` lookups add a second, more general
+//!    embedding mechanism on top of what `include_str!` already does for free.
 //!
-//! `include_str!` already gives us "compiled in, not read from disk", so
-//! `i18n-embed`/`rust-embed` bring machinery (glob-based directory embedding, a
-//! `RustEmbed` derive, runtime `Cow<[u8]>` lookups) that this crate does not need:
-//! the set of compiled-in locales is small and known at compile time, so it is
-//! listed explicitly in `CATALOGUE` instead of discovered by a build-time walk.
-//! This is a deliberate substitution, not an oversight — flagged here and in the
-//! Phase 3 report so the deviation from `docs/PLAN.md` §4.3 is on record.
+//! # The catalogue is generated
+//!
+//! `build.rs` scans `locales/*/`, checks that each directory holds `core.ftl`,
+//! `web.ftl` and `cli.ftl`, and writes `CATALOGUE` into `$OUT_DIR`. Adding a
+//! locale is adding a directory: no Rust edit. The pseudo-locale (`qps-*`) is
+//! left out by rule. `locale_scan.rs` holds the rules and their tests.
 //!
 //! # Bidi isolation
 //!
@@ -60,42 +59,12 @@ struct LocaleSource {
 /// ids (`docs/adr/ADR-003-i18n-fluent.md`).
 const EN_US_TAG: &str = "en-US";
 
-/// Every locale compiled into this binary. `web.ftl` is part of each locale only
-/// with the `web` feature: only the web server and its API look those ids up.
-///
-/// Adding a locale is a one-line change: add a `LocaleSource` entry here and one
-/// `include_str!` per `.ftl` file under `locales/<tag>/`. `catalogue_locales_have_id_parity_with_en_us`
-/// (below) then enforces that the new locale defines exactly the ids `en-US` defines,
-/// no more and no fewer.
-static CATALOGUE: &[LocaleSource] = &[
-    LocaleSource {
-        tag: EN_US_TAG,
-        files: &[
-            include_str!("../../../locales/en-US/core.ftl"),
-            #[cfg(feature = "web")]
-            include_str!("../../../locales/en-US/web.ftl"),
-            include_str!("../../../locales/en-US/cli.ftl"),
-        ],
-    },
-    LocaleSource {
-        tag: "de-DE",
-        files: &[
-            include_str!("../../../locales/de-DE/core.ftl"),
-            #[cfg(feature = "web")]
-            include_str!("../../../locales/de-DE/web.ftl"),
-            include_str!("../../../locales/de-DE/cli.ftl"),
-        ],
-    },
-    LocaleSource {
-        tag: "ja-JP",
-        files: &[
-            include_str!("../../../locales/ja-JP/core.ftl"),
-            #[cfg(feature = "web")]
-            include_str!("../../../locales/ja-JP/web.ftl"),
-            include_str!("../../../locales/ja-JP/cli.ftl"),
-        ],
-    },
-];
+// `CATALOGUE`: every locale compiled into this binary, sorted by tag, generated
+// by `build.rs` from the directories under `locales/`. `web.ftl` is part of each
+// locale only with the `web` feature: only the web server and its API look those
+// ids up. `catalogue_locales_have_id_parity_with_en_us` (below) enforces that each
+// locale defines exactly the ids `en-US` defines, no more and no fewer.
+include!(concat!(env!("OUT_DIR"), "/catalogue.rs"));
 
 /// Looks up the `.ftl` files for the `en-US` catalogue entry.
 fn en_us_files() -> Option<&'static [&'static str]> {
@@ -124,11 +93,73 @@ fn build_bundle(tag: &str, files: &[&str]) -> FluentBundle<FluentResource> {
     bundle
 }
 
+/// Requested tags that map to a shipped locale the language alone does not pick.
+///
+/// A key is `language`, `language-Script`, `language-REGION` or
+/// `language-Script-REGION`, in that canonical case. [`alias_candidates`] tries the
+/// most specific key first, so a script wins over a region (`zh-Hant-CN` is
+/// Traditional). A target that is not compiled in is skipped. A bare language that
+/// has no row here picks the first compiled-in locale of that language.
+///
+/// The same table is in `web/src/i18n/index.tsx`; keep the two in step.
+const ALIASES: &[(&str, &str)] = &[
+    ("en", "en-US"),
+    ("en-AU", "en-GB"),
+    ("en-HK", "en-GB"),
+    ("en-IE", "en-GB"),
+    ("en-IN", "en-GB"),
+    ("en-NZ", "en-GB"),
+    ("en-SG", "en-GB"),
+    ("en-ZA", "en-GB"),
+    ("zh", "zh-CN"),
+    ("zh-Hans", "zh-CN"),
+    ("zh-SG", "zh-CN"),
+    ("zh-Hant", "zh-TW"),
+    ("zh-HK", "zh-TW"),
+    ("zh-MO", "zh-TW"),
+    ("pt", "pt-BR"),
+    ("es", "es-ES"),
+];
+
+/// The [`ALIASES`] keys for `tag`, most specific first.
+fn alias_candidates(tag: &LanguageIdentifier) -> Vec<String> {
+    let language = tag.language.as_str();
+    let script = tag.script.map(|s| s.as_str().to_owned());
+    let region = tag.region.map(|r| r.as_str().to_owned());
+    let mut keys = Vec::with_capacity(4);
+    if let (Some(script), Some(region)) = (&script, &region) {
+        keys.push(format!("{language}-{script}-{region}"));
+    }
+    if let Some(script) = &script {
+        keys.push(format!("{language}-{script}"));
+    }
+    if let Some(region) = &region {
+        keys.push(format!("{language}-{region}"));
+    }
+    keys.push(language.to_owned());
+    keys
+}
+
+/// The compiled-in locale that [`ALIASES`] names for `tag`, if there is one.
+fn alias_match<'a>(
+    tag: &LanguageIdentifier,
+    available: &[(&'a str, LanguageIdentifier)],
+) -> Option<&'a str> {
+    alias_candidates(tag).iter().find_map(|key| {
+        let (_, target) = ALIASES.iter().find(|(from, _)| from == key)?;
+        available
+            .iter()
+            .find(|(name, _)| name == target)
+            .map(|(name, _)| *name)
+    })
+}
+
 /// Picks the best available locale tag for `requested`, trying an exact tag match
-/// for every requested locale (in priority order) before falling back to a
-/// language-only match (e.g. `de-AT` negotiates against a compiled `de`) for every
-/// requested locale, in the same order. Returns `None` only when `available` is
-/// empty or none of `requested` matches anything in it.
+/// for every requested locale (in priority order) before falling back, for every
+/// requested locale in the same order, to an [`ALIASES`] row (`zh-HK` is `zh-TW`,
+/// `en-AU` is `en-GB`) and then to the first available locale of the same language
+/// (`de-AT` negotiates against a compiled `de-DE`). Returns `None` only when
+/// `available` is empty or none of `requested` matches anything in it.
 fn negotiate<'a>(
     requested: &[LanguageIdentifier],
     available: &[(&'a str, LanguageIdentifier)],
@@ -143,10 +174,12 @@ fn negotiate<'a>(
         })
         .or_else(|| {
             requested.iter().find_map(|req| {
-                available
-                    .iter()
-                    .find(|(_, tag)| tag.language == req.language)
-                    .map(|(tag, _)| *tag)
+                alias_match(req, available).or_else(|| {
+                    available
+                        .iter()
+                        .find(|(_, tag)| tag.language == req.language)
+                        .map(|(tag, _)| *tag)
+                })
             })
         })
 }
@@ -285,7 +318,8 @@ impl Localizer {
     }
 
     /// Negotiates `requested` against the compiled-in locales (exact tag match, then
-    /// language-only match), falling back to `en-US` when nothing matches.
+    /// a documented alias such as `zh-HK` to `zh-TW`, then the same language), falling
+    /// back to `en-US` when nothing matches.
     #[must_use]
     pub fn new(requested: &[LanguageIdentifier]) -> Self {
         let available: Vec<(&'static str, LanguageIdentifier)> = CATALOGUE
@@ -394,10 +428,14 @@ impl Localizer {
 }
 
 #[cfg(test)]
+#[path = "../locale_scan.rs"]
+mod locale_scan;
+
+#[cfg(test)]
 mod tests {
     use super::{
-        CATALOGUE, EN_US_TAG, Localizer, build_bundle, negotiate, parse_posix_locale_value,
-        resolve_env_locale, strip_bidi_isolation,
+        ALIASES, CATALOGUE, EN_US_TAG, Localizer, build_bundle, negotiate,
+        parse_posix_locale_value, resolve_env_locale, strip_bidi_isolation,
     };
     use detent_core::diag::{Diagnostic, Diagnostics, MessageId, Severity};
     use fluent_bundle::{FluentArgs, FluentResource};
@@ -558,10 +596,33 @@ mod tests {
         }
     }
 
+    /// The catalogue is exactly the locale directories: adding `locales/<tag>/`
+    /// with the three files is the whole change, and a directory cannot be left out.
     #[test]
-    fn catalogue_ships_de_and_ja() {
-        let tags: Vec<&str> = CATALOGUE.iter().map(|l| l.tag).collect();
-        assert_eq!(tags, ["en-US", "de-DE", "ja-JP"]);
+    fn catalogue_is_the_set_of_locale_directories() -> TestResult {
+        let locales = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../locales");
+        let on_disk = super::locale_scan::scan(&locales)?;
+        let compiled: Vec<&str> = CATALOGUE.iter().map(|l| l.tag).collect();
+        assert_eq!(compiled, on_disk);
+        assert!(compiled.contains(&EN_US_TAG));
+        for tag in &compiled {
+            assert!(tag.parse::<LanguageIdentifier>().is_ok(), "{tag}");
+            assert_eq!(
+                tag.parse::<LanguageIdentifier>()?.to_string(),
+                *tag,
+                "the directory name must be the canonical tag"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn every_locale_lists_all_three_files() {
+        for locale in CATALOGUE {
+            // `web.ftl` is compiled in only with the `web` feature.
+            let want = if cfg!(feature = "web") { 3 } else { 2 };
+            assert_eq!(locale.files.len(), want, "{}", locale.tag);
+        }
     }
 
     #[test]
@@ -708,9 +769,106 @@ mod tests {
         assert_eq!(negotiate(&[], &available), None);
     }
 
+    /// The twelve locales the project ships (owner decision, 2026-10-10).
+    const SHIPPED: [&str; 12] = [
+        "bn-BD", "de-DE", "en-GB", "en-US", "es-ES", "fr-FR", "hi-IN", "ja-JP", "pt-BR", "ru-RU",
+        "zh-CN", "zh-TW",
+    ];
+
+    #[test]
+    fn regional_and_script_tags_negotiate_to_the_documented_locale() {
+        let available = available(&SHIPPED);
+        for (requested, expected) in [
+            ("en", "en-US"),
+            ("en-US", "en-US"),
+            ("en-CA", "en-US"),
+            ("en-GB", "en-GB"),
+            ("en-AU", "en-GB"),
+            ("en-NZ", "en-GB"),
+            ("en-IE", "en-GB"),
+            ("en-IN", "en-GB"),
+            ("zh", "zh-CN"),
+            ("zh-CN", "zh-CN"),
+            ("zh-Hans", "zh-CN"),
+            ("zh-Hans-CN", "zh-CN"),
+            ("zh-SG", "zh-CN"),
+            ("zh-TW", "zh-TW"),
+            ("zh-Hant", "zh-TW"),
+            ("zh-Hant-TW", "zh-TW"),
+            ("zh-HK", "zh-TW"),
+            ("zh-Hant-HK", "zh-TW"),
+            ("zh-MO", "zh-TW"),
+            ("zh-Hant-CN", "zh-TW"),
+            ("pt", "pt-BR"),
+            ("pt-PT", "pt-BR"),
+            ("es", "es-ES"),
+            ("es-MX", "es-ES"),
+            ("es-419", "es-ES"),
+            ("de", "de-DE"),
+            ("de-AT", "de-DE"),
+            ("de-CH", "de-DE"),
+            ("fr", "fr-FR"),
+            ("fr-CA", "fr-FR"),
+            ("ja", "ja-JP"),
+            ("ru", "ru-RU"),
+            ("hi", "hi-IN"),
+            ("bn", "bn-BD"),
+            ("bn-IN", "bn-BD"),
+        ] {
+            assert_eq!(
+                negotiate(&[langid(requested)], &available),
+                Some(expected),
+                "{requested}"
+            );
+        }
+        // No Arabic or other right-to-left locale ships, so those fall through.
+        for requested in ["ar", "ar-SA", "he", "ko-KR", "sv"] {
+            assert_eq!(
+                negotiate(&[langid(requested)], &available),
+                None,
+                "{requested}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_alias_to_a_locale_that_is_not_compiled_in_uses_the_language() {
+        // Only the locales that ship today: en-GB and zh-TW are not there yet.
+        let available = available(&["en-US", "de-DE", "zh-CN"]);
+        for (requested, expected) in [("en-AU", "en-US"), ("zh-HK", "zh-CN"), ("zh-Hant", "zh-CN")]
+        {
+            assert_eq!(
+                negotiate(&[langid(requested)], &available),
+                Some(expected),
+                "{requested}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_matches_still_beat_aliases_across_the_requested_list() {
+        let available = available(&SHIPPED);
+        assert_eq!(
+            negotiate(&[langid("zh-HK"), langid("en-US")], &available),
+            Some("en-US")
+        );
+        assert_eq!(
+            negotiate(&[langid("zh-HK"), langid("fr-CA")], &available),
+            Some("zh-TW")
+        );
+    }
+
+    #[test]
+    fn every_alias_row_is_canonical_and_points_at_a_shipped_locale() {
+        for (from, to) in ALIASES {
+            assert_eq!(langid(from).to_string(), *from, "{from} is not canonical");
+            assert!(SHIPPED.contains(to), "{from} -> {to} is not shipped");
+        }
+    }
+
     #[test]
     fn new_falls_back_to_en_us_when_nothing_compiled_matches() {
-        let localizer = Localizer::new(&[langid("fr-FR"), langid("es")]);
+        let localizer = Localizer::new(&[langid("ko-KR"), langid("sv")]);
         assert_eq!(localizer.locale(), "en-US");
     }
 
@@ -721,7 +879,7 @@ mod tests {
         assert_eq!(Localizer::new(&[langid("ja-JP")]).locale(), "ja-JP");
         // The first requested locale that matches anything wins.
         assert_eq!(
-            Localizer::new(&[langid("fr-FR"), langid("ja"), langid("de")]).locale(),
+            Localizer::new(&[langid("ko-KR"), langid("ja"), langid("de")]).locale(),
             "ja-JP"
         );
     }
