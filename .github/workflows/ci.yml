@@ -860,24 +860,31 @@ jobs:
         run: scripts/size-check.sh --verbose --key full-default-aarch64-musl target/aarch64-unknown-linux-musl/release/detent
 
       - name: Build (resolver + web)
+        # Measure every row even when an earlier row is over its limit.
+        if: ${{ !cancelled() }}
         run: cargo zigbuild --release -p detent --target aarch64-unknown-linux-musl --no-default-features --features module-resolver,web,crypto-aws-lc,init-systemd
 
       - name: size-check (resolver + web)
+        if: ${{ !cancelled() }}
         run: scripts/size-check.sh --verbose --key resolver-web-aarch64-musl target/aarch64-unknown-linux-musl/release/detent
 
       - name: Build (full default + embedded console)
+        if: ${{ !cancelled() }}
         run: cargo zigbuild --release -p detent --target aarch64-unknown-linux-musl --features ui
 
       - name: size-check (full default + embedded console)
+        if: ${{ !cancelled() }}
         run: scripts/size-check.sh --verbose --key full-ui-aarch64-musl target/aarch64-unknown-linux-musl/release/detent
 
       # No crypto feature: main.rs's provider requirement is gated on `web`,
       # so the smallest build does not have to name a TLS backend it will
       # never link. PLAN §4.1 row 3.
       - name: Build (CLI only, no web/acme/update)
+        if: ${{ !cancelled() }}
         run: cargo zigbuild --release -p detent --target aarch64-unknown-linux-musl --no-default-features --features module-hosts,module-resolver,module-chrony,module-mounts,module-nfs,module-samba,module-dhcp,module-network,init-systemd
 
       - name: size-check (CLI only)
+        if: ${{ !cancelled() }}
         run: scripts/size-check.sh --verbose --key cli-aarch64-musl target/aarch64-unknown-linux-musl/release/detent
 
   pins:
