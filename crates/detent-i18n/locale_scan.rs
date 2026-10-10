@@ -45,9 +45,9 @@ pub fn scan(dir: &Path) -> Result<Vec<String>, String> {
         if !path.is_dir() {
             continue;
         }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            return Err(format!("{} is not a UTF-8 name", path.display()));
-        };
+        // A name that is not UTF-8 gets U+FFFD here and so fails `is_tag`.
+        let name = entry.file_name();
+        let name = &*name.to_string_lossy();
         if name.starts_with('.') || is_pseudo(name) {
             continue;
         }
