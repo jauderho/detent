@@ -490,6 +490,9 @@ Fixes from the threat model, in order (each: test first, one commit):
    (`Request::Service` with `Status`, answered by the appended
    `Response::UnitStatus`); no seccomp change. Proven on the test host
    2026-10-10 in both modes: 200 with `chronyd.service` active (`PROGRESS.md`).
+9. ~~**Dependabot `p256` 0.14 / `sha2` 0.11 broke the build** (merged, then
+   reverted by `2a0fc64`, `0bab81e`)~~ Done 2026-10-10 (`PROGRESS.md`): both
+   bumped together, one `digest` generation, verifier tests unchanged.
 
 ### Track G — blocked on the owner or external infrastructure
 
