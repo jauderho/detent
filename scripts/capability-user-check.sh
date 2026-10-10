@@ -63,7 +63,7 @@
 # missing (not root, no systemd, a tool or the server is absent).
 #
 # Requires: bash, curl, jq, systemd (systemctl, systemd-run), pkcheck,
-# runuser, cmp.
+# runuser, setpriv, cmp.
 
 set -euo pipefail
 
@@ -111,7 +111,7 @@ log() {
 
 log_verbose() {
   if [[ "${VERBOSE}" == true ]]; then
-    echo "${BLUE}[capability-user-check][verbose]${NC} $*"
+    echo "${BLUE}[capability-user-check][verbose]${NC} $*" >&2
   fi
 }
 
@@ -213,7 +213,7 @@ fi
 
 [[ "${EUID}" -eq 0 ]] || missing "run as root"
 [[ -d /run/systemd/system ]] || missing "systemd is not running"
-for tool in curl jq systemctl systemd-run pkcheck runuser cmp; do
+for tool in curl jq systemctl systemd-run pkcheck runuser setpriv cmp; do
   command -v "${tool}" >/dev/null 2>&1 || missing "${tool}"
 done
 [[ -x "${DETENT_BIN}" ]] || missing "${DETENT_BIN}"
@@ -302,13 +302,19 @@ doctor="${WORKDIR}/doctor.json"
 runuser -u "${ACCOUNT}" -- "${DETENT_BIN}" --json --state-root "${STATE_ROOT}" doctor \
   >"${doctor}" || true
 log_verbose "doctor: $(jq -c '.checks' "${doctor}")"
-[[ "$(jq -r '.ok' "${doctor}")" == "true" ]] ||
+doctor_ok=true
+if [[ "$(jq -r '.ok' "${doctor}")" != "true" ]]; then
   fail "doctor is not green: $(jq -c '[.checks[] | select(.status == "fail")]' "${doctor}")"
+  doctor_ok=false
+fi
 for row in privilege-mode service-account state-owner backups-dir polkit-rule polkit-daemon unit-capabilities; do
   status="$(jq -r --arg n "${row}" '[.checks[] | select(.name == $n) | .status][0] // "absent"' "${doctor}")"
-  [[ "${status}" == "ok" ]] || fail "doctor row ${row}: ${status}"
+  if [[ "${status}" != "ok" ]]; then
+    fail "doctor row ${row}: ${status}"
+    doctor_ok=false
+  fi
 done
-pass "doctor: ok, every privilege row ok"
+[[ "${doctor_ok}" == true ]] && pass "doctor: ok, every privilege row ok"
 
 # --- 4. The API token ----------------------------------------------------------
 
@@ -393,8 +399,10 @@ else
   fail "daemon-reload as ${ACCOUNT} was refused"
 fi
 
-# A process of the account for pkcheck to ask about, as systemd does.
-runuser -u "${ACCOUNT}" -- sleep 120 &
+# A process of the account for pkcheck to ask about, as systemd does. Not
+# runuser: `$!` would be the runuser parent, which stays root, and polkit
+# allows root everything.
+setpriv --reuid="${ACCOUNT}" --regid="${ACCOUNT}" --init-groups sleep 120 &
 SUBJECT_PID=$!
 sleep 0.5
 
