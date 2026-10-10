@@ -76,6 +76,18 @@ describe('ChangePasswordPage', () => {
     expect(new Headers(call?.init.headers).get(CSRF_HEADER)).toBe('csrf-old')
   })
 
+  it('signs out from the form', async () => {
+    const user = userEvent.setup()
+    const stub = await renderRestricted()
+
+    stub.push(new Response(null, { status: 204 }))
+    await user.click(screen.getByRole('button', { name: 'sign out' }))
+
+    await waitFor(() => {
+      expect(stub.calls.some((each) => each.url.endsWith('/auth/logout'))).toBe(true)
+    })
+  })
+
   it('refuses a mismatch or a short password without asking the host', async () => {
     const user = userEvent.setup()
     const stub = await renderRestricted()
