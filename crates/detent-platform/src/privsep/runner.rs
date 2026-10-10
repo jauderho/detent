@@ -10,7 +10,7 @@
 //!
 //! ```text
 //!   serve ──fork──▶ runner (root, not confined)
-//!     │                ▲ RunnerRequest { check id | binding id + action | reload }
+//!     │                ▲ RunnerRequest { check id | binding id + action | status | reload }
 //!     └──fork──▶ worker│
 //!   monitor (confined) ┘ RunnerResponse
 //! ```
@@ -25,10 +25,11 @@
 //! passes the monitor's own trust check (owned by root or the runner's euid,
 //! no group or other write bit, not a symlink). A compromised monitor
 //! can run only the declared validators on such files, the declared
-//! service actions, a unit-file reload when an enabled module declares
-//! `reload_unit_files`, and, with `[mounts] activate_new_entries`, the start
-//! of the mount units the runner works out itself from an allow-listed
-//! target and a stop of only the units it recorded
+//! service actions, a read of the state of an allow-listed binding's unit
+//! (`systemctl show` with a fixed property list), a unit-file reload when an
+//! enabled module declares `reload_unit_files`, and, with `[mounts]
+//! activate_new_entries`, the start of the mount units the runner works out
+//! itself from an allow-listed target and a stop of only the units it recorded
 //! ([`mounts`](super::mounts)), and the start of the CLI updater for a
 //! valid release tag in the transient unit `detent-update` (the argv is
 //! fixed here, the binary is the runner's own executable; the updater
@@ -51,7 +52,7 @@ use super::monitor::{
 use super::mounts;
 use super::proto::{
     BindingId, CheckId, CheckOutcome, MountOutcome, ServiceAction, ServiceOutcome, TargetId,
-    is_release_tag,
+    UnitStatus, is_release_tag,
 };
 use super::transport::{Channel, ChannelError};
 use crate::service::UpdateStart;
@@ -101,6 +102,14 @@ pub enum RunnerRequest {
         /// Release tag, e.g. `v1.2.3`.
         tag: String,
     },
+    /// Read the state of the unit allow-listed binding `binding` names. The
+    /// unit comes from the runner's own allow-list, and any binding is
+    /// allowed, because the read changes nothing. Appended last, as the
+    /// protocol's enums are.
+    ServiceStatus {
+        /// Index into the allow-list's binding table.
+        binding: BindingId,
+    },
 }
 
 /// The runner's answer.
@@ -124,6 +133,8 @@ pub enum RunnerResponse {
     UpdateStarted(String),
     /// The update unit was already there.
     UpdateRunning,
+    /// The state of the unit a [`RunnerRequest::ServiceStatus`] named.
+    UnitStatus(UnitStatus),
 }
 
 /// Answer requests on `channel` with `hooks` until the monitor goes away.
@@ -249,6 +260,15 @@ fn answer(
                     UpdateStart::Started(detail) => RunnerResponse::UpdateStarted(detail),
                     UpdateStart::AlreadyRunning => RunnerResponse::UpdateRunning,
                 })
+        }
+        RunnerRequest::ServiceStatus { binding } => {
+            let Some(entry) = allow.binding(binding) else {
+                return RunnerResponse::Failed("unknown service binding".to_owned());
+            };
+            hooks
+                .services
+                .service_status(entry.binding)
+                .map(RunnerResponse::UnitStatus)
         }
     };
     outcome.unwrap_or_else(|err| match err {
@@ -406,6 +426,23 @@ impl ServiceControl for RunnerClient {
         })
     }
 
+    fn service_status(&self, binding: &ServiceBinding) -> Result<UnitStatus, HookError> {
+        let Some(&(_, id)) = self
+            .bindings
+            .iter()
+            .find(|(known, _)| std::ptr::eq(*known, binding))
+        else {
+            return Err(HookError::Failed(
+                "service binding is not in the allow-list".to_owned(),
+            ));
+        };
+        let response = self.call(&RunnerRequest::ServiceStatus { binding: id })?;
+        hook_result(response, |response| match response {
+            RunnerResponse::UnitStatus(status) => Some(status),
+            _ => None,
+        })
+    }
+
     fn reload_unit_files(&self) -> Result<String, HookError> {
         let response = self.call(&RunnerRequest::ReloadUnitFiles)?;
         hook_result(response, |response| match response {
@@ -466,7 +503,7 @@ mod tests {
     use crate::privsep::allowlist::{Allowlist, Config};
     use crate::privsep::monitor::{CheckRunner, HookError, Hooks, ServiceControl};
     use crate::privsep::proto::{BindingId, CheckId, CheckOutcome, ServiceAction, ServiceOutcome};
-    use crate::privsep::proto::{MountState, TargetId};
+    use crate::privsep::proto::{MountState, TargetId, UnitState, UnitStatus};
     use crate::privsep::transport::Channel;
     use crate::service::{MountUnitState, State, UpdateStart};
     use detent_core::descriptor::MountUnit;
@@ -558,6 +595,23 @@ mod tests {
                 binding: BindingId(0),
                 active: true,
                 detail: format!("{action:?}"),
+            })
+        }
+
+        /// The unit of the binding it is given, so a test sees which one the
+        /// runner chose; `fake.service` is the fixture's only unit.
+        fn service_status(&self, binding: &ServiceBinding) -> Result<UnitStatus, HookError> {
+            Ok(UnitStatus {
+                unit: binding
+                    .units
+                    .systemd
+                    .first()
+                    .copied()
+                    .unwrap_or_default()
+                    .to_owned(),
+                state: UnitState::Active,
+                enabled: None,
+                since: None,
             })
         }
 
@@ -736,6 +790,55 @@ mod tests {
     }
 
     #[test]
+    fn a_service_status_is_forwarded_by_id_and_names_the_allow_listed_unit() -> R {
+        let fx = fixture()?;
+        with_runner(&fx, |client| {
+            let status = client.service_status(binding()?)?;
+            assert_eq!(status.unit, "fake.service");
+            assert_eq!(status.state, UnitState::Active);
+            Ok(())
+        })
+    }
+
+    /// A status read takes a binding id and nothing else: the runner refuses
+    /// an id outside its allow-list and never names a unit of its own accord.
+    #[test]
+    fn the_runner_refuses_a_status_for_a_binding_outside_the_allow_list() -> R {
+        let fx = fixture()?;
+        let hooks = Hooks {
+            checks: &Fake,
+            services: &Fake,
+        };
+        for binding in [BindingId(1), BindingId(9)] {
+            let response = answer(
+                &fx.allow,
+                &fx.staging,
+                &profile(),
+                &hooks,
+                RunnerRequest::ServiceStatus { binding },
+            );
+            assert!(
+                matches!(response, RunnerResponse::Failed(_)),
+                "{binding:?} answered {response:?}"
+            );
+        }
+        let response = answer(
+            &fx.allow,
+            &fx.staging,
+            &profile(),
+            &hooks,
+            RunnerRequest::ServiceStatus {
+                binding: BindingId(0),
+            },
+        );
+        assert!(
+            matches!(response, RunnerResponse::UnitStatus(ref status) if status.unit == "fake.service"),
+            "answered {response:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn a_unit_files_reload_is_forwarded() -> R {
         let fx = fixture()?;
         with_runner(&fx, |client| {
@@ -810,6 +913,10 @@ mod tests {
             ));
             assert!(matches!(
                 client.service(&stranger_binding, CoreServiceAction::Restart),
+                Err(HookError::Failed(_))
+            ));
+            assert!(matches!(
+                client.service_status(&stranger_binding),
                 Err(HookError::Failed(_))
             ));
             Ok(())

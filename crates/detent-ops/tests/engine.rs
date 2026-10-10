@@ -43,13 +43,11 @@ use detent_platform::privsep::monitor::{
 };
 use detent_platform::privsep::proto::{
     BackupId, CheckId, CheckOutcome, CommitId, MountOutcome, MountState, ProtoError, Request,
-    Response, ServiceOutcome, TargetId,
+    Response, ServiceAction as WireServiceAction, ServiceOutcome, TargetId, UnitState, UnitStatus,
 };
 use detent_platform::privsep::transport::Channel;
 use detent_platform::privsep::worker::{Client, ClientError};
-use detent_platform::service::{
-    ActionOutcome, ServiceError, ServiceManager, ServiceStatus, State, UpdateStart,
-};
+use detent_platform::service::{ServiceError, State, UpdateStart};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -336,6 +334,15 @@ impl ServiceControl for ReloadingServices {
         OK_SERVICES.service(binding, action)
     }
 
+    fn service_status(&self, _binding: &ServiceBinding) -> Result<UnitStatus, HookError> {
+        Ok(UnitStatus {
+            unit: "fake.service".to_owned(),
+            state: UnitState::Active,
+            enabled: Some(true),
+            since: None,
+        })
+    }
+
     fn reload_unit_files(&self) -> Result<String, HookError> {
         self.reloads.fetch_add(1, Ordering::SeqCst);
         if self.fail_reload {
@@ -391,53 +398,6 @@ fn srv_unit(_previous: &str, _current: &str) -> Vec<MountUnit> {
         mountpoint: "/srv".to_owned(),
         unit: "srv.mount".to_owned(),
     }]
-}
-
-/// A [`ServiceManager`] that reports a fixed status and refuses mutation, so
-/// `ServiceStatus` is testable without an init system.
-struct FakeServices {
-    status: Result<ServiceStatus, ServiceError>,
-}
-
-impl ServiceManager for FakeServices {
-    fn status(&self, _units: &UnitNames) -> Result<ServiceStatus, ServiceError> {
-        self.status.clone()
-    }
-
-    fn act(
-        &self,
-        _units: &UnitNames,
-        _action: CoreServiceAction,
-    ) -> Result<ActionOutcome, ServiceError> {
-        Err(ServiceError::Unsupported(
-            "the engine never mutates through a ServiceManager".to_owned(),
-        ))
-    }
-
-    fn reload_unit_files(&self) -> Result<String, ServiceError> {
-        Err(ServiceError::Unsupported(
-            "the engine never mutates through a ServiceManager".to_owned(),
-        ))
-    }
-}
-
-fn fake_services() -> Box<dyn ServiceManager> {
-    Box::new(FakeServices {
-        status: Ok(ServiceStatus {
-            unit: "fake.service".to_owned(),
-            state: State::Active,
-            enabled: Some(true),
-            since: None,
-        }),
-    })
-}
-
-/// A manager that reports the backend as absent, which is what a host with no
-/// `systemctl` looks like.
-fn broken_services() -> Box<dyn ServiceManager> {
-    Box::new(FakeServices {
-        status: Err(ServiceError::Unavailable("no systemctl".to_owned())),
-    })
 }
 
 /// Refuses everything, to exercise the denial path.
@@ -502,8 +462,6 @@ struct Setup {
     deny: bool,
     /// Register the module under a name the allow-list does not know.
     registry_mismatch: bool,
-    /// Which service manager the engine gets.
-    services: Services,
     /// Disable retained backups, leaving commit-confirm nothing to restore.
     disable_backups: bool,
     /// Answer every `StartConfirmTimer` with a planted error, as a monitor
@@ -521,16 +479,9 @@ struct Setup {
     activate: bool,
     /// With `hooks`, fail every mount start.
     fail_mounts: bool,
-}
-
-/// Which [`ServiceManager`] the engine is built with.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-enum Services {
-    /// Reports a running unit.
-    #[default]
-    Running,
-    /// Reports the backend as absent, as a host with no `systemctl` would.
-    Unavailable,
+    /// Keep every request the engine sends the monitor, for
+    /// [`Harness::requests`].
+    record: bool,
 }
 
 struct Harness {
@@ -544,6 +495,8 @@ struct Harness {
     services: &'static ReloadingServices,
     /// The policy every operation runs under.
     authz: Box<dyn Authz>,
+    /// Every request the engine sent the monitor, when `Setup::record` asked.
+    seen: Arc<std::sync::Mutex<Vec<Request>>>,
     _dir: TempDir,
 }
 
@@ -572,6 +525,15 @@ impl Harness {
     /// How often the monitor ran a check.
     fn check_runs(&self) -> usize {
         self.checks.runs.load(Ordering::SeqCst)
+    }
+
+    /// Every request the engine sent the monitor; empty unless
+    /// `Setup::record` was set.
+    fn requests(&self) -> Vec<Request> {
+        self.seen
+            .lock()
+            .map(|seen| seen.clone())
+            .unwrap_or_default()
     }
 
     /// How often the monitor asked for a unit-file reload.
@@ -661,10 +623,18 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
         monitor.serve(&mut channel)
     });
 
-    let worker_end = if setup.fail_arm || setup.fail_restore {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let worker_end = if setup.fail_arm || setup.fail_restore || setup.record {
         let (engine_end, proxy_end) = Channel::pair()?;
+        let seen = Arc::clone(&seen);
         thread::spawn(move || {
-            proxy(proxy_end, worker_end, setup.fail_arm, setup.fail_restore);
+            proxy(
+                proxy_end,
+                worker_end,
+                setup.fail_arm,
+                setup.fail_restore,
+                &seen,
+            );
         });
         engine_end
     } else {
@@ -691,16 +661,11 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
     } else {
         Box::new(AllowAll)
     };
-    let services = match setup.services {
-        Services::Running => fake_services(),
-        Services::Unavailable => broken_services(),
-    };
     let engine = OpsEngine::new(
         modules,
         client,
         host(),
         Box::new(SharedAudit(Arc::clone(&audit))),
-        services,
     );
 
     Ok(Harness {
@@ -711,21 +676,31 @@ fn harness(initial: &[u8], setup: Setup) -> Result<Harness, Box<dyn std::error::
         checks,
         services: monitor_services,
         authz,
+        seen,
         _dir: dir,
     })
 }
 
 /// Sit between the engine and the real monitor and forward every frame, except
 /// that `StartConfirmTimer` (with `fail_arm`) and `Restore` (with
-/// `fail_restore`) get a planted error instead of reaching the monitor. Ends
-/// when either side closes.
-fn proxy(mut engine: Channel, mut monitor: Channel, fail_arm: bool, fail_restore: bool) {
+/// `fail_restore`) get a planted error instead of reaching the monitor. Every
+/// request is also pushed to `seen`. Ends when either side closes.
+fn proxy(
+    mut engine: Channel,
+    mut monitor: Channel,
+    fail_arm: bool,
+    fail_restore: bool,
+    seen: &std::sync::Mutex<Vec<Request>>,
+) {
     loop {
         let request = match engine.poll_recv::<Request>() {
             Ok(Some(request)) => request,
             Ok(None) => continue,
             Err(_) => return,
         };
+        if let Ok(mut seen) = seen.lock() {
+            seen.push(request.clone());
+        }
         let planted = match request {
             Request::StartConfirmTimer { .. } if fail_arm => Some("planted arming failure"),
             Request::Restore { .. } if fail_restore => Some("planted restore failure"),
@@ -1206,7 +1181,6 @@ fn engine_monitor_and_runner_agree_on_the_candidate_directory() -> TestResult {
         client,
         host(),
         Box::new(CaptureAudit::new()),
-        fake_services(),
     );
     let outcome = engine.execute(
         Operation::Plan {
@@ -2533,8 +2507,12 @@ fn restoring_an_id_that_does_not_exist_fails_and_is_audited() -> TestResult {
 // Services
 // ---------------------------------------------------------------------------
 
+/// Bug: `GET /api/v1/services/<id>` answered 500 on a real host. The engine
+/// ran `systemctl show` in the worker, whose seccomp table has no `pipe2`, so
+/// the spawn failed. The engine has no service manager of its own now: the
+/// status is asked of the monitor, as a service action is.
 #[test]
-fn service_status_comes_from_the_service_manager() -> TestResult {
+fn service_status_is_asked_of_the_monitor_and_never_run_in_the_worker() -> TestResult {
     let mut fx = harness(
         b"v1\n",
         Setup {
@@ -2542,6 +2520,8 @@ fn service_status_comes_from_the_service_manager() -> TestResult {
                 service: true,
                 ..Shape::default()
             },
+            hooks: true,
+            record: true,
             ..Setup::default()
         },
     )?;
@@ -2553,7 +2533,24 @@ fn service_status_comes_from_the_service_manager() -> TestResult {
     };
     assert_eq!(status.unit, "fake.service");
     assert_eq!(status.state, State::Active);
+    assert_eq!(status.enabled, Some(true));
     assert!(fx.records().is_empty());
+    // Exactly one request left the engine for the read, and it names a
+    // binding id, not a unit.
+    let statuses: Vec<_> = fx
+        .requests()
+        .into_iter()
+        .filter(|request| {
+            matches!(
+                request,
+                Request::Service {
+                    action: WireServiceAction::Status,
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(statuses.len(), 1, "one Status request: {statuses:?}");
     fx.finish()
 }
 
@@ -2570,7 +2567,8 @@ fn service_status_needs_a_declared_service() -> TestResult {
 }
 
 #[test]
-fn service_status_surfaces_a_service_manager_failure() -> TestResult {
+fn service_status_surfaces_a_monitor_failure() -> TestResult {
+    // No service hook: the monitor answers `Unavailable`.
     let mut fx = harness(
         b"v1\n",
         Setup {
@@ -2578,7 +2576,6 @@ fn service_status_surfaces_a_service_manager_failure() -> TestResult {
                 service: true,
                 ..Shape::default()
             },
-            services: Services::Unavailable,
             ..Setup::default()
         },
     )?;
@@ -2586,8 +2583,38 @@ fn service_status_surfaces_a_service_manager_failure() -> TestResult {
         fx.run(Operation::ServiceStatus {
             id: MODULE.to_owned(),
         }),
-        Err(OpsError::Service(_))
+        Err(OpsError::Service(ServiceError::Unavailable(_)))
     ));
+    fx.finish()
+}
+
+#[test]
+fn service_status_for_a_module_the_monitor_does_not_know_is_refused() -> TestResult {
+    let mut fx = harness(
+        b"v1\n",
+        Setup {
+            shape: Shape {
+                service: true,
+                ..Shape::default()
+            },
+            hooks: true,
+            record: true,
+            registry_mismatch: true,
+            ..Setup::default()
+        },
+    )?;
+    assert!(matches!(
+        fx.run(Operation::ServiceStatus {
+            id: "stranger".to_owned(),
+        }),
+        Err(OpsError::UnknownModule { .. })
+    ));
+    assert!(
+        fx.requests()
+            .iter()
+            .all(|request| matches!(request, Request::Hello { .. })),
+        "nothing but the handshake reached the monitor"
+    );
     fx.finish()
 }
 
@@ -3116,7 +3143,6 @@ fn the_audit_log_never_contains_the_configuration_body() -> TestResult {
         client,
         host(),
         Box::new(audit_file.clone()),
-        fake_services(),
     );
     let who = Identity::new("operator", IdentityKind::Session);
     engine.execute(
@@ -3180,7 +3206,6 @@ fn an_unwritable_audit_sink_refuses_the_mutation() -> TestResult {
         client,
         host(),
         Box::new(FileAudit::new(blocker.join("audit.jsonl"))),
-        fake_services(),
     );
     let Err(err) = engine.execute(apply("v2\n", None), &Identity::local("root"), &AllowAll) else {
         return Err("audit-unavailable must refuse the mutation".into());

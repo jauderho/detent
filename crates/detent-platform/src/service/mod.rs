@@ -56,7 +56,7 @@ pub use openrc::OpenRcManager;
 pub use systemd::{SystemdManager, update_unit_args};
 
 use crate::privsep::monitor::{HookError, ServiceControl};
-use crate::privsep::proto::{BindingId, ServiceOutcome};
+use crate::privsep::proto::{BindingId, ServiceOutcome, UnitState, UnitStatus};
 
 /// Longest a unit name may be. Chosen generously above any real systemd or
 /// `OpenRC` name; the actual gate is the charset check in
@@ -163,6 +163,32 @@ pub enum State {
     Unknown,
 }
 
+impl From<State> for UnitState {
+    fn from(state: State) -> Self {
+        match state {
+            State::Active => Self::Active,
+            State::Inactive => Self::Inactive,
+            State::Failed => Self::Failed,
+            State::Activating => Self::Activating,
+            State::Deactivating => Self::Deactivating,
+            State::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl From<UnitState> for State {
+    fn from(state: UnitState) -> Self {
+        match state {
+            UnitState::Active => Self::Active,
+            UnitState::Inactive => Self::Inactive,
+            UnitState::Failed => Self::Failed,
+            UnitState::Activating => Self::Activating,
+            UnitState::Deactivating => Self::Deactivating,
+            UnitState::Unknown => Self::Unknown,
+        }
+    }
+}
+
 /// How `serde` renders a [`SystemTime`]: two integers, not an RFC 3339
 /// string.
 ///
@@ -195,6 +221,37 @@ pub struct ServiceStatus {
     /// determine it.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<SystemTimeView>))]
     pub since: Option<SystemTime>,
+}
+
+impl From<ServiceStatus> for UnitStatus {
+    /// A time before the Unix epoch has no wire form and becomes `None`.
+    fn from(status: ServiceStatus) -> Self {
+        Self {
+            unit: status.unit,
+            state: status.state.into(),
+            enabled: status.enabled,
+            since: status
+                .since
+                .and_then(|at| at.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map(|elapsed| (elapsed.as_secs(), elapsed.subsec_nanos())),
+        }
+    }
+}
+
+impl From<UnitStatus> for ServiceStatus {
+    /// A time that does not fit [`SystemTime`] becomes `None`.
+    fn from(status: UnitStatus) -> Self {
+        Self {
+            unit: status.unit,
+            state: status.state.into(),
+            enabled: status.enabled,
+            since: status.since.and_then(|(secs, nanos)| {
+                SystemTime::UNIX_EPOCH
+                    .checked_add(std::time::Duration::from_secs(secs))?
+                    .checked_add(std::time::Duration::from_nanos(u64::from(nanos)))
+            }),
+        }
+    }
 }
 
 /// The result of a [`ServiceManager::act`] call.
@@ -456,6 +513,11 @@ impl ServiceControl for ServiceControlAdapter {
         })
     }
 
+    fn service_status(&self, binding: &ServiceBinding) -> Result<UnitStatus, HookError> {
+        let status = self.0.status(&binding.units)?;
+        Ok(status.into())
+    }
+
     fn reload_unit_files(&self) -> Result<String, HookError> {
         self.0.reload_unit_files().map_err(HookError::from)
     }
@@ -506,7 +568,8 @@ impl AltCache {
 mod tests {
     use super::{
         ActionOutcome, NullManager, ServiceControlAdapter, ServiceError, ServiceManager,
-        ServiceStatus, UpdateStart, for_host, installed_binary, validate_unit_name,
+        ServiceStatus, State, SystemTime, UpdateStart, for_host, installed_binary,
+        validate_unit_name,
     };
     use detent_core::descriptor::{InitSystem, ServiceAction, ServiceBinding, UnitNames};
 
@@ -704,6 +767,115 @@ mod tests {
             AlwaysActive.status(&binding.units),
             Err(ServiceError::Unsupported(_))
         ));
+    }
+
+    /// Reports one fixed status, and the unit it was asked about.
+    struct FixedStatus(ServiceStatus);
+
+    impl ServiceManager for FixedStatus {
+        fn status(&self, units: &UnitNames) -> Result<ServiceStatus, ServiceError> {
+            Ok(ServiceStatus {
+                unit: units
+                    .systemd
+                    .first()
+                    .copied()
+                    .unwrap_or_default()
+                    .to_owned(),
+                ..self.0.clone()
+            })
+        }
+
+        fn act(
+            &self,
+            _units: &UnitNames,
+            _action: ServiceAction,
+        ) -> Result<ActionOutcome, ServiceError> {
+            Err(ServiceError::Unsupported("not used".to_owned()))
+        }
+
+        fn reload_unit_files(&self) -> Result<String, ServiceError> {
+            Err(ServiceError::Unsupported("not used".to_owned()))
+        }
+    }
+
+    fn chrony_binding() -> ServiceBinding {
+        ServiceBinding {
+            units: UnitNames {
+                systemd: &["chrony.service"],
+                openrc: &[],
+                bsdrc: &[],
+            },
+            actions: &[ServiceAction::Restart],
+        }
+    }
+
+    #[test]
+    fn service_control_adapter_reads_the_status_of_the_binding_unit() {
+        use crate::privsep::monitor::ServiceControl;
+        use crate::privsep::proto::{UnitState, UnitStatus};
+        let adapter = ServiceControlAdapter(Box::new(FixedStatus(ServiceStatus {
+            unit: String::new(),
+            state: State::Failed,
+            enabled: Some(true),
+            since: None,
+        })));
+        assert_eq!(
+            adapter.service_status(&chrony_binding()),
+            Ok(UnitStatus {
+                unit: "chrony.service".to_owned(),
+                state: UnitState::Failed,
+                enabled: Some(true),
+                since: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_host_with_no_init_system_cannot_report_a_unit_status() {
+        use crate::privsep::monitor::{HookError, ServiceControl};
+        let adapter = ServiceControlAdapter(Box::new(NullManager));
+        assert!(matches!(
+            adapter.service_status(&chrony_binding()),
+            Err(HookError::Unavailable(message)) if message.contains("no supported service manager")
+        ));
+    }
+
+    #[test]
+    fn a_status_survives_the_wire_form() {
+        use crate::privsep::proto::{UnitState, UnitStatus};
+        use std::time::Duration;
+        for state in [
+            State::Active,
+            State::Inactive,
+            State::Failed,
+            State::Activating,
+            State::Deactivating,
+            State::Unknown,
+        ] {
+            assert_eq!(State::from(UnitState::from(state)), state);
+        }
+        let status = ServiceStatus {
+            unit: "chrony.service".to_owned(),
+            state: State::Active,
+            enabled: Some(false),
+            since: Some(SystemTime::UNIX_EPOCH + Duration::new(1_788_000_000, 5)),
+        };
+        let wire = UnitStatus::from(status.clone());
+        assert_eq!(wire.since, Some((1_788_000_000, 5)));
+        assert_eq!(ServiceStatus::from(wire), status);
+        // A time before the epoch, or one that does not fit, is dropped.
+        let before = ServiceStatus {
+            since: Some(SystemTime::UNIX_EPOCH - Duration::from_secs(1)),
+            ..status
+        };
+        assert_eq!(UnitStatus::from(before).since, None);
+        let huge = UnitStatus {
+            unit: String::new(),
+            state: UnitState::Unknown,
+            enabled: None,
+            since: Some((u64::MAX, 0)),
+        };
+        assert_eq!(ServiceStatus::from(huge).since, None);
     }
 
     #[test]

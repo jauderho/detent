@@ -1530,7 +1530,7 @@ impl Session {
         } else {
             Box::new(FileAudit::under_state_root(&settings.state_root))
         };
-        let engine = OpsEngine::new(registry, client, host, audit, service::for_host(init));
+        let engine = OpsEngine::new(registry, client, host, audit);
         Ok(Self {
             engine,
             monitor: Some(monitor),

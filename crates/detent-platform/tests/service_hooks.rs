@@ -10,6 +10,7 @@
 //! `CheckRunner`/`ServiceControl` implementations.
 
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -20,9 +21,11 @@ use detent_core::descriptor::{
 use detent_core::diag::MessageId;
 use detent_platform::privsep::allowlist::{Allowlist, Config};
 use detent_platform::privsep::monitor::{ExitReason, Hooks, Monitor};
-use detent_platform::privsep::proto::ServiceAction;
+use detent_platform::privsep::proto::{ProtoError, ServiceAction, UnitState};
+use detent_platform::privsep::runner::{RunnerClient, serve_runner};
 use detent_platform::privsep::transport::Channel;
 use detent_platform::privsep::worker::Client;
+use detent_platform::privsep::worker::ClientError;
 use detent_platform::service::checks::ExternalCheckRunner;
 use detent_platform::service::exec::{ProcessError, ProcessOutput, ProcessRunner};
 use detent_platform::service::{ServiceControlAdapter, SystemdManager};
@@ -210,5 +213,118 @@ fn monitor_runs_with_real_check_and_service_hooks() -> TestResult {
         return Err("the monitor thread must not panic".into());
     };
     assert_eq!(result.ok(), Some(ExitReason::Shutdown));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Status: worker -> monitor -> runner -> systemctl
+// ---------------------------------------------------------------------------
+
+/// Answers like [`AlwaysOk`] and records every argv it is asked to run.
+#[derive(Clone, Default)]
+struct Recording(Arc<Mutex<Vec<Vec<String>>>>);
+
+impl ProcessRunner for Recording {
+    fn exists(&self, _path: &'static str) -> bool {
+        true
+    }
+
+    fn run(
+        &self,
+        program: &'static str,
+        args: &[String],
+        timeout: Duration,
+    ) -> Result<ProcessOutput, ProcessError> {
+        if let Ok(mut seen) = self.0.lock() {
+            let mut line = vec![program.to_owned()];
+            line.extend(args.iter().cloned());
+            seen.push(line);
+        }
+        AlwaysOk.run(program, args, timeout)
+    }
+}
+
+/// The worker asks for a status; the monitor holds only a runner client; the
+/// runner, which owns the process runner, runs `systemctl show` with a fixed
+/// argv built from the allow-listed unit. Nothing but ids crosses either
+/// channel.
+#[test]
+fn a_status_read_runs_the_fixed_argv_in_the_runner() -> TestResult {
+    let fx = fixture()?;
+    let allow = fx.allow()?;
+    let staging_dir = allow.state_root().with_file_name("monitor-staging");
+    let recording = Recording::default();
+    let seen = Arc::clone(&recording.0);
+
+    let (monitor_runner_end, mut runner_end) = Channel::pair()?;
+    let runner_allow = fx.allow()?;
+    let runner_staging = staging_dir.clone();
+    let runner = thread::spawn(move || {
+        let checks = ExternalCheckRunner::with_runner(Box::new(AlwaysOk));
+        let services =
+            ServiceControlAdapter(Box::new(SystemdManager::with_runner(Box::new(recording))));
+        let hooks = Hooks {
+            checks: &checks,
+            services: &services,
+        };
+        serve_runner(
+            &runner_allow,
+            &runner_staging,
+            &HostProfile::default_for_tests(),
+            &hooks,
+            &mut runner_end,
+        );
+    });
+
+    let runner_client = RunnerClient::new(monitor_runner_end, &allow);
+    let (monitor_end, worker_end) = Channel::pair()?;
+    let monitor = thread::spawn(move || {
+        let mut channel = monitor_end;
+        let hooks = Hooks {
+            checks: &runner_client,
+            services: &runner_client,
+        };
+        let mut monitor = Monitor::new(allow, hooks);
+        monitor.set_staging_dir(staging_dir);
+        monitor.serve(&mut channel)
+    });
+
+    let mut client = Client::new(worker_end);
+    client.hello()?;
+    let binding = client
+        .binding_id("samba")
+        .ok_or("the fixture's own module must advertise its own binding")?;
+    let status = client.service_status(binding)?;
+    assert_eq!(status.unit, "chronyd.service");
+    assert_eq!(status.state, UnitState::Active);
+
+    // A binding the monitor never advertised is refused before the runner.
+    assert!(matches!(
+        client.service_status(detent_platform::privsep::proto::BindingId(7)),
+        Err(ClientError::Remote(ProtoError::UnknownId { .. }))
+    ));
+
+    client.shutdown()?;
+    let Ok(result) = monitor.join() else {
+        return Err("the monitor thread must not panic".into());
+    };
+    assert_eq!(result.ok(), Some(ExitReason::Shutdown));
+    let Ok(()) = runner.join() else {
+        return Err("the runner thread must not panic".into());
+    };
+    let argv = seen
+        .lock()
+        .map_err(|_| "the recording is poisoned")?
+        .clone();
+    assert_eq!(
+        argv,
+        vec![vec![
+            "/usr/bin/systemctl".to_owned(),
+            "show".to_owned(),
+            "chronyd.service".to_owned(),
+            "--property=LoadState,ActiveState,SubState,UnitFileState,ActiveEnterTimestamp"
+                .to_owned(),
+        ]]
+    );
     Ok(())
 }

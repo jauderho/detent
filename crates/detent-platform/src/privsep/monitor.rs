@@ -48,7 +48,7 @@ use super::allowlist::{Allowlist, CANDIDATE_PREFIX};
 use super::proto::{
     BackupId, BackupInfo, BindingId, CheckId, CheckOutcome, CommitId, IdKind, ModuleId,
     MountOutcome, PendingService, ProtoError, Request, Response, ServiceAction, ServiceOutcome,
-    TargetContents, TargetId, UpdateTagRefusal, WriteReceipt, check_update_tag,
+    TargetContents, TargetId, UnitStatus, UpdateTagRefusal, WriteReceipt, check_update_tag,
 };
 use super::transport::{Channel, ChannelError};
 use crate::fs::atomic::{
@@ -136,6 +136,23 @@ pub trait ServiceControl {
         binding: &ServiceBinding,
         action: CoreServiceAction,
     ) -> Result<ServiceOutcome, HookError>;
+
+    /// Read the state of the unit `binding` names, changing nothing. The
+    /// monitor passes only a binding of its own allow-list; the unit name is
+    /// the binding's. The runner client forwards it, because the worker and
+    /// the confined monitor cannot start `systemctl`. The default answers
+    /// [`HookError::Unavailable`].
+    ///
+    /// # Errors
+    ///
+    /// [`HookError::Unavailable`] when no service manager is available or no
+    /// alternative of the unit exists on this host, [`HookError::Failed`]
+    /// when the query itself failed.
+    fn service_status(&self, _binding: &ServiceBinding) -> Result<UnitStatus, HookError> {
+        Err(HookError::Unavailable(
+            "service control is not available in this build".to_owned(),
+        ))
+    }
 
     /// Ask the init system to re-read its unit files, for a module whose
     /// descriptor sets `reload_unit_files`. Returns a short detail.
@@ -1022,11 +1039,14 @@ impl<'a> Monitor<'a> {
             return unknown(IdKind::Binding, u32::from(id.get()));
         };
         let Some(core) = action.to_core() else {
-            // `Status` is not a mutation and has no core counterpart yet; the
-            // service-manager subtask adds it.
-            return Response::Error(ProtoError::Unsupported(
-                "service status is not implemented yet".to_owned(),
-            ));
+            // `Status` is not a mutation and has no core counterpart. It is
+            // not one of the binding's declared actions either, so it skips
+            // that check: the binding is in the allow-list, and that is all
+            // a read needs.
+            return match self.hooks.services.service_status(entry.binding) {
+                Ok(status) => Response::UnitStatus(status),
+                Err(err) => Response::Error(err.into()),
+            };
         };
         if !entry.binding.actions.contains(&core) {
             return Response::Error(ProtoError::ActionNotAllowed);
@@ -2013,7 +2033,7 @@ mod tests {
     use crate::privsep::proto::{
         BackupId, BindingId, CheckId, CheckOutcome, CommitId, IdKind, ModuleId, MountOutcome,
         MountState, PROTO_VERSION, PendingService, ProtoError, Request, Response, ServiceAction,
-        ServiceOutcome, TargetId,
+        ServiceOutcome, TargetId, UnitState, UnitStatus,
     };
     use crate::privsep::transport::{Channel, ChannelError};
     use crate::privsep::worker::Client;
@@ -2874,8 +2894,88 @@ mod tests {
         Ok(())
     }
 
+    /// Answers a status read with the unit of the binding it was given, so a
+    /// test can see which unit the monitor chose.
+    struct StatusServices;
+    impl ServiceControl for StatusServices {
+        fn service(
+            &self,
+            _binding: &ServiceBinding,
+            _action: CoreServiceAction,
+        ) -> Result<ServiceOutcome, HookError> {
+            Err(HookError::Failed(
+                "a status read is not an action".to_owned(),
+            ))
+        }
+
+        fn service_status(&self, binding: &ServiceBinding) -> Result<UnitStatus, HookError> {
+            Ok(UnitStatus {
+                unit: binding
+                    .units
+                    .systemd
+                    .first()
+                    .copied()
+                    .unwrap_or_default()
+                    .to_owned(),
+                state: UnitState::Active,
+                enabled: Some(true),
+                since: None,
+            })
+        }
+    }
+
     #[test]
-    fn service_status_is_not_implemented_yet() -> Result<(), Box<dyn std::error::Error>> {
+    fn service_status_reads_the_unit_of_the_allow_listed_binding()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &StatusServices,
+        };
+        let mut monitor = greeted(fx.allow()?, hooks);
+        // The fixture's binding declares only `Restart`: a read needs no
+        // declared action, and the unit is the binding's, not the worker's.
+        let response = monitor.dispatch(Request::Service {
+            binding: BindingId(0),
+            action: ServiceAction::Status,
+        })?;
+        assert_eq!(
+            response,
+            Response::UnitStatus(UnitStatus {
+                unit: "fake.service".to_owned(),
+                state: UnitState::Active,
+                enabled: Some(true),
+                since: None,
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn service_status_rejects_an_unknown_binding_id() -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &StatusServices,
+        };
+        let mut monitor = greeted(fx.allow()?, hooks);
+        let response = monitor.dispatch(Request::Service {
+            binding: BindingId(99),
+            action: ServiceAction::Status,
+        })?;
+        assert!(matches!(
+            response,
+            Response::Error(ProtoError::UnknownId {
+                kind: IdKind::Binding,
+                id: 99
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn service_status_without_a_service_hook_is_unavailable()
+    -> Result<(), Box<dyn std::error::Error>> {
         let fx = fixture()?;
         let mut monitor = greeted(fx.allow()?, Hooks::default());
         let response = monitor.dispatch(Request::Service {
@@ -2884,8 +2984,39 @@ mod tests {
         })?;
         assert!(matches!(
             response,
-            Response::Error(ProtoError::Unsupported(_))
+            Response::Error(ProtoError::Unavailable(_))
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn service_status_maps_a_failed_hook_to_an_io_error() -> Result<(), Box<dyn std::error::Error>>
+    {
+        struct FailingStatus;
+        impl ServiceControl for FailingStatus {
+            fn service(
+                &self,
+                _binding: &ServiceBinding,
+                _action: CoreServiceAction,
+            ) -> Result<ServiceOutcome, HookError> {
+                Err(HookError::Failed("not used".to_owned()))
+            }
+
+            fn service_status(&self, _binding: &ServiceBinding) -> Result<UnitStatus, HookError> {
+                Err(HookError::Failed("systemctl show timed out".to_owned()))
+            }
+        }
+        let fx = fixture()?;
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &FailingStatus,
+        };
+        let mut monitor = greeted(fx.allow()?, hooks);
+        let response = monitor.dispatch(Request::Service {
+            binding: BindingId(0),
+            action: ServiceAction::Status,
+        })?;
+        assert!(matches!(response, Response::Error(ProtoError::Io(_))));
         Ok(())
     }
 

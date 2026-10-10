@@ -63,6 +63,10 @@ use detent_core::descriptor::{ServiceAction as CoreServiceAction, TargetKind};
 /// version stays `2`. E16 also retired [`Request::StageBegin`],
 /// [`Request::StageUpdate`] and [`Request::ReplaceBinary`]: the monitor
 /// refuses them, and they stay in the enum so no discriminant moves.
+///
+/// [`Response::UnitStatus`] (the answer to [`Request::Service`] with
+/// [`ServiceAction::Status`]) is appended to its enum too; the version stays
+/// `2`, and no request changed.
 pub const PROTO_VERSION: u16 = 2;
 /// Largest encoded message accepted in either direction, in bytes.
 ///
@@ -237,7 +241,8 @@ pub enum ServiceAction {
     Start,
     /// Stop a running service.
     Stop,
-    /// Report status only; never allowed to change state.
+    /// Report status only; never allowed to change state. Answered with
+    /// [`Response::UnitStatus`].
     Status,
 }
 
@@ -318,7 +323,12 @@ pub enum Request {
         /// Candidate file contents, written to a temporary file by the monitor.
         bytes: Vec<u8>,
     },
-    /// Act on an allow-listed service binding.
+    /// Act on an allow-listed service binding. With [`ServiceAction::Status`]
+    /// the monitor changes nothing: it has the runner read the unit's state
+    /// (`systemctl show`) and answers [`Response::UnitStatus`]. The worker
+    /// cannot start a process, so it asks for the read like it asks for an
+    /// action. The unit comes from the binding, never from the worker, and
+    /// `Status` need not be one of the binding's declared actions.
     Service {
         /// Which binding.
         binding: BindingId,
@@ -653,6 +663,42 @@ pub struct ServiceOutcome {
     pub detail: String,
 }
 
+/// The run state of a unit, as the monitor read it.
+///
+/// A wire mirror of `service::State`, for the same reasons as [`PathKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+pub enum UnitState {
+    /// Running.
+    Active,
+    /// Not running, not failed.
+    Inactive,
+    /// Exited with an error, or crashed.
+    Failed,
+    /// Transitioning to active.
+    Activating,
+    /// Transitioning to inactive.
+    Deactivating,
+    /// The init system's output did not say.
+    Unknown,
+}
+
+/// Result of a [`Request::Service`] with [`ServiceAction::Status`]: what the
+/// init system reports for the unit the allow-listed binding names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+pub struct UnitStatus {
+    /// The unit name actually resolved and queried.
+    pub unit: String,
+    /// Its run state.
+    pub state: UnitState,
+    /// Whether it starts at boot, when the init system says.
+    pub enabled: Option<bool>,
+    /// When it entered its state, as whole seconds and nanoseconds since the
+    /// Unix epoch, when the init system says.
+    pub since: Option<(u64, u32)>,
+}
+
 /// What happened to one mount unit after a `mounts` apply, or at a
 /// rollback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -796,6 +842,12 @@ pub enum Response {
         /// A short human-readable result.
         detail: String,
     },
+    /// Answer to [`Request::Service`] with [`ServiceAction::Status`]. Any
+    /// other action is answered [`Response::Serviced`].
+    ///
+    /// Appended after [`Response::UpdateStarted`] to preserve every existing
+    /// discriminant; see [`PROTO_VERSION`]'s doc comment.
+    UnitStatus(UnitStatus),
 }
 
 // ---------------------------------------------------------------------------
@@ -1003,8 +1055,9 @@ mod tests {
         BackupId, BackupInfo, BindingId, BindingInfo, CheckId, CheckInfo, CheckOutcome, CodecError,
         CommitId, HelloAck, IdKind, MAX_FRAME, MAX_RELEASE_TAG_LEN, ModuleId, ModuleInfo,
         MountOutcome, MountState, PROTO_VERSION, PathKind, PendingService, ProtoError, Request,
-        Response, ServiceAction, ServiceOutcome, TargetContents, TargetId, TargetInfo,
-        UpdateTagRefusal, WriteReceipt, check_update_tag, decode, encode, is_release_tag,
+        Response, ServiceAction, ServiceOutcome, TargetContents, TargetId, TargetInfo, UnitState,
+        UnitStatus, UpdateTagRefusal, WriteReceipt, check_update_tag, decode, encode,
+        is_release_tag,
     };
     use crate::fs::atomic::Sha256Digest;
     use detent_core::descriptor::{ServiceAction as CoreServiceAction, TargetKind};
@@ -1225,6 +1278,12 @@ mod tests {
             Response::UpdateStarted {
                 detail: "started detent-update.service".to_owned(),
             },
+            Response::UnitStatus(UnitStatus {
+                unit: "chrony.service".to_owned(),
+                state: UnitState::Active,
+                enabled: None,
+                since: None,
+            }),
         ];
         responses.extend(every_error_response());
         responses
@@ -1481,6 +1540,29 @@ mod tests {
         // `Response::Error` is discriminant 10, `UpdateRunning` the 14th error.
         assert_eq!(bytes.as_slice(), &[10, 13]);
         assert_eq!(decode::<Response>(&bytes).ok(), Some(running));
+    }
+
+    #[test]
+    fn the_unit_status_answer_takes_the_next_response_discriminant() {
+        // Appended after `UpdateStarted` (17): no existing discriminant
+        // moves, and the request that asks for it is the old `Service`.
+        let status = Response::UnitStatus(UnitStatus {
+            unit: "chrony.service".to_owned(),
+            state: UnitState::Failed,
+            enabled: Some(false),
+            since: Some((7, 9)),
+        });
+        let bytes = encode(&status).unwrap_or_default();
+        assert_eq!(bytes.first(), Some(&18));
+        assert_eq!(decode::<Response>(&bytes).ok(), Some(status));
+
+        let ask = Request::Service {
+            binding: BindingId(3),
+            action: ServiceAction::Status,
+        };
+        let bytes = encode(&ask).unwrap_or_default();
+        assert_eq!(bytes.first(), Some(&4));
+        assert_eq!(decode::<Request>(&bytes).ok(), Some(ask));
     }
 
     #[test]

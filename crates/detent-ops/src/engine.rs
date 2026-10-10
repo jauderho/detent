@@ -11,13 +11,13 @@
 //!   module's backend target and to validate against the installed versions;
 //! * an **[`AuditSink`]** and an **[`Authz`]** policy.
 //!
-//! # One deliberate deviation, documented at its call site
+//! # Service status
 //!
-//! * [`Operation::ServiceStatus`] does **not** go through the monitor. The
-//!   privsep protocol answers `ProtoError::Unsupported` for
-//!   `ServiceAction::Status` (`privsep::monitor`), and querying a unit's state
-//!   needs no privilege, so the engine asks a [`ServiceManager`] directly.
-//!   Every *mutating* service action still goes through the monitor.
+//! [`Operation::ServiceStatus`] goes through the monitor like a service
+//! action does: the engine runs in the worker, which cannot start a process
+//! (its seccomp table has no `pipe2`), so it sends `Request::Service` with
+//! `ServiceAction::Status` and the monitor has its runner read the unit.
+//! The unit is the allow-listed binding's, never a name the worker sends.
 //!
 //! [`Operation::RollbackCommit`] is not a deviation: it forwards to the
 //! monitor's `Request::RollbackCommit` exactly as [`Operation::ConfirmCommit`]
@@ -38,7 +38,7 @@ use detent_platform::privsep::proto::{
     ServiceAction as WireServiceAction, TargetId, UpdateTagRefusal, WriteReceipt, check_update_tag,
 };
 use detent_platform::privsep::worker::{Client, ClientError};
-use detent_platform::service::ServiceManager;
+use detent_platform::service::{ServiceError, ServiceStatus};
 use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -101,7 +101,6 @@ pub struct OpsEngine {
     client: Client,
     host: Detected,
     audit: Box<dyn AuditSink>,
-    services: Box<dyn ServiceManager>,
     next_commit: u32,
     /// Last commit-confirm window armed by this engine, used to rehydrate its
     /// full report without inventing fields from the protocol's id-only query.
@@ -131,14 +130,12 @@ impl OpsEngine {
         client: Client,
         host: Detected,
         audit: Box<dyn AuditSink>,
-        services: Box<dyn ServiceManager>,
     ) -> Self {
         Self {
             modules,
             client,
             host,
             audit,
-            services,
             next_commit: 1,
             pending_commit: None,
             cert: None,
@@ -503,15 +500,26 @@ impl OpsEngine {
     }
 
     fn service_status(&mut self, id: &str) -> Result<OpOutcome, OpsError> {
-        let descriptor = find_module(&self.modules, id)?.descriptor();
-        let binding = descriptor
-            .services
-            .first()
+        let module = find_module(&self.modules, id)?;
+        let descriptor = module.descriptor();
+        if descriptor.services.is_empty() {
+            return Err(OpsError::NoService {
+                module: descriptor.id.to_owned(),
+            });
+        }
+        // A module the monitor does not know is not "no service".
+        module_id(&self.client, module)?;
+        let binding = self
+            .client
+            .binding_id(descriptor.id)
             .ok_or_else(|| OpsError::NoService {
                 module: descriptor.id.to_owned(),
             })?;
-
-        Ok(OpOutcome::Status(self.services.status(&binding.units)?))
+        let status = self
+            .client
+            .service_status(binding)
+            .map_err(map_status_error)?;
+        Ok(OpOutcome::Status(ServiceStatus::from(status)))
     }
 
     fn apply_is_noop(&mut self, op: &Operation) -> Result<bool, OpsError> {
@@ -1052,6 +1060,19 @@ fn map_client(err: ClientError) -> OpsError {
     }
 }
 
+/// A failed status read. The monitor's own message for a hook failure keeps
+/// the [`OpsError::Service`] shape the front ends render; any other refusal
+/// is [`OpsError::Privsep`].
+fn map_status_error(err: ClientError) -> OpsError {
+    match err {
+        ClientError::Remote(ProtoError::Unavailable(message)) => {
+            ServiceError::Unavailable(message).into()
+        }
+        ClientError::Remote(ProtoError::Io(message)) => ServiceError::Failed(message).into(),
+        other => OpsError::Privsep(other),
+    }
+}
+
 /// `timeout_s` from now, as RFC 3339 UTC.
 fn deadline_rfc3339(timeout_s: u16) -> String {
     OffsetDateTime::now_utc()
@@ -1091,6 +1112,27 @@ mod tests {
             refused.starts_with("monitor refused the request"),
             "{refused}"
         );
+    }
+
+    #[test]
+    fn a_status_failure_keeps_the_monitor_message_in_the_service_error() {
+        use super::map_status_error;
+        use detent_platform::service::ServiceError;
+        assert!(matches!(
+            map_status_error(ClientError::Remote(ProtoError::Unavailable(
+                "systemctl was not found on this host".to_owned()
+            ))),
+            OpsError::Service(ServiceError::Unavailable(message))
+                if message == "systemctl was not found on this host"
+        ));
+        assert!(matches!(
+            map_status_error(ClientError::Remote(ProtoError::Io("timed out".to_owned()))),
+            OpsError::Service(ServiceError::Failed(message)) if message == "timed out"
+        ));
+        assert!(matches!(
+            map_status_error(ClientError::Remote(ProtoError::ActionNotAllowed)),
+            OpsError::Privsep(_)
+        ));
     }
 
     use super::{Hashes, command, deadline_rfc3339, decode, map_client};

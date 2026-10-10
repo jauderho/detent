@@ -97,13 +97,7 @@ impl Live {
             },
             facts: HostFacts::default(),
         };
-        let ops_engine = OpsEngine::new(
-            Vec::new(),
-            client,
-            host,
-            Box::new(NullAudit),
-            service::for_host(InitSystem::Systemd),
-        );
+        let ops_engine = OpsEngine::new(Vec::new(), client, host, Box::new(NullAudit));
         let (handle, engine) = spawn_engine(ops_engine);
         fixture.state.engine = handle;
         Ok(Self {

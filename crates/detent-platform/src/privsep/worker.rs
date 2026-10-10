@@ -14,7 +14,7 @@ use crate::fs::atomic::Sha256Digest;
 use super::proto::{
     BackupId, BackupInfo, BindingId, BindingInfo, CheckId, CheckOutcome, CommitId, HelloAck,
     ModuleId, MountOutcome, PROTO_VERSION, PathKind, PendingService, ProtoError, Request, Response,
-    ServiceAction, ServiceOutcome, TargetContents, TargetId, TargetInfo, WriteReceipt,
+    ServiceAction, ServiceOutcome, TargetContents, TargetId, TargetInfo, UnitStatus, WriteReceipt,
 };
 use super::transport::{Channel, ChannelError};
 
@@ -243,6 +243,24 @@ impl Client {
         }
     }
 
+    /// Read the state of the unit a service binding names. The worker cannot
+    /// start `systemctl` itself; the monitor has the runner do it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::read_target`]; [`ProtoError::Unavailable`] when no
+    /// service manager is available or the unit is on no alternative name
+    /// of this host, [`ProtoError::Io`] when the query failed.
+    pub fn service_status(&mut self, binding: BindingId) -> Result<UnitStatus, ClientError> {
+        match self.checked_call(&Request::Service {
+            binding,
+            action: ServiceAction::Status,
+        })? {
+            Response::UnitStatus(status) => Ok(status),
+            other => Err(unexpected("UnitStatus", &other)),
+        }
+    }
+
     /// Ask the init system to re-read its unit files after a write to
     /// `module`. Returns the monitor's detail.
     ///
@@ -458,6 +476,7 @@ const fn variant_name(response: &Response) -> &'static str {
         Response::Mounted { .. } => "Mounted",
         Response::Staged { .. } => "Staged",
         Response::UpdateStarted { .. } => "UpdateStarted",
+        Response::UnitStatus(_) => "UnitStatus",
     }
 }
 
@@ -468,7 +487,7 @@ mod tests {
     use crate::privsep::proto::{
         BackupId, BindingId, CheckId, CheckOutcome, CommitId, HelloAck, ModuleId, MountOutcome,
         MountState, PROTO_VERSION, PathKind, ProtoError, Request, Response, ServiceAction,
-        ServiceOutcome, TargetContents, TargetId, WriteReceipt,
+        ServiceOutcome, TargetContents, TargetId, UnitState, UnitStatus, WriteReceipt,
     };
     use crate::privsep::transport::Channel;
     use std::thread;
@@ -688,6 +707,53 @@ mod tests {
             Err(ClientError::Unexpected {
                 want: "Serviced",
                 got: "Checked"
+            })
+        ));
+        drop(client);
+        let _ = handle.join();
+        Ok(())
+    }
+
+    #[test]
+    fn service_status_asks_with_the_status_action_and_returns_the_unit_status()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let status = UnitStatus {
+            unit: "chrony.service".to_owned(),
+            state: UnitState::Active,
+            enabled: Some(true),
+            since: None,
+        };
+        let (mut client, handle) =
+            client_with_scripted_reply(Response::UnitStatus(status.clone()))?;
+        assert_eq!(client.service_status(BindingId(0))?, status);
+        // A plain action answered with a status is a mismatch, and the
+        // mismatch names the status variant.
+        assert!(matches!(
+            client.service(BindingId(0), ServiceAction::Restart),
+            Err(ClientError::Unexpected {
+                want: "Serviced",
+                got: "UnitStatus"
+            })
+        ));
+        drop(client);
+        let _ = handle.join();
+        Ok(())
+    }
+
+    #[test]
+    fn service_status_reports_unexpected_for_a_wrong_response()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut client, handle) =
+            client_with_scripted_reply(Response::Serviced(ServiceOutcome {
+                binding: BindingId(0),
+                active: true,
+                detail: String::new(),
+            }))?;
+        assert!(matches!(
+            client.service_status(BindingId(0)),
+            Err(ClientError::Unexpected {
+                want: "UnitStatus",
+                got: "Serviced"
             })
         ));
         drop(client);

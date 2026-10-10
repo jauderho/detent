@@ -291,7 +291,6 @@ mod tests {
     use detent_platform::privsep::monitor::{Hooks, Monitor};
     use detent_platform::privsep::transport::Channel;
     use detent_platform::privsep::worker::Client;
-    use detent_platform::service;
     use tempfile::TempDir;
 
     type R = Result<(), Box<dyn std::error::Error>>;
@@ -336,13 +335,7 @@ mod tests {
                 },
                 facts: HostFacts::default(),
             };
-            let engine = OpsEngine::new(
-                Vec::new(),
-                client,
-                host,
-                audit,
-                service::for_host(InitSystem::Systemd),
-            );
+            let engine = OpsEngine::new(Vec::new(), client, host, audit);
             Ok(Self {
                 engine: Some(engine),
                 monitor: Some(monitor),

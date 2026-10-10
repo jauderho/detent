@@ -1001,6 +1001,84 @@ mod tests {
         })
     }
 
+    /// The unit the status probe below asks about; it exists on no host.
+    static PROBE_SERVICES: &[detent_core::descriptor::ServiceBinding] =
+        &[detent_core::descriptor::ServiceBinding {
+            units: detent_core::descriptor::UnitNames {
+                systemd: &["detent-status-probe.service"],
+                openrc: &[],
+                bsdrc: &[],
+            },
+            actions: &[detent_core::descriptor::ServiceAction::Restart],
+        }];
+
+    /// A unit's state is read by the runner, never by the worker or the
+    /// confined monitor: `GET /api/v1/services/<id>` answered 500 because the
+    /// worker ran `systemctl show` itself and its seccomp table has no
+    /// `pipe2`. Under the real monitor confinement, the runner client's status
+    /// read must come back as the runner's own answer: the runner reaches
+    /// `systemctl` (found: no such unit; absent: no `systemctl`), and the
+    /// monitor survives the read. A dead runner would be reported as "the
+    /// runner is not available" or "stopped answering" instead.
+    #[test]
+    fn enforce_mode_monitor_reads_a_unit_status_through_the_runner()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::privsep::monitor::{HookError, ServiceControl as _};
+        use crate::privsep::runner::RunnerClient;
+        use crate::privsep::spawn::{reap_child, spawn_runner};
+        in_forked_child(|| {
+            let dir = std::env::temp_dir().join(format!(
+                "detent-sandbox-runner-status-{}",
+                std::process::id()
+            ));
+            let staging = dir.join("staging");
+            if std::fs::create_dir_all(&staging).is_err() {
+                return false;
+            }
+            let probe: &'static ModuleDescriptor = Box::leak(Box::new(ModuleDescriptor {
+                id: "probe",
+                display_name_id: MessageId::new("probe-name"),
+                targets: &[],
+                upstream: UPSTREAM,
+                services: PROBE_SERVICES,
+                checks: &[],
+                commit_confirm: false,
+                reload_unit_files: false,
+                added_mounts: None,
+                security_notes: &[],
+            }));
+            let Ok(allow) = Allowlist::from_modules(&[probe], &Config::with_state_root(&dir))
+            else {
+                return false;
+            };
+            let profile = HostProfile {
+                init: detent_core::descriptor::InitSystem::Systemd,
+                ..HostProfile::default()
+            };
+            let Ok(runner) = spawn_runner(&allow, &staging, &profile) else {
+                return false;
+            };
+            if confine(Role::Monitor, &Policy::monitor(&allow)).is_err() {
+                return false;
+            }
+            let pid = runner.child_pid;
+            let client = RunnerClient::new(runner.channel, &allow);
+            let answered = PROBE_SERVICES.first().is_some_and(|binding| {
+                match client.service_status(binding) {
+                    Ok(_) => true,
+                    Err(HookError::Unavailable(message)) => {
+                        message.contains("detent-status-probe.service")
+                            || message.contains("systemctl")
+                    }
+                    Err(HookError::Failed(_)) => false,
+                }
+            });
+            drop(client);
+            reap_child(pid);
+            answered
+        })
+    }
+
     /// B9 follow-up: the confined monitor makes its staging directory
     /// (`ensure_staging_dir`, reached by `RunCheck` for a module with no
     /// file target, or a read-only target directory) and checks that it belongs to the

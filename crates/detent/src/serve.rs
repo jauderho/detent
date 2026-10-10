@@ -54,8 +54,6 @@ use detent_platform::privsep::transport::Channel;
 use detent_platform::sandbox::{
     Confinement, Hooks as SandboxHooks, LandlockOutcome, LandlockStatus, Outcome, Policy,
 };
-#[cfg(feature = "web")]
-use detent_platform::service;
 
 use crate::output::{Exit, Renderer};
 use crate::run::{Settings, Streams};
@@ -1053,12 +1051,11 @@ fn prepare_worker(
     }
 
     let ram_mib = host.profile.ram_mib;
-    let init = host.profile.init;
     let mut hostnames = config.web.tls.hostnames.clone();
     hostnames.push(host.profile.hostname.clone());
 
     let audit: Box<dyn AuditSink> = Box::new(FileAudit::under_state_root(&settings.state_root));
-    let engine = OpsEngine::new(registry, client, host, audit, service::for_host(init));
+    let engine = OpsEngine::new(registry, client, host, audit);
     let (engine_handle, engine_thread) = detent_web::spawn_engine(engine);
 
     let auth_state =
@@ -1675,7 +1672,6 @@ mod web_tests {
     use crate::i18n::Messages;
     use crate::output::{Exit, Renderer};
     use crate::run::Settings;
-    use detent_core::descriptor::InitSystem;
     use detent_ops::{NullAudit, OpsEngine};
     use detent_platform::host::Detected;
     use detent_platform::privsep::allowlist::{Allowlist, Config as AllowConfig};
@@ -1729,13 +1725,7 @@ mod web_tests {
         });
         let mut client = Client::new(worker_end);
         client.hello()?;
-        let engine = OpsEngine::new(
-            Vec::new(),
-            client,
-            Detected::default(),
-            Box::new(NullAudit),
-            detent_platform::service::for_host(InitSystem::Systemd),
-        );
+        let engine = OpsEngine::new(Vec::new(), client, Detected::default(), Box::new(NullAudit));
         let (handle, thread) = detent_web::spawn_engine(engine);
         Ok((handle, thread, monitor))
     }
