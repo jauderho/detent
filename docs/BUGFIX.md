@@ -440,7 +440,7 @@ deferred by the owner.
 `THREAT_MODEL.md` (STRIDE per component, mapped to tests; it must also cover
 any egress §5 would add), `PENTEST_CHECKLIST.md` (ASVS L2), `[privilege]
 mode = "capability-user"` with polkit and the doctor check, optional mTLS,
-`de`/`ja` translations (marked `# needs-review`; done 2026-10-09, machine-drafted, see PROGRESS), `cargo-mutants` and
+`de-DE`/`ja-JP` translations (marked `# needs-review`; done 2026-10-09, machine-drafted, see PROGRESS), the twelve-locale infrastructure (done 2026-10-10: directory-driven catalogue, compressed text, lazy web bundles; the nine directories `en-GB`, `zh-CN`, `zh-TW`, `es-ES`, `pt-BR`, `fr-FR`, `ru-RU`, `hi-IN` and `bn-BD` are still to be translated, see `docs/TRANSLATING.md`), `cargo-mutants` and
 `cargo geiger` jobs, `cargo semver-checks` for `detent-core`, final size/RSS
 numbers in the README, then v1.0.0. Acceptance is in PLAN Phase 12.
 
