@@ -493,8 +493,15 @@ pub enum BackupAction {
 }
 
 /// `detent audit …`.
+///
+/// Bare `audit` (with its filters) reads the log back; `audit verify` checks
+/// it. The filters do not combine with the subcommand.
 #[derive(Debug, Default, Args)]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct AuditArgs {
+    /// What to do instead of reading records back.
+    #[command(subcommand)]
+    pub action: Option<AuditAction>,
     /// Only records about this module.
     #[arg(long, value_name = "ID")]
     pub module: Option<String>,
@@ -504,6 +511,15 @@ pub struct AuditArgs {
     /// At most this many records, newest first.
     #[arg(long, value_name = "N")]
     pub limit: Option<usize>,
+}
+
+/// `detent audit <action>`.
+#[derive(Debug, Subcommand)]
+pub enum AuditAction {
+    /// Check the sequence and hash chain of the whole audit log and print the
+    /// digest of its last record. Keep that digest somewhere else: it is the
+    /// anchor that shows later whether the end of the log was cut off.
+    Verify,
 }
 
 /// `detent update …` (PLAN §2.9).

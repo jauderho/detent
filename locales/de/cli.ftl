@@ -82,6 +82,8 @@ cli-host-note = Hinweis zur Erkennung: {$note}
 ## audit
 cli-no-audit = das Audit-Protokoll hat keine passenden Einträge.
 cli-audit-line = {$ts}  {$who}  {$op}  {$module}  {$result}  {$error}
+cli-audit-verified = die Audit-Kette ist bis Eintrag {$sequence} intakt; Kopf-Digest {$hash}
+cli-audit-broken = die Audit-Kette konnte nicht geprüft werden: {$reason}
 
 ## --dryrun
 cli-dryrun-apply = Probelauf: das würde für {$module} nach {$path} geschrieben.

@@ -87,6 +87,8 @@ cli-host-note = detection note: {$note}
 ## audit
 cli-no-audit = the audit log has no matching records.
 cli-audit-line = {$ts}  {$who}  {$op}  {$module}  {$result}  {$error}
+cli-audit-verified = the audit chain is intact up to record {$sequence}; head digest {$hash}
+cli-audit-broken = the audit chain could not be verified: {$reason}
 
 ## --dryrun
 cli-dryrun-apply = dry run: this is what would be written to {$path} for {$module}.

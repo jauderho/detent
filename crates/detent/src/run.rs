@@ -53,7 +53,7 @@ use detent_platform::service::{self, ServiceControlAdapter};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::cli::{BackupAction, Cli, Command, CommitAction, ConfigAction};
+use crate::cli::{AuditAction, AuditArgs, BackupAction, Cli, Command, CommitAction, ConfigAction};
 use crate::i18n::Messages;
 use crate::output::{ErrorContext, Exit, Renderer};
 
@@ -313,7 +313,66 @@ fn dispatch(
             renderer,
             streams,
         ),
+        Some(Command::Audit(AuditArgs {
+            action: Some(AuditAction::Verify),
+            ..
+        })) => audit_verify(&settings, renderer, streams),
         _ => operate(cli, &settings, renderer, streams),
+    }
+}
+
+/// `audit verify`: check the chain of the whole ops audit log and print the
+/// digest of its last record (`THREAT_MODEL` TM-G6).
+///
+/// Like `defaults`, it has no [`Operation`]: it reads one file under the state
+/// root and needs no monitor. A log that cannot be read, is missing, or whose
+/// chain breaks is exit 1, with the first bad record named. The digest it
+/// prints is the anchor an operator keeps elsewhere, because the chain alone
+/// cannot show that the end of the log was cut off.
+fn audit_verify(
+    settings: &Settings,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<Exit> {
+    match FileAudit::under_state_root(&settings.state_root).verify() {
+        Ok(chain) => {
+            if renderer.json {
+                let text = serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": true,
+                    "sequence": chain.sequence,
+                    "hash": chain.hash,
+                }))
+                .map_err(std::io::Error::other)?;
+                writeln!(streams.out, "{text}")?;
+            } else {
+                renderer.line(
+                    streams.out,
+                    MessageId::new("cli-audit-verified"),
+                    &[
+                        ("sequence", &chain.sequence.to_string()),
+                        ("hash", &chain.hash),
+                    ],
+                )?;
+            }
+            Ok(Exit::Ok)
+        }
+        Err(err) => {
+            let reason = err.to_string();
+            if renderer.json {
+                let text = serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": false,
+                    "error": reason,
+                }))
+                .map_err(std::io::Error::other)?;
+                writeln!(streams.out, "{text}")?;
+            }
+            renderer.line(
+                streams.notes,
+                MessageId::new("cli-audit-broken"),
+                &[("reason", &reason)],
+            )?;
+            Ok(Exit::Failed)
+        }
     }
 }
 
@@ -3720,6 +3779,193 @@ mod tests {
         // A second shutdown has nothing left to join and says so rather than
         // hanging.
         assert!(fx.session.finish().is_err());
+        Ok(())
+    }
+
+    // --- detent audit verify (TM-G6) -------------------------------------------
+
+    /// What one `run` wrote.
+    struct Ran {
+        exit: Exit,
+        out: String,
+        notes: String,
+    }
+
+    fn run_args(argv: &[&str]) -> Result<Ran, Box<dyn std::error::Error>> {
+        let cli = parse(argv)?;
+        let mut input = std::io::empty();
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let exit = run(
+            &cli,
+            &mut Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+        );
+        Ok(Ran {
+            exit,
+            out: String::from_utf8(out)?,
+            notes: String::from_utf8(notes)?,
+        })
+    }
+
+    /// A state root whose ops audit holds `count` records, and the chain of
+    /// the last one.
+    fn state_with_audit(
+        count: u32,
+    ) -> Result<(tempfile::TempDir, detent_ops::audit::AuditChain), Box<dyn std::error::Error>>
+    {
+        use detent_ops::identity::{Identity, IdentityKind};
+        use detent_ops::{AuditRecord, AuditResult, AuditSink as _, FileAudit};
+
+        let dir = tempfile::TempDir::new()?;
+        let sink = FileAudit::under_state_root(&dir.path().join("state"));
+        let who = Identity::new("alice".to_owned(), IdentityKind::LocalUser);
+        for _ in 0..count {
+            sink.record(&AuditRecord::new(
+                &who,
+                OpKind::ListModules,
+                None,
+                AuditResult::Ok,
+            ))?;
+        }
+        let head = sink.verify()?;
+        Ok((dir, head))
+    }
+
+    #[test]
+    fn audit_verify_parses_and_the_flat_audit_form_still_does() -> R {
+        use crate::cli::{AuditAction, Command};
+
+        let verify = |argv: &[&str]| -> Result<bool, Box<dyn std::error::Error>> {
+            Ok(matches!(
+                parse(argv)?.command,
+                Some(Command::Audit(crate::cli::AuditArgs {
+                    action: Some(AuditAction::Verify),
+                    ..
+                }))
+            ))
+        };
+        assert!(verify(&["detent", "audit", "verify"])?);
+        assert!(!verify(&[
+            "detent", "audit", "--module", "hosts", "--limit", "3"
+        ])?);
+        assert!(!verify(&["detent", "audit"])?);
+        // The query filters do not combine with the subcommand.
+        assert!(parse(&["detent", "audit", "verify", "--module", "hosts"]).is_err());
+        assert!(parse(&["detent", "audit", "--module", "hosts", "verify"]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn audit_verify_prints_the_head_digest_of_an_intact_log() -> R {
+        let (dir, head) = state_with_audit(3)?;
+        let state = dir.path().join("state").display().to_string();
+
+        let ran = run_args(&["detent", "audit", "verify", "--state-root", &state])?;
+        assert_eq!(ran.exit, Exit::Ok, "{}", ran.notes);
+        assert!(ran.out.contains(&head.hash), "{}", ran.out);
+        assert!(ran.out.contains('3'), "{}", ran.out);
+
+        let ran = run_args(&[
+            "detent",
+            "--json",
+            "audit",
+            "verify",
+            "--state-root",
+            &state,
+        ])?;
+        assert_eq!(ran.exit, Exit::Ok, "{}", ran.notes);
+        let parsed: serde_json::Value = serde_json::from_str(&ran.out)?;
+        assert_eq!(parsed.pointer("/ok"), Some(&serde_json::json!(true)));
+        assert_eq!(parsed.pointer("/sequence"), Some(&serde_json::json!(3)));
+        assert_eq!(
+            parsed.pointer("/hash").and_then(serde_json::Value::as_str),
+            Some(head.hash.as_str())
+        );
+        // Nothing was started and nothing was written.
+        assert!(!dir.path().join("state").join("state").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn audit_verify_names_the_first_bad_record_and_fails() -> R {
+        let (dir, _head) = state_with_audit(3)?;
+        let state = dir.path().join("state").display().to_string();
+        let log = dir
+            .path()
+            .join("state")
+            .join("audit")
+            .join("detent-audit.jsonl");
+        let raw = std::fs::read_to_string(&log)?;
+        let edited: Vec<String> = raw
+            .lines()
+            .enumerate()
+            .map(|(index, line)| {
+                if index == 1 {
+                    line.replace("alice", "mallory")
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect();
+        assert!(edited.join("\n").contains("mallory"));
+        std::fs::write(&log, format!("{}\n", edited.join("\n")))?;
+
+        let ran = run_args(&["detent", "audit", "verify", "--state-root", &state])?;
+        assert_eq!(ran.exit, Exit::Failed);
+        assert!(ran.out.is_empty(), "{}", ran.out);
+        assert!(ran.notes.contains("record 2"), "{}", ran.notes);
+
+        let ran = run_args(&[
+            "detent",
+            "--json",
+            "audit",
+            "verify",
+            "--state-root",
+            &state,
+        ])?;
+        assert_eq!(ran.exit, Exit::Failed);
+        let parsed: serde_json::Value = serde_json::from_str(&ran.out)?;
+        assert_eq!(parsed.pointer("/ok"), Some(&serde_json::json!(false)));
+        assert!(
+            parsed
+                .pointer("/error")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|text| text.contains("record 2")),
+            "{parsed}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_cut_off_tail_passes_the_chain_but_not_the_kept_anchor() -> R {
+        let (dir, head) = state_with_audit(3)?;
+        let state = dir.path().join("state").display().to_string();
+        let log = dir
+            .path()
+            .join("state")
+            .join("audit")
+            .join("detent-audit.jsonl");
+        let raw = std::fs::read_to_string(&log)?;
+        let kept: Vec<&str> = raw.lines().take(2).collect();
+        std::fs::write(&log, format!("{}\n", kept.join("\n")))?;
+
+        let ran = run_args(&["detent", "audit", "verify", "--state-root", &state])?;
+        assert_eq!(ran.exit, Exit::Ok, "{}", ran.notes);
+        assert!(!ran.out.contains(&head.hash), "{}", ran.out);
+        Ok(())
+    }
+
+    #[test]
+    fn audit_verify_of_a_missing_log_fails() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let state = dir.path().join("state").display().to_string();
+        let ran = run_args(&["detent", "audit", "verify", "--state-root", &state])?;
+        assert_eq!(ran.exit, Exit::Failed);
+        assert!(ran.notes.contains("does not exist"), "{}", ran.notes);
         Ok(())
     }
 

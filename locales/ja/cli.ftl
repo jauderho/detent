@@ -82,6 +82,8 @@ cli-host-note = 検出メモ: {$note}
 ## audit
 cli-no-audit = 一致する監査ログ記録はありません。
 cli-audit-line = {$ts}  {$who}  {$op}  {$module}  {$result}  {$error}
+cli-audit-verified = 監査チェーンはレコード {$sequence} まで整合しています。先頭ダイジェスト {$hash}
+cli-audit-broken = 監査チェーンを検証できませんでした: {$reason}
 
 ## --dryrun
 cli-dryrun-apply = ドライラン: {$module} について {$path} に書き込まれる内容です。

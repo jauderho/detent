@@ -79,8 +79,21 @@ detent doctor                  # check for common misconfigurations
 detent service chrony status
 detent backup list hosts
 detent audit
+detent audit verify            # check the audit hash chain; prints the head digest
 detent completions bash
 ```
+
+`detent audit verify` reads the whole operations audit log and checks its
+sequence and hash chain. It exits 0 and prints the sequence number and digest
+of the last record, or exits 1 and names the first bad record (`--json` prints
+the same as an object). The chain shows that a record was edited, removed,
+inserted or moved. It cannot show that the end of the log was cut off, so keep
+the digest it prints somewhere the log's account cannot write (a ticket, a
+mail, another host) and compare it with a later run: a log that was cut back
+prints a different digest. It does not read the web sign-in log
+(`audit/detent-auth.jsonl`), which has no chain. The service also writes each
+change to the journal; forward the journal to a remote host if you need a
+copy the host cannot rewrite.
 
 ### Web console
 
