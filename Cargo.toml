@@ -63,7 +63,7 @@ schemars = "1.2.2"
 arbitrary = { version = "1.4.2", features = ["derive"] }
 proptest = "1.11.0"
 rustix = { version = "1.1.4", default-features = false, features = ["fs", "process", "std"] }
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 # `parsing`: detent-update reads RFC 3339 timestamps out of GitHub release
 # metadata (`published_at`); formatting alone cannot round-trip them.
 time = { version = "0.3", default-features = false, features = ["std", "formatting", "macros", "parsing"] }
@@ -93,9 +93,7 @@ argon2 = { version = "0.6.0", default-features = false, features = [
 ] }
 axum = "0.8.9"
 # TOTP only (RFC 6238), and only together with `sha1`. `hmac` 0.13 and `sha1`
-# 0.11 are on `digest` 0.11 while the rest of the workspace hashes with `sha2`
-# 0.10 (`digest` 0.10); the duplication is deliberate and tolerated by
-# `multiple_crate_versions = "allow"`.
+# 0.11 are on `digest` 0.11, the same generation as the workspace `sha2` 0.11.
 hmac = "0.13.0"
 # Already in the lock through rustls; detent-acme signs TSIG with its HMAC.
 aws-lc-rs = "1.18.1"
@@ -149,9 +147,10 @@ zeroize = "1.9.0"
 # Self-update verifier (PLAN §2.9, ADR-014). Everything here already exists in
 # the lock via other crates except `p256`/`webpki-roots`; no new HTTP stack
 # (ADR-009), no `sigstore` crate (spike 01).
-# `p256`'s `ecdsa` feature lands on `ecdsa`/`digest` 0.16/0.10 — the same
-# `digest` 0.10 generation as the workspace `sha2`, so no hash-stack split.
-p256 = { version = "0.13.2", features = ["ecdsa"] }
+# `p256`'s `ecdsa` feature lands on `ecdsa`/`digest` 0.17/0.11 — the same
+# `digest` 0.11 generation as the workspace `sha2`, so no hash-stack split.
+# Bump `p256` and `sha2` together to keep one `digest` generation.
+p256 = { version = "0.14.0", features = ["ecdsa"] }
 # Leaf SAN and Fulcio OIDC-issuer-extension extraction; the chain verification
 # itself is `webpki` (package `rustls-webpki`, ADR-014: rustls/webpki, already
 # in the tree).

@@ -377,7 +377,7 @@ mod tests {
         let digests: Vec<String> = trust
             .fulcio_roots
             .iter()
-            .map(|der| format!("{:x}", Sha256::digest(der.as_ref())))
+            .map(|der| crate::verify::hex_lower(&Sha256::digest(der.as_ref())))
             .collect();
         assert_eq!(
             digests,
@@ -476,11 +476,11 @@ mod tests {
         // SHA-256 of `timestampAuthorities[0].certChain` of
         // `trusted_root.json`: the leaf, then the root.
         assert_eq!(
-            format!("{:x}", Sha256::digest(tsa.leaf.as_ref())),
+            crate::verify::hex_lower(&Sha256::digest(tsa.leaf.as_ref())),
             "85f927bc07ab62cac3b44356c10efc81b2c6883fda7ab9e6d870d9d13acd05b7"
         );
         assert_eq!(
-            format!("{:x}", Sha256::digest(tsa.root.as_ref())),
+            crate::verify::hex_lower(&Sha256::digest(tsa.root.as_ref())),
             "2aca8fea5d3ce48b01cc77076293c280e6c23ffe44034757ee7833ca9f45d633"
         );
         assert_eq!(tsa.window, (1_751_587_200, i64::MAX));

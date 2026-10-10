@@ -446,7 +446,7 @@ const NOTE_SIGNATURE_PREFIX: &str = "\u{2014} ";
 fn checkpoint_key_hint(key: &VerifyingKey) -> [u8; 4] {
     let mut hasher = Sha256::new();
     hasher.update(P256_SPKI_PREFIX);
-    hasher.update(key.to_encoded_point(false).as_bytes());
+    hasher.update(key.to_sec1_point(false).as_bytes());
     let digest: [u8; 32] = hasher.finalize().into();
     let [a, b, c, d, ..] = digest;
     [a, b, c, d]
@@ -973,7 +973,7 @@ fn root_from_path(
 }
 
 /// Lowercase hex encoding (the in-toto digest spelling).
-fn hex_lower(bytes: &[u8]) -> String {
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len().saturating_mul(2));
     for byte in bytes {
         out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('?'));
@@ -1448,7 +1448,7 @@ mod tests {
             0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06,
             0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
         ];
-        spki.extend_from_slice(key.to_encoded_point(false).as_bytes());
+        spki.extend_from_slice(key.to_sec1_point(false).as_bytes());
         spki
     }
 
