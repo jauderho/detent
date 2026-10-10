@@ -302,12 +302,20 @@ impl SessionStore {
     /// Called on login and on any privilege change. The old id stops working
     /// before this returns.
     ///
+    /// A session is only rotated for the user it belongs to. When `subject`
+    /// is not that user, the presented session is removed and the answer is
+    /// `None`, exactly as for an expired one: the caller then creates a fresh
+    /// session for `subject`, and nothing of the other user's session (its
+    /// second-factor result, its absolute deadline) carries over. The check
+    /// and the removal happen under one lock.
+    ///
     /// # Errors
     ///
     /// [`AuthError::Entropy`] when the new id cannot be generated.
     pub fn rotate(
         &self,
         presented: &str,
+        subject: &str,
         scopes: Option<Scopes>,
         totp_satisfied: Option<bool>,
         now: Instant,
@@ -329,6 +337,9 @@ impl SessionStore {
         let Some(old) = entries.remove(&key) else {
             return Ok(None);
         };
+        if old.session.subject != subject {
+            return Ok(None);
+        }
         let session = Session {
             subject: old.session.subject,
             scopes: scopes.unwrap_or(old.session.scopes),
@@ -547,7 +558,11 @@ mod tests {
         }
         assert!(store.lookup(id.expose(), now).is_none());
         assert!(!store.logout(id.expose()));
-        assert!(store.rotate(id.expose(), None, None, now)?.is_none());
+        assert!(
+            store
+                .rotate(id.expose(), "alice", None, None, now)?
+                .is_none()
+        );
         Ok(())
     }
 
@@ -590,7 +605,13 @@ mod tests {
         let now = Instant::now();
         let (first, before) = store.create("alice", Scopes::read_only(), false, now)?;
         let (second, after) = store
-            .rotate(first.expose(), Some(Scopes::read_write()), Some(true), now)?
+            .rotate(
+                first.expose(),
+                "alice",
+                Some(Scopes::read_write()),
+                Some(true),
+                now,
+            )?
             .ok_or("nothing was rotated")?;
 
         assert_ne!(first.expose(), second.expose());
@@ -605,7 +626,37 @@ mod tests {
         assert_eq!(store.len(), 1);
 
         // Rotating something that is not a session changes nothing.
-        assert!(store.rotate("nope", None, None, now)?.is_none());
+        assert!(store.rotate("nope", "alice", None, None, now)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn rotation_for_another_subject_removes_the_session_and_hands_out_nothing() -> R {
+        let store = store();
+        let start = Instant::now();
+        let (alice, _s) = store.create("alice", Scopes::read_write(), true, start)?;
+        let (bob, _s) = store.create("bob", Scopes::read_write(), false, start)?;
+
+        let later = at(start, 60);
+        assert!(
+            store
+                .rotate(alice.expose(), "bob", None, Some(false), later)?
+                .is_none(),
+            "Alice's session was rotated for Bob"
+        );
+        // Alice's session is gone; Bob's own is untouched.
+        assert!(store.lookup(alice.expose(), later).is_none());
+        assert!(store.lookup(bob.expose(), later).is_some());
+        assert_eq!(store.len(), 1);
+
+        // Only Bob's own id rotates for Bob, and keeps his absolute deadline.
+        let (rotated, session) = store
+            .rotate(bob.expose(), "bob", None, None, later)?
+            .ok_or("Bob's own session was not rotated")?;
+        assert_eq!(session.subject, "bob");
+        assert_eq!(session.created, start);
+        assert!(store.lookup(bob.expose(), later).is_none());
+        assert!(store.lookup(rotated.expose(), later).is_some());
         Ok(())
     }
 
@@ -615,7 +666,7 @@ mod tests {
         let now = Instant::now();
         let (first, _session) = store.create("alice", Scopes::read_only(), true, now)?;
         let (second, rotated) = store
-            .rotate(first.expose(), None, None, now)?
+            .rotate(first.expose(), "alice", None, None, now)?
             .ok_or("nothing was rotated")?;
         assert!(!rotated.scopes.allows(crate::authz::Scope::Write));
         assert!(rotated.totp_satisfied);
@@ -630,7 +681,7 @@ mod tests {
         let (id, _session) = store.create("alice", Scopes::read_only(), false, start)?;
         assert!(
             store
-                .rotate(id.expose(), None, None, at(start, 901))?
+                .rotate(id.expose(), "alice", None, None, at(start, 901))?
                 .is_none()
         );
         assert_eq!(store.len(), 0);

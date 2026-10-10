@@ -474,10 +474,13 @@ async fn attempt(
 
     // Session fixation: a live pre-login id and CSRF token are replaced before
     // the response is built. Rotation deliberately keeps the original absolute
-    // deadline; an invalid or expired presented id simply creates a new session.
+    // deadline of the same user's session. An invalid or expired presented id,
+    // or one that belongs to another user, is dropped and a new session is
+    // created for the verified user.
     let rotated = match presented.as_ref().map(super::secret::Secret::expose) {
         Some(presented) => state.auth.sessions.rotate(
             presented,
+            &verified.name,
             Some(Scopes::read_write()),
             Some(totp_satisfied),
             now,
@@ -1087,6 +1090,95 @@ mod tests {
                 .lookup(&fresh, std::time::Instant::now())
                 .is_some()
         );
+        Ok(())
+    }
+
+    /// A browser holding Alice's session logs in as Bob. Bob's credentials must
+    /// yield Bob's session, with Bob's second-factor result and Bob's password
+    /// restriction, and Alice's session must be gone.
+    #[tokio::test]
+    async fn logging_in_as_another_user_never_reuses_the_presented_session() -> R {
+        use crate::auth::totp::{STEP_SECS, TotpSecret};
+
+        let fixture = fixture_with_alice()?;
+        let secret = TotpSecret::generate()?;
+        fixture.state.auth.users.set_totp("alice", Some(&secret))?;
+        fixture
+            .state
+            .auth
+            .users
+            .create(&fixture.state.auth.hasher, "bob", "swordfish", true)?;
+        let counter = u64::try_from(super::unix_now()).unwrap_or_default() / STEP_SECS;
+        let alice_login = format!(
+            "{{\"username\":\"alice\",\"password\":\"hunter2\",\"totp_code\":\"{}\"}}",
+            secret.code_at(counter).expose()
+        );
+        let first = app(&fixture.state)
+            .oneshot(login_request(&alice_login)?)
+            .await?;
+        assert_eq!(first.status(), StatusCode::OK);
+        let alice_id = cookie_id(&first)?;
+        let alice_view = json(first).await?;
+        let alice_csrf = alice_view
+            .pointer("/csrf_token")
+            .and_then(|v| v.as_str())
+            .ok_or("no csrf token")?
+            .to_owned();
+        assert_eq!(
+            alice_view
+                .pointer("/totp_satisfied")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+
+        // Bob logs in, with Alice's cookie still on the request.
+        let second = app(&fixture.state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(LOGIN_PATH)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, format!("{COOKIE_NAME}={alice_id}"))
+                    .header(SEC_FETCH_SITE, SAME_ORIGIN)
+                    .header(header::ORIGIN, ORIGIN)
+                    .header(header::HOST, "box.example:3333")
+                    .header(CSRF_HEADER, &alice_csrf)
+                    .body(Body::from(credentials("bob", "swordfish")))?,
+            )
+            .await?;
+        assert_eq!(second.status(), StatusCode::OK);
+        let bob_id = cookie_id(&second)?;
+        let bob_view = json(second).await?;
+        assert_ne!(bob_id, alice_id);
+        assert_eq!(
+            bob_view.pointer("/subject").and_then(|v| v.as_str()),
+            Some("bob")
+        );
+        assert_eq!(
+            bob_view
+                .pointer("/totp_satisfied")
+                .and_then(serde_json::Value::as_bool),
+            Some(false),
+            "Alice's second factor was credited to Bob"
+        );
+        assert_eq!(
+            bob_view
+                .pointer("/must_change_password")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+
+        let now = std::time::Instant::now();
+        let sessions = &fixture.state.auth.sessions;
+        assert!(
+            sessions.lookup(&alice_id, now).is_none(),
+            "Alice's session survived Bob's login"
+        );
+        let stored = sessions.lookup(&bob_id, now).ok_or("Bob has no session")?;
+        assert_eq!(stored.subject, "bob");
+        assert!(!stored.totp_satisfied);
+        assert!(stored.must_change_password);
+        assert_eq!(sessions.len(), 1);
         Ok(())
     }
 
