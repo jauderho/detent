@@ -459,8 +459,9 @@ runs are still to be seen.
 Fixes from the threat model, in order (each: test first, one commit):
 
 1. ~~**TM-G1 TOTP cannot be enrolled (medium)**~~ Done 2026-10-09 (`PROGRESS.md`): `detent user totp enable|disable`; the web UI enrolment is still open.
-2. **TM-G8 / TM-G7 password policy:** at least 12 characters, refuse over 128
-   bytes at login, and enforce `must_change_password` at login.
+2. ~~**TM-G8 / TM-G7 password policy**~~ Done 2026-10-09 (`PROGRESS.md`): 12 to
+   128 characters when a password is set, over 128 refused at login, and
+   `must_change_password` enforced (`POST /api/v1/auth/password`).
 3. **TM-G3 / TM-G4 / TM-G5 / TM-G6 audit gaps:** audit `setup`, `user` and
    `token` changes (emit `TokenIssued`/`TokenRevoked`), log a bad bearer
    token or expired session, have the monitor log each `WriteTarget`,
