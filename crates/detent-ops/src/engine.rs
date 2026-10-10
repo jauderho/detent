@@ -502,12 +502,8 @@ impl OpsEngine {
     fn service_status(&mut self, id: &str) -> Result<OpOutcome, OpsError> {
         let module = find_module(&self.modules, id)?;
         let descriptor = module.descriptor();
-        if descriptor.services.is_empty() {
-            return Err(OpsError::NoService {
-                module: descriptor.id.to_owned(),
-            });
-        }
-        // A module the monitor does not know is not "no service".
+        // A module the monitor does not know is not "no service". A module
+        // that declares no service has no binding.
         module_id(&self.client, module)?;
         let binding = self
             .client
