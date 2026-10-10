@@ -55,6 +55,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/auth/password`.
+         * @description Needs the current password (ASVS 2.1.6), holds the new one to the length
+         *     policy, clears `must_change_password`, ends every session the user holds,
+         *     and answers a new unrestricted one.
+         *
+         *     # Errors
+         *
+         *     401 for no session or a refused current password, 400 for a new password
+         *     outside the policy or equal to the current one, 429, 503 and 500 as for
+         *     login.
+         */
+        post: operations["change_password"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/session": {
         parameters: {
             query?: never;
@@ -899,6 +927,13 @@ export interface components {
             /** @description A named service account, e.g. `unbound`. */
             named: string;
         };
+        /** @description The body of `POST /api/v1/auth/password`. */
+        PasswordChangeRequest: {
+            /** @description The password in force now. */
+            current_password: string;
+            /** @description The password to set: 12 to 128 characters, and not the current one. */
+            new_password: string;
+        };
         /** @description A filesystem path owned by a module. Always a compile-time constant. */
         PathSpec: string;
         /** @description A commit-confirm window that is now running in the monitor. */
@@ -1052,6 +1087,8 @@ export interface components {
              * @description Seconds until the session expires, idle and absolute limits combined.
              */
             expires_in_secs: number;
+            /** @description Whether this session may do nothing but change the password. */
+            must_change_password: boolean;
             /** @description Scope names, `["read"]` or `["read", "write"]`. */
             scopes: string[];
             /** @description The user this session belongs to. */
@@ -1297,6 +1334,66 @@ export interface operations {
             };
             /** @description No session to end */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    change_password: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PasswordChangeRequest"];
+            };
+        };
+        responses: {
+            /** @description Password changed; every older session is ended and a new one is set */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionView"];
+                };
+            };
+            /** @description The new password is outside 12 to 128 characters, or equals the current one */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No session, or the current password was refused */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Too many attempts */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The hashing cap is reached or the session table is full */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

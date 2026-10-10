@@ -16,6 +16,7 @@ const SESSION: SessionView = {
   scopes: ['read', 'write'],
   subject: 'operator',
   totp_satisfied: true,
+  must_change_password: false,
 }
 
 const AUTH_ROUTE = '/api/v1/auth/session'

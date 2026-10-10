@@ -9,9 +9,10 @@
 //!
 //!   POST /auth/logout ─▶ SessionStore::logout ─▶ Set-Cookie Max-Age=0 ─▶ 204
 //!   GET  /auth/session ─▶ SessionView (csrf token, subject, scopes, expiry)
+//!   POST /auth/password ─▶ current password ─▶ new password ─▶ new session
 //! ```
 //!
-//! Phase 4c owns the rest of `/api/v1`; this module registers the three routes
+//! Phase 4c owns the rest of `/api/v1`; this module registers the four routes
 //! that must exist before anything else can be authenticated.
 //!
 //! # Guarantees
@@ -61,7 +62,7 @@ use crate::state::AppState;
 
 use super::AuthError;
 use super::audit::{AuthEvent, AuthRecord};
-use super::extract::{Caller, ClientIp, cookie_id, unix_now};
+use super::extract::{ClientIp, PendingCaller, cookie_id, unix_now};
 use super::secret::Secret;
 use super::session::{self, SessionView};
 use super::users::{self, MAX_NAME_LEN, VerifiedUser};
@@ -74,6 +75,9 @@ pub const LOGOUT_PATH: &str = "/api/v1/auth/logout";
 
 /// Where the front end reads its CSRF token and its remaining time.
 pub const SESSION_PATH: &str = "/api/v1/auth/session";
+
+/// Where a signed-in caller changes its own password.
+pub const PASSWORD_PATH: &str = "/api/v1/auth/password";
 
 /// Fluent id of a request body that is not the shape the endpoint expects.
 pub const MALFORMED_BODY_ID: &str = "web-request-malformed";
@@ -102,7 +106,7 @@ pub const MAX_TOTP_CODE_LEN: usize = 16;
 ///
 /// The table exists so that "GET never mutates" (PLAN §2.7) can be *checked*
 /// rather than asserted: [`crate::csrf`]'s test walks this list, and
-/// [`routes`] is built from the same three entries.
+/// [`routes`] is built from the same four entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Route {
     /// The method it is registered for.
@@ -116,7 +120,7 @@ pub struct Route {
 /// Every route this module registers.
 #[must_use]
 pub fn table() -> &'static [Route] {
-    static TABLE: [Route; 3] = [
+    static TABLE: [Route; 4] = [
         Route {
             method: Method::POST,
             path: LOGIN_PATH,
@@ -132,6 +136,11 @@ pub fn table() -> &'static [Route] {
             path: SESSION_PATH,
             mutating: false,
         },
+        Route {
+            method: Method::POST,
+            path: PASSWORD_PATH,
+            mutating: true,
+        },
     ];
     &TABLE
 }
@@ -143,6 +152,7 @@ pub fn routes() -> axum::Router<AppState> {
         .route(LOGIN_PATH, post(login))
         .route(LOGOUT_PATH, post(logout))
         .route(SESSION_PATH, get(session))
+        .route(PASSWORD_PATH, post(change_password))
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +179,25 @@ impl fmt::Debug for LoginRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LoginRequest")
             .field("username", &self.username)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The body of `POST /api/v1/auth/password`.
+#[derive(Clone, Deserialize)]
+#[cfg_attr(test, derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct PasswordChangeRequest {
+    /// The password in force now.
+    pub current_password: String,
+    /// The password to set: 12 to 128 characters, and not the current one.
+    pub new_password: String,
+}
+
+impl fmt::Debug for PasswordChangeRequest {
+    /// Neither field renders; both are passwords.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PasswordChangeRequest")
             .finish_non_exhaustive()
     }
 }
@@ -216,7 +245,7 @@ async fn login(
             established(&id, &view)
         }
         Err(error) => {
-            audit_failure(&state, &error, subject, ip, now);
+            audit_failure(&state, &error, subject, ip, now, AuthEvent::LoginFailed);
             ApiError::from(error).into_response()
         }
     }
@@ -226,9 +255,9 @@ async fn login(
 async fn logout(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
-    caller: Caller,
+    caller: PendingCaller,
 ) -> Result<Response, ApiError> {
-    let (id, session) = caller.require_session()?;
+    let (id, session) = caller.caller().require_session()?;
     let ended = state.auth.sessions.logout(id.expose());
     state.auth.record(
         &AuthRecord::new(
@@ -252,10 +281,132 @@ async fn logout(
 /// `GET /api/v1/auth/session`.
 async fn session(
     State(state): State<AppState>,
-    caller: Caller,
+    caller: PendingCaller,
 ) -> Result<Json<SessionView>, ApiError> {
-    let (_id, session) = caller.require_session()?;
+    let (_id, session) = caller.caller().require_session()?;
     Ok(Json(state.auth.sessions.view(session, Instant::now())))
+}
+
+/// `POST /api/v1/auth/password`.
+///
+/// Needs the current password (ASVS 2.1.6), holds the new one to the length
+/// policy, clears `must_change_password`, ends every session the user holds,
+/// and answers a new unrestricted one.
+///
+/// # Errors
+///
+/// 401 for no session or a refused current password, 400 for a new password
+/// outside the policy or equal to the current one, 429, 503 and 500 as for
+/// login.
+#[cfg_attr(test, utoipa::path(
+    post,
+    path = PASSWORD_PATH,
+    tag = "auth",
+    request_body = PasswordChangeRequest,
+    responses(
+        (status = 200, description = "Password changed; every older session is ended and a new one is set", body = crate::auth::session::SessionView),
+        (status = 400, description = "The new password is outside 12 to 128 characters, or equals the current one", body = crate::error::ErrorBody),
+        (status = 401, description = "No session, or the current password was refused", body = crate::error::ErrorBody),
+        (status = 429, description = "Too many attempts", body = crate::error::ErrorBody),
+        (status = 503, description = "The hashing cap is reached or the session table is full", body = crate::error::ErrorBody),
+    ),
+))]
+pub async fn change_password(
+    State(state): State<AppState>,
+    ClientIp(ip): ClientIp,
+    caller: PendingCaller,
+    body: Result<Json<PasswordChangeRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let (_id, session) = caller.caller().require_session()?;
+    let Ok(Json(request)) = body else {
+        return Ok(
+            ApiError::new(StatusCode::BAD_REQUEST, MessageId::new(MALFORMED_BODY_ID))
+                .into_response(),
+        );
+    };
+    let subject = session.subject.clone();
+    let now = Instant::now();
+    match replace_password(&state, &subject, &request, session.totp_satisfied, ip, now).await {
+        Ok((id, view)) => {
+            state.auth.limiter.record_success(ip, &subject);
+            state.auth.record(
+                &AuthRecord::new(AuthEvent::PasswordChanged, &subject, AuditResult::Ok)
+                    .with_kind(IdentityKind::Session)
+                    .with_client_ip(ip),
+            );
+            Ok(established(&id, &view))
+        }
+        Err(error) => {
+            audit_failure(
+                &state,
+                &error,
+                &subject,
+                ip,
+                now,
+                AuthEvent::PasswordChangeFailed,
+            );
+            Err(ApiError::from(error))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The password change
+// ---------------------------------------------------------------------------
+
+/// Change `subject`'s password and answer a new session for it.
+///
+/// A wrong current password feeds the same limiter as a wrong login, so a
+/// stolen session cannot be used to guess the password offline of the lockout.
+///
+/// # Errors
+///
+/// [`AuthError::RateLimited`], [`AuthError::InvalidCredentials`] for a wrong
+/// or over-long current password, [`AuthError::PasswordTooShort`],
+/// [`AuthError::PasswordTooLong`] and [`AuthError::PasswordUnchanged`] for the
+/// new one, and the store variants.
+async fn replace_password(
+    state: &AppState,
+    subject: &str,
+    request: &PasswordChangeRequest,
+    totp_satisfied: bool,
+    ip: IpAddr,
+    now: Instant,
+) -> Result<Established, AuthError> {
+    state.auth.limiter.check(ip, subject, now)?;
+    if request.current_password.chars().count() > MAX_PASSWORD_LEN {
+        return Err(AuthError::InvalidCredentials);
+    }
+    users::check_password(&request.new_password)?;
+    let permit = state
+        .auth
+        .argon2_permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| AuthError::Busy)?;
+    let auth = state.auth.clone();
+    let name = subject.to_owned();
+    let current = request.current_password.clone();
+    let new = request.new_password.clone();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        auth.users.verify_password(&auth.hasher, &name, &current)?;
+        if current == new {
+            return Err(AuthError::PasswordUnchanged);
+        }
+        auth.users.set_password(&auth.hasher, &name, &new)
+    })
+    .await
+    .map_err(|_| AuthError::Hash)??;
+    // Whoever held the old password may hold a session; none of them survives.
+    state.auth.sessions.revoke_subject(subject);
+    let (id, session) =
+        state
+            .auth
+            .sessions
+            .create(subject, Scopes::read_write(), totp_satisfied, now)?;
+    let view = state.auth.sessions.view(&session, now);
+    Ok((id, view))
 }
 
 // ---------------------------------------------------------------------------
@@ -324,25 +475,34 @@ async fn attempt(
     // Session fixation: a live pre-login id and CSRF token are replaced before
     // the response is built. Rotation deliberately keeps the original absolute
     // deadline; an invalid or expired presented id simply creates a new session.
-    if let Some(presented) = presented.as_ref().map(super::secret::Secret::expose)
-        && let Some((id, session)) = state.auth.sessions.rotate(
+    let rotated = match presented.as_ref().map(super::secret::Secret::expose) {
+        Some(presented) => state.auth.sessions.rotate(
             presented,
             Some(Scopes::read_write()),
             Some(totp_satisfied),
             now,
-        )?
+        )?,
+        None => None,
+    };
+    let (id, mut session) = match rotated {
+        Some(pair) => pair,
+        // Every account this build knows is an administrator: `users.json`
+        // carries no per-user scopes, and `read` alone would make the UI
+        // useless. Scoping down is what API tokens are for.
+        None => {
+            state
+                .auth
+                .sessions
+                .create(&verified.name, Scopes::read_write(), totp_satisfied, now)?
+        }
+    };
+    // An account that owes a password change gets a session that can do
+    // nothing else (TM-G7). The id has not left this function yet.
+    if verified.must_change_password
+        && let Some(restricted) = state.auth.sessions.restrict(id.expose())
     {
-        let view = state.auth.sessions.view(&session, now);
-        return Ok((id, view));
+        session = restricted;
     }
-    // Every account this build knows is an administrator: `users.json` carries
-    // no per-user scopes, and `read` alone would make the UI useless. Scoping
-    // down is what API tokens are for.
-    let (id, session) =
-        state
-            .auth
-            .sessions
-            .create(&verified.name, Scopes::read_write(), totp_satisfied, now)?;
     let view = state.auth.sessions.view(&session, now);
     Ok((id, view))
 }
@@ -384,7 +544,14 @@ fn check_totp(
 }
 
 /// Record a refused attempt, and the lockouts it caused.
-fn audit_failure(state: &AppState, error: &AuthError, subject: &str, ip: IpAddr, now: Instant) {
+fn audit_failure(
+    state: &AppState,
+    error: &AuthError,
+    subject: &str,
+    ip: IpAddr,
+    now: Instant,
+    event: AuthEvent,
+) {
     // Rate-limited attempts do not append: the lockout that caused the
     // limit was already audited as `LockedOut`, and writing on every
     // knock lets an attacker grow the log at will (M10).
@@ -399,7 +566,7 @@ fn audit_failure(state: &AppState, error: &AuthError, subject: &str, ip: IpAddr,
         return;
     }
     state.auth.record(
-        &AuthRecord::new(AuthEvent::LoginFailed, subject, AuditResult::Error)
+        &AuthRecord::new(event, subject, AuditResult::Error)
             .with_kind(IdentityKind::Session)
             .with_client_ip(ip)
             .with_detail(error.message_id()),
@@ -451,8 +618,8 @@ fn set_cookie(response: &mut Response, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        LOGIN_PATH, LOGOUT_PATH, LoginRequest, MALFORMED_SUBJECT, MAX_PASSWORD_LEN, SESSION_PATH,
-        principal_name, routes, table,
+        LOGIN_PATH, LOGOUT_PATH, LoginRequest, MALFORMED_SUBJECT, MAX_PASSWORD_LEN, PASSWORD_PATH,
+        SESSION_PATH, principal_name, routes, table,
     };
     use crate::auth::audit::AuthEvent;
     use crate::auth::session::COOKIE_NAME;
@@ -540,12 +707,15 @@ mod tests {
     // -- the table -----------------------------------------------------------
 
     #[test]
-    fn the_table_and_the_router_describe_the_same_three_routes() {
+    fn the_table_and_the_router_describe_the_same_four_routes() {
         let paths: Vec<&str> = table().iter().map(|route| route.path).collect();
-        assert_eq!(paths, vec![LOGIN_PATH, LOGOUT_PATH, SESSION_PATH]);
+        assert_eq!(
+            paths,
+            vec![LOGIN_PATH, LOGOUT_PATH, SESSION_PATH, PASSWORD_PATH]
+        );
         assert_eq!(
             table().iter().filter(|route| route.mutating).count(),
-            2,
+            3,
             "{:?}",
             table()
         );
@@ -1135,6 +1305,409 @@ mod tests {
             .await?;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert!(fixture.audit.events().is_empty());
+        Ok(())
+    }
+
+    // -- must_change_password and the password change (TM-G7, ASVS 2.1.6) ----
+
+    const NEW_PASSWORD: &str = "a new long passphrase";
+
+    /// The stack plus two routes behind the ordinary extractors, so a
+    /// restricted session can be tried against both.
+    fn app_with_probes(state: &AppState) -> Router {
+        async fn read(_caller: crate::auth::extract::Caller) -> StatusCode {
+            StatusCode::OK
+        }
+        async fn write(_caller: crate::auth::extract::WriteCaller) -> StatusCode {
+            StatusCode::OK
+        }
+        harden(
+            routes()
+                .route("/api/v1/probe", axum::routing::get(read).post(write))
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    csrf_guard,
+                ))
+                .with_state(state.clone()),
+            Duration::from_secs(30),
+        )
+    }
+
+    fn fixture_with_flagged_alice() -> Result<TestState, Box<dyn std::error::Error>> {
+        let fixture = test_state()?;
+        fixture
+            .state
+            .auth
+            .users
+            .create(&fixture.state.auth.hasher, "alice", "hunter2", true)?;
+        Ok(fixture)
+    }
+
+    /// A signed-in browser: the cookie id, the CSRF token, and the login view.
+    struct Browser {
+        id: String,
+        csrf: String,
+        view: serde_json::Value,
+    }
+
+    async fn sign_in(
+        state: &AppState,
+        username: &str,
+        password: &str,
+    ) -> Result<Browser, Box<dyn std::error::Error>> {
+        let response = app_with_probes(state)
+            .oneshot(login_request(&credentials(username, password))?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let id = cookie_id(&response)?;
+        let view = json(response).await?;
+        let csrf = view
+            .pointer("/csrf_token")
+            .and_then(|v| v.as_str())
+            .ok_or("no csrf token")?
+            .to_owned();
+        Ok(Browser { id, csrf, view })
+    }
+
+    /// A request carrying the cookie, and the CSRF proof when `csrf` is set.
+    fn from_browser(
+        method: Method,
+        uri: &str,
+        id: &str,
+        csrf: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> Result<Request<Body>, Box<dyn std::error::Error>> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::COOKIE, format!("{COOKIE_NAME}={id}"))
+            .header(SEC_FETCH_SITE, SAME_ORIGIN)
+            .header(header::ORIGIN, ORIGIN)
+            .header(header::HOST, "box.example:3333");
+        if let Some(csrf) = csrf {
+            builder = builder.header(CSRF_HEADER, csrf);
+        }
+        Ok(match body {
+            Some(body) => builder
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))?,
+            None => builder.body(Body::empty())?,
+        })
+    }
+
+    fn change(current: &str, new: &str) -> serde_json::Value {
+        serde_json::json!({"current_password": current, "new_password": new})
+    }
+
+    async fn message_id(
+        response: axum::response::Response,
+    ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        Ok(json(response)
+            .await?
+            .pointer("/message_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned))
+    }
+
+    /// An account with the flag signs in, but the session reaches nothing
+    /// except the password change, its own description and sign-out.
+    #[tokio::test]
+    async fn a_flagged_account_gets_a_session_that_only_changes_the_password() -> R {
+        let fixture = fixture_with_flagged_alice()?;
+        let browser = sign_in(&fixture.state, "alice", "hunter2").await?;
+        assert_eq!(
+            browser
+                .view
+                .pointer("/must_change_password")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        let stack = app_with_probes(&fixture.state);
+        for (method, csrf) in [(Method::GET, None), (Method::POST, Some(&browser.csrf))] {
+            let response = stack
+                .clone()
+                .oneshot(from_browser(
+                    method,
+                    "/api/v1/probe",
+                    &browser.id,
+                    csrf.map(String::as_str),
+                    None,
+                )?)
+                .await?;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(
+                message_id(response).await?.as_deref(),
+                Some("web-auth-password-change-required")
+            );
+        }
+        // It can still describe itself, and end.
+        let described = stack
+            .clone()
+            .oneshot(from_browser(
+                Method::GET,
+                SESSION_PATH,
+                &browser.id,
+                None,
+                None,
+            )?)
+            .await?;
+        assert_eq!(described.status(), StatusCode::OK);
+        assert_eq!(
+            json(described)
+                .await?
+                .pointer("/must_change_password")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        let ended = stack
+            .oneshot(from_browser(
+                Method::POST,
+                LOGOUT_PATH,
+                &browser.id,
+                Some(&browser.csrf),
+                None,
+            )?)
+            .await?;
+        assert_eq!(ended.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    /// An account without the flag is not restricted.
+    #[tokio::test]
+    async fn an_unflagged_account_is_not_restricted() -> R {
+        let fixture = fixture_with_alice()?;
+        let browser = sign_in(&fixture.state, "alice", "hunter2").await?;
+        assert_eq!(
+            browser
+                .view
+                .pointer("/must_change_password")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        let response = app_with_probes(&fixture.state)
+            .oneshot(from_browser(
+                Method::GET,
+                "/api/v1/probe",
+                &browser.id,
+                None,
+                None,
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    /// Changing the password clears the flag, ends every old session, and
+    /// answers a new unrestricted one; the old password stops working.
+    #[tokio::test]
+    async fn changing_the_password_clears_the_flag_and_replaces_the_session() -> R {
+        let fixture = fixture_with_flagged_alice()?;
+        let browser = sign_in(&fixture.state, "alice", "hunter2").await?;
+        let stack = app_with_probes(&fixture.state);
+
+        let response = stack
+            .clone()
+            .oneshot(from_browser(
+                Method::POST,
+                PASSWORD_PATH,
+                &browser.id,
+                Some(&browser.csrf),
+                Some(change("hunter2", NEW_PASSWORD)),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let fresh_id = cookie_id(&response)?;
+        assert_ne!(fresh_id, browser.id);
+        let view = json(response).await?;
+        assert_eq!(
+            view.pointer("/must_change_password")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert!(
+            fixture
+                .state
+                .auth
+                .users
+                .list()
+                .iter()
+                .all(|user| !user.must_change_password)
+        );
+
+        // The old session is gone; the new one reaches everything.
+        let old = stack
+            .clone()
+            .oneshot(from_browser(
+                Method::GET,
+                SESSION_PATH,
+                &browser.id,
+                None,
+                None,
+            )?)
+            .await?;
+        assert_eq!(old.status(), StatusCode::UNAUTHORIZED);
+        let new = stack
+            .clone()
+            .oneshot(from_browser(
+                Method::GET,
+                "/api/v1/probe",
+                &fresh_id,
+                None,
+                None,
+            )?)
+            .await?;
+        assert_eq!(new.status(), StatusCode::OK);
+
+        // Only the new password signs in, and unrestricted.
+        let refused = stack
+            .clone()
+            .oneshot(login_request(&credentials("alice", "hunter2"))?)
+            .await?;
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+        let again = sign_in(&fixture.state, "alice", NEW_PASSWORD).await?;
+        assert_eq!(
+            again
+                .view
+                .pointer("/must_change_password")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert!(fixture.audit.events().contains(&AuthEvent::PasswordChanged));
+        Ok(())
+    }
+
+    /// ASVS 2.1.6: the current password is required, a wrong one is the
+    /// generic credential failure, and nothing changes.
+    #[tokio::test]
+    async fn a_password_change_needs_the_current_password() -> R {
+        let fixture = fixture_with_flagged_alice()?;
+        let browser = sign_in(&fixture.state, "alice", "hunter2").await?;
+        let response = app_with_probes(&fixture.state)
+            .oneshot(from_browser(
+                Method::POST,
+                PASSWORD_PATH,
+                &browser.id,
+                Some(&browser.csrf),
+                Some(change("not the password", NEW_PASSWORD)),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(response.headers().get(header::SET_COOKIE).is_none());
+        assert_eq!(
+            message_id(response).await?.as_deref(),
+            Some("web-auth-invalid-credentials")
+        );
+        assert!(
+            fixture
+                .state
+                .auth
+                .users
+                .list()
+                .iter()
+                .all(|user| user.must_change_password)
+        );
+        assert!(
+            fixture
+                .audit
+                .events()
+                .contains(&AuthEvent::PasswordChangeFailed)
+        );
+        // The old password still works: nothing was written.
+        sign_in(&fixture.state, "alice", "hunter2").await?;
+        Ok(())
+    }
+
+    /// The new password obeys the policy, and must differ from the old one.
+    #[tokio::test]
+    async fn a_new_password_must_pass_the_policy_and_differ() -> R {
+        let fixture = fixture_with_flagged_alice()?;
+        let browser = sign_in(&fixture.state, "alice", "hunter2").await?;
+        let stack = app_with_probes(&fixture.state);
+        for (new, want) in [
+            ("elevenchars".to_owned(), "web-auth-password-too-short"),
+            ("x".repeat(129), "web-auth-password-too-long"),
+            ("hunter2".to_owned(), "web-auth-password-too-short"),
+        ] {
+            let response = stack
+                .clone()
+                .oneshot(from_browser(
+                    Method::POST,
+                    PASSWORD_PATH,
+                    &browser.id,
+                    Some(&browser.csrf),
+                    Some(change("hunter2", &new)),
+                )?)
+                .await?;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{new}");
+            assert_eq!(message_id(response).await?.as_deref(), Some(want));
+        }
+        // A stored short password cannot be "changed" to itself either, but a
+        // long one can be tested for equality.
+        let long = "the very same passphrase";
+        fixture
+            .state
+            .auth
+            .users
+            .set_password(&fixture.state.auth.hasher, "alice", long)?;
+        let browser = sign_in(&fixture.state, "alice", long).await?;
+        let response = stack
+            .oneshot(from_browser(
+                Method::POST,
+                PASSWORD_PATH,
+                &browser.id,
+                Some(&browser.csrf),
+                Some(change(long, long)),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            message_id(response).await?.as_deref(),
+            Some("web-auth-password-unchanged")
+        );
+        Ok(())
+    }
+
+    /// The route is a state change like any other: no CSRF token, no change;
+    /// no session, no route.
+    #[tokio::test]
+    async fn the_password_route_enforces_csrf_and_needs_a_session() -> R {
+        let fixture = fixture_with_flagged_alice()?;
+        let browser = sign_in(&fixture.state, "alice", "hunter2").await?;
+        let stack = app_with_probes(&fixture.state);
+        let response = stack
+            .clone()
+            .oneshot(from_browser(
+                Method::POST,
+                PASSWORD_PATH,
+                &browser.id,
+                None,
+                Some(change("hunter2", NEW_PASSWORD)),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            message_id(response).await?.as_deref(),
+            Some("web-auth-csrf-rejected")
+        );
+        assert!(
+            fixture
+                .state
+                .auth
+                .users
+                .list()
+                .iter()
+                .all(|user| user.must_change_password)
+        );
+        let anonymous = stack
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(PASSWORD_PATH)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(change("hunter2", NEW_PASSWORD).to_string()))?,
+            )
+            .await?;
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
         Ok(())
     }
 

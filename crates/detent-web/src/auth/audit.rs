@@ -71,6 +71,10 @@ pub enum AuthEvent {
     LoginFailed,
     /// A principal was locked out by the rate limiter.
     LockedOut,
+    /// A signed-in user changed their own password.
+    PasswordChanged,
+    /// A password change was refused: the current password was wrong.
+    PasswordChangeFailed,
     /// A session was explicitly ended.
     LoggedOut,
     /// An API token was minted.

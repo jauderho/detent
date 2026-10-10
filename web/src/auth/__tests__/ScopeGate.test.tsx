@@ -17,6 +17,7 @@ function sessionWith(scopes: string[]): SessionView {
     scopes,
     subject: 'operator',
     totp_satisfied: false,
+    must_change_password: false,
   }
 }
 

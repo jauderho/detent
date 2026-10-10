@@ -66,6 +66,10 @@ web-auth-csrf-rejected = this request did not pass its cross-site checks; reload
 web-auth-entropy-unavailable = the system random number generator failed, so no credential could be issued.
 web-auth-hash-failed = the password could not be hashed.
 web-auth-invalid-credentials = the user name, password or code was not correct.
+web-auth-password-change-required = change your password before doing anything else.
+web-auth-password-too-long = a password may have at most 128 characters.
+web-auth-password-too-short = a password must have at least 12 characters.
+web-auth-password-unchanged = the new password must differ from the current one.
 web-auth-rate-limited = too many attempts; wait a moment and try again.
 web-auth-session-limit = too many sessions are open; wait for one to expire and sign in again.
 web-auth-store-malformed = a credential file on this host is not valid.
@@ -98,6 +102,18 @@ login-totp-reveal = use an authenticator code
 login-submit = sign in
 login-submitting = signing in
 login-retry-after = too many attempts; wait {$seconds} seconds and try again.
+
+## Change password
+password-change-title = change your password
+password-change-panel-label = password
+password-change-intro = this account must set a new password before it can do anything else.
+password-change-current-label = current password
+password-change-new-label = new password
+password-change-new-description = 12 to 128 characters; any characters are allowed.
+password-change-confirm-label = confirm new password
+password-change-mismatch = the two new passwords are not the same.
+password-change-submit = change password
+password-change-submitting = changing password
 
 ## Session and scope
 auth-checking = checking this session

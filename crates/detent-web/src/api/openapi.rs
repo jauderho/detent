@@ -247,6 +247,7 @@ impl utoipa::Modify for SecurityAddon {
         login_doc,
         logout_doc,
         session_doc,
+        crate::auth::routes::change_password,
         healthz_doc,
         super::modules::list,
         super::modules::get_one,

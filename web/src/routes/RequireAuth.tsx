@@ -13,13 +13,14 @@
 import { Localized } from '@fluent/react'
 import { Navigate, Outlet, useLocation } from 'react-router'
 import { useAuth } from '@/auth/AuthProvider'
+import { ChangePasswordPage } from './ChangePasswordPage'
 import { ROUTES } from './paths'
 
 /** What `/login` reads back out of history state. */
 export type LoginLocationState = { readonly from?: string }
 
 export function RequireAuth() {
-  const { status } = useAuth()
+  const { status, session } = useAuth()
   const location = useLocation()
 
   if (status === 'loading') {
@@ -36,6 +37,12 @@ export function RequireAuth() {
     const from = `${location.pathname}${location.search}`
     const state: LoginLocationState = { from }
     return <Navigate to={ROUTES.login} replace state={state} />
+  }
+
+  // A flagged account sees nothing else until its password is changed; the
+  // server refuses every other route to this session anyway (TM-G7).
+  if (session?.must_change_password) {
+    return <ChangePasswordPage />
   }
 
   return <Outlet />

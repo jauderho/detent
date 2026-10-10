@@ -1391,6 +1391,47 @@ async fn cert_renew_refuses_and_audits_a_read_caller() -> R {
     Ok(())
 }
 
+/// TM-G7: a session restricted to a password change reaches no API route, in
+/// the real router, on a read and on a write.
+#[tokio::test]
+async fn a_session_that_must_change_its_password_reaches_no_api_route() -> R {
+    let fixture = test_state()?;
+    let (id, session) = fixture.state.auth.sessions.create(
+        "alice",
+        crate::authz::Scopes::read_write(),
+        false,
+        std::time::Instant::now(),
+    )?;
+    fixture
+        .state
+        .auth
+        .sessions
+        .restrict(id.expose())
+        .ok_or("no session to restrict")?;
+    let cookie = format!("{}={}", crate::auth::COOKIE_NAME, id.expose());
+    for (method, path) in [(Method::GET, "/api/v1/modules"), (Method::POST, RENEW)] {
+        let response = app(&fixture.state)
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(header::HOST, "box.example:3333")
+                    .header(header::COOKIE, &cookie)
+                    .header(crate::csrf::SEC_FETCH_SITE, crate::csrf::SAME_ORIGIN)
+                    .header(header::ORIGIN, "https://box.example:3333")
+                    .header(crate::csrf::CSRF_HEADER, session.csrf_token.expose())
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+        assert_eq!(
+            error_body(response).await?.1,
+            "web-auth-password-change-required"
+        );
+    }
+    Ok(())
+}
+
 /// A cookie session must send the CSRF token, as for every other `POST`.
 #[tokio::test]
 async fn cert_renew_refuses_a_session_without_the_csrf_token() -> R {

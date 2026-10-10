@@ -70,6 +70,10 @@ pub struct Session {
     pub last_seen: Instant,
     /// Whether a second factor was presented.
     pub totp_satisfied: bool,
+    /// Whether the account's password must be changed before anything else
+    /// is allowed. Set at login from the stored flag; the session may then
+    /// only change the password, read itself and end.
+    pub must_change_password: bool,
 }
 
 impl fmt::Debug for Session {
@@ -79,6 +83,7 @@ impl fmt::Debug for Session {
             .field("subject", &self.subject)
             .field("scopes", &self.scopes)
             .field("totp_satisfied", &self.totp_satisfied)
+            .field("must_change_password", &self.must_change_password)
             .finish_non_exhaustive()
     }
 }
@@ -101,6 +106,8 @@ pub struct SessionView {
     pub expires_in_secs: u64,
     /// Whether a second factor was presented.
     pub totp_satisfied: bool,
+    /// Whether this session may do nothing but change the password.
+    pub must_change_password: bool,
 }
 
 impl fmt::Debug for SessionView {
@@ -110,6 +117,7 @@ impl fmt::Debug for SessionView {
             .field("scopes", &self.scopes)
             .field("expires_in_secs", &self.expires_in_secs)
             .field("totp_satisfied", &self.totp_satisfied)
+            .field("must_change_password", &self.must_change_password)
             .finish_non_exhaustive()
     }
 }
@@ -245,6 +253,7 @@ impl SessionStore {
             created: now,
             last_seen: now,
             totp_satisfied,
+            must_change_password: false,
         };
         let mut entries = self
             .entries
@@ -327,6 +336,9 @@ impl SessionStore {
             created: old.session.created,
             last_seen: now,
             totp_satisfied: totp_satisfied.unwrap_or(old.session.totp_satisfied),
+            // Fresh credentials were just verified; the caller restricts the
+            // session again when the account still owes a password change.
+            must_change_password: false,
         };
         entries.insert(
             key_of(fresh.expose()),
@@ -388,7 +400,22 @@ impl SessionStore {
             csrf_token: session.csrf_token.expose().to_owned(),
             expires_in_secs: self.expires_in(session, now).as_secs(),
             totp_satisfied: session.totp_satisfied,
+            must_change_password: session.must_change_password,
         }
+    }
+
+    /// Restrict the session `presented` names to changing its password.
+    ///
+    /// Answers the restricted session, or `None` when no live session has
+    /// that id.
+    pub fn restrict(&self, presented: &str) -> Option<Session> {
+        let mut entries = self.entries.lock().ok()?;
+        let entry = entries.get_mut(&key_of(presented))?;
+        if !entry.id.ct_eq(presented) {
+            return None;
+        }
+        entry.session.must_change_password = true;
+        Some(entry.session.clone())
     }
 
     /// Remove every expired entry from `entries`.

@@ -142,6 +142,22 @@ impl Caller {
         ScopedAuthz::new(self.scopes)
     }
 
+    /// Refuse a session that may only change its password.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::PasswordChangeRequired`] for a restricted session.
+    fn require_unrestricted(self) -> Result<Self, AuthError> {
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.must_change_password)
+        {
+            return Err(AuthError::PasswordChangeRequired);
+        }
+        Ok(self)
+    }
+
     /// The cookie session, when this caller has one. A bearer token does not.
     #[must_use]
     pub fn session(&self) -> Option<&Session> {
@@ -233,6 +249,39 @@ impl FromRequestParts<AppState> for Caller {
     ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
         std::future::ready(
             Self::resolve(state, &parts.headers, Instant::now(), unix_now())
+                .and_then(Self::require_unrestricted)
+                .map_err(ApiError::from),
+        )
+    }
+}
+
+/// A [`Caller`] that is let through while its password change is pending.
+///
+/// [`Caller`] itself refuses a session restricted by `must_change_password`
+/// (TM-G7), so every handler is closed to it by default. Only the three
+/// routes a restricted session needs — change the password, describe the
+/// session, sign out — take this instead.
+#[derive(Debug)]
+pub struct PendingCaller(Caller);
+
+impl PendingCaller {
+    /// The caller underneath.
+    #[must_use]
+    pub const fn caller(&self) -> &Caller {
+        &self.0
+    }
+}
+
+impl FromRequestParts<AppState> for PendingCaller {
+    type Rejection = ApiError;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        std::future::ready(
+            Caller::resolve(state, &parts.headers, Instant::now(), unix_now())
+                .map(Self)
                 .map_err(ApiError::from),
         )
     }

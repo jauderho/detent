@@ -20,6 +20,7 @@ const READ_ONLY_SESSION: SessionView = {
   scopes: ['read'],
   subject: 'operator',
   totp_satisfied: false,
+  must_change_password: false,
 }
 
 const SESSION: SessionView = {
@@ -28,6 +29,7 @@ const SESSION: SessionView = {
   scopes: ['read', 'write'],
   subject: 'operator',
   totp_satisfied: false,
+  must_change_password: false,
 }
 
 function report(overrides: Partial<CertReport> = {}): CertReport {

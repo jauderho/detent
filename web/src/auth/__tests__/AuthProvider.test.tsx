@@ -26,6 +26,7 @@ const SESSION: SessionView = {
   scopes: ['read', 'write'],
   subject: 'operator',
   totp_satisfied: false,
+  must_change_password: false,
 }
 
 /** Shows the context's state, and can drive each of its transitions. */

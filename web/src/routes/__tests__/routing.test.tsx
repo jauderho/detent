@@ -27,6 +27,7 @@ const SESSION: SessionView = {
   scopes: ['read', 'write'],
   subject: 'operator',
   totp_satisfied: false,
+  must_change_password: false,
 }
 
 /** Stands in for a page that talks to the host. */

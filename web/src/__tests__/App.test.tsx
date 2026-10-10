@@ -23,6 +23,7 @@ const SESSION: SessionView = {
   scopes: ['read'],
   subject: 'operator',
   totp_satisfied: false,
+  must_change_password: false,
 }
 
 describe('App', () => {

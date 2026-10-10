@@ -3992,7 +3992,7 @@ mod tests {
             &config,
             "setup",
         ])?;
-        let mut input = b"hunter22\nhunter22\n".as_slice();
+        let mut input = b"correct-horse-1\ncorrect-horse-1\n".as_slice();
         let mut out = Vec::new();
         let mut notes = Vec::new();
         let exit = super::run_as(
@@ -4016,7 +4016,7 @@ mod tests {
             "add",
             "bob",
         ])?;
-        let mut input = b"hunter22\nhunter22\n".as_slice();
+        let mut input = b"correct-horse-1\ncorrect-horse-1\n".as_slice();
         let mut out = Vec::new();
         let mut notes = Vec::new();
         let exit = super::run_as(
@@ -4092,7 +4092,7 @@ mod tests {
             ];
             argv.extend_from_slice(words);
             let cli = parse(&argv)?;
-            let typed = b"hunter22\nhunter22\n";
+            let typed = b"correct-horse-1\ncorrect-horse-1\n";
             let mut input = typed.as_slice();
             let mut out = Vec::new();
             let mut notes = Vec::new();

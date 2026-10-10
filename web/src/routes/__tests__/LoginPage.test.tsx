@@ -21,6 +21,7 @@ const SESSION: SessionView = {
   scopes: ['read', 'write'],
   subject: 'operator',
   totp_satisfied: false,
+  must_change_password: false,
 }
 
 /** The screen, mounted after the session probe has answered "nobody". */

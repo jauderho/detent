@@ -32,6 +32,8 @@ import { useApiClient } from '@/api/ApiProvider'
 import {
   fetchSession,
   type LoginRequest,
+  type PasswordChangeRequest,
+  changePassword as postChangePassword,
   login as postLogin,
   logout as postLogout,
   SESSION_QUERY_KEY,
@@ -61,6 +63,7 @@ export type AuthContextValue = {
   /** Why the session probe itself failed, when it failed for a reason other than `401`. */
   readonly probeError: ApiError | null
   login(credentials: LoginRequest): Promise<ApiResult<SessionView>>
+  changePassword(request: PasswordChangeRequest): Promise<ApiResult<SessionView>>
   logout(): Promise<void>
 }
 
@@ -125,6 +128,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [client, queryClient],
   )
 
+  const changePassword = useCallback(
+    async (request: PasswordChangeRequest): Promise<ApiResult<SessionView>> => {
+      const result = await postChangePassword(client, request)
+      if (!result.ok) return result
+      // The server ended every older session and issued this one: a new CSRF
+      // token, and no restriction.
+      queryClient.setQueryData<SessionView | null>(SESSION_QUERY_KEY, result.data)
+      client.setCsrfToken(result.data.csrf_token)
+      return result
+    },
+    [client, queryClient],
+  )
+
   const logout = useCallback(async (): Promise<void> => {
     // The answer is deliberately ignored: a refused logout still means this
     // browser is finished with the session, and the cookie is gone either way.
@@ -151,9 +167,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         session === null ? null : query.dataUpdatedAt + session.expires_in_secs * MS_PER_SECOND,
       probeError: query.error === null ? null : toApiError(query.error),
       login,
+      changePassword,
       logout,
     }
-  }, [query.isPending, query.dataUpdatedAt, query.error, session, login, logout])
+  }, [query.isPending, query.dataUpdatedAt, query.error, session, login, changePassword, logout])
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }

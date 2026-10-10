@@ -66,6 +66,10 @@ web-auth-csrf-rejected = diese Anfrage hat die Cross-Site-Prüfungen nicht besta
 web-auth-entropy-unavailable = der Zufallszahlengenerator des Systems ist ausgefallen, daher konnten keine Zugangsdaten ausgestellt werden.
 web-auth-hash-failed = das Passwort konnte nicht gehasht werden.
 web-auth-invalid-credentials = der Benutzername, das Passwort oder der Code war nicht korrekt.
+web-auth-password-change-required = ändere dein Passwort, bevor du etwas anderes tust.
+web-auth-password-too-long = ein Passwort darf höchstens 128 Zeichen haben.
+web-auth-password-too-short = ein Passwort muss mindestens 12 Zeichen haben.
+web-auth-password-unchanged = das neue Passwort muss sich vom aktuellen unterscheiden.
 web-auth-rate-limited = zu viele Versuche; warte einen Moment und versuche es erneut.
 web-auth-session-limit = zu viele Sitzungen sind offen; warte, bis eine abläuft, und melde dich erneut an.
 web-auth-store-malformed = eine Zugangsdatendatei auf diesem Host ist ungültig.
@@ -98,6 +102,18 @@ login-totp-reveal = Authenticator-Code verwenden
 login-submit = Anmelden
 login-submitting = Anmeldung läuft
 login-retry-after = zu viele Versuche; warte {$seconds} Sekunden und versuche es erneut.
+
+## Change password
+password-change-title = Passwort ändern
+password-change-panel-label = Passwort
+password-change-intro = dieses Konto muss ein neues Passwort setzen, bevor es etwas anderes tun kann.
+password-change-current-label = aktuelles Passwort
+password-change-new-label = neues Passwort
+password-change-new-description = 12 bis 128 Zeichen; alle Zeichen sind erlaubt.
+password-change-confirm-label = neues Passwort bestätigen
+password-change-mismatch = die beiden neuen Passwörter stimmen nicht überein.
+password-change-submit = Passwort ändern
+password-change-submitting = Passwort wird geändert
 
 ## Session and scope
 auth-checking = Sitzung wird geprüft

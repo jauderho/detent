@@ -105,6 +105,13 @@ pub enum AuthError {
     /// A password has more than [`users::MAX_PASSWORD_CHARS`] characters.
     #[error("a password may have at most {} characters", users::MAX_PASSWORD_CHARS)]
     PasswordTooLong,
+    /// The new password is the one in force. A change that keeps the old
+    /// password would clear `must_change_password` and change nothing.
+    #[error("the new password must differ from the current one")]
+    PasswordUnchanged,
+    /// The session may only change its password until it has.
+    #[error("the password must be changed before anything else")]
+    PasswordChangeRequired,
     /// A user by that name is already on file.
     #[error("that user already exists")]
     UserExists,
@@ -194,6 +201,8 @@ impl AuthError {
             Self::NameInvalid { .. } => MessageId::new("web-auth-user-name-invalid"),
             Self::PasswordTooShort => MessageId::new("web-auth-password-too-short"),
             Self::PasswordTooLong => MessageId::new("web-auth-password-too-long"),
+            Self::PasswordUnchanged => MessageId::new("web-auth-password-unchanged"),
+            Self::PasswordChangeRequired => MessageId::new("web-auth-password-change-required"),
             Self::UserExists => MessageId::new("web-auth-user-exists"),
             Self::UnknownUser => MessageId::new("web-auth-user-unknown"),
             Self::InvalidCredentials => MessageId::new("web-auth-invalid-credentials"),
@@ -225,12 +234,13 @@ impl AuthError {
             Self::InvalidCredentials | Self::Unauthenticated => S::UNAUTHORIZED,
             Self::RateLimited { .. } => S::TOO_MANY_REQUESTS,
             Self::SessionLimit | Self::Busy => S::SERVICE_UNAVAILABLE,
-            Self::CsrfRejected => S::FORBIDDEN,
+            Self::CsrfRejected | Self::PasswordChangeRequired => S::FORBIDDEN,
             Self::UserExists | Self::TokenLimit => S::CONFLICT,
             Self::UnknownUser | Self::UnknownToken => S::NOT_FOUND,
             Self::NameInvalid { .. }
             | Self::PasswordTooShort
             | Self::PasswordTooLong
+            | Self::PasswordUnchanged
             | Self::AmbiguousCredentials
             | Self::TotpSecretInvalid
             | Self::StoreMalformed { .. } => S::BAD_REQUEST,

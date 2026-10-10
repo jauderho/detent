@@ -149,6 +149,78 @@
         }
       }
     },
+    "/api/v1/auth/password": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`POST /api/v1/auth/password`.",
+        "description": "Needs the current password (ASVS 2.1.6), holds the new one to the length\npolicy, clears `must_change_password`, ends every session the user holds,\nand answers a new unrestricted one.\n\n# Errors\n\n401 for no session or a refused current password, 400 for a new password\noutside the policy or equal to the current one, 429, 503 and 500 as for\nlogin.",
+        "operationId": "change_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordChangeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Password changed; every older session is ended and a new one is set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The new password is outside 12 to 128 characters, or equals the current one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No session, or the current password was refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many attempts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The hashing cap is reached or the session table is full",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/auth/session": {
       "get": {
         "tags": [
@@ -2071,6 +2143,25 @@
         ],
         "description": "The account a [`Target`] must belong to after a write."
       },
+      "PasswordChangeRequest": {
+        "type": "object",
+        "description": "The body of `POST /api/v1/auth/password`.",
+        "required": [
+          "current_password",
+          "new_password"
+        ],
+        "properties": {
+          "current_password": {
+            "type": "string",
+            "description": "The password in force now."
+          },
+          "new_password": {
+            "type": "string",
+            "description": "The password to set: 12 to 128 characters, and not the current one."
+          }
+        },
+        "additionalProperties": false
+      },
       "PathSpec": {
         "type": "string",
         "description": "A filesystem path owned by a module. Always a compile-time constant."
@@ -2372,7 +2463,8 @@
           "scopes",
           "csrf_token",
           "expires_in_secs",
-          "totp_satisfied"
+          "totp_satisfied",
+          "must_change_password"
         ],
         "properties": {
           "csrf_token": {
@@ -2384,6 +2476,10 @@
             "format": "int64",
             "description": "Seconds until the session expires, idle and absolute limits combined.",
             "minimum": 0
+          },
+          "must_change_password": {
+            "type": "boolean",
+            "description": "Whether this session may do nothing but change the password."
           },
           "scopes": {
             "type": "array",

@@ -1325,7 +1325,7 @@ mod tests {
             &UserAction::Add {
                 name: "alice".to_owned(),
             },
-            "hunter22\nhunter22\n",
+            "correct-horse-1\ncorrect-horse-1\n",
         )?;
         assert_eq!(ran.exit, Exit::Ok, "{}", ran.notes);
         Ok(())
@@ -1385,8 +1385,11 @@ mod tests {
         assert_eq!(ran.exit, Exit::Ok, "{}", ran.notes);
 
         let hasher = Hasher::new(detent_web::config::Argon2Params::default(), 1024)?;
-        let verified =
-            UserStore::load(&settings.state_root)?.verify_password(&hasher, "alice", "hunter22")?;
+        let verified = UserStore::load(&settings.state_root)?.verify_password(
+            &hasher,
+            "alice",
+            "correct-horse-1",
+        )?;
         let stored = verified.totp.ok_or("no secret was stored")?;
         assert_eq!(stored.to_base32().expose(), FIXED_SECRET);
         assert_eq!(verified.totp_last_counter, Some(step(NOW)));

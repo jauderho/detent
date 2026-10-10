@@ -12,6 +12,7 @@ import type { components } from './schema'
 
 export type SessionView = components['schemas']['SessionView']
 export type LoginRequest = components['schemas']['LoginRequest']
+export type PasswordChangeRequest = components['schemas']['PasswordChangeRequest']
 
 /** Query key for the session probe; also the prefix the auth cache is cleared by. */
 export const SESSION_QUERY_KEY = ['auth', 'session'] as const
@@ -46,6 +47,22 @@ export function login(
 ): Promise<ApiResult<SessionView>> {
   return client.post('/api/v1/auth/login', {
     body: credentials,
+    suppressUnauthorizedEvent: true,
+  })
+}
+
+/**
+ * `POST /api/v1/auth/password`.
+ *
+ * `401` here means the current password was refused, not that the session is
+ * gone, so it bypasses the global handler like a refused login does.
+ */
+export function changePassword(
+  client: ApiClient,
+  request: PasswordChangeRequest,
+): Promise<ApiResult<SessionView>> {
+  return client.post('/api/v1/auth/password', {
+    body: request,
     suppressUnauthorizedEvent: true,
   })
 }

@@ -20,6 +20,7 @@ const READ_WRITE_SESSION: SessionView = {
   scopes: ['read', 'write'],
   subject: 'operator',
   totp_satisfied: true,
+  must_change_password: false,
 }
 
 const READ_ONLY_SESSION: SessionView = { ...READ_WRITE_SESSION, scopes: ['read'] }

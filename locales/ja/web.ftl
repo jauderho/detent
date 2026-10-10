@@ -66,6 +66,10 @@ web-auth-csrf-rejected = このリクエストはクロスサイトチェック�
 web-auth-entropy-unavailable = システムの乱数生成器が失敗したため、資格情報を発行できませんでした。
 web-auth-hash-failed = パスワードをハッシュ化できませんでした。
 web-auth-invalid-credentials = ユーザー名、パスワード、またはコードが正しくありません。
+web-auth-password-change-required = 他の操作の前にパスワードを変更してください。
+web-auth-password-too-long = パスワードは 128 文字以下にしてください。
+web-auth-password-too-short = パスワードは 12 文字以上にしてください。
+web-auth-password-unchanged = 新しいパスワードは現在のパスワードと異なるものにしてください。
 web-auth-rate-limited = 試行回数が多すぎます。しばらく待ってからやり直してください。
 web-auth-session-limit = 開いているセッションが多すぎます。どれかが期限切れになるまで待ってから、再度サインインしてください。
 web-auth-store-malformed = このホスト上の資格情報ファイルが有効ではありません。
@@ -98,6 +102,18 @@ login-totp-reveal = 認証コードを使う
 login-submit = サインイン
 login-submitting = サインイン中
 login-retry-after = 試行回数が多すぎます。{$seconds} 秒待ってからやり直してください。
+
+## Change password
+password-change-title = パスワードの変更
+password-change-panel-label = パスワード
+password-change-intro = このアカウントは、他の操作を行う前に新しいパスワードを設定する必要があります。
+password-change-current-label = 現在のパスワード
+password-change-new-label = 新しいパスワード
+password-change-new-description = 12〜128 文字。使用できる文字に制限はありません。
+password-change-confirm-label = 新しいパスワード (確認)
+password-change-mismatch = 新しいパスワードが一致しません。
+password-change-submit = パスワードを変更
+password-change-submitting = 変更中
 
 ## Session and scope
 auth-checking = このセッションを確認中

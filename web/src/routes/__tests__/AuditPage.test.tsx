@@ -36,6 +36,7 @@ const SESSION: SessionView = {
   scopes: ['read', 'write'],
   subject: 'operator',
   totp_satisfied: false,
+  must_change_password: false,
 }
 
 function record(overrides: Partial<AuditRecord> = {}): AuditRecord {
