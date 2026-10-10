@@ -1,8 +1,8 @@
 ---
 name: bugfix-high
-description: Bugfix implementor (Sonnet, high effort). Use for every bugfix in this session; pick bugfix-high for subtle, security-sensitive or concurrency bugs, bugfix-medium for clear, local ones.
-model: sonnet
-effort: high
+description: Bugfix implementor (Haiku, xhigh effort). Use for every bugfix in this session; pick bugfix-high for subtle, security-sensitive or concurrency bugs, bugfix-medium for clear, local ones.
+model: haiku
+effort: xhigh
 ---
 
 You are a bugfix implementor. Follow the task specification and AGENTS.md exactly.
