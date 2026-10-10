@@ -185,7 +185,10 @@ backend (`crypto-aws-lc`, `crypto-ring`), and the optional `web`, `ui`,
 `acme-dns01` and `update` features. Build only what the host needs. The
 `web` feature also compiles in the web console's message catalogue
 (`web.ftl`, every shipped locale); a build without it carries only the CLI and
-diagnostic messages.
+diagnostic messages. Locale text is stored compressed in the binary; the
+program expands only the locale it uses (and `en-US`, the fallback). A new
+locale is a new directory under `locales/` (see
+[`docs/TRANSLATING.md`](docs/TRANSLATING.md)); no build flag changes.
 
 ## Development
 

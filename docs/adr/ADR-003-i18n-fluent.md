@@ -40,6 +40,16 @@ Negative:
   is extra tooling (`bun run i18n:check`) that must stay in sync with both
   the Rust and web string sets.
 
+## Update 2026-10-10: shipped locales and embedding
+
+Twelve locales ship (owner decision): `en-US`, `en-GB`, `zh-CN`, `zh-TW`,
+`es-ES`, `pt-BR`, `ja-JP`, `fr-FR`, `de-DE`, `ru-RU`, `hi-IN`, `bn-BD`. No
+right-to-left locale ships. The Rust side does not use `i18n-embed`: a build
+script in `detent-i18n` scans `locales/*/`, packs each file as raw DEFLATE
+(`miniz_oxide`), and a `Localizer` inflates only the locale in use and `en-US`.
+The web console loads one `web.ftl` chunk per locale on demand. Adding a locale
+is adding a directory (`docs/TRANSLATING.md`).
+
 ## Alternatives considered
 
 - Inline string literals with a lighter i18n library — rejected implicitly:
