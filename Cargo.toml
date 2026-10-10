@@ -137,7 +137,7 @@ tower-http = { version = "0.7.0", features = ["timeout"] }
 # `#[utoipa::path]` `Path`/`Query` parameter extraction from axum's own
 # types, which is all this crate needs; `utoipa-axum` is deliberately not
 # pulled in on top of it (routes are still registered by hand).
-utoipa = { version = "5.5.0", features = ["axum_extras"] }
+utoipa = { version = "6.0.0", features = ["axum_extras"] }
 zeroize = "1.9.0"
 
 # Self-update verifier (PLAN §2.9, ADR-014). Everything here already exists in
