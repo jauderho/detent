@@ -484,6 +484,10 @@ Fixes from the threat model, in order (each: test first, one commit):
 7. ~~**Login rotation kept the old session's subject**~~ Done 2026-10-10
    (`PROGRESS.md`): `SessionStore::rotate` takes the verified subject; a
    presented session of another user is removed and login creates a new one.
+8. ~~**`GET /api/v1/services/<id>` answers 500 (found on the test host)**~~ Done
+   2026-10-10 (`PROGRESS.md`): the status read goes worker, monitor, runner
+   (`Request::Service` with `Status`, answered by the appended
+   `Response::UnitStatus`); no seccomp change. Unproven until a test-host run.
 
 ### Track G — blocked on the owner or external infrastructure
 
