@@ -469,7 +469,7 @@ export interface components {
              *     or the apply changed nothing.
              */
             checks: components["schemas"]["CheckReport"][];
-            commit?: null | components["schemas"]["PendingCommit"];
+            commit?: components["schemas"]["PendingCommit"] | null;
             /**
              * @description Whether the target did not exist before. Always `false`: apply never
              *     creates a target and refuses a missing one.
@@ -477,13 +477,13 @@ export interface components {
             created: boolean;
             /** @description The module. */
             module: string;
-            mounts?: null | components["schemas"]["MountsReport"];
+            mounts?: components["schemas"]["MountsReport"] | null;
             /** @description Digest now on disk. */
             new_hash: components["schemas"]["Sha256Digest"];
             /** @description The target that was written. */
             path: string;
-            prev_hash?: null | components["schemas"]["Sha256Digest"];
-            service?: null | components["schemas"]["ServiceReport"];
+            prev_hash?: components["schemas"]["Sha256Digest"] | null;
+            service?: components["schemas"]["ServiceReport"] | null;
         };
         /** @description The body of `POST /api/v1/modules/{id}/apply`. */
         ApplyRequest: {
@@ -501,7 +501,7 @@ export interface components {
             expected_hash?: string | null;
             /** @description The candidate model. */
             model: Record<string, never>;
-            service_action?: null | components["schemas"]["ApiServiceCommand"];
+            service_action?: components["schemas"]["ApiServiceCommand"] | null;
         };
         /** @description One argument of an [`ExternalCheck`] command line. */
         ArgTemplate: {
@@ -582,7 +582,7 @@ export interface components {
          *     "unknown", never a failure: status must work even when the parse does not.
          */
         CertReport: {
-            expiry_warning?: null | components["schemas"]["ExpiryWarning"];
+            expiry_warning?: components["schemas"]["ExpiryWarning"] | null;
             /** @description Uppercase colon-separated SHA-256 of the DER, as printed at startup. */
             fingerprint: string;
             /**
@@ -658,12 +658,12 @@ export interface components {
             args: {
                 [key: string]: string;
             };
-            field?: null | components["schemas"]["FieldPath"];
+            field?: components["schemas"]["FieldPath"] | null;
             /** @description The Fluent id of the message. */
             id: components["schemas"]["MessageId"];
             /** @description How much this finding matters. */
             severity: components["schemas"]["Severity"];
-            span?: null | components["schemas"]["Span"];
+            span?: components["schemas"]["Span"] | null;
         };
         /**
          * @description The findings from one call to `ConfigModule::validate`, in the order they were
@@ -863,7 +863,7 @@ export interface components {
          *     it.
          */
         ModuleView: {
-            current_hash?: null | components["schemas"]["Sha256Digest"];
+            current_hash?: components["schemas"]["Sha256Digest"] | null;
             /** @description The module's static metadata. */
             descriptor: components["schemas"]["ModuleDescriptor"];
             /** @description Validation findings for that model. */
@@ -1063,7 +1063,7 @@ export interface components {
              *     determine it.
              */
             enabled?: boolean | null;
-            since?: null | components["schemas"]["SystemTimeView"];
+            since?: components["schemas"]["SystemTimeView"] | null;
             /** @description Current run state. */
             state: components["schemas"]["State"];
             /**
@@ -1447,7 +1447,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": null | components["schemas"]["PendingCommit"];
+                    "application/json": components["schemas"]["PendingCommit"] | null;
                 };
             };
             /** @description No credential */

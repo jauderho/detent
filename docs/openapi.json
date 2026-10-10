@@ -267,10 +267,10 @@
                 "schema": {
                   "oneOf": [
                     {
-                      "type": "null"
+                      "$ref": "#/components/schemas/PendingCommit"
                     },
                     {
-                      "$ref": "#/components/schemas/PendingCommit"
+                      "type": "null"
                     }
                   ]
                 }
@@ -1140,11 +1140,11 @@
           "commit": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/PendingCommit",
                 "description": "The armed commit-confirm window, for a module whose descriptor sets\n`commit_confirm`."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -1159,11 +1159,11 @@
           "mounts": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/MountsReport",
                 "description": "What happened to the mount units of the entries the apply added, for\na module that declares mounts (`mounts`). `None` for every other\nmodule, and when the apply changed nothing."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -1178,22 +1178,22 @@
           "prev_hash": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/Sha256Digest",
                 "description": "Digest of the replaced contents; `None` when the file was created."
+              },
+              {
+                "type": "null"
               }
             ]
           },
           "service": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/ServiceReport",
                 "description": "The service action, when one was requested."
+              },
+              {
+                "type": "null"
               }
             ]
           }
@@ -1230,11 +1230,11 @@
           "service_action": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/ApiServiceCommand",
                 "description": "What to do to the module's service afterwards."
+              },
+              {
+                "type": "null"
               }
             ]
           }
@@ -1425,11 +1425,11 @@
           "expiry_warning": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/ExpiryWarning",
                 "description": "PLAN Phase 6 failure UX: `half` at 50 % of lifetime used, `quarter`\nat 75 % (25 % remains). `None` when the validity window did not\nparse or no threshold is reached yet."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -1567,11 +1567,11 @@
           "field": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/FieldPath",
                 "description": "The model field this finding is about, if any."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -1586,11 +1586,11 @@
           "span": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/Span",
                 "description": "The byte range in the source file this finding is about, if any."
+              },
+              {
+                "type": "null"
               }
             ]
           }
@@ -1989,11 +1989,11 @@
           "current_hash": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/Sha256Digest",
                 "description": "Digest of the file the model came from."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -2437,11 +2437,11 @@
           "since": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/SystemTimeView",
                 "description": "When the unit entered its current state, when the backend can\ndetermine it."
+              },
+              {
+                "type": "null"
               }
             ]
           },
