@@ -52,8 +52,8 @@ use super::proto::{
 };
 use super::transport::{Channel, ChannelError};
 use crate::fs::atomic::{
-    AtomicError, BackupEntry, InPlace, InPlaceMarker, WriteRequest, list_backups, read_with_digest,
-    remove_marker, restore_backup_with, write_atomic,
+    AtomicError, BackupEntry, InPlace, InPlaceMarker, Sha256Digest, WriteRequest, list_backups,
+    read_with_digest, remove_marker, restore_backup_with, write_atomic,
 };
 use crate::service::{MountUnitState, UpdateStart};
 
@@ -715,7 +715,8 @@ impl<'a> Monitor<'a> {
             });
         }
 
-        Ok(match request {
+        let summary = RequestSummary::of(&request);
+        let response = match request {
             // A second handshake is as much a protocol error as a missing one.
             Request::Hello { .. } => Response::Error(ProtoError::HandshakeRequired),
             Request::ReadTarget { target } => self.read_target(target),
@@ -750,7 +751,11 @@ impl<'a> Monitor<'a> {
             Request::Shutdown => Response::ShuttingDown,
             Request::ReloadUnitFiles { module } => self.reload_unit_files(module),
             Request::StartUpdate { tag } => self.start_update(&tag),
-        })
+        };
+        if let Some(summary) = summary {
+            summary.log(&response);
+        }
+        Ok(response)
     }
 
     /// Start the CLI updater for `tag` (BUGFIX E16): a valid release tag,
@@ -1666,6 +1671,130 @@ fn atomic_to_proto(err: &AtomicError) -> ProtoError {
         }
         AtomicError::BadDigest => ProtoError::Io("invalid digest".to_owned()),
         AtomicError::Clock => ProtoError::Io("system clock out of range".to_owned()),
+    }
+}
+
+/// What the monitor says about one state-changing request (`THREAT_MODEL`
+/// TM-G5): which request, which ids, how big and which digest, and how it
+/// ended.
+///
+/// The ops audit log is written by the worker, so a taken worker can leave a
+/// change out of it. This line is written by the monitor, which the worker
+/// cannot reach, to `tracing` (journald, `RUST_LOG=info` in the unit). It
+/// needs no file, so the monitor's confinement does not change.
+///
+/// It holds ids, a size, a digest and a refusal text, never the request body.
+/// The refusal texts of [`ProtoError`] carry no path by contract.
+struct RequestSummary {
+    /// The request, as a snake-case name.
+    request: &'static str,
+    /// The target id the request names.
+    target: Option<u16>,
+    /// The module id the request names.
+    module: Option<u16>,
+    /// The service binding id the request names.
+    binding: Option<u16>,
+    /// The commit id the request names.
+    commit: Option<u32>,
+    /// The service action.
+    action: Option<&'static str>,
+    /// Length of the bytes the request carries.
+    size: Option<u64>,
+    /// SHA-256 of the bytes the request carries.
+    digest: Option<String>,
+}
+
+impl RequestSummary {
+    /// The summary of `request`, or `None` for one that changes no state.
+    fn of(request: &Request) -> Option<Self> {
+        if !request.changes_state() {
+            return None;
+        }
+        let mut summary = Self {
+            request: "other",
+            target: None,
+            module: None,
+            binding: None,
+            commit: None,
+            action: None,
+            size: None,
+            digest: None,
+        };
+        match request {
+            Request::WriteTarget { target, bytes, .. } => {
+                summary.request = "write_target";
+                summary.target = Some(target.get());
+                summary.size = u64::try_from(bytes.len()).ok();
+                summary.digest = Some(Sha256Digest::of(bytes).to_string());
+            }
+            Request::Restore { module, .. } => {
+                summary.request = "restore";
+                summary.module = Some(module.get());
+            }
+            Request::Service { binding, action } => {
+                summary.request = "service";
+                summary.binding = Some(binding.get());
+                summary.action = Some(match action {
+                    ServiceAction::Restart => "restart",
+                    ServiceAction::Reload => "reload",
+                    ServiceAction::Start => "start",
+                    ServiceAction::Stop => "stop",
+                    ServiceAction::Status => "status",
+                });
+            }
+            Request::StartConfirmTimer { commit, .. } => {
+                summary.request = "start_confirm_timer";
+                summary.commit = Some(commit.get());
+            }
+            Request::ConfirmCommit { commit } => {
+                summary.request = "confirm_commit";
+                summary.commit = Some(commit.get());
+            }
+            Request::RollbackCommit { commit } => {
+                summary.request = "rollback_commit";
+                summary.commit = Some(commit.get());
+            }
+            Request::Mount { target } => {
+                summary.request = "mount";
+                summary.target = Some(target.get());
+            }
+            Request::ReloadUnitFiles { module } => {
+                summary.request = "reload_unit_files";
+                summary.module = Some(module.get());
+            }
+            Request::StartUpdate { .. } => summary.request = "start_update",
+            Request::ReplaceBinary { .. } => summary.request = "replace_binary",
+            Request::StageBegin { .. } => summary.request = "stage_begin",
+            Request::StageUpdate { .. } => summary.request = "stage_update",
+            Request::Hello { .. }
+            | Request::ReadTarget { .. }
+            | Request::RunCheck { .. }
+            | Request::ListBackups { .. }
+            | Request::PendingCommit
+            | Request::Shutdown => return None,
+        }
+        Some(summary)
+    }
+
+    /// Write the line, now that `response` is known.
+    fn log(&self, response: &Response) {
+        let (outcome, error) = match response {
+            Response::Error(err) => ("error", Some(err.to_string())),
+            _ => ("ok", None),
+        };
+        tracing::info!(
+            request = self.request,
+            target = self.target,
+            module = self.module,
+            binding = self.binding,
+            commit = self.commit,
+            action = self.action,
+            size = self.size,
+            digest = self.digest,
+            outcome,
+            error,
+            "privsep request"
+        );
     }
 }
 
@@ -3354,6 +3483,206 @@ mod tests {
             finish_send_error(ChannelError::Io(std::io::Error::other("x"))),
             Err(super::MonitorError::Channel(ChannelError::Io(_)))
         ));
+    }
+
+    // -- request records (TM-G5) ------------------------------------------------
+
+    type LoggedEvent = Vec<(String, String)>;
+
+    /// Keeps every event as its `(field, value)` pairs.
+    #[derive(Clone, Default)]
+    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<LoggedEvent>>>);
+
+    struct Fields<'a>(&'a mut LoggedEvent);
+
+    impl tracing::field::Visit for Fields<'_> {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.push((field.name().to_owned(), value.to_owned()));
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.push((field.name().to_owned(), format!("{value:?}")));
+        }
+    }
+
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut fields = vec![("level".to_owned(), event.metadata().level().to_string())];
+            event.record(&mut Fields(&mut fields));
+            if let Ok(mut events) = self.0.lock() {
+                events.push(fields);
+            }
+        }
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    /// Runs `body` with a subscriber on this thread and returns what it
+    /// logged beside what it returned.
+    fn capture<T>(body: impl FnOnce() -> T) -> (T, Vec<LoggedEvent>) {
+        let capture = Capture::default();
+        let out = tracing::subscriber::with_default(capture.clone(), body);
+        let events = capture
+            .0
+            .lock()
+            .map(|events| events.clone())
+            .unwrap_or_default();
+        (out, events)
+    }
+
+    fn field<'a>(event: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        event
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// The `privsep request` events, in order.
+    fn request_events(events: &[LoggedEvent]) -> Vec<&LoggedEvent> {
+        events
+            .iter()
+            .filter(|event| field(event, "message") == Some("privsep request"))
+            .collect()
+    }
+
+    #[test]
+    fn a_state_changing_request_leaves_one_record_with_its_outcome()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &OkServices,
+        };
+        let mut monitor = greeted(fx.allow()?, hooks);
+        let (result, events) = capture(|| -> Result<(), Box<dyn std::error::Error>> {
+            // A refused write: the guard digest is wrong.
+            let stale = Some(Sha256Digest::of(b"not what is on disk"));
+            assert!(matches!(
+                monitor.dispatch(Request::WriteTarget {
+                    target: TargetId(0),
+                    expected_prev: stale,
+                    bytes: b"v2".to_vec(),
+                    journal: false,
+                })?,
+                Response::Error(ProtoError::Conflict { .. })
+            ));
+            assert!(matches!(
+                monitor.dispatch(Request::WriteTarget {
+                    target: TargetId(0),
+                    expected_prev: None,
+                    bytes: b"v2".to_vec(),
+                    journal: false,
+                })?,
+                Response::Written(_)
+            ));
+            assert!(matches!(
+                monitor.dispatch(Request::Restore {
+                    module: ModuleId(0),
+                    backup: BackupId(0),
+                })?,
+                Response::Restored { .. }
+            ));
+            assert!(matches!(
+                monitor.dispatch(Request::Service {
+                    binding: BindingId(0),
+                    action: ServiceAction::Restart,
+                })?,
+                Response::Serviced(_)
+            ));
+            // An id outside the table is logged too.
+            assert!(matches!(
+                monitor.dispatch(Request::Mount {
+                    target: TargetId(77),
+                })?,
+                Response::Error(ProtoError::UnknownId { .. })
+            ));
+            Ok(())
+        });
+        result?;
+
+        let records = request_events(&events);
+        let summary: Vec<_> = records
+            .iter()
+            .map(|event| (field(event, "request"), field(event, "outcome")))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                (Some("write_target"), Some("error")),
+                (Some("write_target"), Some("ok")),
+                (Some("restore"), Some("ok")),
+                (Some("service"), Some("ok")),
+                (Some("mount"), Some("error")),
+            ]
+        );
+        for record in &records {
+            assert_eq!(field(record, "level"), Some("INFO"), "{record:?}");
+        }
+        let digest = Sha256Digest::of(b"v2").to_string();
+        let [refused, written, restored, serviced, mounted] = records.as_slice() else {
+            return Err("expected five records".into());
+        };
+        assert_eq!(field(refused, "target"), Some("0"));
+        assert_eq!(field(refused, "size"), Some("2"));
+        assert_eq!(field(refused, "digest"), Some(digest.as_str()));
+        assert!(
+            field(refused, "error").is_some_and(|text| text.contains("changed on disk")),
+            "{refused:?}"
+        );
+        assert_eq!(field(written, "digest"), Some(digest.as_str()));
+        assert_eq!(field(written, "error"), None);
+        assert_eq!(field(restored, "module"), Some("0"));
+        assert_eq!(field(serviced, "binding"), Some("0"));
+        assert_eq!(field(serviced, "action"), Some("restart"));
+        assert_eq!(field(mounted, "target"), Some("77"));
+        Ok(())
+    }
+
+    #[test]
+    fn reads_and_a_service_status_leave_no_record_and_no_content()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &OkServices,
+        };
+        let mut monitor = greeted(fx.allow()?, hooks);
+        let (result, events) = capture(|| -> Result<(), Box<dyn std::error::Error>> {
+            monitor.dispatch(Request::ReadTarget {
+                target: TargetId(0),
+            })?;
+            monitor.dispatch(Request::ListBackups {
+                module: ModuleId(0),
+            })?;
+            monitor.dispatch(Request::PendingCommit)?;
+            monitor.dispatch(Request::Service {
+                binding: BindingId(0),
+                action: ServiceAction::Status,
+            })?;
+            monitor.dispatch(Request::WriteTarget {
+                target: TargetId(0),
+                expected_prev: None,
+                bytes: b"secret-looking-contents".to_vec(),
+                journal: false,
+            })?;
+            Ok(())
+        });
+        result?;
+        let records = request_events(&events);
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert!(
+            !format!("{events:?}").contains("secret-looking-contents"),
+            "the request body reached the log"
+        );
+        Ok(())
     }
 
     // -- handshake gating -------------------------------------------------------
