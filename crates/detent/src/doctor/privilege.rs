@@ -82,8 +82,12 @@ pub(super) fn checks(mode: PrivilegeMode, host: &Host<'_>) -> Vec<Check> {
         checks.push(account_check(&host.account, &host.group));
         checks.push(state_owner_check(host.state_root, account));
         checks.push(backups_check(&host.state_root.join("backups"), account));
-        checks.push(polkit_rule_check(host.polkit_rule));
-        checks.push(polkit_daemon_check(host.runner));
+        let daemon = polkit_daemon_check(host.runner);
+        checks.push(polkit_rule_check(
+            host.polkit_rule,
+            daemon.status == Status::Ok,
+        ));
+        checks.push(daemon);
         checks.push(unit_check(host.runner));
     }
     checks
@@ -175,16 +179,37 @@ fn backups_check(backups: &Path, account: Option<&UserIds>) -> Check {
 
 /// The polkit rule: present, root's, not writable by others, and the detent
 /// rule (the one this build ships, or at least one for the `detent` user).
-fn polkit_rule_check(rule: &Path) -> Check {
+///
+/// Distributions make `rules.d` unreadable to other users (Ubuntu: `0750
+/// root:polkitd`), so the `detent` user normally cannot even `stat` the
+/// rule. That is the normal state of a correct install, not a fault: the row
+/// is `ok` with a note that the content was not compared, but only when a
+/// polkit daemon is installed (`daemon`). Otherwise it stays `warn`. As root
+/// the rule is read and compared.
+fn polkit_rule_check(rule: &Path, daemon: bool) -> Check {
     let path = rule.display();
-    let meta = match std::fs::symlink_metadata(rule) {
-        Ok(meta) => meta,
-        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
-            return Check::new(
+    let unreadable = || {
+        if daemon {
+            Check::new(
+                "polkit-rule",
+                Status::Ok,
+                format!(
+                    "{path}: not readable by this user, content not compared \
+                     (run `sudo detent doctor` to compare it)"
+                ),
+            )
+        } else {
+            Check::new(
                 "polkit-rule",
                 Status::Warn,
                 format!("{path}: cannot read as this user (run doctor as root)"),
-            );
+            )
+        }
+    };
+    let meta = match std::fs::symlink_metadata(rule) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            return unreadable();
         }
         Err(err) => {
             return Check::new(
@@ -226,11 +251,7 @@ fn polkit_rule_check(rule: &Path) -> Check {
             Status::Fail,
             format!("{path} is not the detent rule"),
         ),
-        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => Check::new(
-            "polkit-rule",
-            Status::Warn,
-            format!("{path}: cannot read as this user (run doctor as root)"),
-        ),
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => unreadable(),
         Err(err) => Check::new("polkit-rule", Status::Fail, format!("{path}: {err}")),
     }
 }
@@ -496,7 +517,7 @@ mod tests {
     fn the_polkit_rule_must_be_present_root_owned_and_the_detent_rule() -> R {
         let dir = tempfile::TempDir::new()?;
         let rule = dir.path().join("50-detent.rules");
-        let absent = polkit_rule_check(&rule);
+        let absent = polkit_rule_check(&rule, true);
         assert_eq!(absent.status, Status::Fail);
         assert!(
             absent.detail.contains("--mode capability-user"),
@@ -506,13 +527,13 @@ mod tests {
         std::fs::write(&rule, PACKAGED_RULE)?;
         std::fs::set_permissions(&rule, std::fs::Permissions::from_mode(0o644))?;
         let root_owned = std::fs::metadata(&rule)?.uid() == 0;
-        let packaged = polkit_rule_check(&rule);
+        let packaged = polkit_rule_check(&rule, true);
         if root_owned {
             assert_eq!(packaged.status, Status::Ok, "{packaged:?}");
             std::fs::write(&rule, PACKAGED_RULE.replace("reload-daemon", "x"))?;
-            assert_eq!(polkit_rule_check(&rule).status, Status::Warn);
+            assert_eq!(polkit_rule_check(&rule, true).status, Status::Warn);
             std::fs::write(&rule, "polkit.addRule(function () {});\n")?;
-            assert_eq!(polkit_rule_check(&rule).status, Status::Fail);
+            assert_eq!(polkit_rule_check(&rule, true).status, Status::Fail);
             std::fs::write(&rule, PACKAGED_RULE)?;
         } else {
             // Not root: the file is this user's, and polkit would read a
@@ -521,13 +542,39 @@ mod tests {
             assert!(packaged.detail.contains("must be root's"), "{packaged:?}");
         }
         std::fs::set_permissions(&rule, std::fs::Permissions::from_mode(0o666))?;
-        assert_eq!(polkit_rule_check(&rule).status, Status::Fail);
+        assert_eq!(polkit_rule_check(&rule, true).status, Status::Fail);
 
         let link = dir.path().join("link.rules");
         std::os::unix::fs::symlink(&rule, &link)?;
-        let linked = polkit_rule_check(&link);
+        let linked = polkit_rule_check(&link, true);
         assert_eq!(linked.status, Status::Fail);
         assert!(linked.detail.contains("not a regular file"), "{linked:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn an_unreadable_polkit_rule_is_ok_with_a_note_only_beside_a_daemon() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let rules = dir.path().join("rules.d");
+        std::fs::create_dir(&rules)?;
+        let rule = rules.join("50-detent.rules");
+        std::fs::write(&rule, PACKAGED_RULE)?;
+        // Like Ubuntu's `0750 root:polkitd`: this user cannot enter it.
+        std::fs::set_permissions(&rules, std::fs::Permissions::from_mode(0o000))?;
+        let readable = std::fs::symlink_metadata(&rule).is_ok();
+        let with_daemon = polkit_rule_check(&rule, true);
+        let without = polkit_rule_check(&rule, false);
+        std::fs::set_permissions(&rules, std::fs::Permissions::from_mode(0o755))?;
+        if readable {
+            // Root reads through any mode; the row then compares the file.
+            return Ok(());
+        }
+        assert_eq!(with_daemon.status, Status::Ok, "{with_daemon:?}");
+        assert!(
+            with_daemon.detail.contains("sudo detent doctor"),
+            "{with_daemon:?}"
+        );
+        assert_eq!(without.status, Status::Warn, "{without:?}");
         Ok(())
     }
 
