@@ -445,8 +445,15 @@ mode = "capability-user"` with polkit and the doctor check, optional mTLS,
 numbers in the README, then v1.0.0. Acceptance is in PLAN Phase 12.
 
 `[privilege] mode = "capability-user"`: done in code 2026-10-09
-(`PROGRESS.md`); unproven until a test-host run
-(`scripts/capability-user-check.sh`).
+(`PROGRESS.md`). Test-host run 2026-10-10: the mode works (processes and
+capabilities, `/etc` write, restart and `daemon-reload` through polkit, polkit
+refusals, mount activation); `systemd-analyze security` 1.8 (capability-user)
+and 2.6 (root-confined, target 2.5). Open from that run: the `doctor` row
+`polkit-rule` is `warn` on a host whose `rules.d` is `0750 root:polkitd`;
+`GET /api/v1/services/<id>` answers 500 in both modes (the worker runs
+`systemctl show`; seccomp has no `pipe2`); two faults in
+`scripts/capability-user-check.sh` (root `runuser` pid as the polkit subject;
+`--verbose` text in the saved API answers). Details in `PROGRESS.md`.
 
 Landed 2026-10-09 (CI only, `PROGRESS.md`): the `core-semver`, `unsafe-report`
 (`cargo geiger`) and weekly `mutants.yml` (`cargo-mutants`) jobs. Their first CI
