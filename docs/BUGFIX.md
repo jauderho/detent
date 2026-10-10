@@ -472,6 +472,9 @@ Fixes from the threat model, in order (each: test first, one commit):
    `sendto`): owner decision, §4.
 6. **TM-G12 tag push gives a signed release:** the rulesets in
    `docs/RELEASING.md` (E5, owner).
+7. ~~**Login rotation kept the old session's subject**~~ Done 2026-10-10
+   (`PROGRESS.md`): `SessionStore::rotate` takes the verified subject; a
+   presented session of another user is removed and login creates a new one.
 
 ### Track G — blocked on the owner or external infrastructure
 
