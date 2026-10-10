@@ -30,7 +30,11 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write as _};
 
 use detent_core::diag::MessageId;
-use detent_web::auth::{AuthError, Hasher, TokenStore, TotpSecret, UserStore};
+use detent_ops::audit::AuditResult;
+use detent_ops::identity::IdentityKind;
+use detent_web::auth::{
+    AuthError, AuthEvent, AuthRecord, FileAuthAudit, Hasher, TokenStore, TotpSecret, UserStore,
+};
 use detent_web::authz::Scope;
 use rustix::termios::{self, LocalModes, OptionalActions};
 use zeroize::Zeroizing;
@@ -93,15 +97,17 @@ pub fn setup(
         Ok(hasher) => hasher,
         Err(err) => return credential_failed(&err, renderer, streams),
     };
-    match store.create(&hasher, &args.name, &password, false) {
-        Ok(()) => {}
+    let event = match store.create(&hasher, &args.name, &password, false) {
+        Ok(()) => AuthEvent::UserCreated,
         Err(AuthError::UserExists) if args.force => {
             if let Err(err) = store.set_password(&hasher, &args.name, &password) {
                 return credential_failed(&err, renderer, streams);
             }
+            AuthEvent::PasswordChanged
         }
         Err(err) => return credential_failed(&err, renderer, streams),
-    }
+    };
+    audit_change(settings, event, &args.name, renderer, streams)?;
     render_result(
         renderer,
         streams,
@@ -173,6 +179,7 @@ fn user_add(
     if let Err(err) = store.create(&hasher, name, &password, false) {
         return credential_failed(&err, renderer, streams);
     }
+    audit_change(settings, AuthEvent::UserCreated, name, renderer, streams)?;
     render_result(
         renderer,
         streams,
@@ -220,6 +227,13 @@ fn user_passwd(
     if let Err(err) = store.set_password(&hasher, name, &password) {
         return credential_failed(&err, renderer, streams);
     }
+    audit_change(
+        settings,
+        AuthEvent::PasswordChanged,
+        name,
+        renderer,
+        streams,
+    )?;
     render_result(
         renderer,
         streams,
@@ -253,6 +267,7 @@ fn user_rm(
     if let Err(err) = store.remove(name) {
         return credential_failed(&err, renderer, streams);
     }
+    audit_change(settings, AuthEvent::UserRemoved, name, renderer, streams)?;
     render_result(
         renderer,
         streams,
@@ -310,7 +325,8 @@ fn totp_enable(
         Ok(secret) => secret,
         Err(err) => return credential_failed(&err, renderer, streams),
     };
-    enrol_totp(&store, name, &secret, &now_secs, renderer, streams)
+    let audit = FileAuthAudit::under_state_root(&settings.state_root);
+    enrol_totp(&store, name, &secret, &now_secs, &audit, renderer, streams)
 }
 
 /// Shows `secret` on `out`, reads a code, and stores the secret only if the
@@ -318,12 +334,13 @@ fn totp_enable(
 ///
 /// The secret goes to `out` and nowhere else: not to `notes`, not to a log.
 /// The code that proved the enrolment is recorded as used, so it cannot be
-/// replayed at the next sign-in.
+/// replayed at the next sign-in. A stored secret is recorded in `audit`.
 fn enrol_totp(
     store: &UserStore,
     name: &str,
     secret: &TotpSecret,
     now: &dyn Fn() -> u64,
+    audit: &FileAuthAudit,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
@@ -364,6 +381,7 @@ fn enrol_totp(
     {
         return credential_failed(&err, renderer, streams);
     }
+    record_change(audit, AuthEvent::TotpEnabled, name, renderer, streams)?;
     render_result(
         renderer,
         streams,
@@ -415,6 +433,7 @@ fn totp_disable(
     if let Err(err) = store.set_totp(name, None) {
         return credential_failed(&err, renderer, streams);
     }
+    audit_change(settings, AuthEvent::TotpDisabled, name, renderer, streams)?;
     render_result(
         renderer,
         streams,
@@ -511,6 +530,13 @@ fn token_create(
         Ok(minted) => minted,
         Err(err) => return credential_failed(&err, renderer, streams),
     };
+    audit_change(
+        settings,
+        AuthEvent::TokenIssued,
+        &token_subject(&view.id),
+        renderer,
+        streams,
+    )?;
 
     if renderer.json {
         let text = serde_json::to_string_pretty(&serde_json::json!({
@@ -560,6 +586,13 @@ fn token_revoke(
     if let Err(err) = store.revoke(id) {
         return credential_failed(&err, renderer, streams);
     }
+    audit_change(
+        settings,
+        AuthEvent::TokenRevoked,
+        &token_subject(id),
+        renderer,
+        streams,
+    )?;
     render_result(
         renderer,
         streams,
@@ -622,6 +655,50 @@ fn now_unix() -> i64 {
 /// [`now_unix`] as the unsigned count TOTP counters use.
 fn now_secs() -> u64 {
     u64::try_from(now_unix()).unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Audit
+// ---------------------------------------------------------------------------
+
+/// How a token appears in the auth log: its id, never its value.
+fn token_subject(id: &str) -> String {
+    format!("token:{id}")
+}
+
+/// Records a change made on the command line in the auth log under
+/// `settings.state_root`.
+fn audit_change(
+    settings: &Settings,
+    event: AuthEvent,
+    subject: &str,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<()> {
+    let audit = FileAuthAudit::under_state_root(&settings.state_root);
+    record_change(&audit, event, subject, renderer, streams)
+}
+
+/// Appends a `local_user` success to `audit`. The change is already made, so
+/// a log that cannot be written is a note on `notes`, not a failure: there is
+/// no log subscriber in this process to carry it.
+fn record_change(
+    audit: &FileAuthAudit,
+    event: AuthEvent,
+    subject: &str,
+    renderer: &Renderer<'_>,
+    streams: &mut Streams<'_>,
+) -> std::io::Result<()> {
+    let record =
+        AuthRecord::new(event, subject, AuditResult::Ok).with_kind(IdentityKind::LocalUser);
+    if let Err(err) = audit.try_record(&record) {
+        renderer.line(
+            streams.notes,
+            MessageId::new("cli-audit-failed"),
+            &[("reason", &err.to_string())],
+        )?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1304,6 +1381,7 @@ mod tests {
             "alice",
             &fixed_secret()?,
             &|| NOW,
+            &FileAuthAudit::under_state_root(&settings.state_root),
             &renderer,
             &mut Streams {
                 input: &mut input,
@@ -2722,6 +2800,285 @@ mod tests {
         std::fs::rename(&saved, &users_file)?;
         assert_eq!(exit, Exit::Failed);
         assert!(String::from_utf8(notes)?.contains("could not be completed"));
+        Ok(())
+    }
+
+    /// The auth log as raw JSON values, oldest first; empty when absent.
+    fn auth_log(settings: &Settings) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
+        let path = settings.state_root.join("audit").join("detent-auth.jsonl");
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            return Ok(Vec::new());
+        };
+        raw.lines()
+            .map(|line| serde_json::from_str(line).map_err(Into::into))
+            .collect()
+    }
+
+    /// `(event, subject)` of each record, after checking that every record is
+    /// a `local_user` success with no client address.
+    fn audited(settings: &Settings) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+        let mut seen = Vec::new();
+        for record in auth_log(settings)? {
+            let field = |name: &str| {
+                record
+                    .get(name)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            };
+            assert_eq!(field("kind").as_deref(), Some("local_user"), "{record}");
+            assert_eq!(field("result").as_deref(), Some("ok"), "{record}");
+            assert!(
+                record
+                    .get("client_ip")
+                    .is_some_and(serde_json::Value::is_null)
+            );
+            seen.push((
+                field("event").ok_or("no event")?,
+                field("subject").ok_or("no subject")?,
+            ));
+        }
+        Ok(seen)
+    }
+
+    fn pair(event: &str, subject: &str) -> (String, String) {
+        (event.to_owned(), subject.to_owned())
+    }
+
+    #[test]
+    fn user_changes_made_on_the_command_line_are_audited() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let settings = settings(dir.path());
+        add_alice(&settings)?;
+        let ran = run_user(
+            &settings,
+            true,
+            &UserAction::Passwd {
+                name: "alice".to_owned(),
+            },
+            "second-password-2\nsecond-password-2\n",
+        )?;
+        assert_eq!(ran.exit, Exit::Ok, "{}", ran.notes);
+        let ran = run_user(
+            &settings,
+            true,
+            &UserAction::Rm {
+                name: "alice".to_owned(),
+            },
+            "",
+        )?;
+        assert_eq!(ran.exit, Exit::Ok, "{}", ran.notes);
+        assert_eq!(
+            audited(&settings)?,
+            vec![
+                pair("user_created", "alice"),
+                pair("password_changed", "alice"),
+                pair("user_removed", "alice"),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_refused_or_dry_run_change_is_not_audited() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let settings = settings(dir.path());
+        let messages = messages();
+        let renderer = renderer(&messages, true);
+        let mut input = b"correct-horse-1\ncorrect-horse-1\n".as_slice();
+        let (mut out, mut notes) = (Vec::new(), Vec::new());
+        let exit = user(
+            &UserAction::Add {
+                name: "alice".to_owned(),
+            },
+            true,
+            &settings,
+            &renderer,
+            &mut Streams {
+                input: &mut input,
+                out: &mut out,
+                notes: &mut notes,
+            },
+        )?;
+        assert_eq!(exit, Exit::Ok);
+        let ran = run_user(
+            &settings,
+            true,
+            &UserAction::Rm {
+                name: "ghost".to_owned(),
+            },
+            "",
+        )?;
+        assert_eq!(ran.exit, Exit::Usage);
+        assert_eq!(audited(&settings)?, Vec::new());
+        Ok(())
+    }
+
+    #[test]
+    fn setup_is_audited_as_a_creation_and_a_forced_rerun_as_a_password_change() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let settings = settings(dir.path());
+        let messages = messages();
+        let renderer = renderer(&messages, true);
+        for force in [false, true] {
+            let args = crate::cli::SetupArgs {
+                name: "admin".to_owned(),
+                force,
+            };
+            let mut input = b"correct-horse-1\ncorrect-horse-1\n".as_slice();
+            let (mut out, mut notes) = (Vec::new(), Vec::new());
+            let exit = setup(
+                &args,
+                false,
+                &settings,
+                &renderer,
+                &mut Streams {
+                    input: &mut input,
+                    out: &mut out,
+                    notes: &mut notes,
+                },
+            )?;
+            assert_eq!(exit, Exit::Ok, "{}", String::from_utf8_lossy(&notes));
+        }
+        assert_eq!(
+            audited(&settings)?,
+            vec![
+                pair("user_created", "admin"),
+                pair("password_changed", "admin"),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn turning_the_second_factor_on_is_audited_only_after_the_code_checks() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let settings = settings(dir.path());
+        add_alice(&settings)?;
+        let ran = run_enrol(&settings, true, "000000\n")?;
+        assert_eq!(ran.exit, Exit::Usage, "{}", ran.notes);
+        assert_eq!(audited(&settings)?, vec![pair("user_created", "alice")]);
+
+        let code = fixed_secret()?.code_at(step(NOW));
+        let ran = run_enrol(&settings, true, &format!("{}\n", code.expose()))?;
+        assert_eq!(ran.exit, Exit::Ok, "{}", ran.notes);
+        assert_eq!(
+            audited(&settings)?,
+            vec![pair("user_created", "alice"), pair("totp_enabled", "alice")]
+        );
+        let raw =
+            std::fs::read_to_string(settings.state_root.join("audit").join("detent-auth.jsonl"))?;
+        assert!(!raw.contains(FIXED_SECRET), "the TOTP key reached the log");
+        Ok(())
+    }
+
+    #[test]
+    fn turning_the_second_factor_off_is_audited() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let settings = settings(dir.path());
+        add_alice(&settings)?;
+        let ran = run_user(
+            &settings,
+            true,
+            &UserAction::Totp {
+                action: TotpAction::Disable {
+                    name: "alice".to_owned(),
+                    yes: true,
+                },
+            },
+            "",
+        )?;
+        assert_eq!(ran.exit, Exit::Ok, "{}", ran.notes);
+        assert_eq!(
+            audited(&settings)?,
+            vec![
+                pair("user_created", "alice"),
+                pair("totp_disabled", "alice")
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn token_changes_are_audited_by_id_and_never_carry_the_token() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let settings = settings(dir.path());
+        let messages = messages();
+        let renderer = renderer(&messages, true);
+        let run = |action: &TokenAction| -> Result<Ran, Box<dyn std::error::Error>> {
+            let mut input = std::io::empty();
+            let (mut out, mut notes) = (Vec::new(), Vec::new());
+            let exit = token(
+                action,
+                false,
+                &settings,
+                &renderer,
+                &mut Streams {
+                    input: &mut input,
+                    out: &mut out,
+                    notes: &mut notes,
+                },
+            )?;
+            Ok(Ran {
+                exit,
+                out: String::from_utf8(out)?,
+                notes: String::from_utf8(notes)?,
+            })
+        };
+        let created = run(&TokenAction::Create {
+            label: "laptop".to_owned(),
+            write: false,
+            expires_secs: None,
+        })?;
+        assert_eq!(created.exit, Exit::Ok, "{}", created.notes);
+        let parsed: serde_json::Value = serde_json::from_str(&created.out)?;
+        let id = parsed
+            .pointer("/id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("no id")?
+            .to_owned();
+        let secret = parsed
+            .pointer("/token")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("no token")?
+            .to_owned();
+        let revoked = run(&TokenAction::Revoke { id: id.clone() })?;
+        assert_eq!(revoked.exit, Exit::Ok, "{}", revoked.notes);
+        let subject = format!("token:{id}");
+        assert_eq!(
+            audited(&settings)?,
+            vec![
+                pair("token_issued", &subject),
+                pair("token_revoked", &subject)
+            ]
+        );
+        let raw =
+            std::fs::read_to_string(settings.state_root.join("audit").join("detent-auth.jsonl"))?;
+        assert!(!raw.contains(&secret), "the token value reached the log");
+        Ok(())
+    }
+
+    #[test]
+    fn a_log_that_cannot_be_written_is_a_note_not_a_failure() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let settings = settings(dir.path());
+        // A file where the audit directory should be.
+        std::fs::write(settings.state_root.join("audit"), b"")?;
+        let ran = run_user(
+            &settings,
+            false,
+            &UserAction::Add {
+                name: "alice".to_owned(),
+            },
+            "correct-horse-1\ncorrect-horse-1\n",
+        )?;
+        assert_eq!(ran.exit, Exit::Ok, "{}", ran.notes);
+        assert!(ran.notes.contains("audit"), "{}", ran.notes);
+        assert!(
+            UserStore::load(&settings.state_root)?
+                .list()
+                .iter()
+                .any(|user| user.name == "alice")
+        );
         Ok(())
     }
 

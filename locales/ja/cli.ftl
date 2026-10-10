@@ -141,6 +141,7 @@ cli-token-revoked = トークン {$id} を失効させました。
 cli-token-no-tokens = 発行されたトークンはありません。
 cli-token-line = {$id}  {$label}  {$scopes}  {$created}  {$expires}
 cli-credential-failed = リクエストを完了できませんでした: {$reason}
+cli-audit-failed = 変更は行われましたが、監査レコードを書き込めませんでした: {$reason}
 cli-state-command-as-root = detent {$command} を root で実行してはいけません。書き込まれるファイルが root の所有になり、サービスが読めなくなります。代わりにサービスアカウントで実行してください: sudo -u {$account} detent {$command}
 
 ## cert status

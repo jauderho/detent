@@ -141,6 +141,7 @@ cli-token-revoked = Token {$id} wurde widerrufen.
 cli-token-no-tokens = es wurden keine Token ausgestellt.
 cli-token-line = {$id}  {$label}  {$scopes}  {$created}  {$expires}
 cli-credential-failed = die Anfrage konnte nicht abgeschlossen werden: {$reason}
+cli-audit-failed = die Änderung wurde vorgenommen, aber ihr Audit-Eintrag konnte nicht geschrieben werden: {$reason}
 cli-state-command-as-root = detent {$command} darf nicht als root laufen: die geschriebenen Dateien gehörten root, und der Dienst könnte sie nicht lesen. Führe es stattdessen als Dienstkonto aus: sudo -u {$account} detent {$command}
 
 ## cert status

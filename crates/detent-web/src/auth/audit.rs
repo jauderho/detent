@@ -71,7 +71,8 @@ pub enum AuthEvent {
     LoginFailed,
     /// A principal was locked out by the rate limiter.
     LockedOut,
-    /// A signed-in user changed their own password.
+    /// A password was changed: by the signed-in user, or on the command line
+    /// by the operator (kind `local_user`).
     PasswordChanged,
     /// A password change was refused: the current password was wrong.
     PasswordChangeFailed,
@@ -81,6 +82,14 @@ pub enum AuthEvent {
     TokenIssued,
     /// An API token was revoked.
     TokenRevoked,
+    /// An account was created on the command line.
+    UserCreated,
+    /// An account was removed on the command line.
+    UserRemoved,
+    /// The second factor of an account was turned on on the command line.
+    TotpEnabled,
+    /// The second factor of an account was turned off on the command line.
+    TotpDisabled,
     /// A valid caller attempted an operation without its required scope.
     ScopeDenied,
     /// A caller asked the ACME client to renew the certificate now
@@ -202,6 +211,19 @@ impl FileAuthAudit {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Append one record, or say why not.
+    ///
+    /// [`AuthAudit::record`] logs a failure and carries on, because the login
+    /// it records already happened. A caller with no log subscriber, such as
+    /// the command line, uses this to report the failure itself.
+    ///
+    /// # Errors
+    ///
+    /// The directory or the file could not be created, locked down or written.
+    pub fn try_record(&self, record: &AuthRecord) -> Result<(), std::io::Error> {
+        self.append(record)
     }
 
     /// Append one line, or say why not.
@@ -470,6 +492,30 @@ mod tests {
             &AuthRecord::new(AuthEvent::LoginFailed, "alice", AuditResult::Error),
         );
         assert!(sink.query(None).is_empty());
+    }
+
+    #[test]
+    fn try_record_reports_the_failure_that_record_swallows() -> R {
+        let bad = FileAuthAudit::new("/proc/detent-auth-should-not-exist/log.jsonl");
+        assert!(bad.try_record(&sample()).is_err());
+
+        let root = tempfile::tempdir()?;
+        let good = FileAuthAudit::under_state_root(root.path());
+        good.try_record(&AuthRecord::new(
+            AuthEvent::UserCreated,
+            "alice",
+            AuditResult::Ok,
+        ))?;
+        let raw = std::fs::read_to_string(good.path())?;
+        assert!(raw.contains("\"event\":\"user_created\""), "{raw}");
+        for (event, name) in [
+            (AuthEvent::UserRemoved, "user_removed"),
+            (AuthEvent::TotpEnabled, "totp_enabled"),
+            (AuthEvent::TotpDisabled, "totp_disabled"),
+        ] {
+            assert_eq!(serde_json::to_string(&event)?, format!("\"{name}\""));
+        }
+        Ok(())
     }
 
     #[test]
