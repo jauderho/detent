@@ -469,10 +469,12 @@ Fixes from the threat model, in order (each: test first, one commit):
 2. ~~**TM-G8 / TM-G7 password policy**~~ Done 2026-10-09 (`PROGRESS.md`): 12 to
    128 characters when a password is set, over 128 refused at login, and
    `must_change_password` enforced (`POST /api/v1/auth/password`).
-3. **TM-G3 / TM-G4 / TM-G5 / TM-G6 audit gaps:** audit `setup`, `user` and
+3. ~~**TM-G3 / TM-G4 / TM-G5 / TM-G6 audit gaps:** audit `setup`, `user` and
    `token` changes (emit `TokenIssued`/`TokenRevoked`), log a bad bearer
    token or expired session, have the monitor log each `WriteTarget`,
-   `Restore` and `Service`, and add `detent audit verify`.
+   `Restore` and `Service`, and add `detent audit verify`.~~ Done 2026-10-10
+   (`PROGRESS.md`). Still open from it: a notice channel to the user on a
+   credential change (ASVS 2.2.3, 2.5.5), a remote log sink (1.7.2, 7.3.3).
 4. **Stale statements** in SECURITY_HARDENING, ARCHITECTURE §11 and ADR-012
    (THREAT_MODEL §7).
 5. **TM-G2 worker UDP egress** (seccomp argument filter on `socket` /
