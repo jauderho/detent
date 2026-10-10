@@ -431,7 +431,9 @@ deferred by the owner.
     409 `ops-update-not-newer` (F1); the stamp is `0644` and an install
     removes it (F2); `GET /api/v1/system/update` serves only the stamp, 404
     `web-update-not-checked` without one, and no live check remains (F3).
-    Open: capability-user mode needs a polkit rule for the unit (Phase 12).
+    Capability-user mode (2026-10-09): no polkit grant for the transient
+    unit (it would let the `detent` uid run any command as root); a web or
+    MCP install is refused in that mode. Owner question in §4.
 
 ### Track F — Phase 12 / M4 (v1.0)
 
@@ -441,6 +443,10 @@ mode = "capability-user"` with polkit and the doctor check, optional mTLS,
 `de`/`ja` translations (marked `# needs-review`; done 2026-10-09, machine-drafted, see PROGRESS), `cargo-mutants` and
 `cargo geiger` jobs, `cargo semver-checks` for `detent-core`, final size/RSS
 numbers in the README, then v1.0.0. Acceptance is in PLAN Phase 12.
+
+`[privilege] mode = "capability-user"`: done in code 2026-10-09
+(`PROGRESS.md`); unproven until a test-host run
+(`scripts/capability-user-check.sh`).
 
 Landed 2026-10-09 (CI only, `PROGRESS.md`): the `core-semver`, `unsafe-report`
 (`cargo geiger`) and weekly `mutants.yml` (`cargo-mutants`) jobs. Their first CI
@@ -518,7 +524,14 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
 - Track F `capability-user` mode for v1 (monitor as `detent` with ambient
   capabilities, polkit for service control, unit drop-in and polkit rule
   changes, doctor checks)? — owner answer (2026-10-09): implement for v1;
-  root-confined stays the default.
+  root-confined stays the default. Done in code 2026-10-09; test-host run open.
+- Capability-user web/MCP update: polkit sees only the name and verb of a
+  transient unit, so a grant for `detent-update.service` lets the `detent`
+  uid run any command as root. — proposed: ship a root-owned template unit
+  `detent-update@.service` (`ExecStart=/usr/local/bin/detent update --tag
+  %i`) and grant only `start` of `detent-update@*.service` in
+  capability-user mode; until then the install is refused in that mode —
+  owner answer:
 - D4: remove build toolchains from testhost. — proposed: after Track C A1–A3 —
   owner answer:
 - libbz2 on testhost: `libbz2-1.0` was downgraded to `1.0.8-6build2` by an earlier
@@ -559,8 +572,8 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   unmounted. No remount on option-only changes. Never mount over `/` or an
   ancestor of `/etc`, `/usr`, `/boot`, the state root or the binary
   directory. Phase 12 capability-user polkit rule: allow start/stop of
-  `.mount`/`.automount` units. (done in code, `666572d`…`792c4dc`; testhost
-  run and the Phase 12 polkit rule open)
+  `.mount`/`.automount` units. (done in code, `666572d`…`792c4dc`; the
+  Phase 12 polkit rule done 2026-10-09; testhost run open)
 
 ---
 

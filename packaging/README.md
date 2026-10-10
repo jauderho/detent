@@ -19,7 +19,7 @@ PLAN §1.6) and are intentionally not present here yet.
 | `systemd/detent.service.d/capability-user.conf` | Drop-in for the **capability-user** hardened mode (Phase 12): switches to `User=detent` with ambient capabilities instead of root, adds `RemoveIPC=yes`. Only installed with `--mode capability-user`. |
 | `sysusers.d/detent.conf` | Creates the unprivileged `detent` system user (`systemd-sysusers`). |
 | `tmpfiles.d/detent.conf` | Creates `/var/lib/detent` (0700 detent:detent), `/var/lib/detent/backups` and `/run/detent/staging` (0700 root:root monitor-only), plus `/etc/detent` (0750 root:detent) (`systemd-tmpfiles --create`). The capability-user drop-in hands the runtime tree to `detent` before startup. |
-| `polkit/50-detent.rules` | polkit JS rule granting the `detent` user `org.freedesktop.systemd1.manage-units` (start/stop/restart/reload only) for an explicit unit allow-list. Only takes effect in capability-user mode (root already bypasses polkit); harmless to install unconditionally. |
+| `polkit/50-detent.rules` | polkit JS rule (polkit 0.106 or later) for capability-user mode. It grants the `detent` user `manage-units` for the units the modules bind, with only their bindings' verbs; `start`/`stop` of `.mount`/`.automount` units except those over `/`, `/etc`, `/usr`, `/boot`, `/var/lib/detent`, `/usr/local/bin` and their ancestors; and `reload-daemon`. It grants no transient unit, so a web or MCP update install is refused in this mode. Installed only with `--mode capability-user`. |
 | `install.sh` | Installs/uninstalls the above plus the `detent` binary. |
 
 ## Install / uninstall
@@ -28,8 +28,9 @@ PLAN §1.6) and are intentionally not present here yet.
 # Root-confined mode (default, ADR-001)
 sudo packaging/install.sh --binary ./target/release/detent
 
-# Capability-user mode (Phase 12 hardened; also installs the polkit rule's
-# prerequisite drop-in)
+# Capability-user mode (Phase 12 hardened): also installs the drop-in and
+# the polkit rule. Then set [privilege] mode = "capability-user" in
+# /etc/detent/detent.toml: `detent serve` refuses a mode the unit does not run.
 sudo packaging/install.sh --binary ./target/release/detent --mode capability-user
 
 # Remove everything install.sh placed
@@ -49,6 +50,23 @@ to run as root, since the service account must own the files they write).
 Enabling/starting the service
 (`systemctl enable --now detent`) is left to the operator, matching
 `install.sh` not assuming the config (`/etc/detent/detent.toml`) exists yet.
+
+### Capability-user mode
+
+The service runs as `detent`, not root. Per process:
+
+| Process | Capabilities | Why |
+|---|---|---|
+| monitor | `CAP_DAC_OVERRIDE`, `CAP_CHOWN`, `CAP_FOWNER` | open and replace root-owned targets and backups; give a replaced file its old owner; set mode and xattrs on a file it does not own |
+| runner | `CAP_DAC_OVERRIDE` | read the root-owned backups for mount activation; validators read root-only included files |
+| worker, acme | none | they clear the sets they inherit at the fork |
+
+Service actions, `daemon-reload` and mount units go through polkit
+(`polkit/50-detent.rules`). A web or MCP update install is refused in this
+mode (no polkit grant for the transient `detent-update.service`); run
+`sudo detent update` on the host. `detent doctor` (run as `detent`) checks
+the prerequisites; `scripts/capability-user-check.sh` checks a running
+install on a test host.
 
 ## Verifying the systemd hardening score
 
@@ -70,7 +88,9 @@ docker run --rm -v "$PWD/packaging:/p" fedora:latest bash -c '
 ```
 
 Measured at the time this packaging was written: **2.5** (root-confined),
-**1.8** (capability-user). Both meet the target exactly. The residual findings
+**1.8** (capability-user). Measured again 2026-10-09 with the method above
+(current `fedora:latest`): **2.6** (root-confined, unit unchanged: the newer
+`systemd-analyze` scores it higher) and **1.8** (capability-user). Both meet the target exactly. The residual findings
 in both modes are structural and are *not* fixable without breaking the
 daemon (a network daemon that forks an unprivileged worker and writes
 root-owned files) — see the comments in `systemd/detent.service` for exactly
