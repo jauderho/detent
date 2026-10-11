@@ -333,11 +333,12 @@ fn the_polkit_rule_grants_no_unit_that_no_module_binds() {
     assert_eq!(polkit_unit_verbs(), module_unit_verbs());
 }
 
-/// The rule names only the two systemd actions detent needs, and never
-/// grants the update unit: polkit sees only the name of a transient unit,
-/// not what it runs.
+/// The rule names only the two systemd actions detent needs. Of the update
+/// unit it names only instances of the template (never the bare
+/// `detent-update.service`), with only the `start` verb, and only while the
+/// template file `install.sh` installs exists.
 #[test]
-fn the_polkit_rule_handles_only_two_actions_and_not_the_update_unit() {
+fn the_polkit_rule_handles_only_two_actions_and_only_the_update_template() {
     let code = polkit_code();
     let actions: Vec<String> = code
         .lines()
@@ -351,12 +352,176 @@ fn the_polkit_rule_handles_only_two_actions_and_not_the_update_unit() {
             "org.freedesktop.systemd1.manage-units"
         ]
     );
-    assert!(
-        !code.contains("detent-update"),
-        "the update unit is granted"
+    let update_lines: Vec<&str> = code
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains("detent-update"))
+        .collect();
+    assert_eq!(
+        update_lines,
+        [
+            r"var UPDATE_UNIT = /^detent-update@v[0-9A-Za-z.-]{1,63}\.service$/;",
+            r#"var UPDATE_TEMPLATE = "/etc/systemd/system/detent-update@.service";"#,
+        ]
     );
+    assert!(
+        INSTALL_SH_TEXT.contains(r#"UPDATE_UNIT_DEST="etc/systemd/system/detent-update@.service""#),
+        "the rule checks another path than install.sh installs"
+    );
+    assert!(code.contains(r#"polkit.spawn(["/usr/bin/test", "-f", UPDATE_TEMPLATE]);"#));
+    assert!(code.contains("if (verb != \"start\") {"));
     assert!(code.contains("subject.user != \"detent\""));
     assert!(code.contains("(verb == \"start\" || verb == \"stop\")"));
+}
+
+/// `install.sh`, as text.
+const INSTALL_SH_TEXT: &str = include_str!("../../../packaging/install.sh");
+
+/// A JavaScript runtime on this host (`node` or `bun`), to run the rule.
+fn js_runtime() -> Option<&'static str> {
+    ["node", "bun"].into_iter().find(|program| {
+        std::process::Command::new(program)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    })
+}
+
+/// Runs the rule as polkit does, for each case `[user, action, unit, verb,
+/// template present]`, and prints `yes` or `no` per case, then the argv of
+/// every `polkit.spawn` call.
+const RULE_HARNESS: &str = r#"
+const fs = require("fs");
+const [rulePath, casesJson] = process.argv.slice(2);
+const rules = [];
+let templatePresent = true;
+const spawned = [];
+const polkit = {
+  Result: { YES: "yes", NOT_HANDLED: "no" },
+  addRule(rule) { rules.push(rule); },
+  spawn(argv) {
+    spawned.push(argv);
+    if (!templatePresent) { throw new Error("exit 1"); }
+    return "";
+  },
+};
+new Function("polkit", fs.readFileSync(rulePath, "utf8"))(polkit);
+const out = [];
+for (const [user, id, unit, verb, present] of JSON.parse(casesJson)) {
+  templatePresent = present;
+  const details = { unit, verb };
+  const action = { id, lookup: (key) => details[key] };
+  out.push(rules[0](action, { user }));
+}
+console.log(out.join("\n"));
+console.log(JSON.stringify(spawned[0] || null));
+"#;
+
+/// Cases for the rule, one per line: `user|action|unit|verb|template
+/// present (1 or 0)|expected`. Actions: `M` manage-units, `F`
+/// manage-unit-files, `R` reload-daemon.
+const RULE_CASES: &[&str] = &[
+    "detent|M|detent-update@v1.2.0-rc.1.service|start|1|yes",
+    "detent|M|detent-update@v1.2.0-rc.1.service|start|0|no",
+    "detent|M|detent-update@v1.2.0.service|stop|1|no",
+    "detent|M|detent-update@v1.2.0.service|restart|1|no",
+    "detent|M|detent-update@v1.2.0.service|reload|1|no",
+    "detent|M|detent-update@v1.2.0.service|try-restart|1|no",
+    "detent|M|detent-update@v1.2.0.service|reload-or-restart|1|no",
+    "detent|M|detent-update@v1.2.0.service|kill|1|no",
+    "detent|M|detent-update@v1.2.0.service|set-property|1|no",
+    "detent|M|detent-update.service|start|1|no",
+    "detent|M|detent-update@1.2.0.service|start|1|no",
+    r"detent|M|detent-update@v1\x2d2.service|start|1|no",
+    "detent|M|detent-update@v1.2.0 x.service|start|1|no",
+    "detent|M|detent-update@v1/2.service|start|1|no",
+    "detent|M|detent-update@.service|start|1|no",
+    "detent|M|detent-update@v1.2.0.timer|start|1|no",
+    "detent|M|detent-updatex@v1.2.0.service|start|1|no",
+    "detent|M|xdetent-update@v1.2.0.service|start|1|no",
+    "detent|M|detent.service|start|1|no",
+    "detent|M|sshd.service|start|1|no",
+    "root|M|detent-update@v1.2.0.service|start|1|no",
+    "nobody|M|detent-update@v1.2.0.service|start|1|no",
+    "detent|F|detent-update@v1.2.0.service|start|1|no",
+    // The grants that were there before stay.
+    "detent|M|chronyd.service|restart|1|yes",
+    "detent|M|srv-data.mount|start|1|yes",
+    "detent|R|||1|yes",
+];
+
+/// Runs the rule on `cases` (as [`RULE_CASES`]) with `runtime`: one
+/// decision per case, then the argv of the first `polkit.spawn` call.
+fn rule_decisions(
+    runtime: &str,
+    cases: &[String],
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let mut rows = Vec::new();
+    for case in cases {
+        let fields: Vec<&str> = case.split('|').collect();
+        let [user, action, unit, verb, present, _] = fields.as_slice() else {
+            return Err(format!("bad case {case:?}").into());
+        };
+        let action = match *action {
+            "M" => "org.freedesktop.systemd1.manage-units",
+            "F" => "org.freedesktop.systemd1.manage-unit-files",
+            _ => "org.freedesktop.systemd1.reload-daemon",
+        };
+        let present = *present == "1";
+        rows.push(format!("[{user:?},{action:?},{unit:?},{verb:?},{present}]"));
+    }
+    let dir = tempfile::TempDir::new()?;
+    let harness = dir.path().join("harness.js");
+    std::fs::write(&harness, RULE_HARNESS)?;
+    let rule = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../packaging/polkit/50-detent.rules"
+    );
+    let output = std::process::Command::new(runtime)
+        .arg(&harness)
+        .arg(rule)
+        .arg(format!("[{}]", rows.join(",")))
+        .output()?;
+    if !output.status.success() {
+        return Err(format!("{runtime}: {}", String::from_utf8_lossy(&output.stderr)).into());
+    }
+    Ok(String::from_utf8(output.stdout)?
+        .lines()
+        .map(str::to_owned)
+        .collect())
+}
+
+/// The rule itself, run: the `detent` user may only start an instance of
+/// the update template named like a release tag (at most 64 bytes), and
+/// only while the template exists. Stop, restart and every other verb of an
+/// instance, any other unit name, and another user are refused. Needs
+/// `node` or `bun` (CI has `node`); without one the test says so and passes.
+#[test]
+fn the_polkit_rule_grants_only_the_start_of_an_update_instance()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Some(runtime) = js_runtime() else {
+        eprintln!("skipped: neither node nor bun is installed");
+        return Ok(());
+    };
+    let tag64 = format!("v{}", "1".repeat(63));
+    let tag65 = format!("{tag64}1");
+    let mut cases: Vec<String> = RULE_CASES.iter().map(|case| (*case).to_owned()).collect();
+    cases.push(format!(
+        "detent|M|detent-update@{tag64}.service|start|1|yes"
+    ));
+    cases.push(format!("detent|M|detent-update@{tag65}.service|start|1|no"));
+    let decisions = rule_decisions(runtime, &cases)?;
+    for (case, decision) in cases.iter().zip(&decisions) {
+        assert!(
+            case.ends_with(&format!("|{decision}")),
+            "{case}: {decision}"
+        );
+    }
+    assert_eq!(
+        decisions.get(cases.len()).map(String::as_str),
+        Some(r#"["/usr/bin/test","-f","/etc/systemd/system/detent-update@.service"]"#)
+    );
+    Ok(())
 }
 
 /// The mount units the rule refuses are the ones over the paths the runner

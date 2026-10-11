@@ -17,12 +17,18 @@
 //      /usr/local/bin. The runner itself stops only the units it recorded.
 //   3. org.freedesktop.systemd1.reload-daemon (`systemctl daemon-reload`
 //      after an fstab write; systemd gives this action no details).
-//
-// Not granted: starting the transient detent-update.service (E16). polkit
-// sees only the unit name and verb of a StartTransientUnit call, not the
-// command it runs or its User=, so a grant for that name would let any
-// process of the `detent` user run any command as root. In this mode a web
-// or MCP update install is refused by polkit; run `detent update` as root.
+//   4. org.freedesktop.systemd1.manage-units "start" (only start) of an
+//      instance of the packaged template unit detent-update@.service whose
+//      instance name has the shape of a release tag, for the web and MCP
+//      update install (E16). The template runs only
+//      `/usr/local/bin/detent update --tag=%i` as root; the updater verifies
+//      the release and refuses a downgrade. polkit sees only the unit name
+//      and verb, also for a transient unit (systemd-run), so this grant is
+//      safe only while /etc/systemd/system/detent-update@.service exists:
+//      systemd then refuses a transient unit of an instance name ("has a
+//      fragment file"). The rule checks that the file exists before it
+//      grants; install.sh also installs the template before this rule and
+//      removes this rule first.
 //
 // Installed to /etc/polkit-1/rules.d/50-detent.rules by
 // `install.sh --mode capability-user` only. JavaScript rules need polkit
@@ -66,6 +72,25 @@ polkit.addRule(function (action, subject) {
     return UNIT_VERBS[unit].indexOf(verb) !== -1
       ? polkit.Result.YES
       : polkit.Result.NOT_HANDLED;
+  }
+
+  // Instances of the update template unit: start only, and only a name of
+  // the shape of a release tag (`proto::is_release_tag`: `v`, then only
+  // [0-9A-Za-z.-], at most 64 bytes); no `\` escape.
+  var UPDATE_UNIT = /^detent-update@v[0-9A-Za-z.-]{1,63}\.service$/;
+  var UPDATE_TEMPLATE = "/etc/systemd/system/detent-update@.service";
+  if (UPDATE_UNIT.test(unit)) {
+    if (verb != "start") {
+      return polkit.Result.NOT_HANDLED;
+    }
+    // Only while the template file exists: without it systemd accepts a
+    // transient unit of this name, and polkit cannot tell the two apart.
+    try {
+      polkit.spawn(["/usr/bin/test", "-f", UPDATE_TEMPLATE]);
+    } catch (error) {
+      return polkit.Result.NOT_HANDLED;
+    }
+    return polkit.Result.YES;
   }
 
   // Mount units of fstab entries: what `systemd-escape --path` writes, never
