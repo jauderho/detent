@@ -67,6 +67,11 @@
 //! `accept4` stay refused, so the process still cannot accept a TCP
 //! connection.
 //!
+//! **TM-G2 addendum (argument filters):** a table entry allows any arguments
+//! unless [`arg_rules_for`] has a rule for it. Only `WORKER` has rules:
+//! `socket` for a TCP stream only and `sendto` with a NULL address only
+//! (traced on the test host, see [`WORKER_ARG_RULES`]).
+//!
 //! Only `x86_64` and `aarch64` are covered (PLAN §1.6 defers armv7 and riscv64);
 //! [`Arch::parse`] and [`Arch::host`] report anything else as
 //! [`SeccompError::UnsupportedArch`] rather than failing to compile, so a
@@ -364,7 +369,9 @@ const WORKER: &[&str] = &[
     "socketpair",
     // Listening: `detent_web::Server::bind` opens a TCP socket, binds it to
     // `config.listen.addr`, and starts listening; `local_addr()` (logged by
-    // `run_worker` as `cli-serve-listening`) reads it back.
+    // `run_worker` as `cli-serve-listening`) reads it back. `socket` takes
+    // only a TCP stream, and `sendto` (above) only a NULL address
+    // ([`WORKER_ARG_RULES`], TM-G2).
     "socket",
     "bind",
     "listen",
@@ -427,6 +434,99 @@ const WORKER: &[&str] = &[
     // 2026-09-30) in the audit-directory test.
     "stat",
 ];
+
+/// One test on a syscall argument: `(args[arg] & mask) == value`. `wide` is
+/// `false` for an `int` argument, which the kernel truncates to 32 bits, so
+/// only the low 32 bits are compared; `true` compares all 64 (a pointer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArgCheck {
+    /// The argument index, 0 to 5.
+    pub arg: u8,
+    /// Compare all 64 bits (`true`) or the low 32 (`false`).
+    pub wide: bool,
+    /// The bits of the argument that are compared.
+    pub mask: u64,
+    /// The value the masked argument must have.
+    pub value: u64,
+}
+
+/// A syscall of a role's table that is allowed only when one of `any_of`
+/// holds; each alternative holds when all of its checks hold. A syscall with
+/// no rule is allowed with any arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArgRule {
+    /// The syscall name, as in the role's table.
+    pub name: &'static str,
+    /// The allowed argument patterns.
+    pub any_of: &'static [&'static [ArgCheck]],
+}
+
+/// `socket(domain, SOCK_STREAM | flags, 0)`: `domain` and `protocol` exact,
+/// and the type with `SOCK_NONBLOCK`/`SOCK_CLOEXEC` masked off
+/// (`SOCK_TYPE_MASK`, `0xf`). Numbers from `<linux/socket.h>` and
+/// `<linux/net.h>`; the same on `x86_64` and `aarch64`.
+const fn tcp_socket(domain: u64) -> [ArgCheck; 3] {
+    [
+        ArgCheck {
+            arg: 0,
+            wide: false,
+            mask: 0xffff_ffff,
+            value: domain,
+        },
+        ArgCheck {
+            arg: 1,
+            wide: false,
+            mask: 0xf,
+            value: 1, // SOCK_STREAM
+        },
+        ArgCheck {
+            arg: 2,
+            wide: false,
+            mask: 0xffff_ffff,
+            value: 0,
+        },
+    ]
+}
+
+/// Argument rules for [`WORKER`] (TM-G2, owner decision 2026-10-10). Traced
+/// on the test host (`x86_64` musl, `detent serve` under the packaged unit and
+/// by hand, `strace -f` for `socket`, `socketpair`, `bind`, `listen`,
+/// `connect` and the send calls, through login, every module read, a hosts
+/// apply and revert, a service status, the update, cert, profile, audit and
+/// commit reads, a refused password and token, and a cert renew): the worker
+/// makes one `socket` call, `socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC|
+/// SOCK_NONBLOCK, IPPROTO_IP)` for the listener, and every `sendto` has a
+/// NULL address (`MSG_NOSIGNAL` on the privsep channel and on `tokio`'s
+/// signal pair, which comes from `socketpair`, not `socket`). So `socket`
+/// takes only a TCP stream for `AF_INET` (2) or `AF_INET6` (10, a
+/// `[listen] addr` on IPv6), and `sendto` only a NULL `dest_addr` (argument
+/// 4). Without `connect`, a UDP socket was the worker's one way to send to
+/// any address; a NULL address also stops TCP Fast Open (`MSG_FASTOPEN`
+/// with an address connects).
+const WORKER_ARG_RULES: &[ArgRule] = &[
+    ArgRule {
+        name: "socket",
+        any_of: &[&tcp_socket(2), &tcp_socket(10)],
+    },
+    ArgRule {
+        name: "sendto",
+        any_of: &[&[ArgCheck {
+            arg: 4,
+            wide: true,
+            mask: u64::MAX,
+            value: 0,
+        }]],
+    },
+];
+
+/// The argument rules for `role`'s table. Only the worker has any.
+#[must_use]
+pub const fn arg_rules_for(role: Role) -> &'static [ArgRule] {
+    match role {
+        Role::Worker => WORKER_ARG_RULES,
+        Role::Monitor | Role::Acme => &[],
+    }
+}
 
 /// Syscalls the acme process needs (ADR-015): an outbound HTTPS/TCP client
 /// on a current-thread `tokio` runtime with hyper-rustls, plus glibc/musl
@@ -748,9 +848,13 @@ pub fn compile(
         Arch::X86_64 => TargetArch::x86_64,
         Arch::Aarch64 => TargetArch::aarch64,
     };
+    // Fails on a name with no number, as `numbers_for` does.
+    numbers_for(role, arch)?;
     let mut rules: BTreeMap<i64, Vec<seccompiler::SeccompRule>> = BTreeMap::new();
-    for number in numbers_for(role, arch)? {
-        rules.insert(number, Vec::new());
+    for name in syscalls_for(role) {
+        if let Some(number) = number(name, arch) {
+            rules.insert(number, seccomp_rules(role, name)?);
+        }
     }
     let default_action = match mode {
         SeccompMode::Log => SeccompAction::Log,
@@ -772,6 +876,42 @@ pub fn compile(
     let filter = SeccompFilter::new(rules, default_action, SeccompAction::Allow, target)
         .map_err(|err| SeccompError::Build(err.to_string()))?;
     seccompiler::BpfProgram::try_from(filter).map_err(|err| SeccompError::Build(err.to_string()))
+}
+
+/// The `seccompiler` rules for `name` in `role`'s table: none (any arguments)
+/// when [`arg_rules_for`] has no rule for it, else one rule per alternative.
+#[cfg(target_os = "linux")]
+fn seccomp_rules(role: Role, name: &str) -> Result<Vec<seccompiler::SeccompRule>, SeccompError> {
+    use seccompiler::{SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompRule};
+
+    let build = |err: seccompiler::BackendError| SeccompError::Build(err.to_string());
+    let Some(found) = arg_rules_for(role).iter().find(|r| r.name == name) else {
+        return Ok(Vec::new());
+    };
+    found
+        .any_of
+        .iter()
+        .map(|checks| {
+            let conditions = checks
+                .iter()
+                .map(|check| {
+                    let len = if check.wide {
+                        SeccompCmpArgLen::Qword
+                    } else {
+                        SeccompCmpArgLen::Dword
+                    };
+                    SeccompCondition::new(
+                        check.arg,
+                        len,
+                        SeccompCmpOp::MaskedEq(check.mask),
+                        check.value,
+                    )
+                    .map_err(build)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            SeccompRule::new(conditions).map_err(build)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -986,6 +1126,121 @@ mod tests {
         for needed in ["getpid", "statx", "fsync", "openat"] {
             assert!(acme.contains(&needed), "acme table lacks {needed}");
         }
+    }
+
+    /// Whether `role`'s rules let `name` run with `args`, read from the same
+    /// data `compile` turns into BPF (the kernel half is
+    /// `enforce_mode_worker_opens_only_a_tcp_listener_and_sends_on_connected_sockets`
+    /// in `linux.rs`).
+    fn permits(role: Role, name: &str, args: [u64; 6]) -> bool {
+        if !syscalls_for(role).contains(&name) {
+            return false;
+        }
+        let Some(found) = super::arg_rules_for(role).iter().find(|r| r.name == name) else {
+            return true;
+        };
+        found.any_of.iter().any(|checks| {
+            checks.iter().all(|check| {
+                let width = if check.wide { u64::MAX } else { 0xffff_ffff };
+                args.get(usize::from(check.arg))
+                    .is_some_and(|arg| arg & check.mask & width == check.value & check.mask & width)
+            })
+        })
+    }
+
+    const AF_UNIX: u64 = 1;
+    const AF_INET: u64 = 2;
+    const AF_INET6: u64 = 10;
+    const AF_NETLINK: u64 = 16;
+    const AF_PACKET: u64 = 17;
+    const SOCK_STREAM: u64 = 1;
+    const SOCK_DGRAM: u64 = 2;
+    const SOCK_RAW: u64 = 3;
+    const SOCK_FLAGS: u64 = 0o2_000_000 | 0o4_000; // SOCK_CLOEXEC | SOCK_NONBLOCK
+    const IPPROTO_SCTP: u64 = 132;
+    const MSG_NOSIGNAL: u64 = 0x4000;
+
+    /// TM-G2: the worker opens only the TCP listener (`socket(AF_INET or
+    /// AF_INET6, SOCK_STREAM, 0)`) and sends only on connected sockets
+    /// (`sendto` with a NULL address), as the test-host trace showed. A UDP,
+    /// raw, `AF_UNIX`, netlink or packet socket, an SCTP stream, and a
+    /// `sendto` with an address (UDP, or TCP Fast Open) are refused.
+    #[test]
+    fn the_worker_opens_only_a_tcp_listener_and_sends_only_on_connected_sockets() {
+        let socket = |domain, kind, proto| [domain, kind, proto, 0, 0, 0];
+        for domain in [AF_INET, AF_INET6] {
+            assert!(
+                permits(
+                    Role::Worker,
+                    "socket",
+                    socket(domain, SOCK_STREAM | SOCK_FLAGS, 0)
+                ),
+                "{domain} stream refused"
+            );
+            assert!(permits(
+                Role::Worker,
+                "socket",
+                socket(domain, SOCK_STREAM, 0)
+            ));
+            for kind in [SOCK_DGRAM, SOCK_RAW] {
+                assert!(
+                    !permits(Role::Worker, "socket", socket(domain, kind | SOCK_FLAGS, 0)),
+                    "{domain}/{kind} allowed"
+                );
+            }
+            assert!(!permits(
+                Role::Worker,
+                "socket",
+                socket(domain, SOCK_STREAM | SOCK_FLAGS, IPPROTO_SCTP)
+            ));
+        }
+        for domain in [AF_UNIX, AF_NETLINK, AF_PACKET] {
+            for kind in [SOCK_STREAM, SOCK_DGRAM, SOCK_RAW] {
+                assert!(
+                    !permits(Role::Worker, "socket", socket(domain, kind | SOCK_FLAGS, 0)),
+                    "{domain}/{kind} allowed"
+                );
+            }
+        }
+        // Only the low 32 bits of an `int` argument count, as in the kernel.
+        assert!(permits(
+            Role::Worker,
+            "socket",
+            socket(0xdead_0000_0000_0000 | AF_INET, SOCK_STREAM, 0)
+        ));
+        let sendto = |dest| [5, 0x1000, 6, MSG_NOSIGNAL, dest, 16];
+        assert!(permits(Role::Worker, "sendto", sendto(0)));
+        assert!(!permits(Role::Worker, "sendto", sendto(0x7fff_0000_1000)));
+        assert!(!permits(Role::Worker, "sendto", sendto(0x1_0000_0000)));
+        // The socket pair `tokio::signal` makes needs no `socket` call.
+        assert!(permits(
+            Role::Worker,
+            "socketpair",
+            [AF_UNIX, SOCK_STREAM | SOCK_FLAGS, 0, 0, 0, 0]
+        ));
+    }
+
+    /// An argument rule only takes effect on a syscall its role's table
+    /// lists; the monitor and acme tables keep no argument rule.
+    #[test]
+    fn every_argument_rule_names_a_listed_syscall_with_valid_arguments() {
+        for role in [Role::Monitor, Role::Worker, Role::Acme] {
+            for rule in super::arg_rules_for(role) {
+                assert!(syscalls_for(role).contains(&rule.name), "{}", rule.name);
+                assert!(!rule.any_of.is_empty(), "{} refuses everything", rule.name);
+                for check in rule.any_of.iter().flat_map(|checks| checks.iter()) {
+                    assert!(check.arg < 6, "{}: argument {}", rule.name, check.arg);
+                    assert_eq!(check.value & !check.mask, 0, "{}", rule.name);
+                }
+            }
+        }
+        assert!(super::arg_rules_for(Role::Monitor).is_empty());
+        assert!(super::arg_rules_for(Role::Acme).is_empty());
+        let names: Vec<_> = super::arg_rules_for(Role::Worker)
+            .iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(names, ["socket", "sendto"]);
     }
 
     #[cfg(target_os = "linux")]

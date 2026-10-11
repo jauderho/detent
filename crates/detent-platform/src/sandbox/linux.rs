@@ -704,6 +704,46 @@ mod tests {
         })
     }
 
+    /// TM-G2: under the real worker confinement, a UDP or `AF_UNIX` socket
+    /// and a `sendto` with an address answer `EPERM`, while the TCP listener
+    /// and a send on a connected socket (the privsep channel, `tokio`'s
+    /// signal pair) still work. Before the argument filter a UDP socket opened
+    /// and could send to any address without `connect`.
+    #[test]
+    fn enforce_mode_worker_opens_only_a_tcp_listener_and_sends_on_connected_sockets()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::net::UnixDatagram;
+        in_forked_child(|| {
+            let dir =
+                std::env::temp_dir().join(format!("detent-sandbox-socket-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            let Ok(allow) = fixture_allowlist(&dir) else {
+                return false;
+            };
+            // Made before confinement, like the privsep channel.
+            let Ok((left, right)) = UnixDatagram::pair() else {
+                return false;
+            };
+            if confine(Role::Worker, &Policy::worker(&allow)).is_err() {
+                return false;
+            }
+            let refused = |result: std::io::Result<()>| {
+                result
+                    .err()
+                    .is_some_and(|err| err.raw_os_error() == Some(1))
+            };
+            let udp = refused(std::net::UdpSocket::bind("127.0.0.1:0").map(drop));
+            let unix = refused(UnixDatagram::unbound().map(drop));
+            // Allowed, this would fail with `ENOENT`, not `EPERM`.
+            let addressed = refused(left.send_to(b"x", dir.join("no-such-socket")).map(drop));
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").is_ok();
+            let connected = left.send(b"x").is_ok_and(|n| n == 1);
+            let mut buf = [0_u8; 1];
+            let received = right.recv(&mut buf).is_ok_and(|n| n == 1);
+            udp && unix && addressed && listener && connected && received
+        })
+    }
+
     /// Slice W1 (STAGE4 4.3 item 5): under the real worker confinement, the
     /// audit writers' `File::sync_data()` call (`fdatasync`) on a file under
     /// the state root must succeed, not `EPERM` — the gap slice S2 hit live
