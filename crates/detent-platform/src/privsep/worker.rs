@@ -391,9 +391,10 @@ impl Client {
         }
     }
 
-    /// Start the CLI updater for release `tag` in its transient unit
-    /// ([`Request::StartUpdate`]). Returns the monitor's detail once the
-    /// unit runs; the update's own outcome is the running version later.
+    /// Start the CLI updater for release `tag` in an instance of the
+    /// update template unit ([`Request::StartUpdate`]). Returns the
+    /// monitor's detail once the start job is queued; the update's own
+    /// outcome is the running version later.
     ///
     /// # Errors
     ///

@@ -943,7 +943,7 @@ mod tools {
         fn description() -> Option<Cow<'static, str>> {
             Some(
                 "Start installing a release in the background (`detent update --tag` in a \
-                 transient systemd unit). The answer comes when the update starts, not when \
+                 systemd unit). The answer comes when the update starts, not when \
                  it ends: the service restarts if the release installs, and the update rolls \
                  back if the restarted service is not healthy. The running detent version \
                  shows the result."

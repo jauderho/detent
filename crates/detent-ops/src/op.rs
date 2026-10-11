@@ -207,8 +207,8 @@ pub enum Operation {
     /// acme process to renew.
     CertRenew,
     /// Start installing a release: the monitor asks the runner to run
-    /// `detent update --tag <version>` in the transient systemd unit
-    /// `detent-update`, which downloads, verifies, self-tests, swaps,
+    /// `detent update --tag <version>` in the systemd unit
+    /// `detent-update@<version>.service`, which downloads, verifies, self-tests, swaps,
     /// restarts the service, checks `/healthz` and rolls back if it is not
     /// healthy. The operation answers once the unit runs.
     UpdateApply {

@@ -53,7 +53,7 @@ use detent_core::descriptor::{InitSystem, ServiceAction, ServiceBinding, UnitNam
 
 pub use launchd::LaunchdManager;
 pub use openrc::OpenRcManager;
-pub use systemd::{SystemdManager, update_unit_args};
+pub use systemd::SystemdManager;
 
 use crate::privsep::monitor::{HookError, ServiceControl};
 use crate::privsep::proto::{BindingId, ServiceOutcome, UnitState, UnitStatus};
@@ -114,9 +114,27 @@ pub fn validate_mount_unit_name(name: &str) -> Result<(), ServiceError> {
     }
 }
 
-/// The transient unit [`ServiceManager::start_update`] runs the CLI
-/// updater in (`detent-update.service`).
+/// The template unit [`ServiceManager::start_update`] starts an instance of
+/// (`packaging/systemd/detent-update@.service`). It runs only
+/// `/usr/local/bin/detent update --tag=%i`, as root.
 pub const UPDATE_UNIT: &str = "detent-update";
+
+/// The instance of [`UPDATE_UNIT`] for release `tag`:
+/// `detent-update@<tag>.service`, or `None` when `tag` fails
+/// [`is_release_tag`](crate::privsep::proto::is_release_tag).
+///
+/// The tag is the instance name as it is, with no escaping: a release tag
+/// holds only `[0-9A-Za-z.-]`, which are all valid in a unit name, and the
+/// unit reads it back with `%i` (verbatim). `systemd-escape` would write `-`
+/// as `\x2d`, and `%I` would turn each `-` into `/`.
+#[must_use]
+pub fn update_unit_name(tag: &str) -> Option<String> {
+    if !crate::privsep::proto::is_release_tag(tag) {
+        return None;
+    }
+    let unit = format!("{UPDATE_UNIT}@{tag}.service");
+    validate_unit_name(&unit).ok().map(|()| unit)
+}
 
 /// What every backend but systemd answers for [`ServiceManager::start_update`].
 const UPDATE_NEEDS_SYSTEMD: &str = "starting an update from the web or MCP needs systemd; run `detent update --tag <tag>` on the host";
@@ -126,7 +144,8 @@ const UPDATE_NEEDS_SYSTEMD: &str = "starting an update from the web or MCP needs
 pub enum UpdateStart {
     /// The unit runs; a short detail.
     Started(String),
-    /// A unit named [`UPDATE_UNIT`] is already there: an update runs.
+    /// An instance of [`UPDATE_UNIT`] is active or has a job: an update
+    /// runs.
     AlreadyRunning,
 }
 
@@ -388,54 +407,21 @@ pub trait ServiceManager: Send + Sync {
         ))
     }
 
-    /// Starts `binary update --tag <tag>` in the transient unit
-    /// [`UPDATE_UNIT`], outside detent's own service, so the updater lives
-    /// through the service restart it does. Returns once the unit runs; it
-    /// does not wait for the update.
+    /// Starts the instance of the template unit [`UPDATE_UNIT`] for `tag`
+    /// ([`update_unit_name`]), outside detent's own service, so the updater
+    /// lives through the service restart it does. The unit file fixes the
+    /// command; only the tag varies. Returns once the start job is queued;
+    /// it does not wait for the update.
     ///
     /// # Errors
     ///
     /// [`ServiceError::InvalidUnitName`] before any process runs when `tag`
-    /// fails [`is_release_tag`](crate::privsep::proto::is_release_tag) or
-    /// `binary` is not an absolute UTF-8 path; [`ServiceError::Unsupported`]
-    /// on every backend but systemd; [`ServiceError::Unavailable`] when
-    /// `systemd-run` is absent; [`ServiceError::Failed`] when it failed.
-    fn start_update(
-        &self,
-        _binary: &std::path::Path,
-        _tag: &str,
-    ) -> Result<UpdateStart, ServiceError> {
+    /// fails [`is_release_tag`](crate::privsep::proto::is_release_tag);
+    /// [`ServiceError::Unsupported`] on every backend but systemd;
+    /// [`ServiceError::Unavailable`] when `systemctl` is absent;
+    /// [`ServiceError::Failed`] when a `systemctl` call failed.
+    fn start_update(&self, _tag: &str) -> Result<UpdateStart, ServiceError> {
         Err(ServiceError::Unsupported(UPDATE_NEEDS_SYSTEMD.to_owned()))
-    }
-}
-
-/// The installed detent binary, from [`std::env::current_exe`]'s answer
-/// `exe`: an absolute path. After the file was replaced under a running
-/// process, Linux names the old inode `<path> (deleted)`; the suffix is
-/// removed, because the path now holds the newer installed binary.
-///
-/// # Errors
-///
-/// [`ServiceError::Failed`] when `exe` is an error or not absolute.
-pub fn installed_binary(
-    exe: std::io::Result<std::path::PathBuf>,
-) -> Result<std::path::PathBuf, ServiceError> {
-    let exe = exe.map_err(|err| {
-        ServiceError::Failed(format!("the installed binary cannot be found: {err}"))
-    })?;
-    let exe = match exe
-        .to_str()
-        .and_then(|path| path.strip_suffix(" (deleted)"))
-    {
-        Some(path) => std::path::PathBuf::from(path),
-        None => exe,
-    };
-    if exe.is_absolute() {
-        Ok(exe)
-    } else {
-        Err(ServiceError::Failed(
-            "the installed binary path is not absolute".to_owned(),
-        ))
     }
 }
 
@@ -534,11 +520,8 @@ impl ServiceControl for ServiceControlAdapter {
         self.0.stop_mount_units(units).map_err(HookError::from)
     }
 
-    /// The binary is this process's own executable ([`installed_binary`]),
-    /// never a path from the socket.
     fn start_update(&self, tag: &str) -> Result<UpdateStart, HookError> {
-        let binary = installed_binary(std::env::current_exe())?;
-        self.0.start_update(&binary, tag).map_err(HookError::from)
+        self.0.start_update(tag).map_err(HookError::from)
     }
 }
 
@@ -568,7 +551,7 @@ impl AltCache {
 mod tests {
     use super::{
         ActionOutcome, NullManager, ServiceControlAdapter, ServiceError, ServiceManager,
-        ServiceStatus, State, SystemTime, UpdateStart, for_host, installed_binary,
+        ServiceStatus, State, SystemTime, UpdateStart, for_host, update_unit_name,
         validate_unit_name,
     };
     use detent_core::descriptor::{InitSystem, ServiceAction, ServiceBinding, UnitNames};
@@ -889,7 +872,7 @@ mod tests {
         ));
     }
 
-    /// Answers `start_update` with the binary and the tag it was given.
+    /// Answers `start_update` with the tag it was given.
     struct UpdateEcho;
 
     impl ServiceManager for UpdateEcho {
@@ -909,26 +892,18 @@ mod tests {
             Err(ServiceError::Unsupported("not used".to_owned()))
         }
 
-        fn start_update(
-            &self,
-            binary: &std::path::Path,
-            tag: &str,
-        ) -> Result<UpdateStart, ServiceError> {
-            Ok(UpdateStart::Started(format!("{} {tag}", binary.display())))
+        fn start_update(&self, tag: &str) -> Result<UpdateStart, ServiceError> {
+            Ok(UpdateStart::Started(format!("echo {tag}")))
         }
     }
 
     #[test]
-    fn the_adapter_starts_the_update_with_this_process_executable()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn the_adapter_forwards_the_update_tag() {
         use crate::privsep::monitor::ServiceControl;
         let adapter = ServiceControlAdapter(Box::new(UpdateEcho));
         assert_eq!(
             adapter.start_update("v1.2.3"),
-            Ok(UpdateStart::Started(format!(
-                "{} v1.2.3",
-                std::env::current_exe()?.display()
-            )))
+            Ok(UpdateStart::Started("echo v1.2.3".to_owned()))
         );
         let units = UnitNames {
             systemd: &[],
@@ -938,7 +913,32 @@ mod tests {
         assert!(adapter.0.status(&units).is_err());
         assert!(adapter.0.act(&units, ServiceAction::Restart).is_err());
         assert!(adapter.0.reload_unit_files().is_err());
-        Ok(())
+    }
+
+    /// The tag is the instance name verbatim: release tags need no
+    /// escaping, and anything else gets no name at all.
+    #[test]
+    fn the_update_unit_name_is_the_template_instance_of_a_release_tag() {
+        assert_eq!(
+            update_unit_name("v1.2.0-rc.1").as_deref(),
+            Some("detent-update@v1.2.0-rc.1.service")
+        );
+        assert_eq!(
+            update_unit_name("v0.1.1").as_deref(),
+            Some("detent-update@v0.1.1.service")
+        );
+        for tag in [
+            "",
+            "1.2.3",
+            "-v1.2.3",
+            "v1.2.3+build",
+            "v1.2.3 x",
+            "v1.2.3/..",
+            "v1.2\\x2d3",
+            "v1.2.3;id",
+        ] {
+            assert_eq!(update_unit_name(tag), None, "{tag:?}");
+        }
     }
 
     #[test]
@@ -948,27 +948,6 @@ mod tests {
         assert!(matches!(
             null.start_update("v1.2.3"),
             Err(HookError::Unavailable(message)) if message.contains("needs systemd")
-        ));
-    }
-
-    #[test]
-    fn the_installed_binary_is_absolute_and_loses_the_deleted_suffix() {
-        use std::path::PathBuf;
-        assert_eq!(
-            installed_binary(Ok(PathBuf::from("/usr/local/bin/detent"))),
-            Ok(PathBuf::from("/usr/local/bin/detent"))
-        );
-        assert_eq!(
-            installed_binary(Ok(PathBuf::from("/usr/local/bin/detent (deleted)"))),
-            Ok(PathBuf::from("/usr/local/bin/detent"))
-        );
-        assert!(matches!(
-            installed_binary(Ok(PathBuf::from("detent"))),
-            Err(ServiceError::Failed(_))
-        ));
-        assert!(matches!(
-            installed_binary(Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
-            Err(ServiceError::Failed(_))
         ));
     }
 

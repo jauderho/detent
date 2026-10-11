@@ -360,8 +360,9 @@ impl OpsEngine {
                 None => Err(OpsError::Unsupported { what: "cert_renew" }),
             },
             // The confined worker can neither download nor swap a binary, so
-            // the runner starts the CLI updater in its own transient unit
-            // (`StartUpdate`, E16); the answer comes once the unit runs.
+            // the runner starts the CLI updater in an instance of the update
+            // template unit (`StartUpdate`, E16); the answer comes once the
+            // start job is queued.
             Operation::UpdateApply { version } => self
                 .update_apply(&version)
                 .map(|()| OpOutcome::UpdateStarted { version }),
@@ -404,8 +405,8 @@ impl OpsEngine {
     }
 
     /// Ask the monitor to start the CLI updater for `version`
-    /// (`StartUpdate`, E16): the runner runs `detent update --tag
-    /// <version>` in the transient unit `detent-update`, which downloads,
+    /// (`StartUpdate`, E16): the runner starts `detent update --tag
+    /// <version>` in the unit `detent-update@<version>.service`, which downloads,
     /// verifies, self-tests, swaps, restarts, checks `/healthz` and rolls
     /// back. This returns once the unit runs; the result is the running
     /// version afterwards.

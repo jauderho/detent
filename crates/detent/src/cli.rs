@@ -540,7 +540,8 @@ pub struct UpdateArgs {
     /// one. The policy still applies: the tag must be offered, past the age
     /// gate, not rolled back on this host, and newer than the running
     /// version unless `--allow-downgrade`. The web and MCP install run
-    /// `detent update --tag <tag>` in a transient systemd unit.
+    /// `detent update --tag=<tag>` in the systemd unit
+    /// `detent-update@<tag>.service`.
     #[arg(long, value_name = "TAG", conflicts_with_all = ["check", "force"])]
     pub tag: Option<String>,
 }

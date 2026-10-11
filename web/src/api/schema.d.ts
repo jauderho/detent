@@ -399,8 +399,8 @@ export interface paths {
         /**
          * `POST /api/v1/system/update`.
          * @description Starts installing the named release in the background: the monitor asks
-         *     the runner to run `detent update --tag <version>` in the transient
-         *     systemd unit `detent-update`, which downloads and verifies the release,
+         *     the runner to run `detent update --tag <version>` in the systemd unit
+         *     `detent-update@<version>.service`, which downloads and verifies the release,
          *     swaps it in, restarts the service, and rolls back if the restarted
          *     service is not healthy. `202` means the unit runs, not that the release
          *     is installed; `GET` shows the running version afterwards. `400`
