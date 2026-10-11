@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
 # packaging/install.sh — install or uninstall the detent binary, systemd
-# unit, sysusers/tmpfiles snippets, and (capability-user mode) the unit
-# drop-in and polkit rule (PLAN §2.4, §2.10, Phase 2 "Packaging", Phase 12).
+# unit, the update template unit, sysusers/tmpfiles snippets, and
+# (capability-user mode) the unit drop-in and polkit rule (PLAN §2.4, §2.10,
+# Phase 2 "Packaging", Phase 12).
 #
 # Usage:
 #   install.sh [OPTIONS]
@@ -60,6 +61,7 @@ VERBOSE=0
 
 BIN_DEST="usr/local/bin/detent"
 SERVICE_DEST="etc/systemd/system/detent.service"
+UPDATE_UNIT_DEST="etc/systemd/system/detent-update@.service"
 DROPIN_DIR="etc/systemd/system/detent.service.d"
 DROPIN_DEST="$DROPIN_DIR/capability-user.conf"
 SYSUSERS_DEST="etc/sysusers.d/detent.conf"
@@ -284,13 +286,16 @@ remove_empty_dir() {
 
 do_uninstall() {
   stop_service
+  # The polkit rule goes before the update template unit: the rule's grant
+  # to start an instance is safe only while the template file exists.
+  remove_file "$POLKIT_DEST"
   remove_file "$BIN_DEST"
   remove_file "$SERVICE_DEST"
+  remove_file "$UPDATE_UNIT_DEST"
   remove_file "$DROPIN_DEST"
   remove_empty_dir "$DROPIN_DIR"
   remove_file "$SYSUSERS_DEST"
   remove_file "$TMPFILES_DEST"
-  remove_file "$POLKIT_DEST"
 
   if ((DRYRUN == 0)) && [[ -z "$PREFIX" ]]; then
     run "systemctl daemon-reload" systemctl daemon-reload
@@ -313,6 +318,9 @@ do_install() {
 
   install_file "$BINARY" "$BIN_DEST" 0755
   install_file "$SCRIPT_DIR/systemd/detent.service" "$SERVICE_DEST" 0644
+  # Both modes: the web and MCP update install starts an instance of it.
+  # Installed before the polkit rule, which is safe only with it.
+  install_file "$SCRIPT_DIR/systemd/detent-update@.service" "$UPDATE_UNIT_DEST" 0644
   install_file "$SCRIPT_DIR/sysusers.d/detent.conf" "$SYSUSERS_DEST" 0644
   install_file "$SCRIPT_DIR/tmpfiles.d/detent.conf" "$TMPFILES_DEST" 0644
 
