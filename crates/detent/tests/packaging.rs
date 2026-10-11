@@ -160,6 +160,68 @@ fn the_unit_keeps_setuid_for_the_worker_drop() {
     }
 }
 
+const UPDATE_UNIT: &str = include_str!("../../../packaging/systemd/detent-update@.service");
+
+/// The value of the first `key=` line of the update template unit.
+fn update_unit_value(key: &str) -> Option<&'static str> {
+    UPDATE_UNIT
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(key)?.strip_prefix('='))
+}
+
+/// The update template runs only the installed binary's `update`, with the
+/// instance name verbatim (`%i`, never `%I`, which would turn `-` into `/`)
+/// as one quoted `--tag=` argument, and nothing else.
+#[test]
+fn the_update_template_runs_only_detent_update_with_the_instance_tag() {
+    let exec: Vec<&str> = UPDATE_UNIT
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("ExecStart"))
+        .collect();
+    assert_eq!(exec, ["=/usr/local/bin/detent update \"--tag=%i\""]);
+    let service_binary = unit_value("ExecStart")
+        .and_then(|exec| exec.split_whitespace().next())
+        .unwrap_or_default();
+    assert_eq!(service_binary, "/usr/local/bin/detent");
+    assert!(
+        UPDATE_UNIT
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .all(|line| !line.contains("%I")),
+        "%I unescapes the instance name"
+    );
+    for key in ["ExecStartPre", "ExecStartPost", "ExecStop", "ExecStopPost"] {
+        assert_eq!(update_unit_value(key), None, "{key}");
+    }
+}
+
+/// A oneshot unit, as root (the updater replaces the binary and restarts
+/// the service), unloaded when it ends also after a failure (what
+/// `systemd-run --collect` did), with a start timeout so a hung update
+/// cannot keep every later install at 409.
+#[test]
+fn the_update_template_is_a_collected_oneshot_root_unit() {
+    assert_eq!(update_unit_value("Type"), Some("oneshot"));
+    assert_eq!(update_unit_value("User"), Some("root"));
+    assert_eq!(update_unit_value("CollectMode"), Some("inactive-or-failed"));
+    assert!(update_unit_value("TimeoutStartSec").is_some());
+    assert_eq!(update_unit_value("NoNewPrivileges"), Some("yes"));
+    assert_eq!(update_unit_value("ProtectSystem"), Some("strict"));
+    assert_eq!(
+        update_unit_value("ReadWritePaths"),
+        Some("/usr/local/bin /var/lib/detent")
+    );
+    assert_eq!(
+        update_unit_value("CapabilityBoundingSet"),
+        Some("CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH")
+    );
+    assert_eq!(update_unit_value("AmbientCapabilities"), None);
+    assert!(
+        !UPDATE_UNIT.contains("[Install]"),
+        "the template is started on demand, never enabled"
+    );
+}
+
 const POLKIT_RULE: &str = include_str!("../../../packaging/polkit/50-detent.rules");
 
 /// The rule's code, without its comment lines.
@@ -337,10 +399,13 @@ const INSTALL_SH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../packaging/i
 /// Where `install.sh` puts the capability-user drop-in and the polkit rule.
 const DROPIN: &str = "etc/systemd/system/detent.service.d/capability-user.conf";
 const POLKIT: &str = "etc/polkit-1/rules.d/50-detent.rules";
+/// Where `install.sh` puts the update template unit, in both modes.
+const UPDATE_TEMPLATE: &str = "etc/systemd/system/detent-update@.service";
 /// Every file `install.sh` may place.
 const INSTALLED: &[&str] = &[
     "usr/local/bin/detent",
     "etc/systemd/system/detent.service",
+    UPDATE_TEMPLATE,
     "etc/sysusers.d/detent.conf",
     "etc/tmpfiles.d/detent.conf",
     DROPIN,
@@ -382,6 +447,16 @@ fn install_dryrun_in_capability_user_mode_installs_the_drop_in_and_the_rule()
         text.contains("[privilege] mode = \"capability-user\""),
         "{text}"
     );
+    let template = text
+        .find(&format!("installing {UPDATE_TEMPLATE}"))
+        .ok_or_else(|| format!("no update template: {text}"))?;
+    let rule = text
+        .find(&format!("installing {POLKIT}"))
+        .ok_or_else(|| format!("no polkit rule: {text}"))?;
+    assert!(
+        template < rule,
+        "the template must be in place before the rule: {text}"
+    );
     Ok(())
 }
 
@@ -400,6 +475,10 @@ fn install_dryrun_in_root_confined_mode_installs_no_polkit_rule()
     assert!(!text.contains(&format!("installing {POLKIT}")), "{text}");
     assert!(!text.contains(&format!("installing {DROPIN}")), "{text}");
     assert!(!text.contains("[privilege]"), "{text}");
+    assert!(
+        text.contains(&format!("installing {UPDATE_TEMPLATE}")),
+        "{text}"
+    );
     Ok(())
 }
 
@@ -442,18 +521,54 @@ fn install_prefix_switches_modes_and_uninstalls() -> Result<(), Box<dyn std::err
         POLKIT_RULE,
         "the installed rule is not the packaged one"
     );
+    assert_eq!(
+        std::fs::read_to_string(root.join(UPDATE_TEMPLATE))?,
+        UPDATE_UNIT,
+        "the installed template is not the packaged one"
+    );
 
     let (ok, text) = install_sh(&["--prefix", &prefix, "--binary", &binary])?;
     assert!(ok, "{text}");
     assert!(!present(DROPIN), "{text}");
     assert!(!present(POLKIT), "{text}");
     assert!(present("etc/systemd/system/detent.service"), "{text}");
+    assert!(present(UPDATE_TEMPLATE), "{text}");
 
     let (ok, text) = install_sh(&["--prefix", &prefix, "--uninstall"])?;
     assert!(ok, "{text}");
     for rel in INSTALLED {
         assert!(!present(rel), "{rel} left after --uninstall");
     }
+    Ok(())
+}
+
+/// `--uninstall` removes the polkit rule before the update template: the
+/// rule's grant to start an instance is safe only while the template file
+/// exists (without it, systemd would accept a transient unit of that name).
+#[test]
+fn uninstall_removes_the_polkit_rule_before_the_update_template()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::TempDir::new()?;
+    let binary = fake_binary(dir.path())?;
+    let prefix = dir.path().join("root").to_string_lossy().into_owned();
+    let (ok, text) = install_sh(&[
+        "--prefix",
+        &prefix,
+        "--mode",
+        "capability-user",
+        "--binary",
+        &binary,
+    ])?;
+    assert!(ok, "{text}");
+    let (ok, text) = install_sh(&["--prefix", &prefix, "--uninstall"])?;
+    assert!(ok, "{text}");
+    let rule = text
+        .find(&format!("removing {POLKIT}"))
+        .ok_or_else(|| format!("the rule was not removed: {text}"))?;
+    let template = text
+        .find(&format!("removing {UPDATE_TEMPLATE}"))
+        .ok_or_else(|| format!("the template was not removed: {text}"))?;
+    assert!(rule < template, "{text}");
     Ok(())
 }
 

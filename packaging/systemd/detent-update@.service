@@ -1,0 +1,79 @@
+# packaging/systemd/detent-update@.service
+#
+# The CLI updater for one release, started by detent's runner for a web or
+# MCP install (BUGFIX E16): `systemctl start --no-block
+# detent-update@v1.2.3.service`. The instance name is the release tag,
+# verbatim: detent starts it only for a tag that passes
+# `proto::is_release_tag` (`v` + semver, only [0-9A-Za-z.-]), which needs no
+# unit-name escaping. `%i` passes the instance name as it is; `%I` would
+# unescape it and turn each `-` into `/`. The quotes and `--tag=` keep it one
+# argument with the option name fixed, whatever the instance name holds.
+#
+# It runs as root in both privilege modes: the updater replaces
+# /usr/local/bin/detent and restarts detent.service. It runs outside
+# detent.service, so it lives through that restart. The updater itself
+# verifies the release and applies the release policy (offered for this
+# build, past the age gate, not rolled back on this host, newer than the
+# running version: no --allow-downgrade here).
+#
+# In capability-user mode, packaging/polkit/50-detent.rules lets the
+# `detent` user start (only start) an instance of this unit whose name is a
+# release tag. Because this file exists, systemd also refuses a transient
+# unit with an instance name of it ("has a fragment file"), so that grant
+# cannot run any other command.
+#
+# Sandbox: as tight as the updater allows, from what it does: it reads
+# /etc/detent/detent.toml and the serving certificate under /var/lib/detent,
+# downloads from GitHub, stages and swaps in /usr/local/bin, runs the
+# candidate's self-test, writes /var/lib/detent/update, runs `systemctl
+# restart detent.service` and polls `/healthz`. detent.service runs the same
+# kinds of work (TLS, files, `systemctl` in its runner) under
+# SystemCallFilter=@system-service.
+#
+# Installed by packaging/install.sh in both modes; do not hand-edit a
+# deployed copy — re-run install.sh instead.
+
+[Unit]
+Description=detent update to release %i
+Documentation=https://github.com/jauderho/detent
+After=network-online.target
+Wants=network-online.target
+# Unload the instance when it ends, also after a failure: a failed update
+# leaves nothing behind, and a later start of the same tag runs again.
+CollectMode=inactive-or-failed
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/detent update "--tag=%i"
+# A oneshot unit has no start timeout by default. A hung update would keep
+# every later web or MCP install at 409; the health check itself waits 30 s.
+TimeoutStartSec=15min
+
+User=root
+# Root needs no capability to replace its own binary; CAP_DAC_OVERRIDE and
+# CAP_DAC_READ_SEARCH reach the state root (detent:detent 0700) for the
+# certificate, the update stamp and the bad-release list.
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+
+ProtectSystem=strict
+ReadWritePaths=/usr/local/bin /var/lib/detent
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
