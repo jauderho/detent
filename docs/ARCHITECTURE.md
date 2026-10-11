@@ -82,6 +82,15 @@ privilege.
   (`become_worker`) and confines itself.
 - The monitor confines itself in `spawn_pair` before it releases the worker
   (`sandbox.confine_monitor()`, then the start byte).
+- With `[privilege] mode = "capability-user"` the whole service runs as
+  `detent` (unit drop-in `capability-user.conf`) with `CAP_DAC_OVERRIDE`,
+  `CAP_CHOWN` and `CAP_FOWNER` and no root process. The monitor keeps the
+  three, the runner keeps `CAP_DAC_OVERRIDE`, and the worker and acme
+  process clear all of theirs (`keep_only`, `spawn.rs`). `serve` refuses to
+  start when the mode and the process disagree (`check_mode`,
+  `privsep/mode.rs`). Service control goes through polkit
+  (`packaging/polkit/50-detent.rules`). The diagram and §9 show the default
+  root-confined mode.
 - The acme process (ADR-015; `spawn_acme` in `spawn.rs`,
   `crates/detent-platform/src/privsep/acme.rs`) hardens itself, drops to
   uid `detent` and confines itself with `Policy::acme` and the `ACME`
@@ -342,7 +351,7 @@ H17, `docs/stage4-wip/h17-set-partial.patch`).
 | Capabilities | all | bounding set cut to `DAC_OVERRIDE`, `CHOWN`, `FOWNER`; start fails if the cut fails (`require_caps`) | none | none |
 | `no_new_privs` / not dumpable | no / no | yes / yes | yes / yes | yes / yes |
 | Landlock (writes) | none | target parent dirs, backup dirs, state root, `/run/detent/staging`; degrades with a warning if absent (`require_landlock` off by default) | state root only | ACME credentials dir only |
-| seccomp | none | `MONITOR` table, kill on violation; start fails if it does not install (`require_seccomp`) | `WORKER` table, `EPERM` on violation, same rule | `ACME` table (outbound client: `connect`, `bind` for musl's resolver, no `listen`/`accept4`), `EPERM`, same rule |
+| seccomp | none | `MONITOR` table, kill on violation; start fails if it does not install (`require_seccomp`) | `WORKER` table, `EPERM` on violation, same rule; `socket` only as a TCP stream (`AF_INET`/`AF_INET6`) and `sendto` only with a NULL address (TM-G2, `arg_rules_for`) | `ACME` table (outbound client: `connect`, `bind` for musl's resolver, no `listen`/`accept4`), `EPERM`, same rule |
 | Reachable by | monitor only (socket pair) | worker only (socket pair) | network | worker only (socket pair); no listening socket |
 
 Sources: `crates/detent-platform/src/sandbox/mod.rs` (`Policy::monitor`,
@@ -358,7 +367,7 @@ any degraded step (`report_confinement`, `serve.rs`).
 | per-target backup dirs | monitor | timestamped backups, retained count from config |
 | `/var/lib/detent` (state root) | monitor and worker | the items below |
 | `…/audit/detent-audit.jsonl` | engine | operation audit, sequence and hash chain |
-| `…/audit/detent-auth.jsonl` | worker | login, token and session events |
+| `…/audit/detent-auth.jsonl` | worker; the CLI (`setup`, `user`, `token`) | login, token, session and local account events; a refused credential, once per client address per 60 s |
 | `…/users.json`, `…/tokens.json` | `detent setup`, `detent user`, `detent token` (local operator) | Argon2id hashes; token SHA-256 digests |
 | `…/pending-commit.json` | monitor | commit-confirm marker, replayed at start |
 | `/var/lib/detent/certs` | worker | TLS pair, `0600` in a `0700` dir |
@@ -377,11 +386,19 @@ any degraded step (`report_confinement`, `serve.rs`).
    other process-creation call (removed 2026-09-30; guarded by
    `the_monitor_table_has_no_process_creation_calls`, `crates/detent-platform/src/sandbox/seccomp.rs`).
 3. **One-shot CLI and `detent mcp` are not privilege-separated** (§3.2).
+   `detent audit verify` and the CLI audit records run in that process too.
 4. **Landlock is absent on Raspberry Pi OS kernels** (SECURITY_HARDENING
    Gaps). Seccomp and the capability cut still apply.
 5. **aarch64 confinement is compiled and unit-tested but not run on
    hardware.**
-6. Open items (including the STAGE3 review items) are tracked in
+6. **The worker can still open a TCP listener.** Its seccomp table limits
+   `socket` and `sendto` (§9), but `bind` and `listen` take any address, and
+   `detent.service` has no `IPAddressDeny=`.
+7. **In capability-user mode the monitor and the worker share the uid
+   `detent`.** Landlock, seccomp and the worker's empty capability sets stay;
+   the uid check on the staging and audit directories separates nothing
+   (SECURITY_HARDENING Gaps item 14).
+8. Open items (including the STAGE3 review items) are tracked in
    [`BUGFIX.md`](BUGFIX.md).
 
 ## 12. How to verify

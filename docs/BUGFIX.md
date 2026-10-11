@@ -484,8 +484,8 @@ Fixes from the threat model, in order (each: test first, one commit):
    (`PROGRESS.md`); proven on the test host 2026-10-10 (CLI records, `privsep
    request` log, coalesced `credential_rejected`, `audit verify`). Still open from it: a notice channel to the user on a
    credential change (ASVS 2.2.3, 2.5.5), a remote log sink (1.7.2, 7.3.3).
-4. **Stale statements** in SECURITY_HARDENING, ARCHITECTURE §11 and ADR-012
-   (THREAT_MODEL §7).
+4. ~~**Stale statements** in SECURITY_HARDENING, ARCHITECTURE §11 and ADR-012
+   (THREAT_MODEL §7).~~ Done 2026-10-10 (`PROGRESS.md`).
 5. ~~**TM-G2 worker UDP egress** (seccomp argument filter on `socket` /
    `sendto`)~~ Done 2026-10-10 (`PROGRESS.md`): traced on the test host;
    `WORKER` `socket` takes only an `AF_INET`/`AF_INET6` TCP stream, `sendto`

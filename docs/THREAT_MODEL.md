@@ -359,7 +359,7 @@ above.** If the owner says yes, update this document first. The change adds:
 
 ## 7. Out-of-date statements found during this pass
 
-Fixed 2026-10-09 in a docs-only pass, except the last item, which that pass did not cover.
+Fixed 2026-10-09 and 2026-10-10 in docs-only passes. Nothing here is open.
 
 - [SH-I] row "Only one pending commit at a time" and SH Gaps item 9 say no
   negative test exists; `a_second_commit_confirm_apply_while_one_is_pending_writes_nothing`
@@ -381,7 +381,16 @@ Fixed 2026-10-09 in a docs-only pass, except the last item, which that pass did 
 - SH Gaps item 7 (Landlock degradation not tied to `doctor`) is partly
   closed: `doctor_reports_the_confinement_each_role_recorded`
   (`detent/src/doctor.rs`), `a_missing_landlock_is_reported_at_startup`
-  (`detent/src/serve.rs`).
+  (`detent/src/serve.rs`). **Fixed 2026-10-10:** the item now names both tests and the part still open.
+- ADR-012 also said service restart is not replayed (H4) and the marker does
+  not trigger rollback (H1); the monitor replays it (`replay_service`) and
+  `recover_pending` rolls back a leftover marker. **Fixed 2026-10-10.**
+- ARCHITECTURE and SECURITY_HARDENING lacked the 2026-10-10 controls:
+  worker `socket`/`sendto` argument filters (ARCHITECTURE §9, §11),
+  capability-user mode (ARCHITECTURE §3.1, §11), CLI and `credential_rejected`
+  auth records and `detent audit verify` (ARCHITECTURE §10,
+  SECURITY_HARDENING auth and ops audit rows). **Fixed 2026-10-10.** The E16
+  template unit and the PKG-6 mount fragment rule were already stated.
 
 ## 8. Gaps
 
