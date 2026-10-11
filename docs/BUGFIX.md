@@ -485,8 +485,10 @@ Fixes from the threat model, in order (each: test first, one commit):
    credential change (ASVS 2.2.3, 2.5.5), a remote log sink (1.7.2, 7.3.3).
 4. **Stale statements** in SECURITY_HARDENING, ARCHITECTURE §11 and ADR-012
    (THREAT_MODEL §7).
-5. **TM-G2 worker UDP egress** (seccomp argument filter on `socket` /
-   `sendto`): owner decision, §4.
+5. ~~**TM-G2 worker UDP egress** (seccomp argument filter on `socket` /
+   `sendto`)~~ Done 2026-10-10 (`PROGRESS.md`): traced on the test host;
+   `WORKER` `socket` takes only an `AF_INET`/`AF_INET6` TCP stream, `sendto`
+   only a NULL address. Proven on the test host in both modes.
 6. **TM-G12 tag push gives a signed release:** the rulesets in
    `docs/RELEASING.md` (E5, owner).
 7. ~~**Login rotation kept the old session's subject**~~ Done 2026-10-10
@@ -555,6 +557,7 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   argument filter, so a taken worker can send UDP without `connect`. Add an
   argument filter (for example `socket` only for `AF_UNIX`)? — proposed: yes,
   after a trace on the test host shows what the worker needs — owner answer:
+  yes (2026-10-10, below). Done 2026-10-10 (`PROGRESS.md`).
 - Track F passkeys: ADR-016 recommends deferring past v1 (a WebAuthn RP ID
   needs a DNS name; the default install is reached by IP). — owner answer:
 - Track F `capability-user` mode for v1 (monitor as `detent` with ambient
@@ -578,6 +581,9 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
     keeps 1.8.
   - TM-G2: trace the worker on the test host, then add a seccomp argument
     filter (`socket` limited to what the worker needs, e.g. `AF_UNIX`).
+    Done 2026-10-10: the trace showed no `AF_UNIX` `socket` call, only the
+    TCP listener; `socket` takes a TCP stream only, `sendto` a NULL address
+    only (`PROGRESS.md`).
   - Passkeys: deferred past v1 (ADR-016).
 - D4: remove build toolchains from testhost. — proposed: after Track C A1–A3 —
   owner answer:

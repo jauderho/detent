@@ -175,7 +175,7 @@ boundary.
 | Id | S/T/R/I/D/E | Threat | Control | Proven by | Status |
 |---|---|---|---|---|---|
 | WRK-1 | E | Remote code execution in the worker becomes root (AS1–AS9 ← A6) | uid `detent`, empty bounding set, `no_new_privs`, Landlock writes only in the state root, `WORKER` seccomp table | `hooks_confine_both_roles_across_a_forked_pair`, `enforce_mode_worker_drops_the_bounding_set_before_its_uid_change` (`sandbox/linux.rs`, root); `worker_policy_is_state_root_only_with_no_capabilities` (`sandbox/mod.rs`) | Covered |
-| WRK-2 | I | A taken worker sends data out (AS3, AS6, AS7 ← A6) | `WORKER` has no `connect` (ADR-015) | `the_acme_table_connects_out_and_never_accepts` (`sandbox/seccomp.rs`) asserts the worker and the monitor cannot `connect` | Gap TM-G2: `WORKER` allows `socket` and `sendto` with no argument filter, so a taken worker can send UDP datagrams to any address without `connect`. Inferred from the table; not demonstrated |
+| WRK-2 | I | A taken worker sends data out (AS3, AS6, AS7 ← A6) | `WORKER` has no `connect` (ADR-015); argument filters (TM-G2): `socket` only for an `AF_INET`/`AF_INET6` TCP stream with protocol 0 (the listener), `sendto` only with a NULL address | `the_acme_table_connects_out_and_never_accepts` (`sandbox/seccomp.rs`) asserts the worker and the monitor cannot `connect`; `the_worker_opens_only_a_tcp_listener_and_sends_only_on_connected_sockets`, `every_argument_rule_names_a_listed_syscall_with_valid_arguments` (`sandbox/seccomp.rs`); `enforce_mode_worker_opens_only_a_tcp_listener_and_sends_on_connected_sockets` (`sandbox/linux.rs`, root: UDP and `AF_UNIX` sockets and an addressed `sendto` answer `EPERM`); test-host trace and run 2026-10-10 (PROGRESS) | Covered. Residual: the worker can still `bind` and `listen` on any TCP address (inbound only), and can answer on connections it accepts |
 | WRK-3 | I | A taken worker reads the dns-01 secret or the ACME account key (AS4, AS5 ← A6) | The provider is built before the fork and dropped by the parent; the worker cannot re-read `secrets.toml` (`0600` root) | `the_parent_drops_the_issuer_at_the_fork_and_keeps_what_it_passed` (`detent/src/acme.rs`); `acme_policy_writes_only_its_directory_with_no_capabilities` (`sandbox/mod.rs`) | Covered |
 | WRK-4 | E | Worker keeps the runner descriptor it inherits and drives the root runner (AS2 ← A6) | The worker drops it first (`serve.rs`, `Role::Worker` arm) | none | Gap (already listed in [SH-L] row "Validators … runner": no test observes the drop) |
 | WRK-5 | D | A reachable panic aborts the worker (`panic = "abort"`) and logs everyone out (AS13 ← A1) | `unwrap_used`, `expect_used`, `panic`, `indexing_slicing` denied (ADR-010); fuzzing; `Restart=always` | clippy `-D warnings` in CI job "Rust"; `no_bodied_endpoint_ever_answers_5xx` (`detent-web/src/api/integration_tests.rs`); fuzz targets `fuzz_api_json`, `fuzz_session_cookie` | Partial: lint and fuzz evidence, no proof that no panic is reachable |
@@ -348,7 +348,7 @@ above.** If the owner says yes, update this document first. The change adds:
   (`detent-web/src/secrets.rs`) and the same log-capture test as ACM-2.
 - **A conflict with WRK-2**: §5 says "calls run in the worker only", but
   the worker has no `connect` (ADR-015). Either the worker table gains
-  `connect` and DNS calls (this reverses the ADR-015 control and widens
+  `connect` and DNS calls (this reverses the ADR-015 control and reopens
   TM-G2), or the call moves to a separate confined process like the acme
   process. Decide this before the design is accepted.
 - **A new tampering path**: a hostile or spoofed answer. §5 limits it: the
@@ -392,7 +392,7 @@ compromise), **Low** (defence in depth, evidence, or audit quality).
 | Id | Severity | Gap | Rows | In BUGFIX or SH before this pass? |
 |---|---|---|---|---|
 | TM-G1 | Medium | No TOTP enrolment path: `UserStore::set_totp` has no production caller, so MFA cannot be turned on, and `auth.totp_required = true` locks every account out | WEB-4 | No |
-| TM-G2 | Medium | `WORKER` seccomp allows `socket` and `sendto` without argument filters: a taken worker can send UDP to any address without `connect`; the unit has no `IPAddressDeny=` (PKG-4) | WRK-2 | No |
+| TM-G2 | Medium | ~~`WORKER` seccomp allows `socket` and `sendto` without argument filters: a taken worker can send UDP to any address without `connect`; the unit has no `IPAddressDeny=` (PKG-4)~~ Fixed 2026-10-10: argument filters on `socket` (TCP stream only) and `sendto` (NULL address only), worker table only; the unit still has no `IPAddressDeny=` | WRK-2 | No |
 | TM-G3 | Low | ~~CLI user, password and token changes are not audited; `TokenIssued`/`TokenRevoked` have no producer~~ Fixed 2026-10-10 | CLI-6 | No |
 | TM-G4 | Low | ~~A bad bearer token or an expired session on the API is not logged~~ Fixed 2026-10-10 | WEB-14 | No |
 | TM-G5 | Low | ~~The monitor logs no line per `WriteTarget`, `Restore` or `Service`; a taken worker can omit the ops audit record~~ Fixed 2026-10-10 | MON-9 | No |
