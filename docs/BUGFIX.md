@@ -554,6 +554,17 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   %i`) and grant only `start` of `detent-update@*.service` in
   capability-user mode; until then the install is refused in that mode —
   owner answer:
+- Owner answers (2026-10-10):
+  - E16 in capability-user mode: ship a root-owned template unit
+    `detent-update@.service` (runs only `detent update --tag %i`) and grant
+    only `start` of `detent-update@*.service`; root-confined uses the same
+    template.
+  - Hardening score: accept 2.6 for the unchanged root-confined unit on
+    systemd 261 (the newer `systemd-analyze` scores it higher); capability-user
+    keeps 1.8.
+  - TM-G2: trace the worker on the test host, then add a seccomp argument
+    filter (`socket` limited to what the worker needs, e.g. `AF_UNIX`).
+  - Passkeys: deferred past v1 (ADR-016).
 - D4: remove build toolchains from testhost. — proposed: after Track C A1–A3 —
   owner answer:
 - libbz2 on testhost: `libbz2-1.0` was downgraded to `1.0.8-6build2` by an earlier
