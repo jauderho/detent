@@ -50,11 +50,16 @@
 #      back and checks the entry is gone.
 #   6. Service restart: POST /api/v1/services/<module> {"action":"restart"};
 #      the unit's ActiveEnterTimestamp must change.
-#   7. polkit: `systemctl daemon-reload` as detent succeeds; pkcheck (as root,
-#      for a process of detent) refuses a restart of an unlisted unit, a stop
-#      of -.mount and var-lib.mount, and a start of detent-update.service;
-#      `systemd-run` as detent cannot start detent-update.service or any other
-#      transient unit (the shipped rule grants no transient unit).
+#   7. polkit: `systemctl daemon-reload` as detent succeeds; the update
+#      template /etc/systemd/system/detent-update@.service is installed,
+#      root-owned and not group or other writable; pkcheck (as root, for a
+#      process of detent) allows a start of an update instance
+#      (detent-update@v0.0.0-check.1.service) and refuses its stop and
+#      restart, a start of detent-update.service and of a non-tag instance,
+#      a restart of an unlisted unit, and a stop of -.mount and
+#      var-lib.mount; `systemd-run` as detent cannot start
+#      detent-update.service, an update instance name or any other
+#      transient unit.
 #   8. With --mounts: runs scripts/mounts-activation-check.sh.
 #   Cleanup (also on any failure): puts /etc/hosts back when it differs,
 #   revokes the token, removes the work directory.
@@ -78,6 +83,8 @@ VERBOSE=false
 
 ACCOUNT="detent"
 UNIT="detent.service"
+UPDATE_TEMPLATE="/etc/systemd/system/detent-update@.service"
+UPDATE_INSTANCE="detent-update@v0.0.0-check.1"
 HOSTS="/etc/hosts"
 TEST_IP="192.0.2.77"
 TEST_NAME="detent-capability-check.invalid"
@@ -202,7 +209,7 @@ if [[ "${DRYRUN}" == true ]]; then
   log "would mint a write-scope token as ${ACCOUNT}, revoked at the end"
   log "would add '${TEST_IP} ${TEST_NAME}' to ${HOSTS} through POST ${BASE_URL}/api/v1/modules/hosts/apply, then apply the original model back"
   log "would POST ${BASE_URL}/api/v1/services/${SERVICE_MODULE} {\"action\":\"restart\"}"
-  log "would run 'systemctl daemon-reload' and 'systemd-run --unit=detent-update' as ${ACCOUNT}, and pkcheck refusals"
+  log "would check ${UPDATE_TEMPLATE}, run 'systemctl daemon-reload' and 'systemd-run --unit=detent-update' as ${ACCOUNT}, and pkcheck grants and refusals"
   if [[ "${MOUNTS}" == true ]]; then
     log "would run ${SCRIPT_DIR}/mounts-activation-check.sh --detent ${DETENT_BIN} --url ${BASE_URL} --state-root ${STATE_ROOT}"
   fi
@@ -416,7 +423,33 @@ refused() {
   fi
 }
 
+allowed() {
+  local what="$1"
+  shift
+  if pkcheck --process "${SUBJECT_PID}" "$@" >/dev/null 2>&1; then
+    pass "polkit allows ${ACCOUNT} to ${what}"
+  else
+    fail "polkit refuses ${ACCOUNT} to ${what}"
+  fi
+}
+
+# The update template: the polkit grant below is safe only while it exists
+# and only root can change it.
+template_stat="$(stat -c '%U %a' -- "${UPDATE_TEMPLATE}" 2>/dev/null || true)"
+case "${template_stat}" in
+  "root "?[0145][0145])
+    pass "${UPDATE_TEMPLATE} is root-owned (${template_stat})"
+    ;;
+  *)
+    fail "${UPDATE_TEMPLATE} is missing or writable by others: '${template_stat}'"
+    ;;
+esac
+
 manage=(--action-id org.freedesktop.systemd1.manage-units)
+allowed "start ${UPDATE_INSTANCE}.service" "${manage[@]}" --detail unit "${UPDATE_INSTANCE}.service" --detail verb start
+refused "stop ${UPDATE_INSTANCE}.service" "${manage[@]}" --detail unit "${UPDATE_INSTANCE}.service" --detail verb stop
+refused "restart ${UPDATE_INSTANCE}.service" "${manage[@]}" --detail unit "${UPDATE_INSTANCE}.service" --detail verb restart
+refused "start detent-update@check.service" "${manage[@]}" --detail unit detent-update@check.service --detail verb start
 refused "restart sshd.service" "${manage[@]}" --detail unit sshd.service --detail verb restart
 refused "stop ${service_unit}" "${manage[@]}" --detail unit "${service_unit}" --detail verb stop
 refused "stop -.mount" "${manage[@]}" --detail unit -.mount --detail verb stop
@@ -424,7 +457,7 @@ refused "stop var-lib.mount" "${manage[@]}" --detail unit var-lib.mount --detail
 refused "start detent-update.service" "${manage[@]}" --detail unit detent-update.service --detail verb start
 refused "edit unit files" --action-id org.freedesktop.systemd1.manage-unit-files
 
-for name in detent-update capability-user-check-other; do
+for name in detent-update "${UPDATE_INSTANCE}" capability-user-check-other; do
   if runuser -u "${ACCOUNT}" -- systemd-run --no-ask-password --quiet \
     --unit="${name}" --collect /bin/true 2>"${WORKDIR}/run.err"; then
     fail "systemd-run as ${ACCOUNT} started ${name}.service"
