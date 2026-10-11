@@ -83,10 +83,11 @@ pub const MAX_RELEASE_TAG_LEN: usize = 64;
 /// `v`, then a semver version with an optional pre-release and no build
 /// metadata, at most [`MAX_RELEASE_TAG_LEN`] bytes, only `[0-9A-Za-z.-]`.
 ///
-/// The tag becomes one argument of a fixed argv ([`Request::StartUpdate`]),
-/// so the charset and the leading `v` keep out spaces, `/`, `..`, shell
-/// metacharacters and a leading `-` (an option). The monitor and the runner
-/// both check it.
+/// The tag becomes the instance name of the update template unit and one
+/// argument of its fixed command ([`Request::StartUpdate`]), so the charset
+/// and the leading `v` keep out spaces, `/`, `..`, `\` (a unit-name escape),
+/// shell metacharacters and a leading `-` (an option). The monitor and the
+/// runner both check it.
 #[must_use]
 pub fn is_release_tag(tag: &str) -> bool {
     tag.len() <= MAX_RELEASE_TAG_LEN
@@ -460,16 +461,17 @@ pub enum Request {
         chunk: Vec<u8>,
     },
     /// Start the CLI updater for release `tag` outside detent's own
-    /// service (BUGFIX E16): the runner runs `systemd-run
-    /// --unit=detent-update --collect <installed detent> update --tag
-    /// <tag>`. The argv is fixed in the runner; only `tag` varies, and the
-    /// monitor and the runner both refuse a tag that fails
-    /// [`is_release_tag`]. The monitor also refuses a tag that is not newer
+    /// service (BUGFIX E16): the runner runs `systemctl start --no-block --
+    /// detent-update@<tag>.service`, an instance of the packaged template
+    /// unit, which runs `/usr/local/bin/detent update --tag=<tag>`. The
+    /// argv is fixed in the runner and the command in the unit file; only
+    /// `tag` varies, and the monitor and the runner both refuse a tag that
+    /// fails [`is_release_tag`]. The monitor also refuses a tag that is not newer
     /// than the running version. The answer is
     /// [`Response::UpdateStarted`] as soon as the unit runs: the download,
     /// verification, swap, restart, `/healthz` check and rollback happen in
     /// the unit, and the result is the running version afterwards.
-    /// [`ProtoError::UpdateRunning`] when the unit is already there;
+    /// [`ProtoError::UpdateRunning`] when an instance already runs;
     /// [`ProtoError::Unavailable`] on a host without systemd.
     ///
     /// Appended after [`Request::StageUpdate`] to preserve every existing
@@ -924,8 +926,8 @@ pub enum ProtoError {
     /// discriminant; see [`PROTO_VERSION`]'s doc comment.
     #[error("the monitor does not hold the state lock; state changes are refused")]
     StateLockUnavailable,
-    /// [`Request::StartUpdate`] was refused because the update unit is
-    /// already running.
+    /// [`Request::StartUpdate`] was refused because an instance of the
+    /// update template unit is already running.
     ///
     /// Appended after [`ProtoError::StateLockUnavailable`] to keep every
     /// existing discriminant; see [`PROTO_VERSION`]'s doc comment.

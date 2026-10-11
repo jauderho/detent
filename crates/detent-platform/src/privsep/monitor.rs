@@ -235,10 +235,11 @@ pub trait ServiceControl {
         Err(no_mount_units())
     }
 
-    /// Start the CLI updater for release `tag` in its transient unit
+    /// Start the CLI updater for release `tag` in an instance of the
+    /// update template unit
     /// ([`ServiceManager::start_update`](crate::service::ServiceManager::start_update)).
     /// The runner client forwards it; the runner validates the tag again
-    /// and finds the binary itself. The default answers
+    /// and builds the unit name itself. The default answers
     /// [`HookError::Unavailable`].
     ///
     /// # Errors
@@ -777,7 +778,8 @@ impl<'a> Monitor<'a> {
 
     /// Start the CLI updater for `tag` (BUGFIX E16): a valid release tag,
     /// newer than the running version, then the hook. The update itself
-    /// runs in the transient unit; this answers when the unit runs.
+    /// runs in the template unit's instance; this answers when its start
+    /// job is queued.
     fn start_update(&self, tag: &str) -> Response {
         if let Err(refusal) = check_update_tag(tag) {
             return Response::Error(refuse_update_tag(tag, refusal));

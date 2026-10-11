@@ -31,8 +31,8 @@
 //! activate_new_entries`, the start of the mount units the runner works out
 //! itself from an allow-listed target and a stop of only the units it recorded
 //! ([`mounts`](super::mounts)), and the start of the CLI updater for a
-//! valid release tag in the transient unit `detent-update` (the argv is
-//! fixed here, the binary is the runner's own executable; the updater
+//! valid release tag: the instance `detent-update@<tag>.service` of the
+//! packaged template unit, whose unit file fixes the command (the updater
 //! still applies the release policy and verifies the release) — nothing it
 //! could not already ask for through the protocol.
 
@@ -95,9 +95,10 @@ pub enum RunnerRequest {
     StopStartedMounts,
     /// Forget the mount units the last start recorded (a confirm).
     ForgetStartedMounts,
-    /// Start the CLI updater for release `tag` in the transient unit
-    /// `detent-update` (BUGFIX E16). The runner checks the tag again
-    /// ([`is_release_tag`]) and uses its own executable as the binary.
+    /// Start the CLI updater for release `tag`: the instance
+    /// `detent-update@<tag>.service` of the packaged template unit (BUGFIX
+    /// E16). The runner checks the tag again ([`is_release_tag`]) and builds
+    /// the unit name from it.
     StartUpdate {
         /// Release tag, e.g. `v1.2.3`.
         tag: String,
@@ -635,7 +636,7 @@ mod tests {
         fn start_update(&self, tag: &str) -> Result<UpdateStart, HookError> {
             match tag {
                 "v98.0.0" => Ok(UpdateStart::AlreadyRunning),
-                "v97.0.0" => Err(HookError::Failed("systemd-run exited 1".to_owned())),
+                "v97.0.0" => Err(HookError::Failed("systemctl start exited 1".to_owned())),
                 _ => Ok(UpdateStart::Started(format!("started {tag}"))),
             }
         }
@@ -1238,7 +1239,7 @@ mod tests {
             );
             assert_eq!(
                 client.start_update("v97.0.0"),
-                Err(HookError::Failed("systemd-run exited 1".to_owned()))
+                Err(HookError::Failed("systemctl start exited 1".to_owned()))
             );
             Ok(())
         })

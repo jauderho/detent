@@ -20,7 +20,7 @@ use detent_platform::service::exec::{
 };
 use detent_platform::service::{
     LaunchdManager, MOUNT_WAIT, MountUnitState, OpenRcManager, ServiceError, ServiceManager, State,
-    SystemdManager, UpdateStart, update_unit_args,
+    SystemdManager, UpdateStart, update_unit_name,
 };
 
 /// Error type for tests; any `?`-able error is acceptable.
@@ -309,85 +309,189 @@ fn other_init_systems_have_no_unit_files_to_reload_and_run_nothing() -> TestResu
 // The update unit (BUGFIX E16)
 // ---------------------------------------------------------------------------
 
-/// What `systemd-run` prints when the unit name is in use.
-fn output_unit_in_use() -> ProcessOutput {
-    ProcessOutput {
-        status: Some(1),
-        stdout: Vec::new(),
-        stderr: b"Failed to start transient service unit: Unit detent-update.service was already loaded or has a fragment file.\n".to_vec(),
-        timed_out: false,
-    }
+/// `argv` as owned strings.
+fn owned(argv: &[&str]) -> Vec<String> {
+    argv.iter().map(|arg| (*arg).to_owned()).collect()
+}
+
+/// The `systemctl list-units` call that asks for a running update instance.
+fn update_units_query() -> (String, Vec<String>, Duration) {
+    (
+        "/usr/bin/systemctl".to_owned(),
+        owned(&[
+            "list-units",
+            "--plain",
+            "--no-legend",
+            "--state=activating,active,deactivating,reloading",
+            "--",
+            "detent-update@*.service",
+        ]),
+        STATUS_TIMEOUT,
+    )
+}
+
+/// The `systemctl list-jobs` call that asks for a queued update job.
+fn update_jobs_query() -> (String, Vec<String>, Duration) {
+    (
+        "/usr/bin/systemctl".to_owned(),
+        owned(&[
+            "list-jobs",
+            "--plain",
+            "--no-legend",
+            "--",
+            "detent-update@*.service",
+        ]),
+        STATUS_TIMEOUT,
+    )
+}
+
+/// The template instance name is the tag verbatim (no `systemd-escape`):
+/// a release tag holds only characters a unit name allows.
+#[test]
+fn the_update_unit_is_the_template_instance_named_by_the_tag() {
+    assert_eq!(
+        update_unit_name("v1.2.3-rc.1").as_deref(),
+        Some("detent-update@v1.2.3-rc.1.service")
+    );
+    assert_eq!(update_unit_name("v1.2.3 --allow-downgrade"), None);
 }
 
 #[test]
-fn systemd_starts_the_update_unit_with_the_fixed_argv() -> TestResult {
+fn systemd_starts_the_update_template_instance_when_none_runs() -> TestResult {
     let fake = Arc::new(
         FakeRunner::new()
-            .existing(&["/usr/bin/systemd-run"])
+            .existing(&["/usr/bin/systemctl"])
+            .respond(output_ok(""))
+            .respond(output_ok(""))
             .respond(output_ok("")),
     );
     let mgr = SystemdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
-    let started = mgr.start_update(Path::new("/usr/local/bin/detent"), "v1.2.3-rc.1")?;
     assert_eq!(
-        started,
-        UpdateStart::Started("started detent-update.service for v1.2.3-rc.1".to_owned())
-    );
-    let argv: Vec<String> = [
-        "--unit=detent-update",
-        "--collect",
-        "/usr/local/bin/detent",
-        "update",
-        "--tag",
-        "v1.2.3-rc.1",
-    ]
-    .iter()
-    .map(|arg| (*arg).to_owned())
-    .collect();
-    assert_eq!(
-        update_unit_args("/usr/local/bin/detent", "v1.2.3-rc.1"),
-        argv
+        mgr.start_update("v1.2.3-rc.1")?,
+        UpdateStart::Started("started detent-update@v1.2.3-rc.1.service".to_owned())
     );
     assert_eq!(
         fake.calls(),
-        vec![("/usr/bin/systemd-run".to_owned(), argv, ACTION_TIMEOUT)]
+        vec![
+            update_units_query(),
+            update_jobs_query(),
+            (
+                "/usr/bin/systemctl".to_owned(),
+                owned(&[
+                    "start",
+                    "--no-block",
+                    "--",
+                    "detent-update@v1.2.3-rc.1.service"
+                ]),
+                ACTION_TIMEOUT,
+            ),
+        ]
     );
     Ok(())
 }
 
+/// An active or activating instance, of this tag or another, is a running
+/// update: nothing is started (`systemctl start` of a running instance
+/// would succeed and do nothing).
 #[test]
-fn systemd_reports_an_update_unit_in_use_as_already_running() -> TestResult {
+fn systemd_reports_an_active_update_instance_as_already_running() -> TestResult {
     let fake = Arc::new(
         FakeRunner::new()
-            .existing(&["/bin/systemd-run"])
-            .respond(output_unit_in_use()),
+            .existing(&["/usr/bin/systemctl"])
+            .respond(output_ok(
+                "detent-update@v1.2.2.service loaded activating start detent update to release v1.2.2\n",
+            )),
     );
     let mgr = SystemdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
-    assert_eq!(
-        mgr.start_update(Path::new("/usr/bin/detent"), "v1.2.3")?,
-        UpdateStart::AlreadyRunning
-    );
-    assert_eq!(
-        fake.calls().first().map(|call| call.0.clone()),
-        Some("/bin/systemd-run".to_owned())
-    );
+    assert_eq!(mgr.start_update("v1.2.3")?, UpdateStart::AlreadyRunning);
+    assert_eq!(fake.calls(), vec![update_units_query()]);
     Ok(())
 }
 
+/// A queued start job (state not yet changed) is a running update too.
 #[test]
-fn systemd_reports_a_failed_or_slow_systemd_run() {
+fn systemd_reports_a_queued_update_job_as_already_running() -> TestResult {
+    let fake = Arc::new(
+        FakeRunner::new()
+            .existing(&["/bin/systemctl"])
+            .respond(output_ok(""))
+            .respond(output_ok(
+                "1234 detent-update@v1.2.3.service start waiting\n",
+            )),
+    );
+    let mgr = SystemdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
+    assert_eq!(mgr.start_update("v1.2.3")?, UpdateStart::AlreadyRunning);
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 2);
+    assert!(calls.iter().all(|call| call.0 == "/bin/systemctl"
+        && call.1.first().is_some_and(|verb| verb.starts_with("list-"))));
+    Ok(())
+}
+
+/// Other units in a listing do not count, and neither does a unit whose
+/// name only starts like the template.
+#[test]
+fn systemd_ignores_units_that_are_not_update_instances() -> TestResult {
+    let fake = Arc::new(
+        FakeRunner::new()
+            .existing(&["/usr/bin/systemctl"])
+            .respond(output_ok(
+                "detent.service loaded active running detent\ndetent-update.service loaded activating start x\n",
+            ))
+            .respond(output_ok("No jobs running.\n"))
+            .respond(output_ok("")),
+    );
+    let mgr = SystemdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
+    assert!(matches!(
+        mgr.start_update("v1.2.3")?,
+        UpdateStart::Started(_)
+    ));
+    assert_eq!(fake.calls().len(), 3);
+    Ok(())
+}
+
+/// A failed listing refuses the start: the state is unknown.
+#[test]
+fn systemd_does_not_start_an_update_when_the_listing_fails() {
     for (output, needle) in [
-        (output_fail(1), "systemd-run exited Some(1): boom"),
-        (output_timeout(), "systemd-run timed out"),
+        (output_fail(1), "systemctl list-units exited Some(1): boom"),
+        (output_timeout(), "systemctl list-units timed out"),
     ] {
         let fake = Arc::new(
             FakeRunner::new()
-                .existing(&["/usr/bin/systemd-run"])
+                .existing(&["/usr/bin/systemctl"])
+                .respond(output),
+        );
+        let mgr = SystemdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
+        assert!(
+            matches!(
+                mgr.start_update("v1.2.3"),
+                Err(ServiceError::Failed(ref message)) if message.contains(needle)
+            ),
+            "{needle}"
+        );
+        assert_eq!(fake.calls().len(), 1, "{needle}");
+    }
+}
+
+/// A refused or slow start (polkit, a missing template) is a failure.
+#[test]
+fn systemd_reports_a_failed_or_slow_update_start() {
+    for (output, needle) in [
+        (output_fail(1), "systemctl start exited Some(1): boom"),
+        (output_timeout(), "systemctl start timed out"),
+    ] {
+        let fake = Arc::new(
+            FakeRunner::new()
+                .existing(&["/usr/bin/systemctl"])
+                .respond(output_ok(""))
+                .respond(output_ok(""))
                 .respond(output),
         );
         let mgr = SystemdManager::with_runner(Box::new(SharedFake(fake)));
         assert!(
             matches!(
-                mgr.start_update(Path::new("/usr/bin/detent"), "v1.2.3"),
+                mgr.start_update("v1.2.3"),
                 Err(ServiceError::Failed(ref message)) if message.contains(needle)
             ),
             "{needle}"
@@ -396,8 +500,8 @@ fn systemd_reports_a_failed_or_slow_systemd_run() {
 }
 
 #[test]
-fn systemd_refuses_a_bad_tag_or_binary_before_running_anything() {
-    let fake = Arc::new(FakeRunner::new().existing(&["/usr/bin/systemd-run"]));
+fn systemd_refuses_a_bad_tag_before_running_anything() {
+    let fake = Arc::new(FakeRunner::new().existing(&["/usr/bin/systemctl"]));
     let mgr = SystemdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
     for tag in [
         "",
@@ -405,28 +509,23 @@ fn systemd_refuses_a_bad_tag_or_binary_before_running_anything() {
         "v1.2.3 --allow-downgrade",
         "v1.2.3/..",
         "v1.2.3;id",
+        "v1.2\\x2d3",
+        "v1.2.3+build",
     ] {
         assert!(
-            matches!(
-                mgr.start_update(Path::new("/usr/bin/detent"), tag),
-                Err(ServiceError::InvalidUnitName(_))
-            ),
+            matches!(mgr.start_update(tag), Err(ServiceError::InvalidUnitName(_))),
             "{tag:?}"
         );
     }
-    assert!(matches!(
-        mgr.start_update(Path::new("detent"), "v1.2.3"),
-        Err(ServiceError::InvalidUnitName(_))
-    ));
     assert!(fake.calls().is_empty());
 }
 
 #[test]
-fn systemd_without_systemd_run_cannot_start_an_update() {
+fn systemd_without_systemctl_cannot_start_an_update() {
     let fake = Arc::new(FakeRunner::new());
     let mgr = SystemdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
     assert!(matches!(
-        mgr.start_update(Path::new("/usr/bin/detent"), "v1.2.3"),
+        mgr.start_update("v1.2.3"),
         Err(ServiceError::Unavailable(_))
     ));
     assert!(fake.calls().is_empty());
@@ -438,8 +537,8 @@ fn other_init_systems_cannot_start_an_update_and_run_nothing() {
     let openrc = OpenRcManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
     let launchd = LaunchdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
     for result in [
-        openrc.start_update(Path::new("/usr/bin/detent"), "v1.2.3"),
-        launchd.start_update(Path::new("/usr/bin/detent"), "v1.2.3"),
+        openrc.start_update("v1.2.3"),
+        launchd.start_update("v1.2.3"),
     ] {
         assert!(matches!(
             result,

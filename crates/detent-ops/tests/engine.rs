@@ -378,7 +378,7 @@ impl ServiceControl for ReloadingServices {
             "v97.0.0" => Err(HookError::Unavailable(
                 "starting an update needs systemd".to_owned(),
             )),
-            "v96.0.0" => Err(HookError::Failed("systemd-run exited 1".to_owned())),
+            "v96.0.0" => Err(HookError::Failed("systemctl start exited 1".to_owned())),
             _ => Ok(UpdateStart::Started(format!("started {tag}"))),
         }
     }

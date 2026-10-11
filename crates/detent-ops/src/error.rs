@@ -124,8 +124,8 @@ pub enum OpsError {
         /// Which operation, in one short phrase for the log.
         what: &'static str,
     },
-    /// `UpdateApply` was refused: an update already runs (its transient
-    /// unit is there).
+    /// `UpdateApply` was refused: an update already runs (an instance of
+    /// its template unit is active or has a job).
     #[error("an update is already running")]
     UpdateRunning,
     /// `UpdateApply` was refused: the version is not a release tag

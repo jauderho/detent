@@ -15,31 +15,35 @@ use detent_core::descriptor::{ServiceAction, UnitNames};
 use super::exec::{self, ACTION_TIMEOUT, ProcessRunner, RealProcessRunner, STATUS_TIMEOUT};
 use super::{
     ActionOutcome, AltCache, MOUNT_WAIT, MountUnitState, ServiceError, ServiceManager,
-    ServiceStatus, State, UPDATE_UNIT, UpdateStart, validate_mount_unit_name, validate_unit_name,
+    ServiceStatus, State, UPDATE_UNIT, UpdateStart, update_unit_name, validate_mount_unit_name,
+    validate_unit_name,
 };
-use crate::privsep::proto::is_release_tag;
 
 /// Absolute paths `systemctl` may live at, most common first.
 const SYSTEMCTL_CANDIDATES: &[&str] = &["/usr/bin/systemctl", "/bin/systemctl"];
 
-/// Absolute paths `systemd-run` may live at, most common first.
-const SYSTEMD_RUN_CANDIDATES: &[&str] = &["/usr/bin/systemd-run", "/bin/systemd-run"];
-
-/// The whole `systemd-run` argv for [`ServiceManager::start_update`]: fixed
-/// literals, the installed binary and the tag. `--collect` unloads the unit
-/// when it ends, also after a failure, so a refused update does not keep the
-/// name and block the next start.
-#[must_use]
-pub fn update_unit_args(binary: &str, tag: &str) -> Vec<String> {
-    vec![
-        format!("--unit={UPDATE_UNIT}"),
-        "--collect".to_owned(),
-        binary.to_owned(),
-        "update".to_owned(),
-        "--tag".to_owned(),
-        tag.to_owned(),
-    ]
-}
+/// The `systemctl` argvs that list the instances of the update template
+/// unit that run: one by active state, one by job. A `Type=oneshot`
+/// instance keeps its start job until the updater exits, and a job queued
+/// by `start --no-block` can come before the state change. Fixed literals;
+/// the pattern is a glob for `systemctl`, never for a shell. Each entry is
+/// the verb and the arguments after it.
+const UPDATE_RUNNING_QUERIES: [(&str, &[&str]); 2] = [
+    (
+        "list-units",
+        &[
+            "--plain",
+            "--no-legend",
+            "--state=activating,active,deactivating,reloading",
+            "--",
+            "detent-update@*.service",
+        ],
+    ),
+    (
+        "list-jobs",
+        &["--plain", "--no-legend", "--", "detent-update@*.service"],
+    ),
+];
 
 /// Properties requested from `systemctl show`. A fixed, compile-time
 /// literal: no user input ever reaches this argv position.
@@ -361,46 +365,81 @@ impl ServiceManager for SystemdManager {
         self.read_mount_states(program, units, |state| (state, detail.clone()))
     }
 
-    fn start_update(
-        &self,
-        binary: &std::path::Path,
-        tag: &str,
-    ) -> Result<UpdateStart, ServiceError> {
-        if !is_release_tag(tag) {
-            return Err(ServiceError::InvalidUnitName(tag.to_owned()));
-        }
-        let Some(binary) = binary.to_str().filter(|_| binary.is_absolute()) else {
-            return Err(ServiceError::InvalidUnitName(binary.display().to_string()));
-        };
-        let program = exec::resolve_program(self.runner.as_ref(), SYSTEMD_RUN_CANDIDATES)
-            .ok_or_else(|| {
-                ServiceError::Unavailable("systemd-run was not found on this host".to_owned())
-            })?;
-        let output = self
-            .runner
-            .run(program, &update_unit_args(binary, tag), ACTION_TIMEOUT)
-            .map_err(|err| ServiceError::Failed(err.to_string()))?;
-        if !output.timed_out && output.status == Some(0) {
-            return Ok(UpdateStart::Started(format!(
-                "started {UPDATE_UNIT}.service for {tag}"
-            )));
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // systemd refuses a second transient unit with a name in use:
-        // "Unit detent-update.service was already loaded or has a fragment
-        // file." (older: "... already exists.").
-        if !output.timed_out
-            && stderr.contains(&format!("{UPDATE_UNIT}.service"))
-            && stderr.contains("already")
-        {
+    fn start_update(&self, tag: &str) -> Result<UpdateStart, ServiceError> {
+        let unit =
+            update_unit_name(tag).ok_or_else(|| ServiceError::InvalidUnitName(tag.to_owned()))?;
+        let program = self.program()?;
+        // `systemctl start` of an instance that already runs succeeds and
+        // does nothing, so ask first. The runner serves one request at a
+        // time, so no second start comes between the check and the start.
+        if self.update_running(program)? {
             return Ok(UpdateStart::AlreadyRunning);
         }
-        Err(ServiceError::Failed(if output.timed_out {
-            format!("systemd-run timed out after {}s", ACTION_TIMEOUT.as_secs())
+        // `--no-block`: the start job of a `Type=oneshot` unit ends only when
+        // the updater exits, and the updater restarts this service.
+        let args = vec![
+            "start".to_owned(),
+            "--no-block".to_owned(),
+            "--".to_owned(),
+            unit.clone(),
+        ];
+        let output = self
+            .runner
+            .run(program, &args, ACTION_TIMEOUT)
+            .map_err(|err| ServiceError::Failed(err.to_string()))?;
+        if !output.timed_out && output.status == Some(0) {
+            Ok(UpdateStart::Started(format!("started {unit}")))
         } else {
-            format!("systemd-run exited {:?}: {}", output.status, stderr.trim())
-        }))
+            Err(ServiceError::Failed(failure_detail(
+                "start",
+                &output,
+                ACTION_TIMEOUT,
+            )))
+        }
     }
+}
+
+impl SystemdManager {
+    /// True when one of [`UPDATE_RUNNING_QUERIES`] lists an instance of the
+    /// update template unit.
+    fn update_running(&self, program: &'static str) -> Result<bool, ServiceError> {
+        for (verb, rest) in UPDATE_RUNNING_QUERIES {
+            let args: Vec<String> = std::iter::once(verb)
+                .chain(rest.iter().copied())
+                .map(str::to_owned)
+                .collect();
+            let output = self
+                .runner
+                .run(program, &args, STATUS_TIMEOUT)
+                .map_err(|err| ServiceError::Failed(err.to_string()))?;
+            if output.timed_out {
+                return Err(ServiceError::Failed(format!(
+                    "systemctl {verb} timed out after {}s",
+                    STATUS_TIMEOUT.as_secs()
+                )));
+            }
+            if output.status != Some(0) {
+                return Err(ServiceError::Failed(format!(
+                    "systemctl {verb} exited {:?}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
+            if lists_update_unit(&output.stdout) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+/// True when a `systemctl list-units` or `list-jobs` listing names an
+/// instance of the update template unit, in any column.
+fn lists_update_unit(stdout: &[u8]) -> bool {
+    let prefix = format!("{UPDATE_UNIT}@");
+    String::from_utf8_lossy(stdout)
+        .split_whitespace()
+        .any(|word| word.starts_with(&prefix) && word.ends_with(".service"))
 }
 
 const fn action_verb(action: ServiceAction) -> &'static str {
