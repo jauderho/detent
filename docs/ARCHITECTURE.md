@@ -233,12 +233,15 @@ confined monitor does not start programs itself.
   directory.
 - A `Service` action must be declared by the binding; `Status` is refused.
 - `StartUpdate { tag }` (E16): the runner checks the tag again
-  (`is_release_tag`) and runs one fixed argv, `systemd-run
-  --unit=detent-update --collect <its own executable> update --tag <tag>`
-  (`update_unit_args`, `service/systemd.rs`). The binary is never taken
-  from the socket. A unit name in use is `UpdateRunning`; a host without
-  systemd is `Unavailable`. A compromised monitor can only start the CLI
-  updater, which applies the release policy and verifies the release.
+  (`is_release_tag`), lists the instances of the template unit
+  `detent-update@.service` that are active or have a job (`systemctl
+  list-units`, `list-jobs`; one is `UpdateRunning`), then runs `systemctl
+  start --no-block -- detent-update@<tag>.service` (`update_unit_name`,
+  `service/systemd.rs`). The command is in the root-owned unit file
+  (`/usr/local/bin/detent update "--tag=%i"`); only the tag comes from the
+  socket. A host without systemd is `Unavailable`. A compromised monitor
+  can only start the CLI updater, which applies the release policy and
+  verifies the release.
 - Any channel error disables the client for good, so every later check or
   service call is `Unavailable` and apply fails closed.
 
@@ -320,11 +323,13 @@ client ─▶ worker: /api/v1 handler ─▶ Operation::Apply ─▶ OpsEngine (
    for `/healthz`, and on failure puts the previous binary back, restarts
    again and adds the tag to `bad.json`.
 4. The web and MCP install (`Operation::UpdateApply`, E16) do not install
-   anything in the service: `StartUpdate { tag }` asks the runner to run
-   `systemd-run --unit=detent-update --collect <installed detent> update
-   --tag <tag>` (§5.3). The transient unit is outside `detent.service`, so
-   the updater lives through the restart it does. The request answers when
-   the unit runs; the running version shows the result.
+   anything in the service: `StartUpdate { tag }` asks the runner to start
+   `detent-update@<tag>.service`, an instance of the packaged template
+   unit, which runs `/usr/local/bin/detent update --tag=<tag>` as root
+   (§5.3). The unit is outside `detent.service`, so the updater lives
+   through the restart it does. The request answers when the start job is
+   queued; the running version shows the result. In capability-user mode
+   polkit lets the `detent` user start (only start) such an instance.
 
 Known open item: the Rekor signed-entry-timestamp verification gap (STAGE3
 H17, `docs/stage4-wip/h17-set-partial.patch`).

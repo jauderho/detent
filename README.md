@@ -156,8 +156,8 @@ root yourself, for example in root's crontab:
 ```
 
 Until it runs once, the console says no update check has run. An install
-from the console runs `detent update --tag <tag>` in a transient
-`detent-update` unit.
+from the console runs `detent update --tag <tag>` in the systemd unit
+`detent-update@<tag>.service` (both privilege modes).
 
 ## Security
 

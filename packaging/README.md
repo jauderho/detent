@@ -16,10 +16,11 @@ PLAN §1.6) and are intentionally not present here yet.
 | Path | Purpose |
 |---|---|
 | `systemd/detent.service` | The monitor unit, **root-confined** privilege mode (ADR-001 default). `User=root`, confined via capability bounding set, Landlock, seccomp, and the systemd sandboxing directives in PLAN §2.4/Appendix C. |
+| `systemd/detent-update@.service` | Template unit for the web and MCP update install (E16), both modes. The runner starts `detent-update@<tag>.service`; it runs only `/usr/local/bin/detent update --tag=<tag>` as root (`Type=oneshot`, collected when it ends, 15 min start timeout), in a systemd sandbox that can write only `/usr/local/bin` and `/var/lib/detent` (`systemd-analyze security`: 2.1). The tag is the instance name verbatim (`%i`): release tags need no escaping. Never enabled. |
 | `systemd/detent.service.d/capability-user.conf` | Drop-in for the **capability-user** hardened mode (Phase 12): switches to `User=detent` with ambient capabilities instead of root, adds `RemoveIPC=yes`. Only installed with `--mode capability-user`. |
 | `sysusers.d/detent.conf` | Creates the unprivileged `detent` system user (`systemd-sysusers`). |
 | `tmpfiles.d/detent.conf` | Creates `/var/lib/detent` (0700 detent:detent), `/var/lib/detent/backups` and `/run/detent/staging` (0700 root:root monitor-only), plus `/etc/detent` (0750 root:detent) (`systemd-tmpfiles --create`). The capability-user drop-in hands the runtime tree to `detent` before startup. |
-| `polkit/50-detent.rules` | polkit JS rule (polkit 0.106 or later) for capability-user mode. It grants the `detent` user `manage-units` for the units the modules bind, with only their bindings' verbs; `start`/`stop` of `.mount`/`.automount` units except those over `/`, `/etc`, `/usr`, `/boot`, `/var/lib/detent`, `/usr/local/bin` and their ancestors; and `reload-daemon`. It grants no transient unit, so a web or MCP update install is refused in this mode. Installed only with `--mode capability-user`. |
+| `polkit/50-detent.rules` | polkit JS rule (polkit 0.106 or later) for capability-user mode. It grants the `detent` user `manage-units` for the units the modules bind, with only their bindings' verbs; `start`/`stop` of `.mount`/`.automount` units except those over `/`, `/etc`, `/usr`, `/boot`, `/var/lib/detent`, `/usr/local/bin` and their ancestors; and `reload-daemon`; and `start` (only) of `detent-update@<tag>.service` instances whose name has the shape of a release tag, only while the template file exists. It grants no transient unit. Installed only with `--mode capability-user`. |
 | `install.sh` | Installs/uninstalls the above plus the `detent` binary. |
 
 ## Install / uninstall
@@ -61,10 +62,14 @@ The service runs as `detent`, not root. Per process:
 | runner | `CAP_DAC_OVERRIDE` | read the root-owned backups for mount activation; validators read root-only included files |
 | worker, acme | none | they clear the sets they inherit at the fork |
 
-Service actions, `daemon-reload` and mount units go through polkit
-(`polkit/50-detent.rules`). A web or MCP update install is refused in this
-mode (no polkit grant for the transient `detent-update.service`); run
-`sudo detent update` on the host. `detent doctor` (run as `detent`) checks
+Service actions, `daemon-reload`, mount units and the start of the update
+template unit go through polkit (`polkit/50-detent.rules`). A web or MCP
+update install starts `detent-update@<tag>.service`, which runs as root.
+polkit sees only a unit's name and verb, also for a transient unit, so the
+rule grants the start only while `/etc/systemd/system/detent-update@.service`
+exists: with that file systemd refuses a transient unit of an instance name.
+`install.sh` installs the template before the rule and removes the rule
+first. `detent doctor` (run as `detent`) checks
 the prerequisites; `scripts/capability-user-check.sh` checks a running
 install on a test host.
 
@@ -90,7 +95,10 @@ docker run --rm -v "$PWD/packaging:/p" fedora:latest bash -c '
 Measured at the time this packaging was written: **2.5** (root-confined),
 **1.8** (capability-user). Measured again 2026-10-09 with the method above
 (current `fedora:latest`): **2.6** (root-confined, unit unchanged: the newer
-`systemd-analyze` scores it higher) and **1.8** (capability-user). Both meet the target exactly. The residual findings
+`systemd-analyze` scores it higher) and **1.8** (capability-user). Both meet the target exactly.
+The update template (`systemd/detent-update@.service`, copied to the same
+`/r/etc/systemd/system/`, scored as `detent-update@v1.2.0-rc.1.service`):
+**2.1** (2026-10-10, systemd 259), and `systemd-analyze verify` passes. The residual findings
 in both modes are structural and are *not* fixable without breaking the
 daemon (a network daemon that forks an unprivileged worker and writes
 root-owned files) — see the comments in `systemd/detent.service` for exactly
