@@ -433,7 +433,14 @@ deferred by the owner.
     `web-update-not-checked` without one, and no live check remains (F3).
     Capability-user mode (2026-10-09): no polkit grant for the transient
     unit (it would let the `detent` uid run any command as root); a web or
-    MCP install is refused in that mode. Owner question in §4.
+    MCP install is refused in that mode. Owner question in §4. Done
+    2026-10-10 (owner answer, §4; PROGRESS): the runner starts
+    `detent-update@<tag>.service`, an instance of the packaged root-owned
+    template unit `detent-update@.service` (runs only `detent update
+    --tag=%i`), in both modes; `systemd-run` and its code are gone. polkit
+    grants `detent` only `start` of such an instance, only while the
+    template file exists. Proven in a container (systemd 259, polkit); not
+    yet on the test host.
 
 ### Track F — Phase 12 / M4 (v1.0)
 
@@ -553,12 +560,12 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   `detent-update@.service` (`ExecStart=/usr/local/bin/detent update --tag
   %i`) and grant only `start` of `detent-update@*.service` in
   capability-user mode; until then the install is refused in that mode —
-  owner answer:
+  owner answer: see 2026-10-10 below (done).
 - Owner answers (2026-10-10):
   - E16 in capability-user mode: ship a root-owned template unit
     `detent-update@.service` (runs only `detent update --tag %i`) and grant
     only `start` of `detent-update@*.service`; root-confined uses the same
-    template.
+    template. Done 2026-10-10 (`PROGRESS.md`); test-host run open.
   - Hardening score: accept 2.6 for the unchanged root-confined unit on
     systemd 261 (the newer `systemd-analyze` scores it higher); capability-user
     keeps 1.8.

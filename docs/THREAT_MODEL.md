@@ -74,7 +74,7 @@ Out of scope:
                   │          ▼
                   │   ┌─────────────┐   TB4: candidate bytes
                   │   │  runner     │──▶ validators, systemctl,
-                  │   │ root, open  │    systemd-run detent-update ──┐
+                  │   │ root, open  │    start detent-update@<tag> ──┐
                   │   └─────────────┘                                │
                   │                                                  ▼
    local operator ── TB6 ──▶ CLI / `detent mcp` (no privsep)   CLI updater
@@ -134,7 +134,8 @@ Assumptions (a break voids the listed controls):
 
 1. The kernel enforces seccomp, `no_new_privs` and capabilities. Landlock is
    present on most hosts but not all (TM-G13).
-2. systemd runs the unit as packaged and starts transient units on request.
+2. systemd runs the units as packaged (the service and the update template)
+   and starts units on request.
 3. Sigstore public-good roots embedded at build time are honest. A Fulcio
    or Rekor compromise together with a GitHub OIDC compromise could sign a
    release.
@@ -184,7 +185,7 @@ boundary.
 | Id | S/T/R/I/D/E | Threat | Control | Proven by | Status |
 |---|---|---|---|---|---|
 | RUN-1 | E | A taken monitor runs an arbitrary program as root through the unconfined runner (AS1, AS2 ← A7) | Only allow-list ids, a staged file name, a declared action, or a release tag; argv built from static declarations | `the_runner_refuses_anything_outside_the_allow_list`, `the_runner_refuses_anything_but_a_candidate_in_a_target_directory`, `the_runner_refuses_a_reload_no_module_declares` (`runner.rs`). [SH-L] row "Validators … runner" | Covered |
-| RUN-2 | T, E | Monitor injects an argument into the update start (AS9 ← A7) | Tag checked again (`is_release_tag`); one fixed argv; binary path never from the socket | `the_runner_refuses_a_tag_that_is_not_a_release_tag` (`runner.rs`); `systemd_starts_the_update_unit_with_the_fixed_argv`, `systemd_refuses_a_bad_tag_or_binary_before_running_anything` (`detent-platform/tests/service_manager.rs`); `the_adapter_starts_the_update_with_this_process_executable` (`service/mod.rs`) | Covered (live `systemd-run` under the packaged unit: [SH-L] says unproven until a Linux run) |
+| RUN-2 | T, E | Monitor injects an argument into the update start (AS9 ← A7) | Tag checked again (`is_release_tag`); the runner only starts the template instance `detent-update@<tag>.service` (fixed argv); the command is fixed in the root-owned unit file | `the_runner_refuses_a_tag_that_is_not_a_release_tag` (`runner.rs`); `systemd_starts_the_update_template_instance_when_none_runs`, `systemd_refuses_a_bad_tag_before_running_anything` (`detent-platform/tests/service_manager.rs`); `the_update_unit_name_is_the_template_instance_of_a_release_tag` (`service/mod.rs`); `the_update_template_runs_only_detent_update_with_the_instance_tag` (`detent/tests/packaging.rs`) | Covered (a web install through the template on the test host: unproven, PROGRESS 2026-10-10) |
 | RUN-3 | E | The runner is root and unconfined (AS1–AS9 ← A7) | Its only input is the monitor's socket | — | Accepted (ADR-001: a seccomp filter binds every child, so the runner is forked before confinement) |
 | RUN-4 | D | Runner channel fails mid-apply and apply goes on without checks (AS1 ← A7, crash) | Any channel error disables the client; apply fails closed | `a_runner_that_is_gone_makes_every_later_call_unavailable` (`runner.rs`) | Covered |
 | RUN-5 | E | Mount activation mounts over a system path (AS13 ← A6) | Units computed from the target; `/` and ancestors of `/etc`, `/usr`, `/boot`, state root, binary dir refused | `protected_mount_points_are_refused_and_never_reach_the_init_system` (`privsep/mounts.rs`) | Covered |
@@ -260,9 +261,10 @@ Full rows: [SH-T] and [SH-W].
 | CLI-7 | T | `--dryrun` writes anyway | Dry run withholds every mutation | `a_dry_run_withholds_every_other_mutation_too` (`detent/src/run.rs`) | Covered |
 | CLI-8 | S | A stored "must change password" flag is ignored | — | — | `a_flagged_account_gets_a_session_that_only_changes_the_password`, `a_session_that_must_change_its_password_reaches_no_api_route`; fixed 2026-10-09 (TM-G7) |
 
-### 5.9 Updater (`detent update`, transient `detent-update` unit, `detent-update`)
+### 5.9 Updater (`detent update`, template unit `detent-update@.service`, `detent-update`)
 
-The updater runs as root, outside the sandbox, and parses network data.
+The updater runs as root, outside detent's own sandbox (in the template
+unit's systemd sandbox), and parses network data.
 Full row: [SH-S] row "Sigstore verification".
 
 | Id | S/T/R/I/D/E | Threat | Control | Proven by | Status |
@@ -307,6 +309,7 @@ Full row: [SH-S] row "Sigstore verification".
 | PKG-2 | D | A missing optional path stops the unit (`226/NAMESPACE`) | `-` prefix on optional `ReadWritePaths` | `every_module_path_in_read_write_paths_is_optional` (`detent/tests/packaging.rs`) | Covered |
 | PKG-3 | E | Capability-user mode: monitor and worker share uid `detent` (AS1 ← A6) | Landlock, seccomp, worker capability drop | — | Gap TM-G17 (Track F: polkit rule and doctor check not done; [SH-L] Gaps item 14) |
 | PKG-4 | I, D | Unit omits `IPAddressDeny=` and `PrivateUsers=` | — | — | Accepted (PLAN §2.4: they break LAN access and root-owned writes) |
+| PKG-5 | E | Capability-user mode: the `detent` uid uses the polkit grant for the update unit to run a command as root (AS1, AS9 ← A6) | The grant is `start` only, of `detent-update@v<tag-shaped>.service` only, and only while `/etc/systemd/system/detent-update@.service` exists (the rule checks); the template runs only `detent update --tag=%i`, which verifies the release and refuses a downgrade; with the template present systemd refuses a transient unit of that name | `the_polkit_rule_grants_only_the_start_of_an_update_instance` (runs the rule), `the_polkit_rule_handles_only_two_actions_and_only_the_update_template`, `uninstall_removes_the_polkit_rule_before_the_update_template` (`detent/tests/packaging.rs`); run under systemd 259 and polkit in a container (PROGRESS 2026-10-10) | Covered (test host unproven). Residual: the uid can start an update to any newer signed release that passes the policy, also one the operator did not choose |
 
 ### 5.13 Release pipeline and supply chain (`.github/workflows/`, ADR-005, ADR-011)
 
