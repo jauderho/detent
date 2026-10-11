@@ -9,12 +9,24 @@
 //      modules bind services to, each with only the verbs its module binding
 //      allows (ServiceBinding.actions in the module descriptors).
 //   2. org.freedesktop.systemd1.manage-units "start" and "stop" of
-//      .mount/.automount units, for `[mounts] activate_new_entries` (Track D
-//      1, D1 mount route). polkit cannot see which units detent itself
-//      started, so every mount unit is allowed except the ones over the paths
-//      the runner also protects: `/` and every ancestor of /etc, /usr,
-//      /boot, the state root /var/lib/detent and the binary directory
-//      /usr/local/bin. The runner itself stops only the units it recorded.
+//      .mount/.automount units the fstab generator backs with a fragment
+//      file, for `[mounts] activate_new_entries` (Track D 1, D1 mount
+//      route). polkit sees only a unit's name and verb, also of a transient
+//      unit (systemd-mount/systemd-run StartTransientUnit), so a grant for
+//      every non-protected mount name would let the detent user start a
+//      transient mount of any such name and bind or tmpfs its own files over
+//      a root path (e.g. etc-systemd-system.mount, etc-polkit\x2d1-rules.d
+//      .mount) -> root. The grant is therefore given only while
+//      /run/systemd/generator/<unit> exists (polkit.spawn test -f): systemd
+//      then refuses a transient unit of that name ("has a fragment file"),
+//      and only root writes /etc/fstab and the generator directory, so the
+//      detent user cannot make a fragment for a name of its choosing.
+//      detent's own fstab units have the fragment after the daemon-reload
+//      the runner does before it starts them. Units over the paths the
+//      runner also protects stay refused even with a fragment: `/` and every
+//      ancestor of /etc, /usr, /boot, the state root /var/lib/detent and the
+//      binary directory /usr/local/bin. The runner itself stops only the
+//      units it recorded.
 //   3. org.freedesktop.systemd1.reload-daemon (`systemctl daemon-reload`
 //      after an fstab write; systemd gives this action no details).
 //   4. org.freedesktop.systemd1.manage-units "start" (only start) of an
@@ -96,6 +108,9 @@ polkit.addRule(function (action, subject) {
   // Mount units of fstab entries: what `systemd-escape --path` writes, never
   // the root mount ("-.mount") or a mount over a protected path.
   var MOUNT_UNIT = /^[A-Za-z0-9:_.\\][A-Za-z0-9:_.\\-]*\.(mount|automount)$/;
+  // Where the fstab generator writes a unit's fragment. The unit name holds
+  // no "/" (MOUNT_UNIT), so this path cannot traverse out of the directory.
+  var MOUNT_GENERATOR_DIR = "/run/systemd/generator/";
   var PROTECTED_MOUNT_UNITS = [
     "boot.automount",
     "boot.mount",
@@ -119,6 +134,16 @@ polkit.addRule(function (action, subject) {
     PROTECTED_MOUNT_UNITS.indexOf(unit) === -1 &&
     (verb == "start" || verb == "stop")
   ) {
+    // Only a unit the fstab generator backs with a fragment file. Without
+    // it polkit refuses, so the detent user cannot start a transient mount
+    // of an arbitrary name over a root path; with it systemd refuses the
+    // transient unit itself. A transient mount the user cannot create it
+    // cannot stop either, so stop requires the fragment too.
+    try {
+      polkit.spawn(["/usr/bin/test", "-f", MOUNT_GENERATOR_DIR + unit]);
+    } catch (error) {
+      return polkit.Result.NOT_HANDLED;
+    }
     return polkit.Result.YES;
   }
 

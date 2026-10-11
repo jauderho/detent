@@ -417,8 +417,10 @@ console.log(out.join("\n"));
 console.log(JSON.stringify(spawned[0] || null));
 "#;
 
-/// Cases for the rule, one per line: `user|action|unit|verb|template
-/// present (1 or 0)|expected`. Actions: `M` manage-units, `F`
+/// Cases for the rule, one per line: `user|action|unit|verb|fragment
+/// present (1 or 0)|expected`. The "present" field is the result of every
+/// `polkit.spawn` `test -f`: the update template for an update instance, the
+/// fstab generator fragment for a mount unit. Actions: `M` manage-units, `F`
 /// manage-unit-files, `R` reload-daemon.
 const RULE_CASES: &[&str] = &[
     "detent|M|detent-update@v1.2.0-rc.1.service|start|1|yes",
@@ -446,7 +448,24 @@ const RULE_CASES: &[&str] = &[
     "detent|F|detent-update@v1.2.0.service|start|1|no",
     // The grants that were there before stay.
     "detent|M|chronyd.service|restart|1|yes",
+    // Mount units: granted only while the fstab generator backs the name
+    // with a fragment, and never a protected name.
     "detent|M|srv-data.mount|start|1|yes",
+    "detent|M|srv-data.mount|stop|1|yes",
+    "detent|M|srv-data.mount|start|0|no",
+    "detent|M|srv-data.mount|stop|0|no",
+    "detent|M|srv-data.mount|restart|1|no",
+    r"detent|M|srv-a\x2db.mount|start|1|yes",
+    "detent|M|srv-data.automount|start|1|yes",
+    // A name an attacker would pick to mount over a root path: no fstab
+    // entry, so no fragment, so refused. With a fragment systemd refuses the
+    // transient unit itself (proven in the container).
+    "detent|M|etc-systemd-system.mount|start|0|no",
+    r"detent|M|etc-polkit\x2d1-rules.d.mount|start|0|no",
+    "detent|M|root.mount|start|0|no",
+    // Protected names stay refused even with a fragment present.
+    "detent|M|etc.mount|start|1|no",
+    "detent|M|var-lib.mount|stop|1|no",
     "detent|R|||1|yes",
 ];
 
@@ -556,6 +575,12 @@ fn the_polkit_rule_protects_the_mount_points_the_runner_protects() {
             r"var MOUNT_UNIT = /^[A-Za-z0-9:_.\\][A-Za-z0-9:_.\\-]*\.(mount|automount)$/;"
         )
     );
+    // A mount unit is granted only while its fstab generator fragment
+    // exists; without it polkit refuses, so the detent user cannot start a
+    // transient mount of an arbitrary name over a root path.
+    let code = polkit_code();
+    assert!(code.contains(r#"var MOUNT_GENERATOR_DIR = "/run/systemd/generator/";"#));
+    assert!(code.contains(r#"polkit.spawn(["/usr/bin/test", "-f", MOUNT_GENERATOR_DIR + unit]);"#));
 }
 
 /// `packaging/install.sh`, from the repository root.

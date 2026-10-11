@@ -56,10 +56,12 @@
 #      process of detent) allows a start of an update instance
 #      (detent-update@v0.0.0-check.1.service) and refuses its stop and
 #      restart, a start of detent-update.service and of a non-tag instance,
-#      a restart of an unlisted unit, and a stop of -.mount and
-#      var-lib.mount; `systemd-run` as detent cannot start
-#      detent-update.service, an update instance name or any other
-#      transient unit.
+#      a restart of an unlisted unit, a stop of -.mount and var-lib.mount,
+#      and a start of a mount name no fstab entry backs
+#      (etc-systemd-system.mount, no generator fragment); `systemd-run` as
+#      detent cannot start detent-update.service, an update instance name or
+#      any other transient unit, and `systemd-mount` as detent cannot start
+#      a transient mount.
 #   8. With --mounts: runs scripts/mounts-activation-check.sh.
 #   Cleanup (also on any failure): puts /etc/hosts back when it differs,
 #   revokes the token, removes the work directory.
@@ -67,8 +69,8 @@
 # Exit codes: 0 every check passed; 1 a check failed; 2 a precondition is
 # missing (not root, no systemd, a tool or the server is absent).
 #
-# Requires: bash, curl, jq, systemd (systemctl, systemd-run), pkcheck,
-# runuser, setpriv, cmp.
+# Requires: bash, curl, jq, systemd (systemctl, systemd-run, systemd-mount),
+# pkcheck, runuser, setpriv, cmp.
 
 set -euo pipefail
 
@@ -209,7 +211,7 @@ if [[ "${DRYRUN}" == true ]]; then
   log "would mint a write-scope token as ${ACCOUNT}, revoked at the end"
   log "would add '${TEST_IP} ${TEST_NAME}' to ${HOSTS} through POST ${BASE_URL}/api/v1/modules/hosts/apply, then apply the original model back"
   log "would POST ${BASE_URL}/api/v1/services/${SERVICE_MODULE} {\"action\":\"restart\"}"
-  log "would check ${UPDATE_TEMPLATE}, run 'systemctl daemon-reload' and 'systemd-run --unit=detent-update' as ${ACCOUNT}, and pkcheck grants and refusals"
+  log "would check ${UPDATE_TEMPLATE}, run 'systemctl daemon-reload', 'systemd-run --unit=detent-update' and 'systemd-mount' as ${ACCOUNT}, and pkcheck grants and refusals"
   if [[ "${MOUNTS}" == true ]]; then
     log "would run ${SCRIPT_DIR}/mounts-activation-check.sh --detent ${DETENT_BIN} --url ${BASE_URL} --state-root ${STATE_ROOT}"
   fi
@@ -220,7 +222,7 @@ fi
 
 [[ "${EUID}" -eq 0 ]] || missing "run as root"
 [[ -d /run/systemd/system ]] || missing "systemd is not running"
-for tool in curl jq systemctl systemd-run pkcheck runuser setpriv cmp; do
+for tool in curl jq systemctl systemd-run systemd-mount pkcheck runuser setpriv cmp; do
   command -v "${tool}" >/dev/null 2>&1 || missing "${tool}"
 done
 [[ -x "${DETENT_BIN}" ]] || missing "${DETENT_BIN}"
@@ -455,6 +457,10 @@ refused "stop ${service_unit}" "${manage[@]}" --detail unit "${service_unit}" --
 refused "stop -.mount" "${manage[@]}" --detail unit -.mount --detail verb stop
 refused "stop var-lib.mount" "${manage[@]}" --detail unit var-lib.mount --detail verb stop
 refused "start detent-update.service" "${manage[@]}" --detail unit detent-update.service --detail verb start
+# A mount name no fstab entry backs has no generator fragment, so the rule
+# refuses it; this is the name an attacker would pick to mount over a root
+# config path.
+refused "start etc-systemd-system.mount (no fragment)" "${manage[@]}" --detail unit etc-systemd-system.mount --detail verb start
 refused "edit unit files" --action-id org.freedesktop.systemd1.manage-unit-files
 
 for name in detent-update "${UPDATE_INSTANCE}" capability-user-check-other; do
@@ -466,6 +472,22 @@ for name in detent-update "${UPDATE_INSTANCE}" capability-user-check-other; do
     pass "systemd-run as ${ACCOUNT} cannot start ${name}.service"
   fi
 done
+
+# A transient mount as detent: StartTransientUnit of a mount unit whose name
+# no fstab entry backs. The rule refuses it (no generator fragment), so the
+# account cannot bind or tmpfs its own files over a root path. The mount
+# point is a scratch directory under the work directory; its unit name has
+# no fstab entry, so it has no fragment.
+mount_target="${WORKDIR}/mnt"
+mkdir -p "${mount_target}"
+if runuser -u "${ACCOUNT}" -- systemd-mount --no-ask-password --quiet \
+  -t tmpfs tmpfs "${mount_target}" 2>"${WORKDIR}/mount.err"; then
+  fail "systemd-mount as ${ACCOUNT} started a transient mount over ${mount_target}"
+  umount "${mount_target}" 2>/dev/null || true
+else
+  log_verbose "systemd-mount ${mount_target}: $(cat "${WORKDIR}/mount.err")"
+  pass "systemd-mount as ${ACCOUNT} cannot start a transient mount"
+fi
 
 # --- 8. Mount activation ----------------------------------------------------------
 
