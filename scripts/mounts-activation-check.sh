@@ -103,7 +103,7 @@ log() {
 
 log_verbose() {
   if [[ "${VERBOSE}" == true ]]; then
-    echo "${BLUE}[mounts-check][verbose]${NC} $*"
+    echo "${BLUE}[mounts-check][verbose]${NC} $*" >&2
   fi
 }
 
