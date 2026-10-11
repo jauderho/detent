@@ -500,6 +500,13 @@ Fixes from the threat model, in order (each: test first, one commit):
 9. ~~**Dependabot `p256` 0.14 / `sha2` 0.11 broke the build** (merged, then
    reverted by `2a0fc64`, `0bab81e`)~~ Done 2026-10-10 (`PROGRESS.md`): both
    bumped together, one `digest` generation, verifier tests unchanged.
+10. ~~**PKG-6 capability-user mount grant lets a transient mount over a root
+    path (medium):** the polkit mount `start`/`stop` grant named only the
+    unit, so `detent` could `systemd-mount` a transient `etc-systemd-system
+    .mount` (etc.) over a root config path -> root.~~ Done 2026-10-10
+    (`PROGRESS.md`): the grant now requires the fstab generator fragment
+    `/run/systemd/generator/<unit>`; systemd then refuses the transient unit,
+    and `detent` cannot forge a fragment. Proven in a container.
 
 ### Track G — blocked on the owner or external infrastructure
 
