@@ -439,8 +439,9 @@ deferred by the owner.
     template unit `detent-update@.service` (runs only `detent update
     --tag=%i`), in both modes; `systemd-run` and its code are gone. polkit
     grants `detent` only `start` of such an instance, only while the
-    template file exists. Proven in a container (systemd 259, polkit); not
-    yet on the test host.
+    template file exists. Proven in a container (systemd 259, polkit); on the
+    test host (2026-10-10, PROGRESS) 202, 409, the sandbox, polkit and the score
+    2.1 in both modes; the install itself is open: no newer signed release exists.
 
 ### Track F — Phase 12 / M4 (v1.0)
 
@@ -575,7 +576,7 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   - E16 in capability-user mode: ship a root-owned template unit
     `detent-update@.service` (runs only `detent update --tag %i`) and grant
     only `start` of `detent-update@*.service`; root-confined uses the same
-    template. Done 2026-10-10 (`PROGRESS.md`); test-host run open.
+    template. Done 2026-10-10 (`PROGRESS.md`); test-host run partly done (install open: no newer release).
   - Hardening score: accept 2.6 for the unchanged root-confined unit on
     systemd 261 (the newer `systemd-analyze` scores it higher); capability-user
     keeps 1.8.
