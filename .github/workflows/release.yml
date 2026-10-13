@@ -84,7 +84,7 @@ jobs:
       # of the entries (release dry runs 37173368384 and 37173751335).
       - name: Harden Runner
         if: runner.os == 'Linux'
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
         with:
           egress-policy: block
           allowed-endpoints: >
@@ -104,7 +104,7 @@ jobs:
       # not blocked.
       - name: Harden Runner (audit, macOS)
         if: runner.os == 'macOS'
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
         with:
           egress-policy: audit
 
@@ -223,7 +223,7 @@ jobs:
     steps:
       # Block mode; this job only downloads artifacts.
       - name: Harden Runner
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
         with:
           egress-policy: block
           allowed-endpoints: >
@@ -262,7 +262,7 @@ jobs:
       # Block mode; same sources as the build job less zig. cdxgen runs
       # through bunx from registry.npmjs.org.
       - name: Harden Runner
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
         with:
           egress-policy: block
           allowed-endpoints: >
@@ -367,7 +367,7 @@ jobs:
       attestations: write  # actions/attest* store attestations on the repo
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
         with:
           # The one job with write access runs in block mode. The allow list
           # is everything checkout, `gh release`, artifact download, the
