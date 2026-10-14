@@ -160,6 +160,27 @@ fn the_unit_keeps_setuid_for_the_worker_drop() {
     }
 }
 
+/// The `NAME=value` entries of every `Environment=` line of the unit.
+fn unit_environment() -> Vec<&'static str> {
+    UNIT.lines()
+        .filter_map(|line| line.trim().strip_prefix("Environment="))
+        .flat_map(str::split_whitespace)
+        .collect()
+}
+
+/// mimalloc purges freed memory only after `purge_delay` (1000 ms), and only
+/// when it is called again after that. An idle worker makes no call, so the
+/// Argon2 block of the start-up dummy hash and of each login (64 MiB) stayed
+/// resident: 34 MiB idle and 84 MiB after one login on the test host.
+#[test]
+fn the_unit_has_mimalloc_purge_freed_memory_at_once() {
+    let environment = unit_environment();
+    assert!(
+        environment.contains(&"MIMALLOC_PURGE_DELAY=0"),
+        "{environment:?}"
+    );
+}
+
 const UPDATE_UNIT: &str = include_str!("../../../packaging/systemd/detent-update@.service");
 
 /// The value of the first `key=` line of the update template unit.
