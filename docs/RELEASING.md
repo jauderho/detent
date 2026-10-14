@@ -11,19 +11,24 @@ document is the authoritative record of what is configured and why.
 | Setting | Value |
 |---|---|
 | Require pull request before merging | yes |
-| Required approvals | ≥ 1 |
+| Required approvals | 0 (one maintainer; the PR exists for the `CI gate` run) |
+| Allowed merge methods | squash, rebase |
 | Require status checks to pass | yes: one check, **`CI gate`** (the last job of `ci.yml`; see "CI layout") |
 | Require signed commits | yes |
 | Require linear history | yes (no merge commits on `main`) |
 | Allow force pushes | **no** |
 | Allow deletions | **no** |
+| Bypass | repository admins, always (lands a branch whose `CI gate` passed by fast-forward) |
 
-### `v*` tag ruleset
+### `v*` tag rulesets
 
-- Match pattern: `v*` (e.g. `v0.1.0`).
-- Protected: force-push **disabled**, tag deletion **disabled** — a published
-  release tag is immutable once `release.yml` has run against it.
-- Only maintainers may create `v*` tags.
+Two rulesets match `refs/tags/v*` (e.g. `v0.1.0`):
+
+- **only admins create**: tag creation is refused, with a bypass for
+  repository admins.
+- **immutable**: update, deletion and force-push are refused for everyone,
+  with no bypass. A published release tag cannot move; a wrong tag needs a new
+  version.
 
 ### Workflow hardening
 
