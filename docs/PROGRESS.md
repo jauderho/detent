@@ -5,6 +5,12 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-14 - Upstream watch: stop false-positive drift issues
+
+Issues #22 to #27 came from `sort -V | tail -1` over all tags, which ignored tag prefixes and prereleases (`mandriva-1.22`, `tevent-0.17.2`, `v262-rc3`, `glibc-2.44.9000`). Selection now lives in `scripts/upstream-watch.sh`: each `upstream.toml` has `tag_regex` (whole tag must match) and `version_regex`, and an issue opens only when the newest release is newer than `tracked_version`. The Atom feed is no longer read (its first title could be a prerelease). nfs gets `tags_repo` because its `repo_url` is a cgit page that `git ls-remote` cannot read. `UPSTREAM_WATCH_FAKE_VERSION` still works; `workflow_dispatch` gains a `dry_run` input. `scripts/upstream-watch.sh selftest` runs offline over recorded `git ls-remote --tags` lists in `scripts/fixtures/upstream-watch/` and runs in the Shell CI job and in the watch workflow.
+
+**Result on live tags (2026-10-14).** Only #22 (chrony) was a false positive: 4.9 is the newest release. The others point at real newer releases even though the tag text was wrong: hosts glibc 2.44 (2.42 tracked), mounts util-linux 2.42.4, network and resolver systemd 262 (261.3 and 257.6 tracked), samba 4.25.0 and 4.24.8 (4.24.7 tracked). nfs-utils now reports 3.1.1 (2.9.2 tracked); that run never ran before because the old `repo_url` could not be listed. The issue titles were wrong; the drift is real.
+
 ## 2026-10-14 - CI: Rust 1.99.0 pin, rustls 0.23.46, post-quantum key exchange
 
 CI failed on every Rust pull request for two reasons unrelated to those pull requests (run 38616542019): the `Preinstalled Rust matches rust-toolchain.toml` step, and `cargo deny check` on four new rustls advisories. Four signed commits.

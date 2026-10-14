@@ -61,7 +61,16 @@ models, and the injection probes, then expands
 exact model each fixture parses to.
 
 **`upstream.toml`** is read by `.github/workflows/upstream-watch.yml`; it must
-agree with the `Upstream` block in the descriptor.
+agree with the `Upstream` block in the descriptor. Besides
+`tracked_version`, it needs two ERE keys that select the project's release tags:
+`tag_regex` (the whole tag must match, so rc, alpha, pre, test, devel and
+`.9000` tags never do) and `version_regex` (one capture group; `-` becomes `.`).
+Use TOML literal strings (single quotes) so `\.` needs no escaping. Add
+`tags_repo` when `repo_url` is not a git remote. A new module also needs a
+tag list in `scripts/fixtures/upstream-watch/<id>.tags` and an entry in
+`EXPECTED` in `scripts/upstream-watch.sh`; `scripts/upstream-watch.sh selftest`
+checks them offline. The watch compares versions with `sort -V` and opens an
+issue only when the newest release is newer than `tracked_version`.
 
 ## 3. Step by step
 

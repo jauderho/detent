@@ -12,6 +12,10 @@ repo_url = "https://git.samba.org/samba.git"
 # (4.25.x exists only as release candidates). Bump only together with new
 # fixtures under fixtures/samba/<version>/.
 tracked_version = "4.24.7"
+# Release tags only (the whole tag must match; prereleases do not). Keys are
+# documented in scripts/upstream-watch.sh.
+tag_regex = '^samba-[0-9]+\.[0-9]+\.[0-9]+$'
+version_regex = '^samba-(.*)$'
 # Documentation URLs shown in the UI (man pages, reference manual).
 docs = ["https://www.samba.org/samba/docs/current/man-html/smb.conf.5.html"]
 

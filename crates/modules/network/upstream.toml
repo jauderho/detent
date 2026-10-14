@@ -7,6 +7,10 @@
 project = "systemd"
 repo_url = "https://github.com/systemd/systemd.git"
 tracked_version = "261.3"
+# Release tags only (the whole tag must match; prereleases do not). Keys are
+# documented in scripts/upstream-watch.sh.
+tag_regex = '^v[0-9]+(\.[0-9]+)?$'
+version_regex = '^v(.*)$'
 docs = [
   "https://www.freedesktop.org/software/systemd/man/latest/systemd.network.html",
   "https://networkmanager.dev/docs/api/latest/nm-settings-keyfile.html",

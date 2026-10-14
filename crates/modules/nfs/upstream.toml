@@ -10,6 +10,12 @@ project = "nfs-utils"
 # release candidates).
 repo_url = "https://git.linux-nfs.org/?p=steved/nfs-utils.git"
 tracked_version = "2.9.2"
+# Release tags only (the whole tag must match; prereleases do not). Keys are
+# documented in scripts/upstream-watch.sh.
+tag_regex = '^nfs-utils-[0-9]+-[0-9]+(-[0-9]+)?$'
+version_regex = '^nfs-utils-(.*)$'
+# repo_url is a cgit page; git needs the plain remote.
+tags_repo = 'git://git.linux-nfs.org/projects/steved/nfs-utils.git'
 docs = ["https://man7.org/linux/man-pages/man5/exports.5.html"]
 
 # nfs-utils publishes no release atom feed; the upstream-watch workflow compares

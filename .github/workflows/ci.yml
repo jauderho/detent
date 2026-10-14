@@ -870,6 +870,9 @@ jobs:
           fi
           shfmt -d -i 2 -ci "${files[@]}"
 
+      - name: upstream-watch tag selection
+        run: scripts/upstream-watch.sh selftest
+
   size:
     name: Size check
     runs-on: ubuntu-26.04

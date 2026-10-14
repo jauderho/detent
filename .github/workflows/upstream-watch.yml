@@ -1,14 +1,21 @@
 name: Upstream watch
 
-# Compares each module's `upstream.toml` tracked_version against the latest
-# upstream release and opens an issue when they drift (PLAN §2.3, Phase 7
-# acceptance). To exercise the issue path, set the repository variable
+# Compares each module's `upstream.toml` tracked_version against the newest
+# upstream release tag (selection rules: scripts/upstream-watch.sh) and opens an
+# issue only when the release is newer (PLAN §2.3, Phase 7 acceptance). Dispatch
+# with `dry_run` to print what would be opened and open nothing.
+# To exercise the issue path, set the repository variable
 # `UPSTREAM_WATCH_FAKE_VERSION` to `0.0` before dispatching.
 
 on:
   schedule:
     - cron: "23 4 * * 1"
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print the issues that would be opened; open none"
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -34,51 +41,18 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Self-test tag selection
+        run: scripts/upstream-watch.sh selftest
+
       - name: Check upstream versions
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FAKE_VERSION: ${{ vars.UPSTREAM_WATCH_FAKE_VERSION }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
-          # ponytail: linear scan over a handful of tomls; no matrix needed.
-          failed=0
-          for toml in crates/modules/*/upstream.toml; do
-            id="$(dirname "${toml}" | xargs basename)"
-            tracked="$(sed -n 's/^tracked_version = "\(.*\)"$/\1/p' "${toml}")"
-            repo="$(sed -n 's/^repo_url = "\(.*\)"$/\1/p' "${toml}")"
-            feed="$(sed -n 's/^release_feed = "\(.*\)"$/\1/p' "${toml}")"
-            if [[ -n "${FAKE_VERSION}" ]]; then
-              tracked="${FAKE_VERSION}"
-            fi
-            echo "--- ${id}: tracked=${tracked} feed=${feed:-<tags>}"
-            latest=""
-            if [[ -n "${feed}" ]]; then
-              latest="$(curl -fsSL --max-time 30 "${feed}" \
-                | grep -oE '<title>[^<]+</title>' | head -2 | tail -1 \
-                | sed -e 's/<[^>]*>//g' -e 's/^[[:space:]]*//' || true)"
-            fi
-            if [[ -z "${latest}" ]] && [[ -n "${repo}" ]]; then
-              # No atom feed (e.g. glibc): newest tag in `repo_url`.
-              latest="$(git ls-remote --tags --refs "${repo}" 2>/dev/null \
-                | sed -n 's|.*refs/tags/||p' | sed 's/\^{}$//' \
-                | sort -V | tail -1 || true)"
-            fi
-            if [[ -z "${latest}" ]]; then
-              echo "could not determine latest for ${id}; skipping"
-              continue
-            fi
-            if [[ "${latest}" != *"${tracked}"* ]]; then
-              echo "${id} drifted: tracked=${tracked} latest=${latest}"
-              existing="$(gh issue list --search "upstream ${id} moved" \
-                --state open --limit 1 --json title --jq length 2>/dev/null || echo 0)"
-              if [[ "${existing}" != "0" ]]; then
-                echo "issue already open for ${id}; skipping"
-                continue
-              fi
-              gh issue create \
-                --title "upstream ${id} moved: tracked ${tracked}, latest ${latest}" \
-                --body "Diff docs, add/deprecate options in the schema, add fixtures, bump \`tracked_version\`, add \`since\`. (PLAN §2.3)" \
-                || failed=1
-            fi
-          done
-          exit "${failed}"
+          flags=(--verbose)
+          if [[ "${DRY_RUN}" == "true" ]]; then
+            flags+=(--dryrun)
+          fi
+          scripts/upstream-watch.sh check "${flags[@]}"

@@ -7,6 +7,10 @@
 project = "systemd"
 repo_url = "https://github.com/systemd/systemd.git"
 tracked_version = "257.6"
+# Release tags only (the whole tag must match; prereleases do not). Keys are
+# documented in scripts/upstream-watch.sh.
+tag_regex = '^v[0-9]+(\.[0-9]+)?$'
+version_regex = '^v(.*)$'
 docs = [
   "https://man7.org/linux/man-pages/man5/resolv.conf.5.html",
   "https://www.freedesktop.org/software/systemd/man/latest/resolved.conf.html",

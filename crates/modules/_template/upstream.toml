@@ -13,10 +13,15 @@ repo_url = "https://example.invalid/TEMPLATE.git"
 # The upstream release this module's option set was derived from. Bump only
 # together with new fixtures under fixtures/TEMPLATE/<version>/.
 tracked_version = "0.0"
+# Release tags only (the whole tag must match; prereleases do not). Keys are
+# documented in scripts/upstream-watch.sh.
+tag_regex = '^v[0-9]+\.[0-9]+(\.[0-9]+)?$'
+version_regex = '^v(.*)$'
 # Documentation URLs shown in the UI (man pages, reference manual).
 docs = ["https://example.invalid/TEMPLATE.5.html"]
 
-# Atom/RSS feed of releases, when upstream publishes one. Leave as "" when it
+# Informational; upstream-watch compares release tags, not this feed. Atom/RSS
+# feed of releases, when upstream publishes one. Leave as "" when it
 # does not (the hosts module does: glibc has no feed, so upstream-watch falls
 # back to comparing git tags in `repo_url`).
 release_feed = "https://example.invalid/TEMPLATE/tags?format=atom"

@@ -5,6 +5,10 @@
 project = "chrony"
 repo_url = "https://gitlab.com/chrony/chrony.git"
 tracked_version = "4.9"
+# Release tags only (the whole tag must match; prereleases do not). Keys are
+# documented in scripts/upstream-watch.sh.
+tag_regex = '^[0-9]+\.[0-9]+(\.[0-9]+)?$'
+version_regex = '^(.*)$'
 docs = ["https://chrony-project.org/doc/stable/chrony.conf.html"]
 
 # chrony publishes no release atom feed; the upstream-watch workflow compares
