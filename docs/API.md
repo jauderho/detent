@@ -32,6 +32,33 @@ time, and the CSRF token described below. Every route under `/api/v1` needs a
 credential; `POST /api/v1/auth/login` and `/healthz` are the only endpoints
 that do not.
 
+### Second factor (TOTP)
+
+A signed-in user turns its own second factor on and off with four routes.
+They take a session cookie only (a bearer token gets `401`), and a session
+that must change its password gets `403`.
+
+- `GET /api/v1/auth/totp` answers `{ enrolled, required }`; `required` is
+  `auth.totp_required`.
+- `POST /api/v1/auth/totp/enrol` with `{ current_password }` makes a new key
+  and answers its `otpauth://` URI and base32 key, once. The key is kept in
+  the session, not on disk, for 10 minutes. An account that has a key gets
+  `409 web-auth-totp-enrolled`.
+- `POST /api/v1/auth/totp/confirm` with `{ code }` stores the pending key
+  only if the code is valid. The code is then used up, as at sign-in. A
+  session with no live pending key gets `409 web-auth-totp-no-pending`.
+- `POST /api/v1/auth/totp/disable` with `{ current_password, code }` clears
+  the key; the code is used up. A host with `auth.totp_required` refuses
+  with `409 web-auth-totp-required` (the account could not sign in again;
+  `detent user totp disable` still works).
+
+Confirm and disable end every session of the account and answer a new
+session (new cookie, new CSRF token) like `POST /api/v1/auth/password`;
+after confirm, `totp_satisfied` is `true`. A wrong password or code is
+`401 web-auth-invalid-credentials` and counts against the login rate
+limiter. Both write `totp_enabled` or `totp_disabled` to the auth log, kind
+`session`.
+
 ## Scopes
 
 Every credential holds `read`, or `read` and `write` together — there is no
