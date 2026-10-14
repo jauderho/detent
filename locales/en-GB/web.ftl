@@ -104,6 +104,7 @@ login-title = sign in
 login-panel-label = session
 login-username-label = user name
 login-password-label = password
+password-reveal = show password
 login-totp-label = authenticator code
 login-totp-description = six digits from the authenticator enrolled for this account.
 login-totp-reveal = use an authenticator code

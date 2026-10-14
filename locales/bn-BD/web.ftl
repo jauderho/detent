@@ -103,6 +103,7 @@ login-title = সাইন ইন
 login-panel-label = সেশন
 login-username-label = ব্যবহারকারীর নাম
 login-password-label = পাসওয়ার্ড
+password-reveal = পাসওয়ার্ড দেখান
 login-totp-label = অথেন্টিকেটর কোড
 login-totp-description = এই অ্যাকাউন্টের জন্য নিবন্ধিত অথেন্টিকেটর থেকে ছয় অঙ্কের কোড।
 login-totp-reveal = অথেন্টিকেটর কোড ব্যবহার করুন

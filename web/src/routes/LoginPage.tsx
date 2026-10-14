@@ -29,6 +29,7 @@ import { useAuth } from '@/auth/AuthProvider'
 import { Banner } from '@/components/Banner'
 import { Button } from '@/components/Button'
 import { Panel } from '@/components/Panel'
+import { PasswordField } from '@/components/PasswordField'
 import { TextField } from '@/components/TextField'
 import { TinyButton } from '@/components/TinyButton'
 import { safeRedirect } from './paths'
@@ -139,10 +140,9 @@ export function LoginPage() {
               setUsername(event.target.value)
             }}
           />
-          <TextField
+          <PasswordField
             label={l10n.getString('login-password-label')}
             name="password"
-            type="password"
             value={password}
             autoComplete="current-password"
             required

@@ -20,7 +20,7 @@ import { useAuth } from '@/auth/AuthProvider'
 import { Banner } from '@/components/Banner'
 import { Button } from '@/components/Button'
 import { Panel } from '@/components/Panel'
-import { TextField } from '@/components/TextField'
+import { PasswordField } from '@/components/PasswordField'
 import { TinyButton } from '@/components/TinyButton'
 
 const MIN_PASSWORD_CHARS = 12
@@ -101,10 +101,9 @@ export function ChangePasswordPage() {
           }}
           style={FORM_STYLE}
         >
-          <TextField
+          <PasswordField
             label={l10n.getString('password-change-current-label')}
             name="current_password"
-            type="password"
             value={current}
             autoComplete="current-password"
             required
@@ -113,11 +112,10 @@ export function ChangePasswordPage() {
               setCurrent(event.target.value)
             }}
           />
-          <TextField
+          <PasswordField
             label={l10n.getString('password-change-new-label')}
             description={l10n.getString('password-change-new-description')}
             name="new_password"
-            type="password"
             value={next}
             autoComplete="new-password"
             required
@@ -126,10 +124,9 @@ export function ChangePasswordPage() {
               setNext(event.target.value)
             }}
           />
-          <TextField
+          <PasswordField
             label={l10n.getString('password-change-confirm-label')}
             name="confirm_password"
-            type="password"
             value={confirm}
             autoComplete="new-password"
             required

@@ -103,6 +103,7 @@ login-title = 登录
 login-panel-label = 会话
 login-username-label = 用户名
 login-password-label = 密码
+password-reveal = 显示密码
 login-totp-label = 验证器验证码
 login-totp-description = 为此账户绑定的验证器所显示的六位数字。
 login-totp-reveal = 使用验证器验证码

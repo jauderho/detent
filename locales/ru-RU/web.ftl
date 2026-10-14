@@ -103,6 +103,7 @@ login-title = вход
 login-panel-label = сеанс
 login-username-label = имя пользователя
 login-password-label = пароль
+password-reveal = показать пароль
 login-totp-label = код аутентификатора
 login-totp-description = шесть цифр из аутентификатора, привязанного к этой учётной записи.
 login-totp-reveal = использовать код аутентификатора

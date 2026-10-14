@@ -103,6 +103,7 @@ login-title = サインイン
 login-panel-label = セッション
 login-username-label = ユーザー名
 login-password-label = パスワード
+password-reveal = パスワードを表示
 login-totp-label = 認証コード
 login-totp-description = このアカウントに登録した認証アプリの 6 桁のコード。
 login-totp-reveal = 認証コードを使う

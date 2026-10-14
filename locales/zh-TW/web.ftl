@@ -103,6 +103,7 @@ login-title = 登入
 login-panel-label = 工作階段
 login-username-label = 使用者名稱
 login-password-label = 密碼
+password-reveal = 顯示密碼
 login-totp-label = 驗證器驗證碼
 login-totp-description = 為此帳號綁定的驗證器所顯示的六位數字。
 login-totp-reveal = 使用驗證器驗證碼

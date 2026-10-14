@@ -86,6 +86,20 @@ describe('LoginPage — signing in', () => {
     })
   })
 
+  it('can reveal the password it is typing, and hide it again', async () => {
+    const user = userEvent.setup()
+    await renderLogin()
+    await fillCredentials(user)
+
+    const toggle = screen.getByRole('button', { name: 'show password' })
+    expect(screen.getByLabelText('password')).toHaveAttribute('type', 'password')
+    await user.click(toggle)
+    expect(screen.getByLabelText('password')).toHaveAttribute('type', 'text')
+    expect(screen.getByLabelText('password')).toHaveValue('correct horse')
+    await user.click(toggle)
+    expect(screen.getByLabelText('password')).toHaveAttribute('type', 'password')
+  })
+
   it('sends no CSRF header before a session has issued a token', async () => {
     const user = userEvent.setup()
     const stub = await renderLogin()

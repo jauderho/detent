@@ -103,6 +103,7 @@ login-title = Anmelden
 login-panel-label = Sitzung
 login-username-label = Benutzername
 login-password-label = Passwort
+password-reveal = Passwort anzeigen
 login-totp-label = Authenticator-Code
 login-totp-description = sechs Ziffern aus dem Authenticator, der für dieses Konto eingerichtet ist.
 login-totp-reveal = Authenticator-Code verwenden
