@@ -96,7 +96,14 @@ tower = { workspace = true }
 default = ["crypto-aws-lc"]
 # rustls provider selection (PLAN §2.2). At least one is required; when both
 # are on, aws-lc-rs wins at run time so `--all-features` still builds.
-crypto-aws-lc = ["rustls/aws_lc_rs", "tokio-rustls/aws_lc_rs", "rcgen/aws_lc_rs"]
+# `prefer-post-quantum` ranks X25519MLKEM768 first (PLAN §2.7); without it the
+# provider lists X25519 first and the clients built on it offer X25519 first.
+crypto-aws-lc = [
+    "rustls/aws_lc_rs",
+    "rustls/prefer-post-quantum",
+    "tokio-rustls/aws_lc_rs",
+    "rcgen/aws_lc_rs",
+]
 crypto-ring = ["rustls/ring", "tokio-rustls/ring", "rcgen/ring"]
 # Embeds `web/dist` into the binary (PLAN §2.6, §4.2). Off by default: that
 # directory does not exist until Phase 5 builds it. See `src/spa.rs`.

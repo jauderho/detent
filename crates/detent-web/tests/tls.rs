@@ -496,3 +496,30 @@ async fn a_served_connection_outlives_the_first_request_deadline() -> TestResult
     let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
     Ok(())
 }
+
+/// PLAN §2.7: the key exchange prefers `X25519MLKEM768`. rustls picks the
+/// group in the client's order, so the provider's own ranking is what makes
+/// detent's clients offer the hybrid group first; a client that does gets it.
+#[cfg(feature = "crypto-aws-lc")]
+#[tokio::test]
+async fn key_exchange_prefers_x25519mlkem768() -> TestResult {
+    let provider = crypto_provider();
+    let first = provider
+        .kx_groups
+        .first()
+        .ok_or("the provider has no key exchange group")?;
+    assert_eq!(first.name(), rustls::NamedGroup::X25519MLKEM768);
+
+    let running = start(8).await?;
+    let config = client_config(&running.cert, &[&rustls::version::TLS13], ALPN_H2_HTTP11)?;
+    let stream = connect(&running, config).await?;
+    let group = stream
+        .get_ref()
+        .1
+        .negotiated_key_exchange_group()
+        .ok_or("no key exchange group negotiated")?;
+    assert_eq!(group.name(), rustls::NamedGroup::X25519MLKEM768);
+
+    drop(stream);
+    running.shutdown().await
+}

@@ -36,7 +36,7 @@ rustls-pki-types = { workspace = true }
 x509-parser = { workspace = true }
 http-body-util = { workspace = true, optional = true }
 # rustls itself is only for the fetch client and health check.
-rustls = { workspace = true, features = ["aws_lc_rs"], optional = true }
+rustls = { workspace = true, features = ["aws_lc_rs", "prefer-post-quantum"], optional = true }
 hyper = { workspace = true, features = ["client"], optional = true }
 hyper-util = { workspace = true, features = ["client", "client-legacy"], optional = true }
 hyper-rustls = { workspace = true, optional = true }

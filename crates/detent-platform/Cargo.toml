@@ -90,6 +90,6 @@ hyper = { workspace = true, features = ["client"] }
 hyper-rustls = { workspace = true }
 hyper-util = { workspace = true, features = ["client", "client-legacy"] }
 rcgen = { workspace = true, features = ["aws_lc_rs"] }
-rustls = { workspace = true, features = ["aws_lc_rs"] }
+rustls = { workspace = true, features = ["aws_lc_rs", "prefer-post-quantum"] }
 rustls-pki-types = { workspace = true }
 tokio = { workspace = true }
