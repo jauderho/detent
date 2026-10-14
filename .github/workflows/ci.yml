@@ -1003,7 +1003,7 @@ jobs:
   # from the hosts (261.3 was measured there), so the version is logged and a
   # score that moves with a newer systemd shows up here first. Thresholds:
   # root-confined 2.6 (owner accepted, BUGFIX section 4), capability-user 1.8,
-  # update template 2.2 (2.1 measured, plus 0.1 tolerance). A failing pass
+  # update template 2.2 (passed to systemd as 26, 18 and 22) (2.1 measured, plus 0.1 tolerance). A failing pass
   # prints the full table.
   systemd-security:
     name: systemd-analyze security (packaged units)
@@ -1037,8 +1037,9 @@ jobs:
 
           fail=0
           check() {
+            # --threshold is the exposure times 10 (26 is 2.6).
             local label="$1" threshold="$2" unit="$3"
-            echo "::group::${label} (threshold ${threshold})"
+            echo "::group::${label} (threshold ${threshold}, exposure times 10)"
             systemd-analyze security --offline=true --no-pager "$unit" || true
             if systemd-analyze security --offline=true --no-pager \
               --threshold="$threshold" "$unit" >/dev/null; then
@@ -1049,9 +1050,9 @@ jobs:
             fi
             echo "::endgroup::"
           }
-          check "root-confined detent.service" 2.6 "$work/root/detent.service"
-          check "capability-user detent.service" 1.8 "$work/capuser/detent.service"
-          check "detent-update@.service" 2.2 "$work/update/detent-update@.service"
+          check "root-confined detent.service" 26 "$work/root/detent.service"
+          check "capability-user detent.service" 18 "$work/capuser/detent.service"
+          check "detent-update@.service" 22 "$work/update/detent-update@.service"
           exit "$fail"
 
   # The one required status check for the `main` ruleset. It passes when every
