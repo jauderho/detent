@@ -584,9 +584,7 @@ fn check_totp(
     };
     let code = code.ok_or(AuthError::InvalidCredentials)?;
     let seconds = u64::try_from(unix_now()).unwrap_or_default();
-    let counter = secret
-        .verify(code, seconds, verified.totp_last_counter)
-        .ok_or(AuthError::InvalidCredentials)?;
+    let counter = secret.check(code, seconds, verified.totp_last_counter)?;
     state
         .auth
         .users
@@ -616,6 +614,13 @@ pub(super) fn audit_failure(
         tracing::debug!(subject = %subject, %ip, "login refused: hashing cap reached");
         return;
     }
+    // A replayed second-factor code is refused like a wrong one but logged as
+    // its own event, so a stolen-code reuse is visible in the log.
+    let event = if matches!(error, AuthError::TotpReplayed) {
+        AuthEvent::TotpReplayed
+    } else {
+        event
+    };
     state.auth.record(
         &AuthRecord::new(event, subject, AuditResult::Error)
             .with_kind(IdentityKind::Session)
@@ -627,7 +632,10 @@ pub(super) fn audit_failure(
     // for as long as an attacker kept knocking, which locks the operator out
     // of their own appliance; a store or entropy failure is not the caller's
     // doing at all.
-    if !matches!(*error, AuthError::InvalidCredentials) {
+    if !matches!(
+        *error,
+        AuthError::InvalidCredentials | AuthError::TotpReplayed
+    ) {
         return;
     }
     for principal in state.auth.limiter.record_failure(ip, subject, now) {
@@ -1289,6 +1297,51 @@ mod tests {
             .oneshot(login_request(&body(code.expose()))?)
             .await?;
         assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_replayed_code_is_its_own_audit_event_and_still_counts_as_a_failure() -> R {
+        use crate::auth::totp::{STEP_SECS, TotpSecret};
+
+        let fixture = fixture_with_alice()?;
+        let secret = TotpSecret::generate()?;
+        fixture.state.auth.users.set_totp("alice", Some(&secret))?;
+        let counter = u64::try_from(super::unix_now()).unwrap_or_default() / STEP_SECS;
+        let code = secret.code_at(counter);
+        let body = |code: &str| {
+            format!("{{\"username\":\"alice\",\"password\":\"hunter2\",\"totp_code\":\"{code}\"}}")
+        };
+
+        let wrong = app(&fixture.state)
+            .oneshot(login_request(&body("000000"))?)
+            .await?;
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+        let first = app(&fixture.state)
+            .oneshot(login_request(&body(code.expose()))?)
+            .await?;
+        assert_eq!(first.status(), StatusCode::OK);
+        let replay = app(&fixture.state)
+            .oneshot(login_request(&body(code.expose()))?)
+            .await?;
+        // The answer is the one a wrong code gets.
+        assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            json(replay)
+                .await?
+                .pointer("/message_id")
+                .and_then(|v| v.as_str()),
+            Some("web-auth-invalid-credentials")
+        );
+
+        assert_eq!(
+            fixture.audit.events(),
+            vec![
+                AuthEvent::LoginFailed,
+                AuthEvent::LoginSucceeded,
+                AuthEvent::TotpReplayed
+            ]
+        );
         Ok(())
     }
 

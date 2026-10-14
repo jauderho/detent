@@ -579,7 +579,16 @@ async fn disabling_needs_the_password_and_a_fresh_code() -> R {
     );
     assert_eq!(
         records.iter().filter(|record| **record == refused).count(),
-        3,
+        2,
+        "{records:?}"
+    );
+    // The used code is logged as a replay, not as a wrong code.
+    assert!(
+        records.contains(&(
+            AuthEvent::TotpReplayed,
+            AuditResult::Error,
+            IdentityKind::Session
+        )),
         "{records:?}"
     );
     assert!(
@@ -804,4 +813,51 @@ fn the_bodies_never_render_a_credential() {
         assert!(!rendered.contains("123456"), "{rendered}");
         assert!(!rendered.contains("SECRETKEY"), "{rendered}");
     }
+}
+
+#[tokio::test]
+async fn disabling_with_a_used_code_is_logged_as_a_replay() -> R {
+    let fixture = fixture()?;
+    let (secret, browser) = enrolled_alice(&fixture).await?;
+    // The sign-in used this step's code; offering it again is a replay.
+    let replayed = post(
+        &fixture.state,
+        &browser,
+        TOTP_DISABLE_PATH,
+        disable_body(PASSWORD, secret.code_at(step()).expose()),
+    )
+    .await?;
+    assert_eq!(replayed.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        message_id(replayed).await?.as_deref(),
+        Some("web-auth-invalid-credentials")
+    );
+    let wrong = post(
+        &fixture.state,
+        &browser,
+        TOTP_DISABLE_PATH,
+        disable_body(PASSWORD, &wrong_code(&secret)),
+    )
+    .await?;
+    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+
+    let records = audit(&fixture);
+    assert!(
+        records.contains(&(
+            AuthEvent::TotpReplayed,
+            AuditResult::Error,
+            IdentityKind::Session
+        )),
+        "{records:?}"
+    );
+    assert!(
+        records.contains(&(
+            AuthEvent::TotpDisabled,
+            AuditResult::Error,
+            IdentityKind::Session
+        )),
+        "{records:?}"
+    );
+    assert!(enrolled(&fixture.state));
+    Ok(())
 }

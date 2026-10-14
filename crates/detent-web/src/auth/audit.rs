@@ -92,6 +92,9 @@ pub enum AuthEvent {
     /// The second factor of an account was turned off: on the command line
     /// (kind `local_user`) or by the signed-in user in the console.
     TotpDisabled,
+    /// A correct second-factor code was presented a second time. The caller
+    /// is refused exactly as for a wrong code; the log tells the two apart.
+    TotpReplayed,
     /// A valid caller attempted an operation without its required scope.
     ScopeDenied,
     /// A bearer token or session cookie was presented and did not resolve:

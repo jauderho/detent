@@ -402,9 +402,7 @@ fn confirm_enrolment(
         .pending_totp(id.expose(), now)
         .ok_or(AuthError::TotpNoPending)?;
     let seconds = u64::try_from(unix_now()).unwrap_or_default();
-    let counter = secret
-        .verify(code, seconds, None)
-        .ok_or(AuthError::InvalidCredentials)?;
+    let counter = secret.check(code, seconds, None)?;
     // Of two requests that confirm the same key, only one stores it.
     if !state.auth.sessions.take_pending_totp(id.expose()) {
         return Err(AuthError::TotpNoPending);
@@ -440,9 +438,7 @@ async fn turn_off(
     let verified = verify_current(state, subject, &request.current_password).await?;
     let secret = verified.totp.ok_or(AuthError::TotpNotEnrolled)?;
     let seconds = u64::try_from(unix_now()).unwrap_or_default();
-    let counter = secret
-        .verify(&request.code, seconds, verified.totp_last_counter)
-        .ok_or(AuthError::InvalidCredentials)?;
+    let counter = secret.check(&request.code, seconds, verified.totp_last_counter)?;
     // Recorded before the key is cleared, so of two requests racing with one
     // code only one gets past this line.
     state.auth.users.note_totp_counter(subject, counter)?;

@@ -126,6 +126,11 @@ pub enum AuthError {
     /// answer to every failed login.
     #[error("the credentials were refused")]
     InvalidCredentials,
+    /// A correct second-factor code was presented again. Answers exactly as
+    /// [`InvalidCredentials`](Self::InvalidCredentials); only the audit log
+    /// tells them apart.
+    #[error("the credentials were refused")]
+    TotpReplayed,
     /// Too many failures from this address or for this user.
     #[error("too many attempts; wait {retry_after_secs}s")]
     RateLimited {
@@ -223,7 +228,9 @@ impl AuthError {
             Self::PasswordChangeRequired => MessageId::new("web-auth-password-change-required"),
             Self::UserExists => MessageId::new("web-auth-user-exists"),
             Self::UnknownUser => MessageId::new("web-auth-user-unknown"),
-            Self::InvalidCredentials => MessageId::new("web-auth-invalid-credentials"),
+            Self::InvalidCredentials | Self::TotpReplayed => {
+                MessageId::new("web-auth-invalid-credentials")
+            }
             Self::RateLimited { .. } => MessageId::new("web-auth-rate-limited"),
             Self::SessionLimit => MessageId::new("web-auth-session-limit"),
             Self::Busy => MessageId::new("web-auth-busy"),
@@ -253,7 +260,9 @@ impl AuthError {
     pub const fn status(&self) -> axum::http::StatusCode {
         use axum::http::StatusCode as S;
         match *self {
-            Self::InvalidCredentials | Self::Unauthenticated => S::UNAUTHORIZED,
+            Self::InvalidCredentials | Self::TotpReplayed | Self::Unauthenticated => {
+                S::UNAUTHORIZED
+            }
             Self::RateLimited { .. } => S::TOO_MANY_REQUESTS,
             Self::SessionLimit | Self::Busy => S::SERVICE_UNAVAILABLE,
             Self::CsrfRejected | Self::PasswordChangeRequired => S::FORBIDDEN,
@@ -376,6 +385,7 @@ mod tests {
             AuthError::UserExists,
             AuthError::UnknownUser,
             AuthError::InvalidCredentials,
+            AuthError::TotpReplayed,
             AuthError::RateLimited {
                 retry_after_secs: 4,
             },

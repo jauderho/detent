@@ -165,6 +165,37 @@ impl TotpSecret {
         }
         accepted
     }
+
+    /// [`verify`](Self::verify), but a code that is correct and already used
+    /// is told apart from a wrong one, for the audit log only.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::TotpReplayed`] for a correct code at or before
+    /// `last_counter`, [`AuthError::InvalidCredentials`] for anything else
+    /// refused. Both answer the caller identically.
+    pub fn check(
+        &self,
+        code: &str,
+        unix_secs: u64,
+        last_counter: Option<u64>,
+    ) -> Result<u64, AuthError> {
+        if let Some(counter) = self.verify(code, unix_secs, last_counter) {
+            return Ok(counter);
+        }
+        let step = unix_secs / STEP_SECS;
+        let first = step.saturating_sub(WINDOW_STEPS);
+        let mut replayed = false;
+        for offset in 0..=WINDOW_STEPS.saturating_mul(2) {
+            let counter = first.saturating_add(offset);
+            replayed |= self.code_at(counter).ct_eq(code);
+        }
+        Err(if replayed {
+            AuthError::TotpReplayed
+        } else {
+            AuthError::InvalidCredentials
+        })
+    }
 }
 
 impl fmt::Debug for TotpSecret {
@@ -302,6 +333,23 @@ mod tests {
             secret.verify(next.expose(), now, Some(accepted)),
             Some(step.saturating_add(1))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn check_tells_a_replay_from_a_wrong_code() -> R {
+        let secret = rfc_secret()?;
+        let now = 1_111_111_111;
+        let code = secret.code_at(now / STEP_SECS);
+        let accepted = secret.check(code.expose(), now, None)?;
+        assert!(matches!(
+            secret.check(code.expose(), now, Some(accepted)),
+            Err(AuthError::TotpReplayed)
+        ));
+        assert!(matches!(
+            secret.check("000000", now, Some(accepted)),
+            Err(AuthError::InvalidCredentials)
+        ));
         Ok(())
     }
 
