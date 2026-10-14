@@ -295,7 +295,7 @@ Full row: [SH-S] row "Sigstore verification".
 | Id | S/T/R/I/D/E | Threat | Control | Proven by | Status |
 |---|---|---|---|---|---|
 | AUD-1 | R | A mutation happens with no record (AS10) | Intent record first; write failure refuses the mutation | `an_unwritable_audit_sink_refuses_the_mutation`, `apply_writes_the_candidate_and_audits_exactly_once` (`detent-ops/tests/engine.rs`) | Covered |
-| AUD-2 | T | Records edited, deleted or reordered (AS10 ← A5 with `detent` rights, A6) | SHA-256 hash chain, sequence, torn-line notes | `a_deleted_middle_record_breaks_the_chain`, `verification_detects_tampering_and_truncation_against_an_anchor` (`detent-ops/src/audit.rs`) | Partial: the worker owns the file and can rewrite the whole chain; journald is the independent copy. `detent audit verify` (TM-G6, fixed 2026-10-10) checks the chain and prints the head digest to keep as an anchor: `audit_verify_prints_the_head_digest_of_an_intact_log`, `audit_verify_names_the_first_bad_record_and_fails`, `a_cut_off_tail_passes_the_chain_but_not_the_kept_anchor` (`detent/src/run.rs`); the operator must keep the anchor elsewhere; the auth log has no chain |
+| AUD-2 | T | Records edited, deleted or reordered (AS10 ← A5 with `detent` rights, A6) | SHA-256 hash chain, sequence, torn-line notes | `a_deleted_middle_record_breaks_the_chain`, `verification_detects_tampering_and_truncation_against_an_anchor` (`detent-ops/src/audit.rs`) | Partial: the worker owns the file and can rewrite the whole chain; journald is the independent copy. `detent audit verify` (TM-G6, fixed 2026-10-10) checks the chain and prints the head digest to keep as an anchor: `audit_verify_prints_the_head_digest_of_an_intact_log`, `audit_verify_names_the_first_bad_record_and_fails`, `a_cut_off_tail_passes_the_chain_but_not_the_kept_anchor` (`detent/src/run.rs`); the operator must keep the anchor elsewhere; the auth log has no chain. Owner decision 2026-10-14 (BUGFIX §4): no built-in remote sink; the operator forwards the journal (README) for a copy the host cannot rewrite, so the remaining risk is accepted as a deployment control. Each record is also logged as the `detent audit` event (`emit`, `detent-ops/src/engine.rs`) at `RUST_LOG=info` |
 | AUD-3 | I | Secrets or config bodies in the audit trail (AS1, AS6 ← A2 via `/api/v1/audit`) | Digests and error ids only | `the_audit_log_never_contains_the_configuration_body` (`detent-ops/tests/engine.rs`); `a_record_carries_hashes_and_an_error_id_but_no_payload` (`detent-ops/src/audit.rs`); `a_record_carries_the_event_and_nothing_secret` (`detent-web/src/auth/audit.rs`) | Covered |
 | AUD-4 | D | Refused logins fill the disk (AS13 ← A1) | Rate-limited attempts not logged; 16 MiB rotation | `rate_limited_attempts_do_not_grow_the_audit_log` (`auth/routes.rs`); `a_log_at_16_mib_is_rotated_to_dot_1_before_the_next_append` (`auth/audit.rs`) | Covered |
 | AUD-5 | I, T | Other local users read or plant audit files (AS10 ← A5) | `0700` dir, `0600` file, symlink and foreign owner refused | `a_symlinked_audit_directory_is_refused`, `the_audit_directory_is_private` (`detent-ops/src/audit.rs`) | Covered |
@@ -418,6 +418,16 @@ compromise), **Low** (defence in depth, evidence, or audit quality).
 | TM-G16 | Low | No `testssl.sh` run; `scripts/tls-check.sh` not in CI | WEB-1 | SH Gaps 12 |
 | TM-G17 | Medium (capability-user mode only) | Monitor and worker share a uid (polkit rule and doctor `polkit-rule` check exist; the shared uid stays) | PKG-3 | SH Gaps 14, BUGFIX Track F |
 | TM-G18 | Low | Root `enforce_mode_*` tests for the E16 changes not yet run in CI or on the test host; aarch64 confinement not run on hardware | MON-7 | BUGFIX Track E, ARCHITECTURE §11 |
+
+Accepted residuals (owner, 2026-10-14; BUGFIX §4):
+
+- **AS6 TOTP keys at rest:** secrets are plain base32 in `users.json`
+  (`0600`, owned by the service account), with the same protection as the
+  password hash file. A reader of that file (the worker, or A5 with `detent`
+  rights) can generate valid codes. Accepted for v1 (ASVS 2.8.2).
+- **AS10 remote copy of the audit log:** detent has no built-in sink; the
+  journal is the independent copy and the operator forwards it (ASVS 1.7.2,
+  7.3.3; TM-G6, AUD-2).
 
 Smaller evidence gaps that stay in their rows: WRK-4 (runner descriptor
 drop untested), WRK-5 (panic reachability), WEB-3 (timing test ignored),

@@ -198,12 +198,12 @@ B3 (real Fulcio/Rekor trust roots) moved to Track E, item 2.
    logs a `tracing::warn!` at half and at a quarter of the lifetime to
    stderr, and systemd sends stderr to the journal (test
    `expiry_warnings_go_to_the_log_at_half_and_a_quarter`, `acme.rs`).
-6. **aarch64 syscall trace** of the acme process — traced 2026-09-30
+6. ~~**aarch64 syscall trace** of the acme process~~ Done 2026-09-30
    (`PROGRESS.md`): `scripts/acme-serve-check.sh`, unchanged, on the
    aarch64 musl binary. All serve checks pass; the one call outside `ACME`
    is `faccessat` (mimalloc's NUMA probe, the aarch64 form of the tolerated
    `access`), refused with `EPERM`. The script now tolerates it (owner
-   decision 2026-09-30) and passes on aarch64. Done.
+   decision 2026-09-30) and passes on aarch64.
 
 Follow-ups found in item 3 (not yet scheduled):
 - ~~**`mcp` without `web` has no certificate hook.**~~ Done 2026-09-30:
@@ -228,7 +228,7 @@ deferred by the owner.
    `enforce_mode_monitor_can_spawn_a_validator` with a test that a confined
    monitor dies by `SIGSYS` on `execve`. Record the trace in
    `SECURITY_HARDENING.md` (runner row).
-2. **A2 (H6) — full confined `serve` end to end** with the packaged units:
+2. ~~**A2 (H6) — full confined `serve` end to end** with the packaged units:
    HTTPS login, `plan` and `apply` with a real validator, a service restart,
    commit-confirm expiry and rollback, shutdown on `SIGTERM`. Each failure
    becomes its own item here.
@@ -237,7 +237,7 @@ deferred by the owner.
    `ReadWritePaths`, staging in `RuntimeDirectory=`, `CAP_SETPCAP`, no
    `StateDirectory=`, `ConfigurationDirectoryMode=0750`, and error causes in
    the journal. A2-a fixed 2026-10-01 (ambient capabilities); A2 then
-   passes with the shipped unit. A2-b fixed 2026-10-01. A2 is done.
+   passes with the shipped unit. A2-b fixed 2026-10-01. A2 is done.~~ Done 2026-10-01 (`PROGRESS.md`).
 3. ~~**A3 — negative checks never run.**~~ In a throwaway worktree with its own
    target dir, remove each fix, run its pinning test, and quote the failure.
    A test that does not fail is vacuous: write a real one first.
@@ -445,6 +445,13 @@ deferred by the owner.
 
 ### Track F — Phase 12 / M4 (v1.0)
 
+**Open now (2026-10-14).**
+- Owner only: E5 / TM-G12 rulesets (`docs/RELEASING.md`); D3 VM runs; the
+  v1.0.0 release and the E16 real-install proof, which needs a published
+  release; native-speaker review of the translated locales.
+- In progress: the credential-change console banner (ASVS 2.2.3, 2.5.5) and
+  the worker RSS trim (PLAN §4.1; §4, 2026-10-14).
+
 `THREAT_MODEL.md` (STRIDE per component, mapped to tests; it must also cover
 any egress §5 would add), `PENTEST_CHECKLIST.md` (ASVS L2), `[privilege]
 mode = "capability-user"` with polkit and the doctor check, optional mTLS,
@@ -485,7 +492,9 @@ Fixes from the threat model, in order (each: test first, one commit):
    `Restore` and `Service`, and add `detent audit verify`.~~ Done 2026-10-10
    (`PROGRESS.md`); proven on the test host 2026-10-10 (CLI records, `privsep
    request` log, coalesced `credential_rejected`, `audit verify`). Still open from it: a notice channel to the user on a
-   credential change (ASVS 2.2.3, 2.5.5), a remote log sink (1.7.2, 7.3.3).
+   credential change (ASVS 2.2.3, 2.5.5; console banner, in progress). The
+   remote log sink (1.7.2, 7.3.3) is decided 2026-10-14: journal forwarding
+   only (§4).
 4. ~~**Stale statements** in SECURITY_HARDENING, ARCHITECTURE §11 and ADR-012
    (THREAT_MODEL §7).~~ Done 2026-10-10 (`PROGRESS.md`).
 5. ~~**TM-G2 worker UDP egress** (seccomp argument filter on `socket` /
@@ -603,6 +612,22 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
     TCP listener; `socket` takes a TCP stream only, `sendto` a NULL address
     only (`PROGRESS.md`).
   - Passkeys: deferred past v1 (ADR-016).
+- Owner answers (2026-10-14):
+  - ASVS 1.7.2 / 7.3.3 remote audit sink: journal forwarding only, no
+    built-in sink. Each audit record also goes to the journal as the
+    `detent audit` event (`emit` in `detent-ops/src/engine.rs`; the web
+    sign-in log in `detent-web/src/auth/audit.rs`), at `RUST_LOG=info`, which
+    the packaged unit sets. Done 2026-10-14: README forwarding how-to; the
+    checklist rows are Accepted risk (deployment control); gap 16 and
+    TM-G6/AUD-2 updated.
+  - TOTP keys at rest in `users.json` (`0600`, owned by the service
+    account): accepted for v1 as a residual, with the same protection as the
+    password hash file. Done 2026-10-14: PENTEST 2.8.2 and THREAT_MODEL §8.
+  - Credential-change notice (ASVS 2.2.3, 2.5.5): a console banner. Being
+    implemented on a separate branch; the checklist rows stay Gap until it
+    lands.
+  - Worker RSS against the PLAN §4.1 30 MiB figure (three-process idle RSS
+    57.5 MiB): investigate and trim. In progress.
 - D4: remove build toolchains from testhost. — proposed: after Track C A1–A3 —
   owner answer:
 - libbz2 on testhost: `libbz2-1.0` was downgraded to `1.0.8-6build2` by an earlier

@@ -104,7 +104,16 @@ mail, another host) and compare it with a later run: a log that was cut back
 prints a different digest. It does not read the web sign-in log
 (`audit/detent-auth.jsonl`), which has no chain. The service also writes each
 change to the journal; forward the journal to a remote host if you need a
-copy the host cannot rewrite.
+copy the host cannot rewrite. detent has no built-in remote sink. To forward
+the journal:
+
+- `systemd-journal-upload` on this host sends to `systemd-journal-remote` on a
+  log host: set `URL=` in `/etc/systemd/journal-upload.conf` (use HTTPS with
+  certificates), then `systemctl enable --now systemd-journal-upload`.
+- Or use rsyslog with `imjournal` and an `omfwd` action over TCP with TLS.
+- Filter on the `detent` unit. Each record is the event `detent audit` (the
+  operation, who, module, result and error id; no hashes). It is logged only
+  at `RUST_LOG=info`, which the packaged unit sets.
 
 ### Web console
 
