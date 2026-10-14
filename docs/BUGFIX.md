@@ -549,7 +549,9 @@ at the contract's 38px.
 
 ### Track G — blocked on the owner or external infrastructure
 
-- `hickory-client` propagation checks (new dependency; ADR-011 cooldown).
+- ~~`hickory-client` propagation checks (new dependency; ADR-011 cooldown).~~ Done 2026-10-14
+  (`PROGRESS.md`): `hickory-net` 0.26.3, because `hickory-client` 0.25.2 carries
+  RUSTSEC-2026-0118 and -0119.
 - ~~TPM attestor (`device-attest-01`) with the step-ca + swtpm CI job
   (`tss-esapi`; cooldown).~~ Deferred past v1 (ADR-017).
 - Let's Encrypt staging run (`docs/spikes/acme-le.md`).

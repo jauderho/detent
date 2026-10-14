@@ -44,6 +44,11 @@ when `[tls] bootstrap = "acme"`:
   `/etc/hosts` resolve. Without `listen` and `accept4`, the process still
   cannot accept a TCP connection. It can receive UDP datagrams on a port it
   binds.
+- **Amendment (2026-10-14):** the dns-01 propagation check queries the
+  zone's authoritative nameservers over plain DNS (UDP, TCP when truncated)
+  from this process. It needs `socket`, `bind`, `sendto`, `recvfrom` and
+  `connect`, all already allowed, and no address rule exists on them, so the
+  table does not change.
 - **Secrets:** the provider (with its secret from `secrets.toml`) is built in
   the privileged parent before the fork and lives only in the acme process
   after it. The worker and the monitor drop it.
