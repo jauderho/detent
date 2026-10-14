@@ -8,6 +8,7 @@
  */
 
 import { useLocalization } from '@fluent/react'
+import { CredentialNotices } from './app/CredentialNotices'
 import { PendingCommitSlot } from './app/PendingCommit'
 import { StatusBar } from './components/StatusBar'
 import { AppNav } from './routes/AppNav'
@@ -36,6 +37,7 @@ function App() {
       <StatusBar />
       <AppNav />
       <PendingCommitSlot />
+      <CredentialNotices />
       <main id={MAIN_ID} tabIndex={-1}>
         <AppRoutes />
       </main>

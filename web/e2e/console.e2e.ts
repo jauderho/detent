@@ -30,6 +30,29 @@ test.describe('sign in and navigate', () => {
   })
 })
 
+test.describe('sign-in notices', () => {
+  test('lists what changed and is dismissed from the keyboard', async ({ page }) => {
+    await stubApi(page, { withNotices: true })
+    await signIn(page)
+
+    const notice = page.getByRole('status').filter({ hasText: 'since your last sign-in' })
+    await expect(notice).toContainText('password changed')
+    await expect(notice).toContainText('198.51.100.9')
+    await expect(notice).toContainText('refused sign-in attempts since then')
+
+    await notice.getByRole('button', { name: 'dismiss' }).focus()
+    await page.keyboard.press('Enter')
+    await expect(notice).toBeHidden()
+  })
+
+  test('shows nothing when nothing changed', async ({ page }) => {
+    await stubApi(page)
+    await signIn(page)
+
+    await expect(page.getByText('since your last sign-in')).toBeHidden()
+  })
+})
+
 test.describe('host text survives the stylesheet', () => {
   /**
    * The console sets `text-transform: lowercase` on the body. That is right for

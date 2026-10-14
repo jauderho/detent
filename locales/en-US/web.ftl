@@ -122,6 +122,19 @@ password-change-mismatch = the two new passwords are not the same.
 password-change-submit = change password
 password-change-submitting = changing password
 
+## Sign-in notices
+notices-heading = changes since your last sign-in on {$time}:
+notices-failed = refused sign-in attempts since then: {$count}
+notices-password-changed = password changed
+notices-totp-enabled = second factor turned on
+notices-totp-disabled = second factor turned off
+notices-token-issued = api token issued
+notices-token-revoked = api token revoked
+notices-source-cli = command line
+notices-source-session = console
+notices-item = {$change}, {$time} ({$source})
+notices-dismiss = dismiss
+
 ## Session and scope
 auth-checking = checking this session
 auth-sign-out = sign out

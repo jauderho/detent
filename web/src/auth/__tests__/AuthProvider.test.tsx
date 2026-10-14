@@ -9,6 +9,7 @@ import userEvent from '@testing-library/user-event'
 import { useApiClient } from '@/api/ApiProvider'
 import type { SessionView } from '@/api/auth'
 import { type ApiClient, createApiClient } from '@/api/client'
+import { CredentialNotices } from '@/app/CredentialNotices'
 import {
   errorResponse,
   type FetchStub,
@@ -181,6 +182,65 @@ describe('AuthProvider — login and logout', () => {
     await waitFor(() => {
       expect(client.hasCsrfToken()).toBe(false)
     })
+  })
+})
+
+describe('AuthProvider — notices after sign-in', () => {
+  const NOTICES = {
+    since: '2026-10-10T08:00:00Z',
+    failed_sign_ins: 0,
+    changes: [{ at: '2026-10-11T09:30:00Z', change: 'password_changed', source: 'cli' }],
+  }
+
+  function signedOutStub(notices: () => Response): UrlFetchStub {
+    return stubFetchByUrl([
+      [
+        '/api/v1/auth/session',
+        () => errorResponse(401, 'web-auth-unauthenticated', 'unauthorized'),
+      ],
+      ['POST /api/v1/auth/login', () => jsonResponse(SESSION)],
+      ['/api/v1/auth/notices', notices],
+    ])
+  }
+
+  it('reads the notices once after a login and shows them', async () => {
+    const user = userEvent.setup()
+    const stub = signedOutStub(() => jsonResponse(NOTICES))
+    renderWithProviders(
+      <>
+        <Probe />
+        <CredentialNotices />
+      </>,
+      { client: clientFor(stub) },
+    )
+    await statusIs('signed-out')
+    expect(screen.queryByRole('status')).toBeNull()
+
+    await user.click(screen.getByRole('button', { name: 'sign in' }))
+
+    expect(await screen.findByText(/password changed/)).toBeInTheDocument()
+    expect(stub.calls.filter((call) => call.url === '/api/v1/auth/notices')).toHaveLength(1)
+  })
+
+  it('signs in all the same when the notices cannot be read', async () => {
+    const user = userEvent.setup()
+    const stub = signedOutStub(() => errorResponse(403, 'web-auth-password-change-required'))
+    renderWithProviders(
+      <>
+        <Probe />
+        <CredentialNotices />
+      </>,
+      { client: clientFor(stub) },
+    )
+    await statusIs('signed-out')
+
+    await user.click(screen.getByRole('button', { name: 'sign in' }))
+
+    await statusIs('authenticated')
+    await waitFor(() => {
+      expect(stub.calls.some((call) => call.url === '/api/v1/auth/notices')).toBe(true)
+    })
+    expect(screen.queryByRole('status')).toBeNull()
   })
 })
 

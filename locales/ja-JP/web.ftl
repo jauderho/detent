@@ -122,6 +122,19 @@ password-change-mismatch = 新しいパスワードが一致しません。
 password-change-submit = パスワードを変更
 password-change-submitting = 変更中
 
+## Sign-in notices
+notices-heading = 前回のサインイン({$time})以降の変更:
+notices-failed = それ以降に拒否されたサインイン試行: {$count}
+notices-password-changed = パスワードを変更しました
+notices-totp-enabled = 第2要素をオンにしました
+notices-totp-disabled = 第2要素をオフにしました
+notices-token-issued = APIトークンを発行しました
+notices-token-revoked = APIトークンを失効させました
+notices-source-cli = コマンドライン
+notices-source-session = コンソール
+notices-item = {$change}、{$time}({$source})
+notices-dismiss = 閉じる
+
 ## Session and scope
 auth-checking = このセッションを確認中
 auth-sign-out = サインアウト

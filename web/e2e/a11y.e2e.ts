@@ -100,6 +100,18 @@ test.describe('accessibility', () => {
     expect(describeViolations(results)).toBe('')
   })
 
+  test('the sign-in notices are clean in both themes', async ({ page }) => {
+    await stubApi(page, { withNotices: true })
+    await signIn(page)
+    await page.getByRole('status').filter({ hasText: 'since your last sign-in' }).waitFor()
+
+    expect(describeViolations(await scan(page))).toBe('')
+    await page.evaluate(() => {
+      document.documentElement.setAttribute('data-theme', 'light')
+    })
+    expect(describeViolations(await scan(page))).toBe('')
+  })
+
   test('the light theme is clean', async ({ page }) => {
     await stubApi(page)
     await signIn(page)

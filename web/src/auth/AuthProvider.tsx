@@ -30,8 +30,10 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo } from 'react'
 import { useApiClient } from '@/api/ApiProvider'
 import {
+  fetchNotices,
   fetchSession,
   type LoginRequest,
+  NOTICES_QUERY_KEY,
   type PasswordChangeRequest,
   changePassword as postChangePassword,
   confirmTotp as postConfirmTotp,
@@ -128,9 +130,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // see. Dropped here rather than on the way out because sign-in happens
       // with no data page mounted, so nothing is left to refetch it; the
       // session entry itself is kept and overwritten a line later.
-      queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== AUTH_SCOPE })
+      // The notices entry is kept too, because the banner is subscribed to it
+      // and a removed entry would leave it watching a query nobody writes; it
+      // is overwritten below, with `null` when the read fails.
+      queryClient.removeQueries({
+        predicate: (query) =>
+          query.queryKey[0] !== AUTH_SCOPE && query.queryKey[1] !== NOTICES_QUERY_KEY[1],
+      })
       queryClient.setQueryData<SessionView | null>(SESSION_QUERY_KEY, result.data)
       client.setCsrfToken(result.data.csrf_token)
+      // What changed since the last sign-in is read once, here. A session that
+      // owes a password change is refused it (403), and a failed read is no
+      // reason to fail the sign-in; either way there is simply no notice.
+      const notices = await fetchNotices(client)
+      queryClient.setQueryData(NOTICES_QUERY_KEY, notices.ok ? notices.data : null)
       return result
     },
     [client, queryClient],

@@ -136,3 +136,17 @@ export function disableTotp(
     suppressUnauthorizedEvent: true,
   })
 }
+
+export type Notices = components['schemas']['Notices']
+export type NoticeChange = components['schemas']['Change']
+
+/**
+ * Query key for the notices of this sign-in. Outside the `auth` prefix on
+ * purpose: they describe one account, so the next sign-in drops them.
+ */
+export const NOTICES_QUERY_KEY = ['account', 'notices'] as const
+
+/** `GET /api/v1/auth/notices`. Read once, right after a sign-in. */
+export function fetchNotices(client: ApiClient): Promise<ApiResult<Notices>> {
+  return client.get('/api/v1/auth/notices', { suppressUnauthorizedEvent: true })
+}

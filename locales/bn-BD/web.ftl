@@ -122,6 +122,19 @@ password-change-mismatch = নতুন পাসওয়ার্ড দুট
 password-change-submit = পাসওয়ার্ড বদলান
 password-change-submitting = পাসওয়ার্ড বদলানো হচ্ছে
 
+## Sign-in notices
+notices-heading = আপনার আগের সাইন-ইন ({$time}) থেকে পরিবর্তন:
+notices-failed = তারপর থেকে প্রত্যাখ্যাত সাইন-ইন প্রচেষ্টা: {$count}
+notices-password-changed = পাসওয়ার্ড পরিবর্তন করা হয়েছে
+notices-totp-enabled = দ্বিতীয় ফ্যাক্টর চালু করা হয়েছে
+notices-totp-disabled = দ্বিতীয় ফ্যাক্টর বন্ধ করা হয়েছে
+notices-token-issued = API টোকেন ইস্যু করা হয়েছে
+notices-token-revoked = API টোকেন বাতিল করা হয়েছে
+notices-source-cli = কমান্ড লাইন
+notices-source-session = কনসোল
+notices-item = {$change}, {$time} ({$source})
+notices-dismiss = বন্ধ করুন
+
 ## Session and scope
 auth-checking = এই সেশন যাচাই করা হচ্ছে
 auth-sign-out = সাইন আউট

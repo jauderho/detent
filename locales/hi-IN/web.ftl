@@ -122,6 +122,19 @@ password-change-mismatch = दोनों नए पासवर्ड एक �
 password-change-submit = पासवर्ड बदलें
 password-change-submitting = पासवर्ड बदला जा रहा है
 
+## Sign-in notices
+notices-heading = आपके पिछले साइन-इन ({$time}) के बाद से बदलाव:
+notices-failed = तब से अस्वीकृत साइन-इन प्रयास: {$count}
+notices-password-changed = पासवर्ड बदला गया
+notices-totp-enabled = दूसरा कारक चालू किया गया
+notices-totp-disabled = दूसरा कारक बंद किया गया
+notices-token-issued = API टोकन जारी किया गया
+notices-token-revoked = API टोकन रद्द किया गया
+notices-source-cli = कमांड लाइन
+notices-source-session = कंसोल
+notices-item = {$change}, {$time} ({$source})
+notices-dismiss = बंद करें
+
 ## Session and scope
 auth-checking = इस सत्र की जाँच हो रही है
 auth-sign-out = साइन आउट

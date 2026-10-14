@@ -146,7 +146,27 @@ export type StubOptions = {
   readOnly?: boolean
   /** Answer `GET /api/v1/system/profile` with this status instead of 200. */
   profileStatus?: number
+  /** Answer `GET /api/v1/auth/notices` with changes, as after a busy absence. */
+  withNotices?: boolean
 }
+
+/** What the notices read answers when there is something to report. */
+const NOTICES = {
+  since: '2026-10-10T08:00:00Z',
+  failed_sign_ins: 2,
+  changes: [
+    { at: '2026-10-11T09:30:00Z', change: 'password_changed', source: 'cli', client_ip: null },
+    {
+      at: '2026-10-11T09:45:00Z',
+      change: 'totp_enabled',
+      source: 'session',
+      client_ip: '198.51.100.9',
+    },
+  ],
+}
+
+/** The same read, when nothing changed. */
+const NO_NOTICES = { since: '2026-10-10T08:00:00Z', failed_sign_ins: 0, changes: [] }
 
 /** A pending second-factor key, as `POST /auth/totp/enrol` answers it. */
 const TOTP_ENROLMENT = {
@@ -201,6 +221,9 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<Re
       return signedIn
         ? json(route, session)
         : json(route, { code: 'unauthorized', message_id: 'web-auth-unauthenticated' }, 401)
+    }
+    if (path.endsWith('/auth/notices')) {
+      return json(route, options.withNotices === true ? NOTICES : NO_NOTICES)
     }
     // Before the commit routes below: `/auth/totp/confirm` also ends in `/confirm`.
     if (path.endsWith('/auth/totp')) {

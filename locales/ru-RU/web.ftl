@@ -122,6 +122,19 @@ password-change-mismatch = два новых пароля не совпадаю�
 password-change-submit = сменить пароль
 password-change-submitting = пароль меняется
 
+## Sign-in notices
+notices-heading = изменения с вашего последнего входа {$time}:
+notices-failed = отклонённые попытки входа с тех пор: {$count}
+notices-password-changed = пароль изменён
+notices-totp-enabled = второй фактор включён
+notices-totp-disabled = второй фактор выключен
+notices-token-issued = токен API выпущен
+notices-token-revoked = токен API отозван
+notices-source-cli = командная строка
+notices-source-session = консоль
+notices-item = {$change}, {$time} ({$source})
+notices-dismiss = закрыть
+
 ## Session and scope
 auth-checking = проверка этого сеанса
 auth-sign-out = выйти

@@ -122,6 +122,19 @@ password-change-mismatch = 两次输入的新密码不一致。
 password-change-submit = 修改密码
 password-change-submitting = 正在修改密码
 
+## Sign-in notices
+notices-heading = 自上次登录({$time})以来的变更:
+notices-failed = 此后被拒绝的登录尝试: {$count}
+notices-password-changed = 密码已更改
+notices-totp-enabled = 第二因素已开启
+notices-totp-disabled = 第二因素已关闭
+notices-token-issued = API 令牌已签发
+notices-token-revoked = API 令牌已吊销
+notices-source-cli = 命令行
+notices-source-session = 控制台
+notices-item = {$change},{$time}({$source})
+notices-dismiss = 关闭
+
 ## Session and scope
 auth-checking = 正在检查此会话
 auth-sign-out = 退出登录
