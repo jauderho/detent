@@ -189,6 +189,10 @@ test.describe('keyboard and focus', () => {
   test('the first Tab stop is a skip link that moves focus to the page', async ({ page }) => {
     await stubApi(page)
     await signIn(page)
+    // A fresh load, so Tab starts from the top of the page and not from wherever
+    // the sign-in click left focus.
+    await page.reload()
+    await page.getByRole('navigation', { name: 'sections' }).waitFor()
 
     await page.keyboard.press('Tab')
     const skip = page.getByRole('link', { name: 'skip to content' })
