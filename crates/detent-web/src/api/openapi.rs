@@ -273,6 +273,13 @@ impl utoipa::Modify for SecurityAddon {
         super::system::audit,
         serve,
     ),
+    servers(
+        (
+            url = "https://{host}",
+            description = "The detent web console. TLS 1.3 only; there is no plain-HTTP listener.",
+            variables(("host" = (default = "localhost:3333", description = "Host and port of the device"))),
+        ),
+    ),
     tags(
         (name = "auth", description = "Sign in, sign out, describe the session"),
         (name = "modules", description = "List, read, validate, plan and apply module configuration"),

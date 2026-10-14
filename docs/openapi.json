@@ -9,6 +9,18 @@
     },
     "version": "0.1.1"
   },
+  "servers": [
+    {
+      "url": "https://{host}",
+      "description": "The detent web console. TLS 1.3 only; there is no plain-HTTP listener.",
+      "variables": {
+        "host": {
+          "default": "localhost:3333",
+          "description": "Host and port of the device"
+        }
+      }
+    }
+  ],
   "paths": {
     "/api/v1/audit": {
       "get": {
