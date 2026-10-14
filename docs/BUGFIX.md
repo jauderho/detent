@@ -451,6 +451,7 @@ deferred by the owner.
   release; native-speaker review of the translated locales.
 - Done 2026-10-14: the credential-change console banner (ASVS 2.2.3, 2.5.5; `PROGRESS.md`).
 - Done 2026-10-14: the worker RSS trim (PLAN §4.1; `PROGRESS.md`).
+- Done 2026-10-14: CI speed-up (path-based job skips, heavy jobs to main and nightly, one `CI gate` check; `docs/RELEASING.md`, `PROGRESS.md`). Owner: set `CI gate` as the only required check in the `main` ruleset after the PR merges.
 
 `THREAT_MODEL.md` (STRIDE per component, mapped to tests; it must also cover
 any egress §5 would add), `PENTEST_CHECKLIST.md` (ASVS L2), `[privilege]

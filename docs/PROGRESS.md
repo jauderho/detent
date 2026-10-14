@@ -5,6 +5,20 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-14 - CI speed-up: path-based skips, heavy jobs off pull requests, one gate
+
+Owner decision 2026-10-14: CI is too slow. Layout and job matrix are in `docs/RELEASING.md` ("CI layout").
+
+**Design.** `ci.yml` gets a first job `changes` that runs `scripts/ci-changes.sh` (stdin: changed paths; stdout: `rust`, `web`, `shell`, `workflows`, `docs` as `true`/`false`). No third-party action: the checkout is the pull request merge commit with `fetch-depth: 2`, and the diff is `HEAD^1..HEAD`. Push, `schedule` (new, 03:17 UTC) and `workflow_dispatch` set every area. A `.github/` change sets every area. The Rust, Coverage, Supply chain, Web, Shell, Size and Action pins jobs have `needs: changes` and an `if:` on their area (Size runs for `rust` or `web` and still waits for `rust`). Miri, both semver jobs, cargo-geiger, both ACME jobs and Rust on macOS have `if: github.event_name != 'pull_request'`. `fuzz.yml` loses its `pull_request` trigger and gains `push` to main. Final job `ci-gate` (name `CI gate`, `always()`) lists every job in `needs:` and fails on `failure` or `cancelled`. Concurrency is `ci-<ref>`, cancelling only pull request runs. Harden-runner and SHA pins are on every new job; the pin check passes locally.
+
+**Found while reading the code.** Rust tests embed `packaging/` files (`include_str!` in `crates/detent/tests/packaging.rs`) and `docs/openapi.json` is embedded and drift-tested by Rust and read by the web `api:*` scripts, so those paths count for `rust` as well as their obvious area. Rust jobs call `scripts/*.sh`, so `scripts/` counts for `rust`.
+
+**Other workflows.** Codespell and Lint Code Base skip pull requests that touch only fuzz corpora and lockfiles; Semgrep also skips Markdown, `docs/` and `locales/`; Dependency Review runs only for manifests, lockfiles and workflows. They use workflow-level filters because they are no longer required checks. CodeQL runs from GitHub default setup (no workflow file), so it is unchanged: filtering it needs an advanced-setup workflow (owner choice).
+
+**Expected jobs per pull request (CI workflow, before: 14 jobs on every pull request, 11 to 16 min wall time per run, the slowest being Rust 375 s, Size 327 s, macOS 325 s).** Docs only: `changes` and `CI gate` (2 jobs, seconds). Web only: `changes`, Web, Size, `CI gate` (4). Rust change: `changes`, Rust, Coverage, Supply chain, Size, `CI gate` (6; plus Web and Shell if locales or `packaging/` or `scripts/` moved). Workflow change: `changes`, Rust, Coverage, Supply chain, Web, Shell, Size, Action pins, `CI gate` (9). Push to main and nightly: all 16.
+
+**Owner action.** After merge, replace the required checks in the `main` ruleset with `CI gate` only.
+
 ## 2026-10-14 - Track F: credential-change notice after sign-in (ASVS 2.2.3, 2.5.5)
 
 Owner decision 2026-10-14: tell a user about recent credential changes to their own account when they sign in. Three signed commits (API and tests; console, strings and tests; docs).

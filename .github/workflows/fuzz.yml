@@ -1,10 +1,16 @@
 name: Fuzz
 
+# No pull_request trigger (owner decision 2026-10-14: CI is too slow): fuzzing
+# runs on push to main, nightly and by hand, like the other heavy jobs in
+# ci.yml.
 on:
-  pull_request:
+  push:
+    branches:
+      - main
     paths:
       - "crates/**"
       - "fuzz/**"
+      - ".github/workflows/fuzz.yml"
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:

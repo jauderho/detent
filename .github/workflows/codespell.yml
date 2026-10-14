@@ -9,7 +9,14 @@ on:
     branches:
     - main
     - master
+  # A pull request that touches only the skipped paths below has nothing to
+  # check. This is not a required check (CI gate is), so a workflow-level
+  # filter is safe.
   pull_request:
+    paths-ignore:
+      - fuzz/corpus/**
+      - web/bun.lock
+      - Cargo.lock
   workflow_dispatch:
 
 #concurrency:

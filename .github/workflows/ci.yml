@@ -5,11 +5,15 @@ on:
   push:
     branches:
       - main
+  schedule:
+    - cron: "17 3 * * *"
   workflow_dispatch:
 
+# Only a pull request run is cancelled by a newer push. A run on main or the
+# nightly run always finishes.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Least privilege: every job here checks out, builds, tests, and (in the
 # coverage job) uploads an artifact. None of that needs more than read access
@@ -29,9 +33,54 @@ env:
   RUSTUP_TOOLCHAIN: stable
 
 jobs:
+  # Which areas does this pull request touch? Every other job reads these
+  # outputs. Push to main, the nightly run and a manual run treat every area
+  # as changed (scripts/ci-changes.sh --all). On a pull request the checkout
+  # is the merge commit, so HEAD^1 is the base tip and the diff is exactly
+  # what the merge brings in. A change under .github/ sets every area.
+  # The heavy jobs (Miri, semver, geiger, ACME, macOS) do not read these
+  # outputs: they do not run on pull requests at all.
+  changes:
+    name: Changed paths
+    runs-on: ubuntu-26.04
+    outputs:
+      rust: ${{ steps.areas.outputs.rust }}
+      web: ${{ steps.areas.outputs.web }}
+      shell: ${{ steps.areas.outputs.shell }}
+      workflows: ${{ steps.areas.outputs.workflows }}
+      docs: ${{ steps.areas.outputs.docs }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Compute changed areas
+        id: areas
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            scripts/ci-changes.sh --all --verbose | tee -a "$GITHUB_OUTPUT"
+          elif ! git rev-parse --verify --quiet 'HEAD^1' >/dev/null; then
+            echo "no base commit in the checkout; treating every area as changed"
+            scripts/ci-changes.sh --all --verbose | tee -a "$GITHUB_OUTPUT"
+          else
+            git -c core.quotepath=off diff --name-only 'HEAD^1' HEAD | scripts/ci-changes.sh --verbose | tee -a "$GITHUB_OUTPUT"
+          fi
+
   rust:
     name: Rust (fmt, clippy, test, feature matrix)
     runs-on: ubuntu-26.04
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
@@ -170,6 +219,7 @@ jobs:
   ffi-soundness:
     name: FFI soundness (Miri on detent-ffi)
     runs-on: ubuntu-26.04
+    if: ${{ github.event_name != 'pull_request' }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
@@ -207,6 +257,7 @@ jobs:
   ffi-semver:
     name: FFI semver (cargo-semver-checks on detent-ffi)
     runs-on: ubuntu-26.04
+    if: ${{ github.event_name != 'pull_request' }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
@@ -238,6 +289,7 @@ jobs:
   core-semver:
     name: Core semver (cargo-semver-checks on detent-core)
     runs-on: ubuntu-26.04
+    if: ${{ github.event_name != 'pull_request' }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
@@ -267,6 +319,7 @@ jobs:
   unsafe-report:
     name: Unsafe report (cargo-geiger, advisory)
     runs-on: ubuntu-26.04
+    if: ${{ github.event_name != 'pull_request' }}
     # Advisory: a broken or missing tool must not turn the run red.
     continue-on-error: true
     steps:
@@ -334,6 +387,7 @@ jobs:
   acme-pebble:
     name: ACME dns-01 (Pebble + challtestsrv)
     runs-on: ubuntu-26.04
+    if: ${{ github.event_name != 'pull_request' }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
@@ -428,6 +482,7 @@ jobs:
   acme-serve:
     name: ACME serve end to end (Pebble + BIND 9, confined)
     runs-on: ubuntu-26.04
+    if: ${{ github.event_name != 'pull_request' }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
@@ -533,6 +588,7 @@ jobs:
   rust-macos:
     name: Rust (build, test, clippy) on macOS
     runs-on: macos-latest
+    if: ${{ github.event_name != 'pull_request' }}
     env:
       # Override workflow-wide `stable`: this job installs the pinned
       # toolchain (macOS images lag at 1.98.0) and must use it, not default.
@@ -574,6 +630,8 @@ jobs:
   supply-chain:
     name: Supply chain (deny, audit, cooldown)
     runs-on: ubuntu-26.04
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
@@ -624,6 +682,8 @@ jobs:
   coverage:
     name: Coverage (llvm-cov + threshold gate)
     runs-on: ubuntu-26.04
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
@@ -689,6 +749,8 @@ jobs:
   web:
     name: Web (bun, biome, bun test, i18n, build)
     runs-on: ubuntu-26.04
+    needs: changes
+    if: ${{ needs.changes.outputs.web == 'true' }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
@@ -764,6 +826,8 @@ jobs:
   shell:
     name: Shell (shellcheck, shfmt)
     runs-on: ubuntu-26.04
+    needs: changes
+    if: ${{ needs.changes.outputs.shell == 'true' }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
@@ -804,7 +868,9 @@ jobs:
   size:
     name: Size check
     runs-on: ubuntu-26.04
-    needs: rust
+    needs: [changes, rust]
+    # `rust` is skipped on a web-only change; only a failed `rust` blocks.
+    if: ${{ !cancelled() && (needs.rust.result == 'success' || needs.rust.result == 'skipped') && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.web == 'true') }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
@@ -895,6 +961,8 @@ jobs:
   pins:
     name: Action pins (SHA + version comment)
     runs-on: ubuntu-26.04
+    needs: changes
+    if: ${{ needs.changes.outputs.workflows == 'true' }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
@@ -917,3 +985,46 @@ jobs:
             fi
           done < <(grep -hE '^\s*-?\s*uses:' .github/workflows/*.yml | grep -vE '^\s*#')
           exit "$bad"
+
+  # The one required status check for the `main` ruleset. It passes when every
+  # job above succeeded or was skipped, and fails when any of them failed or
+  # was cancelled. A skipped job (path filter, or a heavy job on a pull
+  # request) is not a failure. Keep the job name stable: the ruleset matches
+  # on it.
+  ci-gate:
+    name: CI gate
+    runs-on: ubuntu-26.04
+    if: ${{ always() }}
+    needs:
+      - changes
+      - rust
+      - ffi-soundness
+      - ffi-semver
+      - core-semver
+      - unsafe-report
+      - acme-pebble
+      - acme-serve
+      - rust-macos
+      - supply-chain
+      - coverage
+      - web
+      - shell
+      - size
+      - pins
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
+        with:
+          egress-policy: audit
+
+      - name: No needed job failed or was cancelled
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
+          bad="$(jq -r '[to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | .key] | join(", ")' <<<"$NEEDS")"
+          if [[ -n "$bad" ]]; then
+            echo "::error::failed or cancelled: ${bad}"
+            exit 1
+          fi

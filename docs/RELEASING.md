@@ -12,7 +12,7 @@ document is the authoritative record of what is configured and why.
 |---|---|
 | Require pull request before merging | yes |
 | Required approvals | ≥ 1 |
-| Require status checks to pass | yes (the `ci.yml` gates) |
+| Require status checks to pass | yes: one check, **`CI gate`** (the last job of `ci.yml`; see "CI layout") |
 | Require signed commits | yes |
 | Require linear history | yes (no merge commits on `main`) |
 | Allow force pushes | **no** |
@@ -34,6 +34,44 @@ document is the authoritative record of what is configured and why.
   force-pushed daily.
 - Every job runs `step-security/harden-runner` with `egress-policy: audit`
   (release jobs: block), matching `ci.yml`.
+
+### CI layout
+
+Owner decision 2026-10-14: CI is too slow, so a pull request runs only the
+jobs its paths need, and the heavy jobs run after the merge.
+
+- `changes` (first job of `ci.yml`) runs `scripts/ci-changes.sh` on the diff
+  between the merge commit and its first parent. Areas: `rust` (crates, Cargo
+  files, fuzz, toolchain and tool config, baselines, `locales/`, `packaging/`,
+  `scripts/`, `docs/openapi.json`), `web` (`web/`, `locales/`,
+  `docs/openapi.json`), `shell` (`packaging/`, `scripts/`), `workflows`
+  (`.github/`; it sets every area). Anything else is docs only. `packaging/`
+  and `scripts/` also count as `rust` because Rust tests embed the packaged
+  units and the Rust jobs call the CI scripts. A push to main, the nightly run
+  and a manual run treat every area as changed.
+- `CI gate` is the only required check. It lists every other job in `needs:`
+  and runs with `always()`. It fails when a needed job failed or was
+  cancelled, and passes when every job succeeded or was skipped. Add each new
+  `ci.yml` job to its `needs:`. Do not rename it: the ruleset matches the name.
+- Concurrency group `ci-<ref>`. A newer push cancels the old run of a pull
+  request only. A run on main or the nightly run is never cancelled.
+
+| Job | Pull request | Push to main, nightly (03:17 UTC), manual |
+|---|---|---|
+| Changed paths, CI gate | always | always |
+| Rust (fmt, clippy, test, feature matrix), Coverage, Supply chain | `rust` | yes |
+| Size check | `rust` or `web` | yes |
+| Web | `web` | yes |
+| Shell | `shell` | yes |
+| Action pins | `workflows` | yes |
+| Miri (FFI soundness), both semver jobs, cargo-geiger, both ACME end to end jobs, Rust on macOS | no | yes |
+| cargo-fuzz (`fuzz.yml`) | no | push to main (crates, fuzz), nightly, manual |
+
+Other workflows are not required checks and filter at workflow level on a
+pull request: Codespell and Lint Code Base skip fuzz corpora and lockfiles,
+Semgrep also skips Markdown, `docs/` and `locales/`, Dependency Review runs
+only for manifests, lockfiles and workflows. CodeQL uses GitHub default setup
+(no workflow file) and is not filtered here.
 
 ### Dependency cooldowns
 

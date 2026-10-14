@@ -1,7 +1,16 @@
 name: Semgrep
 
 on:
-  pull_request: {}
+  # Not a required check (CI gate is). Prose, translations and data do not
+  # change what Semgrep finds.
+  pull_request:
+    paths-ignore:
+    - '**/*.md'
+    - docs/**
+    - locales/**
+    - fuzz/corpus/**
+    - web/bun.lock
+    - Cargo.lock
   push:
     branches:
     - main

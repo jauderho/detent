@@ -10,7 +10,14 @@ on:
     branches:
     - main
     - master
+  # Not a required check (CI gate is), so a workflow-level filter is safe.
+  # super-linter already lints only the changed files (VALIDATE_ALL_CODEBASE
+  # is false); skip pull requests that change only generated or vendored data.
   pull_request:
+    paths-ignore:
+      - fuzz/corpus/**
+      - web/bun.lock
+      - Cargo.lock
   workflow_dispatch:
 
 #concurrency:
