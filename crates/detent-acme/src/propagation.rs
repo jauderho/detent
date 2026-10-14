@@ -638,7 +638,7 @@ mod tests {
                 "[2001:db8::53]:53".parse().unwrap_or(server(0)),
             ]
         );
-        assert!(parse_resolv_conf("").is_empty());
+        assert_eq!(parse_resolv_conf(""), [] as [SocketAddr; 0]);
     }
 
     /// A provider that records its calls and answers `wait_propagated` from

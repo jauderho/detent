@@ -606,7 +606,10 @@ mod tests {
         assert!(config.acme.profile.is_none());
         assert!(config.acme.provider.is_none());
         assert!(config.acme.propagation_timeout_secs.is_none());
-        assert!(config.acme.propagation_nameservers.is_empty());
+        assert_eq!(
+            config.acme.propagation_nameservers,
+            [] as [std::net::SocketAddr; 0]
+        );
         assert_eq!(config.auth.argon2, Argon2Params::default());
         assert_eq!(config.auth.argon2.m_kib, None);
         assert_eq!(config.auth.argon2.t, 3);
