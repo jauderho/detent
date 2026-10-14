@@ -5,6 +5,20 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-14 - Pentest small fixes: Content-Disposition, totp_replayed, show-password
+
+Three signed commits, test first (ASVS 12.3.4 and 14.4.2, 2.8.5, 2.1.12).
+
+**Content-Disposition.** `headers.rs` adds `Content-Disposition: attachment; filename="api.json"` to every `/api/` answer, errors included, next to `Cache-Control: no-store`. `/healthz` and static assets are not under `/api/` and are unchanged. A handler's own value is replaced (none sets one). Fetch ignores the header, so the SPA is not affected (Playwright 29 passed against the stub).
+
+**TOTP replay.** New `AuthEvent::TotpReplayed` and `AuthError::TotpReplayed`. `TotpSecret::check` wraps `verify` and, on a refusal, tells a correct code at or before the last used counter from a wrong one. The answer to the caller is identical (401, `web-auth-invalid-credentials`), and the limiter counts it the same; only `audit_failure` writes `totp_replayed` instead of `login_failed` or `totp_disabled`. Login, confirm and disable use `check`. Confirm passes no last counter (a new key has none), so a replay cannot occur there; the call is shared for one code path. Limit: the sign-in banner counts `login_failed` only, so a replay is no longer counted as a failed sign-in there. No user notice was added.
+
+**Show password.** New `web/src/components/PasswordField.tsx` (a `TextField` plus a `TinyButton`, `aria-pressed`, in the tab order) on the login and change-password pages. New id `password-reveal` in all twelve `web.ftl` (non-English machine-drafted). The TOTP panel password fields are unchanged.
+
+Size: aarch64 default row 5,890,672 B (limit 5,923,950; last measured 5,889,648, +1,024 B).
+
+Docs: PENTEST rows 12.3.4, 14.4.2, 2.8.5, 2.1.12 are Pass; Counts recomputed from the rows by script (184 Pass, 8 Gap, 13 Accepted risk, 41 N/A); gaps 7, 12, 22 struck; SECURITY_HARDENING rows updated.
+
 ## 2026-10-14 - Upstream watch: stop false-positive drift issues
 
 Issues #22 to #27 came from `sort -V | tail -1` over all tags, which ignored tag prefixes and prereleases (`mandriva-1.22`, `tevent-0.17.2`, `v262-rc3`, `glibc-2.44.9000`). Selection now lives in `scripts/upstream-watch.sh`: each `upstream.toml` has `tag_regex` (whole tag must match) and `version_regex`, and an issue opens only when the newest release is newer than `tracked_version`. The Atom feed is no longer read (its first title could be a prerelease). nfs gets `tags_repo` because its `repo_url` is a cgit page that `git ls-remote` cannot read. `UPSTREAM_WATCH_FAKE_VERSION` still works; a `workflow_dispatch` run is always a dry run (no issues), and only `schedule` opens issues. `scripts/upstream-watch.sh selftest` runs offline over recorded `git ls-remote --tags` lists in `scripts/fixtures/upstream-watch/` and runs in the Shell CI job and in the watch workflow.
