@@ -310,7 +310,7 @@ deferred by the owner.
 
 1. ~~**mounts:** apply runs `daemon-reload` and the optional mount through
    the monitor, as PLAN Phase 7 says.~~ Done in code; the testhost run
-   (`scripts/mounts-activation-check.sh`) is open.
+   (`scripts/mounts-activation-check.sh`) passed 2026-10-07 (`PROGRESS.md`).
    - ~~**`daemon-reload`.**~~ Done: `ModuleDescriptor::reload_unit_files`
      (mounts sets it). The engine sends `Request::ReloadUnitFiles` (a
      module id) after a write; the monitor reloads again after every
@@ -352,9 +352,9 @@ deferred by the owner.
    (`v0.0.1-rc.2`) proved the `publish` job under `block`.
 4. ~~**UI update apply control.**~~ Done (`8a99a38`).
 5. ~~**M3 acceptance.**~~ Passed 2026-10-05 on testhost (see PROGRESS).
-   Immutable releases are on (2026-10-05). **Owner:** the rulesets in
-   `docs/RELEASING.md` (none configured yet); then flip PLAN Phase 9 to
-   `[x]`.
+   Immutable releases are on (2026-10-05). The rulesets in
+   `docs/RELEASING.md` are applied (E5, done 2026-10-14). No release exists
+   (see the note under Track F "Open now"), so PLAN Phase 9 stays `[~]`.
 6. ~~**SCT signatures** (H17).~~ Done (`3c7e270`): a leaf with the modern
    issuer extension needs one SCT from the embedded `ctfe.sigstore.dev/2022`
    key that verifies (RFC 6962 precert form; the real `v0.0.1-rc.2` SCT
@@ -446,9 +446,17 @@ deferred by the owner.
 ### Track F — Phase 12 / M4 (v1.0)
 
 **Open now (2026-10-14).**
-- Owner only: E5 / TM-G12 rulesets (`docs/RELEASING.md`); D3 VM runs; the
-  v1.0.0 release and the E16 real-install proof, which needs a published
-  release; native-speaker review of the translated locales.
+- Owner only: D3 VM runs; the v1.0.0 release and the E16 real-install proof,
+  which needs a published release; native-speaker review of the translated
+  locales.
+- Done 2026-10-14: ~~E5 / TM-G12 rulesets~~ are applied: `main` needs a PR
+  (0 approvals), the `CI gate` check, signed commits and linear history, and
+  allows no force-push or deletion (admin bypass); tags `v*` are created by
+  admins only and are immutable. Immutable releases are enabled.
+- Note (2026-10-14): the repository has no tags or releases since it was
+  recreated on 2026-10-09. Phase 9 acceptance and the E16 real-install proof
+  need a new release. Until then the weekly Rebuild Verify fails. The owner
+  chose to skip a release for now (§4); Phase 9 stays `[~]`.
 - Done 2026-10-14: the credential-change console banner (ASVS 2.2.3, 2.5.5; `PROGRESS.md`).
 - Done 2026-10-14: the worker RSS trim (PLAN §4.1; `PROGRESS.md`).
 - Done 2026-10-14: CI speed-up (path-based job skips, heavy jobs to main and nightly, one `CI gate` check; `docs/RELEASING.md`, `PROGRESS.md`). Owner: set `CI gate` as the only required check in the `main` ruleset after the PR merges.
@@ -502,8 +510,9 @@ Fixes from the threat model, in order (each: test first, one commit):
    `sendto`)~~ Done 2026-10-10 (`PROGRESS.md`): traced on the test host;
    `WORKER` `socket` takes only an `AF_INET`/`AF_INET6` TCP stream, `sendto`
    only a NULL address. Proven on the test host in both modes.
-6. **TM-G12 tag push gives a signed release:** the rulesets in
-   `docs/RELEASING.md` (E5, owner).
+6. ~~**TM-G12 tag push gives a signed release:** the rulesets in
+   `docs/RELEASING.md` (E5, owner).~~ Done 2026-10-14: rulesets applied (see
+   "Open now").
 7. ~~**Login rotation kept the old session's subject**~~ Done 2026-10-10
    (`PROGRESS.md`): `SessionStore::rotate` takes the verified subject; a
    presented session of another user is removed and login creates a new one.
@@ -670,7 +679,8 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   ancestor of `/etc`, `/usr`, `/boot`, the state root or the binary
   directory. Phase 12 capability-user polkit rule: allow start/stop of
   `.mount`/`.automount` units. (done in code, `666572d`…`792c4dc`; the
-  Phase 12 polkit rule done 2026-10-09; testhost run open)
+  Phase 12 polkit rule done 2026-10-09; testhost runs passed 2026-10-07 and
+  2026-10-10, `PROGRESS.md`)
 
 ---
 
