@@ -1252,7 +1252,10 @@ mod tests {
         for role in [Role::Monitor, Role::Worker, Role::Acme] {
             for arch in [Arch::X86_64, Arch::Aarch64] {
                 for mode in [super::SeccompMode::Enforce, super::SeccompMode::Log] {
-                    assert!(!super::compile(role, arch, mode)?.is_empty());
+                    assert_ne!(
+                        super::compile(role, arch, mode)?,
+                        [] as [seccompiler::sock_filter; 0]
+                    );
                 }
             }
         }
