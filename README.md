@@ -122,6 +122,29 @@ the journal:
   operation, who, module, result and error id; no hashes). It is logged only
   at `RUST_LOG=info`, which the packaged unit sets.
 
+#### Alerting
+
+detent does not send alerts. Raise them from the journal, with your own
+monitoring. Every web sign-in event is one `detent audit` line in the journal
+of the `detent` unit. The line is text, and `event=` holds the event name in
+CamelCase (the sign-in log file has the same event in `snake_case`). Match
+these events:
+
+- `event=LockedOut`: the rate limiter locked a user or a client address out.
+- `event=LoginFailed`: a refused sign-in. Alert on a high rate.
+- `event=ScopeDenied`: a valid caller tried an operation without its scope.
+- `event=CredentialRejected`: a token or session cookie that did not resolve
+  (at most one line per client address per minute; `suppressed=` counts the
+  rest).
+
+```bash
+journalctl -u detent --since -1h --grep 'detent audit.*event=(LockedOut|ScopeDenied)'
+```
+
+For a log host, give your log tool the same match: for rsyslog, an `if
+$msg contains 'event=LockedOut'` rule on the `imjournal` input; for
+`systemd-journal-remote`, run the `journalctl` query above from a timer.
+
 ### Web console
 
 Create the first account, then start the server. It listens on **:3333**, TLS
