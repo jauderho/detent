@@ -31,6 +31,7 @@
 pub mod audit;
 pub mod base32;
 pub mod coalesce;
+pub mod enrolment;
 pub mod extract;
 pub mod password;
 pub mod ratelimit;
@@ -157,6 +158,21 @@ pub enum AuthError {
     /// A TOTP secret was not valid base32.
     #[error("that totp secret is not valid base32")]
     TotpSecretInvalid,
+    /// The account already has a second factor; enrolling another would
+    /// replace it without proof of the old one.
+    #[error("this account already has a totp key")]
+    TotpEnrolled,
+    /// The account has no second factor to turn off.
+    #[error("this account has no totp key")]
+    TotpNotEnrolled,
+    /// No TOTP key is waiting for a confirming code in this session: none was
+    /// started, it expired, or it was already confirmed.
+    #[error("no totp enrolment is waiting in this session")]
+    TotpNoPending,
+    /// `auth.totp_required` is set, so the second factor cannot be turned off
+    /// from the console: the account could not sign in again.
+    #[error("this host requires totp, so it cannot be turned off here")]
+    TotpRequired,
     /// A credential file could not be read.
     #[error("{path} could not be read: {source}")]
     StoreRead {
@@ -216,6 +232,10 @@ impl AuthError {
             Self::UnknownToken => MessageId::new("web-auth-token-unknown"),
             Self::TokenLimit => MessageId::new("web-auth-token-limit"),
             Self::TotpSecretInvalid => MessageId::new("web-auth-totp-secret-invalid"),
+            Self::TotpEnrolled => MessageId::new("web-auth-totp-enrolled"),
+            Self::TotpNotEnrolled => MessageId::new("web-auth-totp-not-enrolled"),
+            Self::TotpNoPending => MessageId::new("web-auth-totp-no-pending"),
+            Self::TotpRequired => MessageId::new("web-auth-totp-required"),
             Self::StoreRead { .. } => MessageId::new("web-auth-store-unreadable"),
             Self::StorePrepare { .. } => MessageId::new("web-auth-store-unwritable"),
             Self::StoreWrite { .. } => MessageId::new("web-auth-store-write-failed"),
@@ -236,7 +256,12 @@ impl AuthError {
             Self::RateLimited { .. } => S::TOO_MANY_REQUESTS,
             Self::SessionLimit | Self::Busy => S::SERVICE_UNAVAILABLE,
             Self::CsrfRejected | Self::PasswordChangeRequired => S::FORBIDDEN,
-            Self::UserExists | Self::TokenLimit => S::CONFLICT,
+            Self::UserExists
+            | Self::TokenLimit
+            | Self::TotpEnrolled
+            | Self::TotpNotEnrolled
+            | Self::TotpNoPending
+            | Self::TotpRequired => S::CONFLICT,
             Self::UnknownUser | Self::UnknownToken => S::NOT_FOUND,
             Self::NameInvalid { .. }
             | Self::PasswordTooShort
@@ -361,6 +386,10 @@ mod tests {
             AuthError::UnknownToken,
             AuthError::TokenLimit,
             AuthError::TotpSecretInvalid,
+            AuthError::TotpEnrolled,
+            AuthError::TotpNotEnrolled,
+            AuthError::TotpNoPending,
+            AuthError::TotpRequired,
             AuthError::StoreRead {
                 path: PathBuf::from("/var/lib/detent/state/users.json"),
                 source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),

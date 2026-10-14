@@ -252,6 +252,334 @@
         }
       }
     },
+    "/api/v1/auth/totp": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`GET /api/v1/auth/totp`.",
+        "description": "# Errors\n\n401 for no session or a bearer token, 403 for a session that owes a\npassword change, 500 when the user store cannot be read.",
+        "operationId": "totp_status",
+        "responses": {
+          "200": {
+            "description": "Whether this account has a second factor, and whether the host requires one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TotpStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No session; a bearer token is refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The session must change its password first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/totp/confirm": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`POST /api/v1/auth/totp/confirm`.",
+        "description": "Checks a code against the key this session started. Only a valid code\nstores the key; that code is then used up, exactly as a sign-in uses one\nup. Every session of the account is ended and a new one is answered, with\nthe second factor satisfied.\n\n# Errors\n\n401 for no session, a bearer token or a wrong code, 403 for a session\nthat owes a password change, 409 when no key is pending or the account\nhas a key already, 429 and 500 as for login.",
+        "operationId": "totp_confirm",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TotpConfirmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The key is stored; every older session is ended and a new one is set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is not the expected shape",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No session, a bearer token, or the code was refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The session must change its password first, or the CSRF checks failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No key is pending in this session, or the account already has one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many attempts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/totp/disable": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`POST /api/v1/auth/totp/disable`.",
+        "description": "Needs the current password and a current code; the code is used up.\nRefused on a host with `auth.totp_required`, where the account could not\nsign in again. Every session of the account is ended and a new one is\nanswered.\n\n# Errors\n\n401 for no session, a bearer token, a refused password or a wrong code,\n403 for a session that owes a password change, 409 when the account has no\nkey or the host requires one, 429, 503 and 500 as for login.",
+        "operationId": "totp_disable",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TotpDisableRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The key is cleared; every older session is ended and a new one is set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is not the expected shape",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No session, a bearer token, or the password or code was refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The session must change its password first, or the CSRF checks failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account has no key, or the host requires one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many attempts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The hashing cap is reached or the session table is full",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/totp/enrol": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`POST /api/v1/auth/totp/enrol`.",
+        "description": "Needs the current password. Makes a new key and keeps it in this session\nonly, for [`PENDING_TOTP_TTL`]; nothing is stored until\n`POST /api/v1/auth/totp/confirm` proves a code from it. The key is in this\nanswer and in no other.\n\n# Errors\n\n401 for no session, a bearer token or a refused password, 403 for a\nsession that owes a password change, 409 when the account already has a\nkey, 429, 503 and 500 as for login.",
+        "operationId": "totp_enrol",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TotpEnrolRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "A new key, pending in this session until a code confirms it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TotpEnrolment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is not the expected shape",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No session, a bearer token, or the current password was refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The session must change its password first, or the CSRF checks failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account already has a key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many attempts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The hashing cap is reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
     "/api/v1/commits/pending": {
       "get": {
         "tags": [
@@ -2612,6 +2940,96 @@
           "drop_in_dir",
           "directory"
         ]
+      },
+      "TotpConfirmRequest": {
+        "type": "object",
+        "description": "The body of `POST /api/v1/auth/totp/confirm`.",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "A current six-digit code from the new key."
+          }
+        },
+        "additionalProperties": false
+      },
+      "TotpDisableRequest": {
+        "type": "object",
+        "description": "The body of `POST /api/v1/auth/totp/disable`.",
+        "required": [
+          "current_password",
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "A current six-digit code from the enrolled key."
+          },
+          "current_password": {
+            "type": "string",
+            "description": "The password in force now."
+          }
+        },
+        "additionalProperties": false
+      },
+      "TotpEnrolRequest": {
+        "type": "object",
+        "description": "The body of `POST /api/v1/auth/totp/enrol`.",
+        "required": [
+          "current_password"
+        ],
+        "properties": {
+          "current_password": {
+            "type": "string",
+            "description": "The password in force now."
+          }
+        },
+        "additionalProperties": false
+      },
+      "TotpEnrolment": {
+        "type": "object",
+        "description": "What `POST /api/v1/auth/totp/enrol` answers, once.",
+        "required": [
+          "uri",
+          "secret",
+          "expires_in_secs"
+        ],
+        "properties": {
+          "expires_in_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds left to confirm the key with a code.",
+            "minimum": 0
+          },
+          "secret": {
+            "type": "string",
+            "description": "The same key in base32, for typing in by hand."
+          },
+          "uri": {
+            "type": "string",
+            "description": "The `otpauth://totp/...` URI an authenticator application scans."
+          }
+        }
+      },
+      "TotpStatus": {
+        "type": "object",
+        "description": "What `GET /api/v1/auth/totp` answers.",
+        "required": [
+          "enrolled",
+          "required"
+        ],
+        "properties": {
+          "enrolled": {
+            "type": "boolean",
+            "description": "Whether this account has a second factor."
+          },
+          "required": {
+            "type": "boolean",
+            "description": "Whether this host requires one (`auth.totp_required`)."
+          }
+        }
       },
       "UnitNames": {
         "type": "object",

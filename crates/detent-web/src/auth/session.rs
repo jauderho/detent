@@ -40,6 +40,7 @@ use super::AuthError;
 use super::ratelimit::RateLimiter;
 use super::secret::Secret;
 use super::token::TokenStore;
+use super::totp::TotpSecret;
 
 /// Cookie the session id travels in.
 ///
@@ -54,6 +55,11 @@ pub const MAX_SESSIONS: usize = 256;
 
 /// How often the background sweeper runs.
 pub const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How long a TOTP key started in the web console waits for its confirming
+/// code. Long enough to scan a QR code and read one code; short enough that a
+/// key shown on an unattended screen is soon worthless.
+pub const PENDING_TOTP_TTL: Duration = Duration::from_mins(10);
 
 /// One authenticated browser session.
 #[derive(Clone)]
@@ -160,6 +166,10 @@ struct Entry {
     id: Secret,
     /// The session.
     session: Session,
+    /// A TOTP key started in this session and not yet confirmed, with the
+    /// instant it was started. It lives and dies with the session: never
+    /// persisted, gone on rotation, logout or expiry.
+    pending_totp: Option<(TotpSecret, Instant)>,
 }
 
 /// The in-memory session table.
@@ -268,6 +278,7 @@ impl SessionStore {
             Entry {
                 id: Secret::from_presented(id.expose()),
                 session: session.clone(),
+                pending_totp: None,
             },
         );
         Ok((id, session))
@@ -356,6 +367,7 @@ impl SessionStore {
             Entry {
                 id: Secret::from_presented(fresh.expose()),
                 session: session.clone(),
+                pending_totp: None,
             },
         );
         Ok(Some((fresh, session)))
@@ -427,6 +439,52 @@ impl SessionStore {
         }
         entry.session.must_change_password = true;
         Some(entry.session.clone())
+    }
+
+    /// Keep `secret` as the TOTP key the session `presented` names is
+    /// enrolling, replacing any key it started before. Answers whether a live
+    /// session took it.
+    pub fn set_pending_totp(&self, presented: &str, secret: TotpSecret, now: Instant) -> bool {
+        let Ok(mut entries) = self.entries.lock() else {
+            return false;
+        };
+        match entries.get_mut(&key_of(presented)) {
+            Some(entry) if entry.id.ct_eq(presented) => {
+                entry.pending_totp = Some((secret, now));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The TOTP key the session `presented` names is enrolling, if it started
+    /// one less than [`PENDING_TOTP_TTL`] ago. An expired key is dropped.
+    #[must_use]
+    pub fn pending_totp(&self, presented: &str, now: Instant) -> Option<TotpSecret> {
+        let mut entries = self.entries.lock().ok()?;
+        let entry = entries.get_mut(&key_of(presented))?;
+        if !entry.id.ct_eq(presented) {
+            return None;
+        }
+        let (secret, started) = entry.pending_totp.as_ref()?;
+        if now.saturating_duration_since(*started) >= PENDING_TOTP_TTL {
+            entry.pending_totp = None;
+            return None;
+        }
+        Some(secret.clone())
+    }
+
+    /// Remove the pending TOTP key of the session `presented` names. Answers
+    /// whether one was there, so of two requests that confirm the same key
+    /// only one goes on to store it.
+    pub fn take_pending_totp(&self, presented: &str) -> bool {
+        let Ok(mut entries) = self.entries.lock() else {
+            return false;
+        };
+        match entries.get_mut(&key_of(presented)) {
+            Some(entry) if entry.id.ct_eq(presented) => entry.pending_totp.take().is_some(),
+            _ => false,
+        }
     }
 
     /// Remove every expired entry from `entries`.

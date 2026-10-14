@@ -1,7 +1,7 @@
 //! RFC 6238 time-based one-time passwords, with replay refused.
 //!
 //! ```text
-//!   TotpSecret (20 random bytes) ──▶ base32 ──▶ otpauth:// ──▶ QR (Phase 5)
+//!   TotpSecret (20 random bytes) ──▶ base32 ──▶ otpauth:// ──▶ QR (console)
 //!            │
 //!            ├─ code_at(counter)  = HMAC-SHA1 ─▶ dynamic truncation ─▶ 6 digits
 //!            │
@@ -9,7 +9,7 @@
 //!                                     and counter > last_counter
 //! ```
 //!
-//! The UI lands in Phase 5; this is the backend PLAN Phase 4 asks for.
+//! `detent user totp` and [`super::enrolment`] (the console) enrol a key.
 //!
 //! # Guarantees
 //!

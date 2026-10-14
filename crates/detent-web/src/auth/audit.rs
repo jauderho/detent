@@ -86,9 +86,11 @@ pub enum AuthEvent {
     UserCreated,
     /// An account was removed on the command line.
     UserRemoved,
-    /// The second factor of an account was turned on on the command line.
+    /// The second factor of an account was turned on: on the command line
+    /// (kind `local_user`) or by the signed-in user in the console.
     TotpEnabled,
-    /// The second factor of an account was turned off on the command line.
+    /// The second factor of an account was turned off: on the command line
+    /// (kind `local_user`) or by the signed-in user in the console.
     TotpDisabled,
     /// A valid caller attempted an operation without its required scope.
     ScopeDenied,

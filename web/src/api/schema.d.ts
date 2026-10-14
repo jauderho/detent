@@ -100,6 +100,116 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/totp": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/auth/totp`.
+         * @description # Errors
+         *
+         *     401 for no session or a bearer token, 403 for a session that owes a
+         *     password change, 500 when the user store cannot be read.
+         */
+        get: operations["totp_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/totp/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/auth/totp/confirm`.
+         * @description Checks a code against the key this session started. Only a valid code
+         *     stores the key; that code is then used up, exactly as a sign-in uses one
+         *     up. Every session of the account is ended and a new one is answered, with
+         *     the second factor satisfied.
+         *
+         *     # Errors
+         *
+         *     401 for no session, a bearer token or a wrong code, 403 for a session
+         *     that owes a password change, 409 when no key is pending or the account
+         *     has a key already, 429 and 500 as for login.
+         */
+        post: operations["totp_confirm"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/totp/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/auth/totp/disable`.
+         * @description Needs the current password and a current code; the code is used up.
+         *     Refused on a host with `auth.totp_required`, where the account could not
+         *     sign in again. Every session of the account is ended and a new one is
+         *     answered.
+         *
+         *     # Errors
+         *
+         *     401 for no session, a bearer token, a refused password or a wrong code,
+         *     403 for a session that owes a password change, 409 when the account has no
+         *     key or the host requires one, 429, 503 and 500 as for login.
+         */
+        post: operations["totp_disable"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/totp/enrol": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/auth/totp/enrol`.
+         * @description Needs the current password. Makes a new key and keeps it in this session
+         *     only, for [`PENDING_TOTP_TTL`]; nothing is stored until
+         *     `POST /api/v1/auth/totp/confirm` proves a code from it. The key is in this
+         *     answer and in no other.
+         *
+         *     # Errors
+         *
+         *     401 for no session, a bearer token or a refused password, 403 for a
+         *     session that owes a password change, 409 when the account already has a
+         *     key, 429, 503 and 500 as for login.
+         */
+        post: operations["totp_enrol"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/commits/pending": {
         parameters: {
             query?: never;
@@ -1165,6 +1275,42 @@ export interface components {
          * @enum {string}
          */
         TargetKind: "file" | "drop_in_dir" | "directory";
+        /** @description The body of `POST /api/v1/auth/totp/confirm`. */
+        TotpConfirmRequest: {
+            /** @description A current six-digit code from the new key. */
+            code: string;
+        };
+        /** @description The body of `POST /api/v1/auth/totp/disable`. */
+        TotpDisableRequest: {
+            /** @description A current six-digit code from the enrolled key. */
+            code: string;
+            /** @description The password in force now. */
+            current_password: string;
+        };
+        /** @description The body of `POST /api/v1/auth/totp/enrol`. */
+        TotpEnrolRequest: {
+            /** @description The password in force now. */
+            current_password: string;
+        };
+        /** @description What `POST /api/v1/auth/totp/enrol` answers, once. */
+        TotpEnrolment: {
+            /**
+             * Format: int64
+             * @description Seconds left to confirm the key with a code.
+             */
+            expires_in_secs: number;
+            /** @description The same key in base32, for typing in by hand. */
+            secret: string;
+            /** @description The `otpauth://totp/...` URI an authenticator application scans. */
+            uri: string;
+        };
+        /** @description What `GET /api/v1/auth/totp` answers. */
+        TotpStatus: {
+            /** @description Whether this account has a second factor. */
+            enrolled: boolean;
+            /** @description Whether this host requires one (`auth.totp_required`). */
+            required: boolean;
+        };
         /**
          * @description Per-init-system names for one service, most preferred first.
          *
@@ -1423,6 +1569,269 @@ export interface operations {
             };
             /** @description No session */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    totp_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Whether this account has a second factor, and whether the host requires one */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TotpStatus"];
+                };
+            };
+            /** @description No session; a bearer token is refused */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The session must change its password first */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    totp_confirm: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TotpConfirmRequest"];
+            };
+        };
+        responses: {
+            /** @description The key is stored; every older session is ended and a new one is set */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionView"];
+                };
+            };
+            /** @description The body is not the expected shape */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No session, a bearer token, or the code was refused */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The session must change its password first, or the CSRF checks failed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No key is pending in this session, or the account already has one */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Too many attempts */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    totp_disable: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TotpDisableRequest"];
+            };
+        };
+        responses: {
+            /** @description The key is cleared; every older session is ended and a new one is set */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionView"];
+                };
+            };
+            /** @description The body is not the expected shape */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No session, a bearer token, or the password or code was refused */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The session must change its password first, or the CSRF checks failed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The account has no key, or the host requires one */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Too many attempts */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The hashing cap is reached or the session table is full */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    totp_enrol: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TotpEnrolRequest"];
+            };
+        };
+        responses: {
+            /** @description A new key, pending in this session until a code confirms it */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TotpEnrolment"];
+                };
+            };
+            /** @description The body is not the expected shape */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No session, a bearer token, or the current password was refused */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The session must change its password first, or the CSRF checks failed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The account already has a key */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Too many attempts */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The hashing cap is reached */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

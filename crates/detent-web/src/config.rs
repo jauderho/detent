@@ -462,7 +462,8 @@ pub struct AuthConfig {
     pub absolute_timeout_secs: u64,
     /// Consecutive failures before lockout and backoff. Default 5.
     pub max_failures: u32,
-    /// Require a TOTP second factor. Default false; the UI lands in Phase 5.
+    /// Require a TOTP second factor. Default false. `detent user totp enable` or the console
+    /// settings page enrols a key.
     pub totp_required: bool,
 }
 

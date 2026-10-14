@@ -10,9 +10,10 @@
 //!   POST /auth/logout ─▶ SessionStore::logout ─▶ Set-Cookie Max-Age=0 ─▶ 204
 //!   GET  /auth/session ─▶ SessionView (csrf token, subject, scopes, expiry)
 //!   POST /auth/password ─▶ current password ─▶ new password ─▶ new session
+//!   GET|POST /auth/totp* ─▶ [`super::enrolment`] (second factor on and off)
 //! ```
 //!
-//! Phase 4c owns the rest of `/api/v1`; this module registers the four routes
+//! Phase 4c owns the rest of `/api/v1`; this module registers the routes
 //! that must exist before anything else can be authenticated.
 //!
 //! # Guarantees
@@ -79,6 +80,18 @@ pub const SESSION_PATH: &str = "/api/v1/auth/session";
 /// Where a signed-in caller changes its own password.
 pub const PASSWORD_PATH: &str = "/api/v1/auth/password";
 
+/// Where a signed-in caller reads whether its account has a second factor.
+pub const TOTP_PATH: &str = "/api/v1/auth/totp";
+
+/// Where a signed-in caller starts a TOTP enrolment.
+pub const TOTP_ENROL_PATH: &str = "/api/v1/auth/totp/enrol";
+
+/// Where it confirms the enrolment with a code.
+pub const TOTP_CONFIRM_PATH: &str = "/api/v1/auth/totp/confirm";
+
+/// Where it turns its second factor off.
+pub const TOTP_DISABLE_PATH: &str = "/api/v1/auth/totp/disable";
+
 /// Fluent id of a request body that is not the shape the endpoint expects.
 pub const MALFORMED_BODY_ID: &str = "web-request-malformed";
 
@@ -106,7 +119,7 @@ pub const MAX_TOTP_CODE_LEN: usize = 16;
 ///
 /// The table exists so that "GET never mutates" (PLAN §2.7) can be *checked*
 /// rather than asserted: [`crate::csrf`]'s test walks this list, and
-/// [`routes`] is built from the same four entries.
+/// [`routes`] is built from the same entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Route {
     /// The method it is registered for.
@@ -120,7 +133,7 @@ pub struct Route {
 /// Every route this module registers.
 #[must_use]
 pub fn table() -> &'static [Route] {
-    static TABLE: [Route; 4] = [
+    static TABLE: [Route; 8] = [
         Route {
             method: Method::POST,
             path: LOGIN_PATH,
@@ -141,6 +154,26 @@ pub fn table() -> &'static [Route] {
             path: PASSWORD_PATH,
             mutating: true,
         },
+        Route {
+            method: Method::GET,
+            path: TOTP_PATH,
+            mutating: false,
+        },
+        Route {
+            method: Method::POST,
+            path: TOTP_ENROL_PATH,
+            mutating: true,
+        },
+        Route {
+            method: Method::POST,
+            path: TOTP_CONFIRM_PATH,
+            mutating: true,
+        },
+        Route {
+            method: Method::POST,
+            path: TOTP_DISABLE_PATH,
+            mutating: true,
+        },
     ];
     &TABLE
 }
@@ -153,6 +186,10 @@ pub fn routes() -> axum::Router<AppState> {
         .route(LOGOUT_PATH, post(logout))
         .route(SESSION_PATH, get(session))
         .route(PASSWORD_PATH, post(change_password))
+        .route(TOTP_PATH, get(super::enrolment::status))
+        .route(TOTP_ENROL_PATH, post(super::enrolment::enrol))
+        .route(TOTP_CONFIRM_PATH, post(super::enrolment::confirm))
+        .route(TOTP_DISABLE_PATH, post(super::enrolment::disable))
 }
 
 // ---------------------------------------------------------------------------
@@ -430,7 +467,7 @@ fn principal_name(submitted: &str) -> &str {
 
 /// Everything a successful login has to produce: the id for the cookie and the
 /// body for the response.
-type Established = (Secret, SessionView);
+pub(super) type Established = (Secret, SessionView);
 
 /// Decide one login attempt.
 ///
@@ -547,7 +584,7 @@ fn check_totp(
 }
 
 /// Record a refused attempt, and the lockouts it caused.
-fn audit_failure(
+pub(super) fn audit_failure(
     state: &AppState,
     error: &AuthError,
     subject: &str,
@@ -600,7 +637,7 @@ fn audit_failure(
 // ---------------------------------------------------------------------------
 
 /// The 200 a successful login answers: the session view, and the cookie.
-fn established(id: &Secret, view: &SessionView) -> Response {
+pub(super) fn established(id: &Secret, view: &SessionView) -> Response {
     let mut response = Json(view).into_response();
     set_cookie(&mut response, &session::set_cookie_value(id));
     response
@@ -710,15 +747,24 @@ mod tests {
     // -- the table -----------------------------------------------------------
 
     #[test]
-    fn the_table_and_the_router_describe_the_same_four_routes() {
+    fn the_table_and_the_router_describe_the_same_eight_routes() {
         let paths: Vec<&str> = table().iter().map(|route| route.path).collect();
         assert_eq!(
             paths,
-            vec![LOGIN_PATH, LOGOUT_PATH, SESSION_PATH, PASSWORD_PATH]
+            vec![
+                LOGIN_PATH,
+                LOGOUT_PATH,
+                SESSION_PATH,
+                PASSWORD_PATH,
+                super::TOTP_PATH,
+                super::TOTP_ENROL_PATH,
+                super::TOTP_CONFIRM_PATH,
+                super::TOTP_DISABLE_PATH,
+            ]
         );
         assert_eq!(
             table().iter().filter(|route| route.mutating).count(),
-            3,
+            6,
             "{:?}",
             table()
         );
