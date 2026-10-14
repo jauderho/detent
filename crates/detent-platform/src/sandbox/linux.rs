@@ -31,7 +31,7 @@ const PROBE_ABIS: &[ABI] = &[ABI::V1, ABI::V2, ABI::V3, ABI::V4, ABI::V5];
 pub fn confine(role: Role, policy: &Policy) -> Result<Confinement, SandboxError> {
     let no_new_privs = harden_no_new_privs();
     let dumpable_cleared = harden_dumpable();
-    let caps = drop_capabilities(policy);
+    let caps = drop_capabilities(policy, matches!(no_new_privs, Outcome::Applied));
     caps_verdict(policy.require_caps, &caps)?;
     let landlock = install_landlock(policy)?;
     // Seccomp last: every syscall the steps above need has already run, so
@@ -125,18 +125,29 @@ fn sets_hold_capabilities(
 /// `Applied` only when the bounding set holds nothing beyond `retained`;
 /// otherwise the leftovers are reported. The monitor (`require_caps`) keeps
 /// the strict path.
+///
+/// One leftover is `Applied` too: a bounding set without `CAP_SETPCAP`, under
+/// `no_new_privs`. Capability-user mode is that state: the unit sets the
+/// bounding set to the monitor's three capabilities and no process of the
+/// service holds `CAP_SETPCAP`, so no process can shrink it. With empty
+/// effective and permitted sets and `no_new_privs`, an `execve` gives no
+/// more than the old permitted set, so the leftover grants nothing. Where
+/// `CAP_SETPCAP` is in the bounding set, a root process could have emptied
+/// it before the uid change (Track C A4), and the leftover is reported.
 fn already_unprivileged(
     effective: &CapsHashSet,
     permitted: &CapsHashSet,
     bounding: &CapsHashSet,
     retained: &HashSet<CapsCapability>,
     require_caps: bool,
+    no_new_privs: bool,
 ) -> Option<Outcome> {
     if require_caps || !effective.is_empty() || !permitted.is_empty() {
         return None;
     }
     let mut leftover: Vec<CapsCapability> = bounding.difference(retained).copied().collect();
-    if leftover.is_empty() {
+    let fixed_by_the_unit = no_new_privs && !bounding.contains(&CapsCapability::CAP_SETPCAP);
+    if leftover.is_empty() || fixed_by_the_unit {
         return Some(Outcome::Applied);
     }
     leftover.sort_by_key(CapsCapability::index);
@@ -149,7 +160,7 @@ fn already_unprivileged(
     })
 }
 
-fn drop_capabilities(policy: &Policy) -> Outcome {
+fn drop_capabilities(policy: &Policy, no_new_privs: bool) -> Outcome {
     let retain: HashSet<CapsCapability> = policy
         .retained_caps
         .iter()
@@ -166,6 +177,7 @@ fn drop_capabilities(policy: &Policy) -> Outcome {
         &bounding,
         &retain,
         policy.require_caps,
+        no_new_privs,
     ) {
         return outcome;
     }
@@ -364,6 +376,7 @@ mod tests {
             &some(&[C::CAP_SETUID, C::CAP_CHOWN]),
             &none,
             false,
+            false,
         );
         assert!(
             matches!(&leftover, Some(Outcome::Unavailable { reason })
@@ -371,29 +384,97 @@ mod tests {
             "{leftover:?}"
         );
         assert_eq!(
-            already_unprivileged(&empty(), &empty(), &empty(), &none, false),
+            already_unprivileged(&empty(), &empty(), &empty(), &none, false, false),
             Some(Outcome::Applied)
         );
         // The bounding set may hold exactly what the policy retains.
         let kept: HashSet<C> = [C::CAP_CHOWN].into_iter().collect();
         assert_eq!(
-            already_unprivileged(&empty(), &empty(), &some(&[C::CAP_CHOWN]), &kept, false),
+            already_unprivileged(
+                &empty(),
+                &empty(),
+                &some(&[C::CAP_CHOWN]),
+                &kept,
+                false,
+                false
+            ),
             Some(Outcome::Applied)
         );
         // A required drop never takes the shortcut, and neither does a
         // process that still holds an effective or permitted capability.
         assert_eq!(
-            already_unprivileged(&empty(), &empty(), &empty(), &none, true),
+            already_unprivileged(&empty(), &empty(), &empty(), &none, true, false),
             None
         );
         assert_eq!(
-            already_unprivileged(&some(&[C::CAP_CHOWN]), &empty(), &empty(), &none, false),
+            already_unprivileged(
+                &some(&[C::CAP_CHOWN]),
+                &empty(),
+                &empty(),
+                &none,
+                false,
+                false
+            ),
             None
         );
         assert_eq!(
-            already_unprivileged(&empty(), &some(&[C::CAP_CHOWN]), &empty(), &none, false),
+            already_unprivileged(
+                &empty(),
+                &some(&[C::CAP_CHOWN]),
+                &empty(),
+                &none,
+                false,
+                false
+            ),
             None
         );
+    }
+
+    /// Capability-user mode: the unit sets the bounding set to the three
+    /// monitor capabilities and gives no process `CAP_SETPCAP`, so the
+    /// worker and the acme process cannot shrink it. With `no_new_privs` set
+    /// and empty effective and permitted sets, no `execve` can raise a
+    /// capability from it: the step is applied. Where `CAP_SETPCAP` is still
+    /// in the bounding set (a root process could have emptied it before the
+    /// uid change, Track C A4), or without `no_new_privs`, the leftover is
+    /// still reported.
+    #[test]
+    fn a_bounding_set_no_process_can_shrink_is_applied_under_no_new_privs() {
+        use super::{CapsHashSet, HashSet, already_unprivileged};
+        use caps::Capability as C;
+        let empty = CapsHashSet::new;
+        let unit: CapsHashSet = [C::CAP_CHOWN, C::CAP_DAC_OVERRIDE, C::CAP_FOWNER]
+            .into_iter()
+            .collect();
+        let mut droppable = unit.clone();
+        droppable.insert(C::CAP_SETPCAP);
+        let none = HashSet::new();
+
+        assert_eq!(
+            already_unprivileged(&empty(), &empty(), &unit, &none, false, true),
+            Some(Outcome::Applied)
+        );
+        let reported = |outcome: Option<Outcome>| {
+            matches!(&outcome, Some(Outcome::Unavailable { reason })
+                if reason.contains("CAP_CHOWN") && reason.contains("CAP_DAC_OVERRIDE")
+                    && reason.contains("CAP_FOWNER"))
+        };
+        assert!(reported(already_unprivileged(
+            &empty(),
+            &empty(),
+            &droppable,
+            &none,
+            false,
+            true
+        )));
+        assert!(reported(already_unprivileged(
+            &empty(),
+            &empty(),
+            &unit,
+            &none,
+            false,
+            false
+        )));
     }
 
     /// The container runs the tests as root, so the effective set is full.

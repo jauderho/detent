@@ -229,7 +229,10 @@ pub struct Policy {
     /// drops to an unprivileged uid first, where the drop is expected to
     /// fail). `spawn_pair` and `spawn_acme` empty the bounding set before that
     /// uid change; if it is not empty afterwards, [`Outcome::Unavailable`]
-    /// names what is left.
+    /// names what is left. In capability-user mode no process holds
+    /// `CAP_SETPCAP` and the unit's bounding set stays; with `no_new_privs`
+    /// and empty effective and permitted sets it grants nothing, and the step
+    /// is [`Outcome::Applied`].
     pub require_caps: bool,
     /// When true, a seccomp filter that does not install makes [`confine`]
     /// return `Err` instead of reporting [`Outcome::Unavailable`] and
