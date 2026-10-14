@@ -148,6 +148,13 @@ export type StubOptions = {
   profileStatus?: number
 }
 
+/** A pending second-factor key, as `POST /auth/totp/enrol` answers it. */
+const TOTP_ENROLMENT = {
+  uri: 'otpauth://totp/detent:operator?secret=JBSWY3DPEHPK3PXP&issuer=detent&algorithm=SHA1&digits=6&period=30',
+  secret: 'JBSWY3DPEHPK3PXP',
+  expires_in_secs: 600,
+}
+
 /**
  * Routes `**\/api/v1/**` to the fixtures above and returns the call log.
  *
@@ -162,6 +169,7 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<Re
   // e2e coverage the sign-in screen has.
   let signedIn = false
   let pendingCommit: typeof APPLY_REPORT.commit = null
+  let totpEnrolled = false
 
   const json = (route: Route, body: unknown, status = 200) =>
     route.fulfill({
@@ -193,6 +201,21 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<Re
       return signedIn
         ? json(route, session)
         : json(route, { code: 'unauthorized', message_id: 'web-auth-unauthenticated' }, 401)
+    }
+    // Before the commit routes below: `/auth/totp/confirm` also ends in `/confirm`.
+    if (path.endsWith('/auth/totp')) {
+      return json(route, { enrolled: totpEnrolled, required: false })
+    }
+    if (path.endsWith('/auth/totp/enrol')) {
+      return json(route, TOTP_ENROLMENT)
+    }
+    if (path.endsWith('/auth/totp/confirm')) {
+      totpEnrolled = true
+      return json(route, session)
+    }
+    if (path.endsWith('/auth/totp/disable')) {
+      totpEnrolled = false
+      return json(route, session)
     }
     if (path.endsWith('/auth/logout')) {
       signedIn = false

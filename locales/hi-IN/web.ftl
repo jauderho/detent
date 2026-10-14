@@ -79,6 +79,10 @@ web-auth-store-write-failed = इस होस्ट की एक क्रे�
 web-auth-token-limit = इस होस्ट के पास पहले से api टोकन की अधिकतम संख्या है।
 web-auth-token-unknown = वह api टोकन मौजूद नहीं है, रद्द किया जा चुका है, या समाप्त हो चुका है।
 web-auth-totp-secret-invalid = वह ऑथेंटिकेटर सीक्रेट मान्य base32 नहीं है।
+web-auth-totp-enrolled = इस खाते में पहले से एक दूसरा फ़ैक्टर है। नया जोड़ने से पहले इसे बंद करें।
+web-auth-totp-not-enrolled = इस खाते में बंद करने के लिए कोई दूसरा फ़ैक्टर नहीं है।
+web-auth-totp-no-pending = कोई नया ऑथेंटिकेटर कोड की प्रतीक्षा नहीं कर रहा है। फिर से शुरू करें।
+web-auth-totp-required = यह होस्ट दूसरा फ़ैक्टर अनिवार्य करता है, इसलिए इसे यहाँ बंद नहीं किया जा सकता।
 web-auth-unauthenticated = ऐसा करने के लिए साइन इन करें।
 web-auth-user-exists = उस नाम का उपयोगकर्ता पहले से मौजूद है।
 web-auth-user-name-invalid = वह उपयोगकर्ता नाम उपयोग योग्य नहीं है; `a-z`, `0-9`, `.`, `_` या `-` के 1 से 32 वर्ण उपयोग करें, जो किसी अक्षर या अंक से शुरू हों।
@@ -132,10 +136,6 @@ nav-certificates = प्रमाणपत्र
 nav-settings = सेटिंग
 
 ## Routed pages
-## Certificates and settings are still named placeholders: neither has an API
-## to drive. Certificates waits on Phase 6 (ACME); settings waits on the user
-## and token endpoints.
-page-placeholder-body = यह अनुभाग अभी बना नहीं है।
 page-dashboard-title = डैशबोर्ड
 page-modules-title = मॉड्यूल
 page-module-detail-title = मॉड्यूल {$module}
@@ -147,6 +147,32 @@ page-settings-title = सेटिंग
 page-not-found-title = ऐसा कोई पेज नहीं
 page-not-found-body = वह पता इस कंसोल में किसी चीज़ का नाम नहीं है।
 page-not-found-home = डैशबोर्ड पर जाएँ
+
+## Settings: the second factor (TOTP)
+totp-panel-label = दूसरा फ़ैक्टर
+totp-loading = दूसरे फ़ैक्टर की स्थिति पढ़ी जा रही है।
+totp-status-off = दूसरा फ़ैक्टर बंद है। साइन-इन केवल पासवर्ड माँगता है।
+totp-status-on = दूसरा फ़ैक्टर चालू है। हर साइन-इन आपके ऑथेंटिकेटर से एक कोड माँगता है।
+totp-required-note = यह होस्ट दूसरा फ़ैक्टर अनिवार्य करता है, इसलिए इसे यहाँ बंद नहीं किया जा सकता।
+totp-password-label = मौजूदा पासवर्ड
+totp-code-label = ऑथेंटिकेटर कोड
+totp-code-description = आपके ऑथेंटिकेटर के छह अंक।
+totp-enable-form-label = दूसरा फ़ैक्टर चालू करें
+totp-enable-submit = चालू करें
+totp-enable-submitting = पासवर्ड जाँचा जा रहा है
+totp-scan-intro = इस कोड को अपने ऑथेंटिकेटर ऐप से स्कैन करें, या कुंजी हाथ से टाइप करें। फिर वह कोड डालें जो वह दिखाता है।
+totp-qr-label = नई ऑथेंटिकेटर कुंजी वाला क्यूआर कोड
+totp-key-label = कुंजी
+totp-expiry-note = यह कुंजी {$minutes} मिनट तक कोड की प्रतीक्षा करती है, और केवल एक बार दिखाई जाती है।
+totp-confirm-form-label = नई कुंजी की पुष्टि करें
+totp-confirm-submit = पुष्टि करें
+totp-confirm-submitting = पुष्टि की जा रही है
+totp-cancel = रद्द करें
+totp-disable-form-label = दूसरा फ़ैक्टर बंद करें
+totp-disable-submit = बंद करें
+totp-disable-submitting = बंद किया जा रहा है
+totp-enabled-notice = दूसरा फ़ैक्टर चालू है। अगली बार कोड के साथ साइन इन करें।
+totp-disabled-notice = दूसरा फ़ैक्टर बंद है।
 
 ## Pending commit
 pending-commit-message = एक कॉन्फ़िगरेशन बदलाव पुष्टि की प्रतीक्षा में है; यह विंडो बंद होने पर वह अपने आप रोलबैक हो जाता है।

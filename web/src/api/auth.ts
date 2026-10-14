@@ -1,6 +1,6 @@
 /**
- * The `auth` resource: the three calls docs/API.md documents for a
- * cookie-authenticated browser.
+ * The `auth` resource: the calls docs/API.md documents for a
+ * cookie-authenticated browser — session, password and second factor.
  *
  * Request functions live here rather than in the auth context so the context
  * stays about state and this stays about the wire. Hooks for other resources
@@ -70,4 +70,69 @@ export function changePassword(
 /** `POST /api/v1/auth/logout`. Answers `204` with no body. */
 export function logout(client: ApiClient): Promise<ApiResult<undefined>> {
   return client.post('/api/v1/auth/logout', { suppressUnauthorizedEvent: true })
+}
+
+export type TotpStatus = components['schemas']['TotpStatus']
+export type TotpEnrolment = components['schemas']['TotpEnrolment']
+export type TotpEnrolRequest = components['schemas']['TotpEnrolRequest']
+export type TotpConfirmRequest = components['schemas']['TotpConfirmRequest']
+export type TotpDisableRequest = components['schemas']['TotpDisableRequest']
+
+/**
+ * Query key for the second-factor status. Outside the `auth` prefix on
+ * purpose: it describes one account, so a new sign-in drops it.
+ */
+export const TOTP_QUERY_KEY = ['account', 'totp'] as const
+
+/** `GET /api/v1/auth/totp`. A `401` here is a dead session, like any page read. */
+export function fetchTotpStatus(
+  client: ApiClient,
+  signal?: AbortSignal,
+): Promise<ApiResult<TotpStatus>> {
+  return client.get('/api/v1/auth/totp', signal === undefined ? {} : { signal })
+}
+
+/**
+ * `POST /api/v1/auth/totp/enrol`.
+ *
+ * `401` means the password was refused, not that the session is gone.
+ */
+export function startTotpEnrolment(
+  client: ApiClient,
+  request: TotpEnrolRequest,
+): Promise<ApiResult<TotpEnrolment>> {
+  return client.post('/api/v1/auth/totp/enrol', {
+    body: request,
+    suppressUnauthorizedEvent: true,
+  })
+}
+
+/**
+ * `POST /api/v1/auth/totp/confirm`. Answers a new session.
+ *
+ * `401` means the code was refused, not that the session is gone.
+ */
+export function confirmTotp(
+  client: ApiClient,
+  request: TotpConfirmRequest,
+): Promise<ApiResult<SessionView>> {
+  return client.post('/api/v1/auth/totp/confirm', {
+    body: request,
+    suppressUnauthorizedEvent: true,
+  })
+}
+
+/**
+ * `POST /api/v1/auth/totp/disable`. Answers a new session.
+ *
+ * `401` means the password or the code was refused.
+ */
+export function disableTotp(
+  client: ApiClient,
+  request: TotpDisableRequest,
+): Promise<ApiResult<SessionView>> {
+  return client.post('/api/v1/auth/totp/disable', {
+    body: request,
+    suppressUnauthorizedEvent: true,
+  })
 }

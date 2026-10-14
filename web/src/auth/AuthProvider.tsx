@@ -34,10 +34,14 @@ import {
   type LoginRequest,
   type PasswordChangeRequest,
   changePassword as postChangePassword,
+  confirmTotp as postConfirmTotp,
+  disableTotp as postDisableTotp,
   login as postLogin,
   logout as postLogout,
   SESSION_QUERY_KEY,
   type SessionView,
+  type TotpConfirmRequest,
+  type TotpDisableRequest,
 } from '@/api/auth'
 import type { ApiClient, ApiError, ApiResult } from '@/api/client'
 import { ApiRequestError, toApiError } from '@/api/query'
@@ -64,6 +68,10 @@ export type AuthContextValue = {
   readonly probeError: ApiError | null
   login(credentials: LoginRequest): Promise<ApiResult<SessionView>>
   changePassword(request: PasswordChangeRequest): Promise<ApiResult<SessionView>>
+  /** Turns the second factor on; the server answers a new session. */
+  confirmTotp(request: TotpConfirmRequest): Promise<ApiResult<SessionView>>
+  /** Turns the second factor off; the server answers a new session. */
+  disableTotp(request: TotpDisableRequest): Promise<ApiResult<SessionView>>
   logout(): Promise<void>
 }
 
@@ -128,17 +136,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [client, queryClient],
   )
 
-  const changePassword = useCallback(
-    async (request: PasswordChangeRequest): Promise<ApiResult<SessionView>> => {
-      const result = await postChangePassword(client, request)
+  /**
+   * Takes on the session a password change or a second-factor change
+   * answered. The server ended every older session and issued this one: a
+   * new CSRF token, and no restriction.
+   */
+  const adopt = useCallback(
+    (result: ApiResult<SessionView>): ApiResult<SessionView> => {
       if (!result.ok) return result
-      // The server ended every older session and issued this one: a new CSRF
-      // token, and no restriction.
       queryClient.setQueryData<SessionView | null>(SESSION_QUERY_KEY, result.data)
       client.setCsrfToken(result.data.csrf_token)
       return result
     },
     [client, queryClient],
+  )
+
+  const changePassword = useCallback(
+    async (request: PasswordChangeRequest) => adopt(await postChangePassword(client, request)),
+    [client, adopt],
+  )
+
+  const confirmTotp = useCallback(
+    async (request: TotpConfirmRequest) => adopt(await postConfirmTotp(client, request)),
+    [client, adopt],
+  )
+
+  const disableTotp = useCallback(
+    async (request: TotpDisableRequest) => adopt(await postDisableTotp(client, request)),
+    [client, adopt],
   )
 
   const logout = useCallback(async (): Promise<void> => {
@@ -168,9 +193,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       probeError: query.error === null ? null : toApiError(query.error),
       login,
       changePassword,
+      confirmTotp,
+      disableTotp,
       logout,
     }
-  }, [query.isPending, query.dataUpdatedAt, query.error, session, login, changePassword, logout])
+  }, [
+    query.isPending,
+    query.dataUpdatedAt,
+    query.error,
+    session,
+    login,
+    changePassword,
+    confirmTotp,
+    disableTotp,
+    logout,
+  ])
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }

@@ -1,16 +1,25 @@
 /**
- * Placeholder pages for sections that are not built yet.
+ * The not-found page.
  */
 
 import { describe, expect, it } from 'bun:test'
 import { screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router'
 import { renderWithL10n } from '@/test/l10n'
-import { SettingsPage } from '../pages'
+import { NotFoundPage } from '../pages'
+import { ROUTES } from '../paths'
 
-describe('placeholder pages', () => {
-  it('renders the settings placeholder', () => {
-    renderWithL10n(<SettingsPage />)
-    expect(screen.getByText('settings')).toBeInTheDocument()
-    expect(screen.getByText('this section is not built yet.')).toBeInTheDocument()
+describe('NotFoundPage', () => {
+  it('says the address names nothing and links to the dashboard', () => {
+    renderWithL10n(
+      <MemoryRouter>
+        <NotFoundPage />
+      </MemoryRouter>,
+    )
+    expect(screen.getByText('no such page')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'go to the dashboard' })).toHaveAttribute(
+      'href',
+      ROUTES.dashboard,
+    )
   })
 })

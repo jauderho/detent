@@ -2,14 +2,12 @@
  * The guard, end to end: what an operator sees at an address, and where a
  * `401` puts them.
  *
- * Every case drives `ROUTES.settings` on purpose. The subject here is the
- * guard, not a page, and settings is still a placeholder that asks the host
+ * Every case drives an unknown address under the guard on purpose. The
+ * subject here is the guard, not a page, and the not-found page asks the host
  * for nothing — so the only request in flight is `AuthProvider`'s session
  * probe, the call-order `stubFetch` stays sound, and the "no further calls
  * after the 401" assertion counts what it says it counts. Pointing these at a
  * real section would silently turn them into tests of that section's queries.
- * If settings ever grows a query, move these to whatever is still inert
- * rather than teaching the guard test about page data.
  */
 
 import { describe, expect, it } from 'bun:test'
@@ -19,7 +17,10 @@ import { useApiClient } from '@/api/ApiProvider'
 import type { SessionView } from '@/api/auth'
 import { errorResponse, jsonResponse, renderWithProviders, stubFetch } from '@/test/providers'
 import { AppRoutes } from '../AppRoutes'
-import { ROUTES } from '../paths'
+
+/** An address under the guard whose page asks the host for nothing. */
+const INERT_ROUTE = '/nothing-here'
+const NOT_FOUND = 'that address does not name anything in this console.'
 
 const SESSION: SessionView = {
   csrf_token: 'csrf-abc',
@@ -48,17 +49,17 @@ function DataCall() {
 describe('routing', () => {
   it('sends an unauthenticated visitor from a guarded address to sign-in', async () => {
     const stub = stubFetch([errorResponse(401, 'web-auth-unauthenticated', 'unauthorized')])
-    renderWithProviders(<AppRoutes />, { fetch: stub.fetch, route: ROUTES.settings })
+    renderWithProviders(<AppRoutes />, { fetch: stub.fetch, route: INERT_ROUTE })
 
     expect(await screen.findByRole('button', { name: 'sign in' })).toBeInTheDocument()
-    expect(screen.queryByText('this section is not built yet.')).toBeNull()
+    expect(screen.queryByText(NOT_FOUND)).toBeNull()
   })
 
   it('renders the guarded page for a live session', async () => {
     const stub = stubFetch([jsonResponse(SESSION)])
-    renderWithProviders(<AppRoutes />, { fetch: stub.fetch, route: ROUTES.settings })
+    renderWithProviders(<AppRoutes />, { fetch: stub.fetch, route: INERT_ROUTE })
 
-    expect(await screen.findByText('this section is not built yet.')).toBeInTheDocument()
+    expect(await screen.findByText(NOT_FOUND)).toBeInTheDocument()
   })
 
   it('answers an address it does not know with the not-found page', async () => {
@@ -78,9 +79,9 @@ describe('routing', () => {
         <DataCall />
         <AppRoutes />
       </>,
-      { fetch: stub.fetch, route: ROUTES.settings },
+      { fetch: stub.fetch, route: INERT_ROUTE },
     )
-    await screen.findByText('this section is not built yet.')
+    await screen.findByText(NOT_FOUND)
 
     stub.push(errorResponse(401, 'web-auth-unauthenticated', 'unauthorized'))
     const before = stub.calls.length

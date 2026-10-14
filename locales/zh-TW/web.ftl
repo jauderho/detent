@@ -79,6 +79,10 @@ web-auth-store-write-failed = 無法寫入此主機上的某個認證資訊檔�
 web-auth-token-limit = 此主機已持有 api 權杖數量的上限。
 web-auth-token-unknown = 該 api 權杖不存在、已被撤銷或已過期。
 web-auth-totp-secret-invalid = 該驗證器金鑰不是有效的 base32。
+web-auth-totp-enrolled = 此帳戶已有第二因素。請先關閉它，再新增新的。
+web-auth-totp-not-enrolled = 此帳戶沒有可關閉的第二因素。
+web-auth-totp-no-pending = 沒有等待驗證碼的新驗證器。請重新開始。
+web-auth-totp-required = 此主機要求第二因素，因此無法在此關閉。
 web-auth-unauthenticated = 請先登入再執行此操作。
 web-auth-user-exists = 已存在同名使用者。
 web-auth-user-name-invalid = 該使用者名稱無法使用；請使用 1 到 32 個 `a-z`、`0-9`、`.`、`_` 或 `-` 字元，並以字母或數字開頭。
@@ -132,10 +136,6 @@ nav-certificates = 憑證
 nav-settings = 設定
 
 ## Routed pages
-## Certificates and settings are still named placeholders: neither has an API
-## to drive. Certificates waits on Phase 6 (ACME); settings waits on the user
-## and token endpoints.
-page-placeholder-body = 此區段尚未建置。
 page-dashboard-title = 儀表板
 page-modules-title = 模組
 page-module-detail-title = 模組 {$module}
@@ -147,6 +147,32 @@ page-settings-title = 設定
 page-not-found-title = 找不到頁面
 page-not-found-body = 該位址在此主控台中不對應任何內容。
 page-not-found-home = 前往儀表板
+
+## Settings: the second factor (TOTP)
+totp-panel-label = 第二因素
+totp-loading = 正在讀取第二因素狀態。
+totp-status-off = 第二因素已關閉。登入只需要密碼。
+totp-status-on = 第二因素已開啟。每次登入都需要驗證器中的驗證碼。
+totp-required-note = 此主機要求第二因素，因此無法在此關閉。
+totp-password-label = 目前密碼
+totp-code-label = 驗證器驗證碼
+totp-code-description = 驗證器中的六位數字。
+totp-enable-form-label = 開啟第二因素
+totp-enable-submit = 開啟
+totp-enable-submitting = 正在檢查密碼
+totp-scan-intro = 用驗證器應用程式掃描此碼，或手動輸入金鑰。然後輸入它顯示的驗證碼。
+totp-qr-label = 含新驗證器金鑰的 QR 碼
+totp-key-label = 金鑰
+totp-expiry-note = 此金鑰會等待驗證碼 {$minutes} 分鐘，且只顯示一次。
+totp-confirm-form-label = 確認新金鑰
+totp-confirm-submit = 確認
+totp-confirm-submitting = 正在確認
+totp-cancel = 取消
+totp-disable-form-label = 關閉第二因素
+totp-disable-submit = 關閉
+totp-disable-submitting = 正在關閉
+totp-enabled-notice = 第二因素已開啟。下次請用驗證碼登入。
+totp-disabled-notice = 第二因素已關閉。
 
 ## Pending commit
 pending-commit-message = 有一項設定變更正在等待確認；此視窗關閉時，它會自動回復。

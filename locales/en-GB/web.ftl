@@ -80,6 +80,10 @@ web-auth-store-write-failed = a credential file on this host could not be writte
 web-auth-token-limit = this host already holds the maximum number of api tokens.
 web-auth-token-unknown = that api token does not exist, is revoked, or has expired.
 web-auth-totp-secret-invalid = that authenticator secret is not valid base32.
+web-auth-totp-enrolled = this account already has a second factor. turn it off before you add a new one.
+web-auth-totp-not-enrolled = this account has no second factor to turn off.
+web-auth-totp-no-pending = no new authenticator is waiting for a code. start again.
+web-auth-totp-required = this host requires a second factor, so it cannot be turned off here.
 web-auth-unauthenticated = sign in to do that.
 web-auth-user-exists = a user by that name already exists.
 web-auth-user-name-invalid = that user name is not usable; use 1 to 32 of `a-z`, `0-9`, `.`, `_` or `-`, starting with a letter or a digit.
@@ -133,10 +137,6 @@ nav-certificates = certificates
 nav-settings = settings
 
 ## Routed pages
-## Certificates and settings are still named placeholders: neither has an API
-## to drive. Certificates waits on Phase 6 (ACME); settings waits on the user
-## and token endpoints.
-page-placeholder-body = this section is not built yet.
 page-dashboard-title = dashboard
 page-modules-title = modules
 page-module-detail-title = module {$module}
@@ -148,6 +148,32 @@ page-settings-title = settings
 page-not-found-title = no such page
 page-not-found-body = that address does not name anything in this console.
 page-not-found-home = go to the dashboard
+
+## Settings: the second factor (TOTP)
+totp-panel-label = second factor
+totp-loading = reading the second factor status.
+totp-status-off = the second factor is off. sign-in asks for the password only.
+totp-status-on = the second factor is on. each sign-in asks for a code from your authenticator.
+totp-required-note = this host requires a second factor, so it cannot be turned off here.
+totp-password-label = current password
+totp-code-label = authenticator code
+totp-code-description = six digits from your authenticator.
+totp-enable-form-label = turn on the second factor
+totp-enable-submit = turn on
+totp-enable-submitting = checking password
+totp-scan-intro = scan this code with your authenticator application, or type the key in by hand. then enter the code it shows.
+totp-qr-label = qr code with the new authenticator key
+totp-key-label = key
+totp-expiry-note = this key waits {$minutes} minutes for a code, and is shown only once.
+totp-confirm-form-label = confirm the new key
+totp-confirm-submit = confirm
+totp-confirm-submitting = confirming
+totp-cancel = cancel
+totp-disable-form-label = turn off the second factor
+totp-disable-submit = turn off
+totp-disable-submitting = turning off
+totp-enabled-notice = the second factor is on. sign in with a code next time.
+totp-disabled-notice = the second factor is off.
 
 ## Pending commit
 pending-commit-message = a configuration change is waiting to be confirmed; it rolls back on its own when this window closes.

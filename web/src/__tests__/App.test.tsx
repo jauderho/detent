@@ -3,7 +3,7 @@
  * and the routed page beneath them — composed with the providers `main.tsx`
  * wires, so a missing one fails here rather than in a browser.
  *
- * The signed-in case sits on `ROUTES.settings`, a section that still asks the
+ * The signed-in case sits on an unknown address, whose not-found page asks the
  * host for nothing. The subject is the frame around a page, not any page, and
  * parking this on a section with its own queries would make it fail whenever
  * that section's data shape changed — which is exactly what happened the first
@@ -17,6 +17,10 @@ import { errorResponse, jsonResponse, renderWithProviders, stubFetch } from '@/t
 import App from '../App'
 import { ROUTES } from '../routes/paths'
 
+/** An address under the guard whose page asks the host for nothing. */
+const INERT_ROUTE = '/nothing-here'
+const NOT_FOUND = 'that address does not name anything in this console.'
+
 const SESSION: SessionView = {
   csrf_token: 'csrf-abc',
   expires_in_secs: 900,
@@ -29,9 +33,9 @@ const SESSION: SessionView = {
 describe('App', () => {
   it('frames a signed-in operator with the status bar and the section strip', async () => {
     const stub = stubFetch([jsonResponse(SESSION)])
-    renderWithProviders(<App />, { fetch: stub.fetch, route: ROUTES.settings })
+    renderWithProviders(<App />, { fetch: stub.fetch, route: INERT_ROUTE })
 
-    expect(await screen.findByText('this section is not built yet.')).toBeInTheDocument()
+    expect(await screen.findByText(NOT_FOUND)).toBeInTheDocument()
     expect(screen.getByRole('navigation', { name: 'sections' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'modules' })).toHaveAttribute('href', ROUTES.modules)
     expect(screen.getByRole('button', { name: 'sign out' })).toBeInTheDocument()

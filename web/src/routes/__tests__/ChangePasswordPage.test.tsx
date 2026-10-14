@@ -10,7 +10,10 @@ import type { SessionView } from '@/api/auth'
 import { CSRF_HEADER } from '@/api/client'
 import { errorResponse, jsonResponse, renderWithProviders, stubFetch } from '@/test/providers'
 import { AppRoutes } from '../AppRoutes'
-import { ROUTES } from '../paths'
+
+/** An address under the guard whose page asks the host for nothing. */
+const INERT_ROUTE = '/nothing-here'
+const NOT_FOUND = 'that address does not name anything in this console.'
 
 const RESTRICTED: SessionView = {
   csrf_token: 'csrf-old',
@@ -31,7 +34,7 @@ const NEW_PASSWORD = 'a new long passphrase'
 
 async function renderRestricted(): Promise<ReturnType<typeof stubFetch>> {
   const stub = stubFetch([jsonResponse(RESTRICTED)])
-  renderWithProviders(<AppRoutes />, { fetch: stub.fetch, route: ROUTES.settings })
+  renderWithProviders(<AppRoutes />, { fetch: stub.fetch, route: INERT_ROUTE })
   await screen.findByRole('button', { name: 'change password' })
   return stub
 }
@@ -55,7 +58,7 @@ async function fill(
 describe('ChangePasswordPage', () => {
   it('replaces every page for a session that must change its password', async () => {
     await renderRestricted()
-    expect(screen.queryByText('this section is not built yet.')).toBeNull()
+    expect(screen.queryByText(NOT_FOUND)).toBeNull()
   })
 
   it('posts both passwords with the CSRF token, then lets the operator in', async () => {
@@ -65,7 +68,7 @@ describe('ChangePasswordPage', () => {
     stub.push(jsonResponse(FRESH))
     await fill(user, 'hunter2', NEW_PASSWORD, NEW_PASSWORD)
 
-    expect(await screen.findByText('this section is not built yet.')).toBeInTheDocument()
+    expect(await screen.findByText(NOT_FOUND)).toBeInTheDocument()
     const [call] = passwordCalls(stub)
     expect(call?.url).toBe('/api/v1/auth/password')
     expect(call?.init.method).toBe('POST')

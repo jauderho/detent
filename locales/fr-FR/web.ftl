@@ -79,6 +79,10 @@ web-auth-store-write-failed = un fichier d'identifiants sur cet hôte n'a pas pu
 web-auth-token-limit = cet hôte détient déjà le nombre maximal de jetons api.
 web-auth-token-unknown = ce jeton api n'existe pas, est révoqué ou a expiré.
 web-auth-totp-secret-invalid = ce secret d'authentificateur n'est pas du base32 valide.
+web-auth-totp-enrolled = ce compte a déjà un second facteur. désactivez-le avant d'en ajouter un nouveau.
+web-auth-totp-not-enrolled = ce compte n'a pas de second facteur à désactiver.
+web-auth-totp-no-pending = aucun nouvel authentificateur n'attend de code. recommencez.
+web-auth-totp-required = cet hôte exige un second facteur, il ne peut donc pas être désactivé ici.
 web-auth-unauthenticated = connectez-vous pour faire cela.
 web-auth-user-exists = un utilisateur de ce nom existe déjà.
 web-auth-user-name-invalid = ce nom d'utilisateur est inutilisable ; utilisez de 1 à 32 caractères parmi `a-z`, `0-9`, `.`, `_` ou `-`, en commençant par une lettre ou un chiffre.
@@ -132,10 +136,6 @@ nav-certificates = certificats
 nav-settings = paramètres
 
 ## Routed pages
-## Certificates and settings are still named placeholders: neither has an API
-## to drive. Certificates waits on Phase 6 (ACME); settings waits on the user
-## and token endpoints.
-page-placeholder-body = cette section n'est pas encore construite.
 page-dashboard-title = tableau de bord
 page-modules-title = modules
 page-module-detail-title = module {$module}
@@ -147,6 +147,32 @@ page-settings-title = paramètres
 page-not-found-title = page introuvable
 page-not-found-body = cette adresse ne désigne rien dans cette console.
 page-not-found-home = aller au tableau de bord
+
+## Settings: the second factor (TOTP)
+totp-panel-label = second facteur
+totp-loading = lecture de l’état du second facteur.
+totp-status-off = le second facteur est désactivé. la connexion ne demande que le mot de passe.
+totp-status-on = le second facteur est activé. chaque connexion demande un code de votre authentificateur.
+totp-required-note = cet hôte exige un second facteur, il ne peut donc pas être désactivé ici.
+totp-password-label = mot de passe actuel
+totp-code-label = code de l’authentificateur
+totp-code-description = six chiffres de votre authentificateur.
+totp-enable-form-label = activer le second facteur
+totp-enable-submit = activer
+totp-enable-submitting = vérification du mot de passe
+totp-scan-intro = scannez ce code avec votre application d’authentification, ou saisissez la clé à la main. puis entrez le code affiché.
+totp-qr-label = code qr de la nouvelle clé d’authentification
+totp-key-label = clé
+totp-expiry-note = cette clé attend un code pendant {$minutes} minutes et n’est affichée qu’une fois.
+totp-confirm-form-label = confirmer la nouvelle clé
+totp-confirm-submit = confirmer
+totp-confirm-submitting = confirmation
+totp-cancel = annuler
+totp-disable-form-label = désactiver le second facteur
+totp-disable-submit = désactiver
+totp-disable-submitting = désactivation
+totp-enabled-notice = le second facteur est activé. connectez-vous avec un code la prochaine fois.
+totp-disabled-notice = le second facteur est désactivé.
 
 ## Pending commit
 pending-commit-message = une modification de configuration attend d'être confirmée ; elle est annulée d'elle-même à la fermeture de cette fenêtre.

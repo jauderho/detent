@@ -79,6 +79,10 @@ web-auth-store-write-failed = eine Zugangsdatendatei auf diesem Host konnte nich
 web-auth-token-limit = dieser Host hält bereits die maximale Anzahl an API-Token.
 web-auth-token-unknown = dieses API-Token existiert nicht, wurde widerrufen oder ist abgelaufen.
 web-auth-totp-secret-invalid = dieses Authenticator-Geheimnis ist kein gültiges Base32.
+web-auth-totp-enrolled = dieses Konto hat bereits einen zweiten Faktor. schalten Sie ihn ab, bevor Sie einen neuen hinzufügen.
+web-auth-totp-not-enrolled = dieses Konto hat keinen zweiten Faktor, der abgeschaltet werden könnte.
+web-auth-totp-no-pending = kein neuer Authenticator wartet auf einen Code. beginnen Sie erneut.
+web-auth-totp-required = dieser Host verlangt einen zweiten Faktor, daher kann er hier nicht abgeschaltet werden.
 web-auth-unauthenticated = melde dich an, um das zu tun.
 web-auth-user-exists = ein Benutzer mit diesem Namen existiert bereits.
 web-auth-user-name-invalid = dieser Benutzername ist nicht verwendbar; nutze 1 bis 32 Zeichen aus `a-z`, `0-9`, `.`, `_` oder `-`, beginnend mit einem Buchstaben oder einer Ziffer.
@@ -132,10 +136,6 @@ nav-certificates = Zertifikate
 nav-settings = Einstellungen
 
 ## Routed pages
-## Certificates and settings are still named placeholders: neither has an API
-## to drive. Certificates waits on Phase 6 (ACME); settings waits on the user
-## and token endpoints.
-page-placeholder-body = dieser Bereich ist noch nicht gebaut.
 page-dashboard-title = Dashboard
 page-modules-title = Module
 page-module-detail-title = Modul {$module}
@@ -147,6 +147,32 @@ page-settings-title = Einstellungen
 page-not-found-title = Seite nicht gefunden
 page-not-found-body = diese Adresse bezeichnet nichts in dieser Konsole.
 page-not-found-home = zum Dashboard
+
+## Settings: the second factor (TOTP)
+totp-panel-label = zweiter Faktor
+totp-loading = Status des zweiten Faktors wird gelesen.
+totp-status-off = der zweite Faktor ist aus. die Anmeldung fragt nur nach dem Passwort.
+totp-status-on = der zweite Faktor ist an. jede Anmeldung fragt nach einem Code aus Ihrem Authenticator.
+totp-required-note = dieser Host verlangt einen zweiten Faktor, daher kann er hier nicht abgeschaltet werden.
+totp-password-label = aktuelles Passwort
+totp-code-label = Authenticator-Code
+totp-code-description = sechs Ziffern aus Ihrem Authenticator.
+totp-enable-form-label = zweiten Faktor einschalten
+totp-enable-submit = einschalten
+totp-enable-submitting = Passwort wird geprüft
+totp-scan-intro = scannen Sie diesen Code mit Ihrer Authenticator-App oder tippen Sie den Schlüssel von Hand ein. geben Sie dann den angezeigten Code ein.
+totp-qr-label = QR-Code mit dem neuen Authenticator-Schlüssel
+totp-key-label = Schlüssel
+totp-expiry-note = dieser Schlüssel wartet {$minutes} Minuten auf einen Code und wird nur einmal angezeigt.
+totp-confirm-form-label = neuen Schlüssel bestätigen
+totp-confirm-submit = bestätigen
+totp-confirm-submitting = wird bestätigt
+totp-cancel = abbrechen
+totp-disable-form-label = zweiten Faktor abschalten
+totp-disable-submit = abschalten
+totp-disable-submitting = wird abgeschaltet
+totp-enabled-notice = der zweite Faktor ist an. melden Sie sich das nächste Mal mit einem Code an.
+totp-disabled-notice = der zweite Faktor ist aus.
 
 ## Pending commit
 pending-commit-message = eine Konfigurationsänderung wartet auf Bestätigung; sie wird von selbst zurückgerollt, wenn dieses Fenster abläuft.

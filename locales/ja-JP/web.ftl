@@ -79,6 +79,10 @@ web-auth-store-write-failed = このホスト上の資格情報ファイルに�
 web-auth-token-limit = このホストはすでに API トークンの最大数を保持しています。
 web-auth-token-unknown = その API トークンは存在しないか、失効しているか、期限が切れています。
 web-auth-totp-secret-invalid = その認証アプリのシークレットは有効な base32 ではありません。
+web-auth-totp-enrolled = このアカウントにはすでに第二要素があります。新しく追加する前に無効にしてください。
+web-auth-totp-not-enrolled = このアカウントには無効にする第二要素がありません。
+web-auth-totp-no-pending = コードを待っている新しい認証アプリはありません。もう一度始めてください。
+web-auth-totp-required = このホストは第二要素を必須にしているため、ここでは無効にできません。
 web-auth-unauthenticated = この操作を行うにはサインインしてください。
 web-auth-user-exists = その名前のユーザーはすでに存在します。
 web-auth-user-name-invalid = そのユーザー名は使用できません。`a-z`、`0-9`、`.`、`_`、`-` を 1 〜 32 文字使い、先頭は英字または数字にしてください。
@@ -132,10 +136,6 @@ nav-certificates = 証明書
 nav-settings = 設定
 
 ## Routed pages
-## Certificates and settings are still named placeholders: neither has an API
-## to drive. Certificates waits on Phase 6 (ACME); settings waits on the user
-## and token endpoints.
-page-placeholder-body = このセクションはまだ作られていません。
 page-dashboard-title = ダッシュボード
 page-modules-title = モジュール
 page-module-detail-title = モジュール {$module}
@@ -147,6 +147,32 @@ page-settings-title = 設定
 page-not-found-title = ページが見つかりません
 page-not-found-body = そのアドレスは、このコンソール内のどこも指していません。
 page-not-found-home = ダッシュボードへ移動
+
+## Settings: the second factor (TOTP)
+totp-panel-label = 第二要素
+totp-loading = 第二要素の状態を読み込んでいます。
+totp-status-off = 第二要素は無効です。サインインではパスワードだけを求めます。
+totp-status-on = 第二要素は有効です。サインインのたびに認証アプリのコードを求めます。
+totp-required-note = このホストは第二要素を必須にしているため、ここでは無効にできません。
+totp-password-label = 現在のパスワード
+totp-code-label = 認証アプリのコード
+totp-code-description = 認証アプリに表示される 6 桁の数字。
+totp-enable-form-label = 第二要素を有効にする
+totp-enable-submit = 有効にする
+totp-enable-submitting = パスワードを確認しています
+totp-scan-intro = このコードを認証アプリで読み取るか、キーを手で入力してください。そのあと表示されたコードを入力してください。
+totp-qr-label = 新しい認証キーの QR コード
+totp-key-label = キー
+totp-expiry-note = このキーはコードを {$minutes} 分間待ちます。表示されるのは一度だけです。
+totp-confirm-form-label = 新しいキーを確認する
+totp-confirm-submit = 確認
+totp-confirm-submitting = 確認しています
+totp-cancel = キャンセル
+totp-disable-form-label = 第二要素を無効にする
+totp-disable-submit = 無効にする
+totp-disable-submitting = 無効にしています
+totp-enabled-notice = 第二要素は有効です。次回はコードでサインインしてください。
+totp-disabled-notice = 第二要素は無効です。
 
 ## Pending commit
 pending-commit-message = 設定の変更が確認待ちです。このウィンドウが閉じると、自動的にロールバックされます。

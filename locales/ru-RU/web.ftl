@@ -79,6 +79,10 @@ web-auth-store-write-failed = не удалось записать один из
 web-auth-token-limit = на этом хосте уже выдано максимальное число api-токенов.
 web-auth-token-unknown = этого api-токена не существует, он отозван или истёк.
 web-auth-totp-secret-invalid = этот секрет аутентификатора не является допустимым base32.
+web-auth-totp-enrolled = у этой учётной записи уже есть второй фактор. отключите его, прежде чем добавить новый.
+web-auth-totp-not-enrolled = у этой учётной записи нет второго фактора, который можно отключить.
+web-auth-totp-no-pending = ни один новый аутентификатор не ожидает код. начните заново.
+web-auth-totp-required = этот хост требует второй фактор, поэтому его нельзя отключить здесь.
 web-auth-unauthenticated = войдите, чтобы сделать это.
 web-auth-user-exists = пользователь с таким именем уже существует.
 web-auth-user-name-invalid = это имя пользователя не подходит; используйте от 1 до 32 символов из `a-z`, `0-9`, `.`, `_` или `-`, начиная с буквы или цифры.
@@ -132,10 +136,6 @@ nav-certificates = сертификаты
 nav-settings = настройки
 
 ## Routed pages
-## Certificates and settings are still named placeholders: neither has an API
-## to drive. Certificates waits on Phase 6 (ACME); settings waits on the user
-## and token endpoints.
-page-placeholder-body = этот раздел ещё не готов.
 page-dashboard-title = панель
 page-modules-title = модули
 page-module-detail-title = модуль {$module}
@@ -147,6 +147,32 @@ page-settings-title = настройки
 page-not-found-title = нет такой страницы
 page-not-found-body = этот адрес ничему не соответствует в этой консоли.
 page-not-found-home = перейти на панель
+
+## Settings: the second factor (TOTP)
+totp-panel-label = второй фактор
+totp-loading = чтение состояния второго фактора.
+totp-status-off = второй фактор выключен. при входе спрашивается только пароль.
+totp-status-on = второй фактор включён. при каждом входе спрашивается код из аутентификатора.
+totp-required-note = этот хост требует второй фактор, поэтому его нельзя отключить здесь.
+totp-password-label = текущий пароль
+totp-code-label = код аутентификатора
+totp-code-description = шесть цифр из вашего аутентификатора.
+totp-enable-form-label = включить второй фактор
+totp-enable-submit = включить
+totp-enable-submitting = проверка пароля
+totp-scan-intro = отсканируйте этот код приложением-аутентификатором или введите ключ вручную. затем введите показанный код.
+totp-qr-label = qr-код с новым ключом аутентификатора
+totp-key-label = ключ
+totp-expiry-note = этот ключ ждёт код {$minutes} мин. и показывается только один раз.
+totp-confirm-form-label = подтвердить новый ключ
+totp-confirm-submit = подтвердить
+totp-confirm-submitting = подтверждение
+totp-cancel = отмена
+totp-disable-form-label = выключить второй фактор
+totp-disable-submit = выключить
+totp-disable-submitting = выключение
+totp-enabled-notice = второй фактор включён. в следующий раз войдите с кодом.
+totp-disabled-notice = второй фактор выключен.
 
 ## Pending commit
 pending-commit-message = изменение конфигурации ожидает подтверждения; когда это окно закроется, оно откатится само.

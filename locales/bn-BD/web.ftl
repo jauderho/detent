@@ -79,6 +79,10 @@ web-auth-store-write-failed = এই হোস্টের একটি ক্�
 web-auth-token-limit = এই হোস্টে ইতিমধ্যেই api টোকেনের সর্বোচ্চ সংখ্যা আছে।
 web-auth-token-unknown = ওই api টোকেন নেই, বাতিল করা হয়েছে, অথবা মেয়াদোত্তীর্ণ হয়েছে।
 web-auth-totp-secret-invalid = ওই অথেন্টিকেটর সিক্রেট বৈধ base32 নয়।
+web-auth-totp-enrolled = এই অ্যাকাউন্টে ইতিমধ্যে একটি দ্বিতীয় ফ্যাক্টর আছে। নতুন যোগ করার আগে এটি বন্ধ করুন।
+web-auth-totp-not-enrolled = এই অ্যাকাউন্টে বন্ধ করার মতো কোনো দ্বিতীয় ফ্যাক্টর নেই।
+web-auth-totp-no-pending = কোনো নতুন অথেন্টিকেটর কোডের অপেক্ষায় নেই। আবার শুরু করুন।
+web-auth-totp-required = এই হোস্টে দ্বিতীয় ফ্যাক্টর বাধ্যতামূলক, তাই এখানে এটি বন্ধ করা যায় না।
 web-auth-unauthenticated = এটি করতে সাইন ইন করুন।
 web-auth-user-exists = ওই নামে একজন ব্যবহারকারী ইতিমধ্যে আছেন।
 web-auth-user-name-invalid = ওই ব্যবহারকারীর নাম ব্যবহারযোগ্য নয়; `a-z`, `0-9`, `.`, `_` বা `-` থেকে ১ থেকে ৩২টি অক্ষর ব্যবহার করুন, যা একটি অক্ষর বা অঙ্ক দিয়ে শুরু হবে।
@@ -132,10 +136,6 @@ nav-certificates = সার্টিফিকেট
 nav-settings = সেটিংস
 
 ## Routed pages
-## Certificates and settings are still named placeholders: neither has an API
-## to drive. Certificates waits on Phase 6 (ACME); settings waits on the user
-## and token endpoints.
-page-placeholder-body = এই বিভাগটি এখনও তৈরি হয়নি।
 page-dashboard-title = ড্যাশবোর্ড
 page-modules-title = মডিউল
 page-module-detail-title = মডিউল {$module}
@@ -147,6 +147,32 @@ page-settings-title = সেটিংস
 page-not-found-title = এমন কোনো পেজ নেই
 page-not-found-body = ওই ঠিকানা এই কনসোলের কোনো কিছুর নাম নয়।
 page-not-found-home = ড্যাশবোর্ডে যান
+
+## Settings: the second factor (TOTP)
+totp-panel-label = দ্বিতীয় ফ্যাক্টর
+totp-loading = দ্বিতীয় ফ্যাক্টরের অবস্থা পড়া হচ্ছে।
+totp-status-off = দ্বিতীয় ফ্যাক্টর বন্ধ। সাইন-ইন শুধু পাসওয়ার্ড চায়।
+totp-status-on = দ্বিতীয় ফ্যাক্টর চালু। প্রতিটি সাইন-ইন আপনার অথেন্টিকেটর থেকে একটি কোড চায়।
+totp-required-note = এই হোস্টে দ্বিতীয় ফ্যাক্টর বাধ্যতামূলক, তাই এখানে এটি বন্ধ করা যায় না।
+totp-password-label = বর্তমান পাসওয়ার্ড
+totp-code-label = অথেন্টিকেটর কোড
+totp-code-description = আপনার অথেন্টিকেটরের ছয়টি অঙ্ক।
+totp-enable-form-label = দ্বিতীয় ফ্যাক্টর চালু করুন
+totp-enable-submit = চালু করুন
+totp-enable-submitting = পাসওয়ার্ড যাচাই করা হচ্ছে
+totp-scan-intro = আপনার অথেন্টিকেটর অ্যাপ দিয়ে এই কোডটি স্ক্যান করুন, অথবা কী হাতে টাইপ করুন। তারপর এটি যে কোড দেখায় তা লিখুন।
+totp-qr-label = নতুন অথেন্টিকেটর কী সহ কিউআর কোড
+totp-key-label = কী
+totp-expiry-note = এই কী {$minutes} মিনিট একটি কোডের অপেক্ষা করে, এবং শুধু একবার দেখানো হয়।
+totp-confirm-form-label = নতুন কী নিশ্চিত করুন
+totp-confirm-submit = নিশ্চিত করুন
+totp-confirm-submitting = নিশ্চিত করা হচ্ছে
+totp-cancel = বাতিল
+totp-disable-form-label = দ্বিতীয় ফ্যাক্টর বন্ধ করুন
+totp-disable-submit = বন্ধ করুন
+totp-disable-submitting = বন্ধ করা হচ্ছে
+totp-enabled-notice = দ্বিতীয় ফ্যাক্টর চালু। পরের বার একটি কোড দিয়ে সাইন ইন করুন।
+totp-disabled-notice = দ্বিতীয় ফ্যাক্টর বন্ধ।
 
 ## Pending commit
 pending-commit-message = একটি কনফিগারেশন পরিবর্তন নিশ্চিতকরণের অপেক্ষায় আছে; এই উইন্ডো বন্ধ হলে এটি নিজে থেকেই রোলব্যাক হয়ে যায়।

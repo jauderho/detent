@@ -79,6 +79,10 @@ web-auth-store-write-failed = no se pudo escribir un archivo de credenciales de 
 web-auth-token-limit = este host ya tiene el número máximo de tokens de api.
 web-auth-token-unknown = ese token de api no existe, está revocado o ha caducado.
 web-auth-totp-secret-invalid = ese secreto del autenticador no es base32 válido.
+web-auth-totp-enrolled = esta cuenta ya tiene un segundo factor. desactívelo antes de añadir uno nuevo.
+web-auth-totp-not-enrolled = esta cuenta no tiene un segundo factor que desactivar.
+web-auth-totp-no-pending = ningún autenticador nuevo espera un código. empiece de nuevo.
+web-auth-totp-required = este host exige un segundo factor, así que no se puede desactivar aquí.
 web-auth-unauthenticated = inicia sesión para hacer eso.
 web-auth-user-exists = ya existe un usuario con ese nombre.
 web-auth-user-name-invalid = ese nombre de usuario no es utilizable; usa de 1 a 32 caracteres entre `a-z`, `0-9`, `.`, `_` o `-`, empezando por una letra o un dígito.
@@ -132,10 +136,6 @@ nav-certificates = certificados
 nav-settings = ajustes
 
 ## Routed pages
-## Certificates and settings are still named placeholders: neither has an API
-## to drive. Certificates waits on Phase 6 (ACME); settings waits on the user
-## and token endpoints.
-page-placeholder-body = esta sección aún no está construida.
 page-dashboard-title = panel
 page-modules-title = módulos
 page-module-detail-title = módulo {$module}
@@ -147,6 +147,32 @@ page-settings-title = ajustes
 page-not-found-title = página no encontrada
 page-not-found-body = esa dirección no corresponde a nada en esta consola.
 page-not-found-home = ir al panel
+
+## Settings: the second factor (TOTP)
+totp-panel-label = segundo factor
+totp-loading = leyendo el estado del segundo factor.
+totp-status-off = el segundo factor está desactivado. el inicio de sesión solo pide la contraseña.
+totp-status-on = el segundo factor está activado. cada inicio de sesión pide un código de su autenticador.
+totp-required-note = este host exige un segundo factor, así que no se puede desactivar aquí.
+totp-password-label = contraseña actual
+totp-code-label = código del autenticador
+totp-code-description = seis dígitos de su autenticador.
+totp-enable-form-label = activar el segundo factor
+totp-enable-submit = activar
+totp-enable-submitting = comprobando la contraseña
+totp-scan-intro = escanee este código con su aplicación de autenticación o escriba la clave a mano. después introduzca el código que muestre.
+totp-qr-label = código qr con la nueva clave del autenticador
+totp-key-label = clave
+totp-expiry-note = esta clave espera un código durante {$minutes} minutos y solo se muestra una vez.
+totp-confirm-form-label = confirmar la nueva clave
+totp-confirm-submit = confirmar
+totp-confirm-submitting = confirmando
+totp-cancel = cancelar
+totp-disable-form-label = desactivar el segundo factor
+totp-disable-submit = desactivar
+totp-disable-submitting = desactivando
+totp-enabled-notice = el segundo factor está activado. inicie sesión con un código la próxima vez.
+totp-disabled-notice = el segundo factor está desactivado.
 
 ## Pending commit
 pending-commit-message = un cambio de configuración está esperando confirmación; se revierte solo cuando esta ventana se cierra.

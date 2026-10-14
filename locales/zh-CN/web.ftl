@@ -79,6 +79,10 @@ web-auth-store-write-failed = 无法写入此主机上的某个凭据文件。
 web-auth-token-limit = 此主机已持有 api 令牌数量的上限。
 web-auth-token-unknown = 该 api 令牌不存在、已被吊销或已过期。
 web-auth-totp-secret-invalid = 该验证器密钥不是有效的 base32。
+web-auth-totp-enrolled = 此账户已有第二因素。请先关闭它，再添加新的。
+web-auth-totp-not-enrolled = 此账户没有可关闭的第二因素。
+web-auth-totp-no-pending = 没有等待验证码的新验证器。请重新开始。
+web-auth-totp-required = 此主机要求第二因素，因此无法在此关闭。
 web-auth-unauthenticated = 请先登录再执行此操作。
 web-auth-user-exists = 已存在同名用户。
 web-auth-user-name-invalid = 该用户名不可用；请使用 1 到 32 个 `a-z`、`0-9`、`.`、`_` 或 `-` 字符，并以字母或数字开头。
@@ -132,10 +136,6 @@ nav-certificates = 证书
 nav-settings = 设置
 
 ## Routed pages
-## Certificates and settings are still named placeholders: neither has an API
-## to drive. Certificates waits on Phase 6 (ACME); settings waits on the user
-## and token endpoints.
-page-placeholder-body = 此栏目尚未构建。
 page-dashboard-title = 仪表盘
 page-modules-title = 模块
 page-module-detail-title = 模块 {$module}
@@ -147,6 +147,32 @@ page-settings-title = 设置
 page-not-found-title = 页面不存在
 page-not-found-body = 该地址在此控制台中不对应任何内容。
 page-not-found-home = 前往仪表盘
+
+## Settings: the second factor (TOTP)
+totp-panel-label = 第二因素
+totp-loading = 正在读取第二因素状态。
+totp-status-off = 第二因素已关闭。登录只需要密码。
+totp-status-on = 第二因素已开启。每次登录都需要验证器中的验证码。
+totp-required-note = 此主机要求第二因素，因此无法在此关闭。
+totp-password-label = 当前密码
+totp-code-label = 验证器验证码
+totp-code-description = 验证器中的六位数字。
+totp-enable-form-label = 开启第二因素
+totp-enable-submit = 开启
+totp-enable-submitting = 正在检查密码
+totp-scan-intro = 用验证器应用扫描此码，或手动输入密钥。然后输入它显示的验证码。
+totp-qr-label = 含新验证器密钥的二维码
+totp-key-label = 密钥
+totp-expiry-note = 此密钥会等待验证码 {$minutes} 分钟，并且只显示一次。
+totp-confirm-form-label = 确认新密钥
+totp-confirm-submit = 确认
+totp-confirm-submitting = 正在确认
+totp-cancel = 取消
+totp-disable-form-label = 关闭第二因素
+totp-disable-submit = 关闭
+totp-disable-submitting = 正在关闭
+totp-enabled-notice = 第二因素已开启。下次请用验证码登录。
+totp-disabled-notice = 第二因素已关闭。
 
 ## Pending commit
 pending-commit-message = 有一项配置更改正在等待确认；此窗口关闭时，它会自动回滚。

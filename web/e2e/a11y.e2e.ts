@@ -75,6 +75,19 @@ test.describe('accessibility', () => {
     expect(describeViolations(results)).toBe('')
   })
 
+  test('a second-factor key on screen is clean', async ({ page }) => {
+    await stubApi(page)
+    await signIn(page)
+    await page.getByRole('link', { name: 'settings' }).click()
+    await page.getByLabel('current password').fill('hunter2')
+    await page.getByRole('button', { name: 'turn on' }).click()
+    await page.getByRole('img', { name: 'qr code with the new authenticator key' }).waitFor()
+    await expect(page.getByLabel('authenticator code')).toBeFocused()
+
+    const results = await scan(page)
+    expect(describeViolations(results)).toBe('')
+  })
+
   test('an open dialog is clean', async ({ page }) => {
     await stubApi(page)
     await signIn(page)

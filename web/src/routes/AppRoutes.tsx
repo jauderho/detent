@@ -14,10 +14,11 @@ import { DashboardPage } from './DashboardPage'
 import { LoginPage } from './LoginPage'
 import { ModuleDetailPage } from './ModuleDetailPage'
 import { ModulesPage } from './ModulesPage'
-import { NotFoundPage, SettingsPage } from './pages'
+import { NotFoundPage } from './pages'
 import { ROUTES } from './paths'
 import { RequireAuth } from './RequireAuth'
 import { ServicesPage } from './ServicesPage'
+import { SettingsPage } from './SettingsPage'
 
 export function AppRoutes() {
   return (
