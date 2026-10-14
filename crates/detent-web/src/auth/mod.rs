@@ -33,6 +33,7 @@ pub mod base32;
 pub mod coalesce;
 pub mod enrolment;
 pub mod extract;
+pub mod notices;
 pub mod password;
 pub mod ratelimit;
 pub mod routes;

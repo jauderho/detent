@@ -9,6 +9,7 @@
 //!
 //!   POST /auth/logout ─▶ SessionStore::logout ─▶ Set-Cookie Max-Age=0 ─▶ 204
 //!   GET  /auth/session ─▶ SessionView (csrf token, subject, scopes, expiry)
+//!   GET  /auth/notices ─▶ [`super::notices`] (credential changes since the last sign-in)
 //!   POST /auth/password ─▶ current password ─▶ new password ─▶ new session
 //!   GET|POST /auth/totp* ─▶ [`super::enrolment`] (second factor on and off)
 //! ```
@@ -77,6 +78,10 @@ pub const LOGOUT_PATH: &str = "/api/v1/auth/logout";
 /// Where the front end reads its CSRF token and its remaining time.
 pub const SESSION_PATH: &str = "/api/v1/auth/session";
 
+/// Where a signed-in caller reads the credential changes since its previous
+/// sign-in.
+pub const NOTICES_PATH: &str = "/api/v1/auth/notices";
+
 /// Where a signed-in caller changes its own password.
 pub const PASSWORD_PATH: &str = "/api/v1/auth/password";
 
@@ -133,7 +138,7 @@ pub struct Route {
 /// Every route this module registers.
 #[must_use]
 pub fn table() -> &'static [Route] {
-    static TABLE: [Route; 8] = [
+    static TABLE: [Route; 9] = [
         Route {
             method: Method::POST,
             path: LOGIN_PATH,
@@ -147,6 +152,11 @@ pub fn table() -> &'static [Route] {
         Route {
             method: Method::GET,
             path: SESSION_PATH,
+            mutating: false,
+        },
+        Route {
+            method: Method::GET,
+            path: NOTICES_PATH,
             mutating: false,
         },
         Route {
@@ -185,6 +195,7 @@ pub fn routes() -> axum::Router<AppState> {
         .route(LOGIN_PATH, post(login))
         .route(LOGOUT_PATH, post(logout))
         .route(SESSION_PATH, get(session))
+        .route(NOTICES_PATH, get(super::notices::notices))
         .route(PASSWORD_PATH, post(change_password))
         .route(TOTP_PATH, get(super::enrolment::status))
         .route(TOTP_ENROL_PATH, post(super::enrolment::enrol))
@@ -658,8 +669,8 @@ fn set_cookie(response: &mut Response, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        LOGIN_PATH, LOGOUT_PATH, LoginRequest, MALFORMED_SUBJECT, MAX_PASSWORD_LEN, PASSWORD_PATH,
-        SESSION_PATH, principal_name, routes, table,
+        LOGIN_PATH, LOGOUT_PATH, LoginRequest, MALFORMED_SUBJECT, MAX_PASSWORD_LEN, NOTICES_PATH,
+        PASSWORD_PATH, SESSION_PATH, principal_name, routes, table,
     };
     use crate::auth::audit::AuthEvent;
     use crate::auth::session::COOKIE_NAME;
@@ -747,7 +758,7 @@ mod tests {
     // -- the table -----------------------------------------------------------
 
     #[test]
-    fn the_table_and_the_router_describe_the_same_eight_routes() {
+    fn the_table_and_the_router_describe_the_same_nine_routes() {
         let paths: Vec<&str> = table().iter().map(|route| route.path).collect();
         assert_eq!(
             paths,
@@ -755,6 +766,7 @@ mod tests {
                 LOGIN_PATH,
                 LOGOUT_PATH,
                 SESSION_PATH,
+                NOTICES_PATH,
                 PASSWORD_PATH,
                 super::TOTP_PATH,
                 super::TOTP_ENROL_PATH,

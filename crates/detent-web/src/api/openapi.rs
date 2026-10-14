@@ -247,6 +247,7 @@ impl utoipa::Modify for SecurityAddon {
         login_doc,
         logout_doc,
         session_doc,
+        crate::auth::notices::notices,
         crate::auth::routes::change_password,
         crate::auth::enrolment::status,
         crate::auth::enrolment::enrol,

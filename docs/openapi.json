@@ -161,6 +161,53 @@
         }
       }
     },
+    "/api/v1/auth/notices": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`GET /api/v1/auth/notices`.",
+        "description": "# Errors\n\n401 for no session or a bearer token, 403 for a session that owes a\npassword change.",
+        "operationId": "auth_notices",
+        "responses": {
+          "200": {
+            "description": "Changes and refused sign-ins since the previous sign-in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Notices"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No session; a bearer token is refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The session must change its password first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
     "/api/v1/auth/password": {
       "post": {
         "tags": [
@@ -1803,6 +1850,36 @@
           }
         }
       },
+      "Change": {
+        "type": "object",
+        "description": "One credential change.",
+        "required": [
+          "at",
+          "change",
+          "source"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "description": "When, as RFC 3339 in UTC."
+          },
+          "change": {
+            "type": "string",
+            "description": "What changed: `password_changed`, `totp_enabled`, `totp_disabled`,\n`token_issued` or `token_revoked`."
+          },
+          "client_ip": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The address it came from, when the log has one."
+          },
+          "source": {
+            "type": "string",
+            "description": "Where it was made: `cli` or `session`."
+          }
+        }
+      },
       "CheckExpectation": {
         "oneOf": [
           {
@@ -2423,6 +2500,36 @@
               "$ref": "#/components/schemas/MountReport"
             },
             "description": "One entry per unit of an added or changed entry."
+          }
+        }
+      },
+      "Notices": {
+        "type": "object",
+        "description": "What `GET /api/v1/auth/notices` answers.",
+        "required": [
+          "failed_sign_ins",
+          "changes"
+        ],
+        "properties": {
+          "changes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Change"
+            },
+            "description": "Credential changes since then, newest first, at most [`MAX_CHANGES`]."
+          },
+          "failed_sign_ins": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Refused sign-ins for this account since then.",
+            "minimum": 0
+          },
+          "since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the previous sign-in was; absent on the first one."
           }
         }
       },

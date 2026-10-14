@@ -55,6 +55,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/notices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/auth/notices`.
+         * @description # Errors
+         *
+         *     401 for no session or a bearer token, 403 for a session that owes a
+         *     password change.
+         */
+        get: operations["auth_notices"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/password": {
         parameters: {
             query?: never;
@@ -712,6 +735,20 @@ export interface components {
              */
             renewal_due?: boolean | null;
         };
+        /** @description One credential change. */
+        Change: {
+            /** @description When, as RFC 3339 in UTC. */
+            at: string;
+            /**
+             * @description What changed: `password_changed`, `totp_enabled`, `totp_disabled`,
+             *     `token_issued` or `token_revoked`.
+             */
+            change: string;
+            /** @description The address it came from, when the log has one. */
+            client_ip?: string | null;
+            /** @description Where it was made: `cli` or `session`. */
+            source: string;
+        };
         /** @description How the result of an [`ExternalCheck`] is judged. */
         CheckExpectation: "exit_zero" | {
             /**
@@ -1017,6 +1054,18 @@ export interface components {
             error?: string | null;
             /** @description One entry per unit of an added or changed entry. */
             units: components["schemas"]["MountReport"][];
+        };
+        /** @description What `GET /api/v1/auth/notices` answers. */
+        Notices: {
+            /** @description Credential changes since then, newest first, at most [`MAX_CHANGES`]. */
+            changes: components["schemas"]["Change"][];
+            /**
+             * Format: int32
+             * @description Refused sign-ins for this account since then.
+             */
+            failed_sign_ins: number;
+            /** @description When the previous sign-in was; absent on the first one. */
+            since?: string | null;
         };
         /**
          * @description The kind of an [`Operation`], with none of its payload.
@@ -1480,6 +1529,44 @@ export interface operations {
             };
             /** @description No session to end */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    auth_notices: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Changes and refused sign-ins since the previous sign-in */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Notices"];
+                };
+            };
+            /** @description No session; a bearer token is refused */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The session must change its password first */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

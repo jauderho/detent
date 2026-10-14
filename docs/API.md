@@ -59,6 +59,21 @@ after confirm, `totp_satisfied` is `true`. A wrong password or code is
 limiter. Both write `totp_enabled` or `totp_disabled` to the auth log, kind
 `session`.
 
+## Notices after sign-in
+
+`GET /api/v1/auth/notices` answers what changed on the signed-in account
+since its previous sign-in: `{ since, failed_sign_ins, changes }`. It reads
+the auth log; there is no other store. `changes` lists, newest first and at
+most 10, each password change, second-factor change and API token issue or
+revoke, with `at`, `change`, `source` (`cli` or `session`) and `client_ip`
+(`null` for a change made on the command line). Password and second-factor
+records are the caller's own. A token has no owner, so token records show
+to every account. `failed_sign_ins` counts refused sign-ins for the account.
+The window starts at the sign-in before the newest one; a first sign-in has
+no window (`since` is `null`, the rest is empty). It takes a session cookie
+only (a bearer token gets `401`), and a session that must change its
+password gets `403`.
+
 ## Scopes
 
 Every credential holds `read`, or `read` and `write` together — there is no
