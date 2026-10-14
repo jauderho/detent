@@ -406,8 +406,8 @@ compromise), **Low** (defence in depth, evidence, or audit quality).
 | TM-G4 | Low | ~~A bad bearer token or an expired session on the API is not logged~~ Fixed 2026-10-10 | WEB-14 | No |
 | TM-G5 | Low | ~~The monitor logs no line per `WriteTarget`, `Restore` or `Service`; a taken worker can omit the ops audit record~~ Fixed 2026-10-10 | MON-9 | No |
 | TM-G6 | Low | ~~No operator command runs `FileAudit::verify` or exports a terminal anchor, so tail truncation cannot be detected in practice~~ Fixed 2026-10-10: `detent audit verify`; the anchor is kept by the operator | AUD-2 | No |
-| TM-G7 | Low | `must_change_password` is stored but never enforced | CLI-8 | No |
-| TM-G8 | Medium | Password policy: only non-empty (no 12-character minimum), no breached-password check; login accepts up to 1024 bytes | WEB-2 | No |
+| TM-G7 | Low | ~~`must_change_password` is stored but never enforced~~ Fixed 2026-10-09: a flagged account gets a session that only changes the password | CLI-8 | No |
+| TM-G8 | Medium | ~~Password policy: only non-empty (no 12-character minimum), no breached-password check; login accepts up to 1024 bytes~~ Fixed 2026-10-09: 12 to 128 characters (`MAX_PASSWORD_CHARS`); the breached-password check is not built, see the accepted residuals below | WEB-2 | No |
 | TM-G9 | Low | No re-authentication before apply, restore or update; no list or revoke of other sessions | WEB-16 | No |
 | TM-G10 | Low | `detent mcp` (stdio) and one-shot CLI run without privilege separation; design in ARCHITECTURE §3.2, owner acceptance not recorded | MCP-4 | Documented, not accepted |
 | TM-G11 | Low | MCP write tools: no detent-side control against prompt injection beyond scope; no "read token by default" guidance | MCP-6 | No |
