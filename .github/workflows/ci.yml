@@ -28,8 +28,10 @@ env:
   # so a versioned channel would download on first use. RUSTUP_TOOLCHAIN
   # outranks rust-toolchain.toml, forcing every cargo/rustc/rustup step
   # onto the preinstalled default with no download. The pin file stays
-  # versioned for local dev; the `rust`/`size` drift steps fail closed
-  # when preinstalled stable moves past it.
+  # versioned for local dev; when preinstalled stable is not the pin (the
+  # runner image rolls out over days, so one run can see 1.98.x and the
+  # next 1.99.x), the `rust`/`size` steps install the pin and switch
+  # RUSTUP_TOOLCHAIN to it.
   RUSTUP_TOOLCHAIN: stable
 
 jobs:
@@ -96,18 +98,21 @@ jobs:
       # `--default-toolchain=stable`, plus clippy and rustfmt components),
       # and `RUSTUP_TOOLCHAIN: stable` (workflow env) outranks
       # rust-toolchain.toml so every step reuses it with no download. The
-      # pin file stays versioned for local dev; this step fails closed
-      # when preinstalled stable drifts past it. Read the default
-      # *outside* the checkout: the env override does not apply there.
-      - name: Preinstalled Rust matches rust-toolchain.toml
+      # pin file stays versioned for local dev; this step installs the pin
+      # when preinstalled stable is anything else (older or newer: image
+      # rollout lags the pin, or passes it). Read the default *outside*
+      # the checkout: the env override does not apply there.
+      - name: Rust matches rust-toolchain.toml
         run: |
           pinned=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
           actual=$(cd "$RUNNER_TEMP" && rustup run stable rustc --version | awk '{print $2}')
-          if [[ "$actual" != "$pinned" ]]; then
-            echo "::error::preinstalled stable is ${actual} but rust-toolchain.toml pins ${pinned}" >&2
-            exit 1
+          if [[ "$actual" == "$pinned" ]]; then
+            echo "stable ${actual} matches pin"
+          else
+            echo "preinstalled stable is ${actual}; installing pin ${pinned}"
+            rustup toolchain install "$pinned" --profile minimal --component clippy --component rustfmt
+            echo "RUSTUP_TOOLCHAIN=${pinned}" >> "$GITHUB_ENV"
           fi
-          echo "stable ${actual} matches pin"
       # clippy/rustfmt are requested by rust-toolchain.toml but only rustfmt
       # is listed under the image README's "Packages"; idempotent no-op when
       # already present.
@@ -883,15 +888,17 @@ jobs:
           persist-credentials: false
 
       # Preinstalled stable (via workflow RUSTUP_TOOLCHAIN) plus the musl
-      # cross target — target add only, no second toolchain download.
-      # Same outside-checkout drift read as `rust`.
+      # cross target; the pin is installed instead when stable is not the
+      # pin. Same outside-checkout read as `rust`.
       - name: rustup target add aarch64-unknown-linux-musl
         run: |
           pinned=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
           actual=$(cd "$RUNNER_TEMP" && rustup run stable rustc --version | awk '{print $2}')
           if [[ "$actual" != "$pinned" ]]; then
-            echo "::error::preinstalled stable is ${actual} but rust-toolchain.toml pins ${pinned}" >&2
-            exit 1
+            echo "preinstalled stable is ${actual}; installing pin ${pinned}"
+            rustup toolchain install "$pinned" --profile minimal
+            echo "RUSTUP_TOOLCHAIN=${pinned}" >> "$GITHUB_ENV"
+            export RUSTUP_TOOLCHAIN="$pinned"
           fi
           rustup target add aarch64-unknown-linux-musl
 

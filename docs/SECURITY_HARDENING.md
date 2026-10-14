@@ -199,8 +199,9 @@ quietly into the tables above.
    Current controls: `ci.yml` sets workflow-wide `RUSTUP_TOOLCHAIN: stable`
    (the ubuntu-26.04 image provisions only `stable-*` via `--default-toolchain=stable`,
    so a versioned channel would download a second copy), the `rust`/`size` jobs
-   fail closed with a drift check that reads preinstalled stable from `$RUNNER_TEMP`
-   (outside the checkout, where neither the env override nor the pin file masks it),
+   read preinstalled stable from `$RUNNER_TEMP` (outside the checkout, where neither
+   the env override nor the pin file masks it) and install the pin, switching
+   `RUSTUP_TOOLCHAIN` to it, when it differs (the image rollout takes days),
    `rust-macos` installs pinned `1.99.0` with a job-level override, and
    `release.yml`/`rebuild-verify.yml` keep exact `RUST_TOOLCHAIN: "1.99.0"` via
    `dtolnay` for hash-for-hash reproducibility (ADR-011).
