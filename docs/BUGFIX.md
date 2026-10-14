@@ -523,6 +523,11 @@ Fixes from the threat model, in order (each: test first, one commit):
     effective and permitted sets; a droppable leftover is still reported.
     Proven on the test host in both modes.
 
+improve-it UI pass done 2026-10-13 (`PROGRESS.md`): skip link, `lang`
+follows the locale, the 390 px overflow, 44px touch targets, a translated
+language-selector label and logical CSS properties. The status-bar controls stay
+at the contract's 38px.
+
 ### Track G — blocked on the owner or external infrastructure
 
 - `hickory-client` propagation checks (new dependency; ADR-011 cooldown).
