@@ -510,6 +510,16 @@ Fixes from the threat model, in order (each: test first, one commit):
     (`PROGRESS.md`): the grant now requires the fstab generator fragment
     `/run/systemd/generator/<unit>`; systemd then refuses the transient unit,
     and `detent` cannot forge a fragment. Proven in a container.
+11. ~~**Worker `fchown`/`flistxattr` `EPERM` (found on the test host)**~~ Done
+    2026-10-13 (`PROGRESS.md`): a login rehash rewrites `users.json` through
+    `write_atomic`, which made a same-owner `fchown`. It now skips an `fchown`
+    that changes nothing; `flistxattr` `EPERM` stays and counts as no xattrs.
+    No seccomp change. Proven on the test host in both modes.
+12. ~~**Capability-user worker logs `confinement degraded: caps`**~~ Done
+    2026-10-13 (`PROGRESS.md`): the unit's bounding set, which no process can
+    shrink (no `CAP_SETPCAP`), is `Applied` under `no_new_privs` with empty
+    effective and permitted sets; a droppable leftover is still reported.
+    Proven on the test host in both modes.
 
 ### Track G — blocked on the owner or external infrastructure
 
