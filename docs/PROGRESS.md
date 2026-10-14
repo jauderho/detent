@@ -5,6 +5,42 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-14 - Track F: worker idle RSS under 30 MiB
+
+Owner decision 2026-10-14: trim the worker's idle RSS below 30 MiB with no feature loss. Two signed commits, test first, then this docs commit. No Rust code, Cargo or seccomp change; the binary is the same as before.
+
+**Method.** As the 2026-10-13 entry: x86_64 musl default + `ui`, SPA built first, `cargo zigbuild --locked --release` with the release-profile env overrides (`LTO=fat`, `OPT_LEVEL=z`, `CODEGEN_UNITS=1`, `STRIP=symbols`, no `rustc-wrapper`), copied to the test host, `packaging/install.sh` root-confined, `[listen] addr = "127.0.0.1:3333"`, admin from `detent setup` (random test password on stdin), one write token. `systemctl restart detent`, 60 s idle, then `/proc/<pid>/status` and `smaps_rollup` for each pid of the unit's cgroup; the same light load (200 `GET /api/v1/modules/hosts`, 20 `POST .../hosts/plan`, all 200); new: one login (`POST /api/v1/auth/login`), read 5 s later. Experiments first ran as a systemd drop-in with `Environment=` on the base build, then as the real unit.
+
+**Breakdown, base (`21fc5ae`), worker idle.** `VmRSS` 34,716 kB = `RssAnon` 27,984 + `RssFile` 6,732. File pages are the binary (`r-xp` 4,684, `r--p` 2,176), shared and clean. `Private_Dirty` 23,444 kB, almost all in mimalloc's 1 GiB arena mapping (one `[anon]` range 24,676 kB); `[stack]` 92 kB; 2 threads (main, engine), so thread stacks and the tokio runtime (already `current_thread`) are not a factor. The monitor (13,560 kB) and the runner (10,784 kB) each held about 7 MiB of anon pages, 6.9 MiB of it `Shared_Dirty` from before the fork, in a 2 MiB-aligned arena start (THP). Cause of the worker's anon: `Hasher::new` (`crates/detent-web/src/auth/password.rs`) hashes the dummy password at start with `m=65536` (64 MiB, 3 GB host); mimalloc v3 (libmimalloc-sys 0.1.49) purges freed memory only after `purge_delay` (1000 ms) and only when it is called again, and the idle worker makes no call. After one login the worker was at 84,180 kB (`AnonHugePages` 69,632 kB): each login left its Argon2 block resident.
+
+**Experiments, worker / monitor / runner `VmRSS` idle (kB), base build.**
+
+| Setting | monitor | runner | worker idle | worker after load | worker after login |
+|---|---|---|---|---|---|
+| none (base) | 13,604 | 10,836 | 34,456 | 35,672 | 84,180 |
+| `MIMALLOC_PURGE_DELAY=0` | 12,940 | 10,160 | 13,336 | 15,864 | 16,532 |
+| `MIMALLOC_ALLOW_THP=0` | 8,752 | 5,984 | 28,628 | 30,080 | not run |
+| both | 8,532 | 5,756 | 9,036 | 11,700 | 11,920 |
+
+200 further GETs took 9.9 s (base), 9.3 s (purge) and 8.3 s (both); one login 0.32 s, 0.09 s and 0.11 s: no slowdown seen. Not tried, because the two settings reached the target: fewer tokio threads (already one), stack size, lazy locale or SPA decompression (the remaining worker anon is 2.4 MiB). A code-level option call (`mi_option_set`) would need `libmimalloc-sys` as a direct dependency and `unsafe` in `detent`; the unit's `Environment=` needs neither. The `no_thp` crate feature only skips `MADV_HUGEPAGE` and does not help on a host with THP `always`; `MIMALLOC_ALLOW_THP=0` makes mimalloc call `prctl(PR_SET_THP_DISABLE)` at load, before confinement, so it covers both (`THP_enabled: 0` in all three processes).
+
+**Kept.** `4b84ae5` `Environment=MIMALLOC_PURGE_DELAY=0` and `7f2c7f5` `Environment=MIMALLOC_ALLOW_THP=0` in `packaging/systemd/detent.service`, with `the_unit_has_mimalloc_purge_freed_memory_at_once` and `the_unit_keeps_mimalloc_off_transparent_huge_pages` (`crates/detent/tests/packaging.rs`). `madvise` is already in the `MONITOR`, `WORKER` and `ACME` seccomp tables (the delayed purge used it before), so no table changed. Final table (`VmRSS` / `VmHWM` kB, unit from `7f2c7f5`):
+
+| Process | Idle | After load | After one login |
+|---|---|---|---|
+| monitor (0) | 8,524 / 8,524 | 8,620 / 8,620 | 8,692 |
+| runner (0) | 5,744 / 5,744 | 5,744 / 5,744 | 5,744 |
+| worker (999) | 9,040 / 27,764 | 11,672 / 27,764 | 11,904 / 32,188 |
+| Total | 23,308 | 26,036 | 26,340 |
+
+Worker idle `smaps_rollup`: `Rss` 9,040, `Pss` 4,223, `Anonymous` 2,436, `Pss_File` 2,876, `Private_Dirty` 800. The worker's `VmHWM` is the Argon2 peak at start and at login (64 MiB of hashing memory by PLAN §2.7); it is transient. Floor now: about 6.4 MiB per process is the shared, clean binary.
+
+**Size.** No Rust change; aarch64 default (env overrides above) 5,922,224 B, 1,726 B under the limit 5,923,950.
+
+**Gates.** `cargo fmt --all -- --check`; clippy `--locked --workspace --all-features --all-targets -D warnings` (no issues); `cargo test --locked --workspace --all-features` 2654 passed, 6 ignored; `cargo-zigbuild clippy` x86_64 musl (`detent-platform`, `detent`, all targets, all features, `-D warnings`); `cargo-zigbuild check` aarch64-unknown-linux-gnu (`detent-platform`, `detent`, all targets); no suppression added (stays 110). **Not measured:** capability-user mode (the drop-in does not touch `Environment=`), aarch64, an acme process, a `serve` started outside the unit (it keeps the old numbers), a longer soak. On stop the worker logged `the web server did not stop cleanly: privsep channel failed`, as before this change.
+
+Cleanup: `install.sh --uninstall`, binary and `.prev`, `/etc/detent`, `/run/detent`, the drop-in and scratch removed; `/var/lib/detent` holds only `monitor.lock` (root:root 755); user `detent` kept; no detent unit or polkit rule.
+
 ## 2026-10-13 - Track F: improve-it UI pass on the web console
 
 Checked the console against the `improve-it` checklist and `AESTHETIC_CONTRACT.md` (the contract wins where they differ), at 390, 768 and 1280 px, light and dark, with the e2e stub data. Four signed commits, only for the phases that found something. No dependency added, no Rust touched.

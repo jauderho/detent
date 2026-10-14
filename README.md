@@ -50,15 +50,22 @@ Stripped sizes in bytes, release builds, measured 2026-10-13 at commit
 | Default — all modules, API, TLS | 5,921,712 | 7,159,776 |
 | Default + `ui` (console embedded) | 7,176,240 | 8,414,944 |
 
-Memory, `x86_64-unknown-linux-musl`, default + `ui`, root-confined, measured
-2026-10-13 at commit `9f07124` (`VmRSS` in kB; `serve` runs three processes):
+Memory, `x86_64-unknown-linux-musl`, default + `ui`, root-confined, under the
+packaged unit, measured 2026-10-14 at commit `7f2c7f5` (`VmRSS` in kB; `serve`
+runs three processes). The unit sets `MIMALLOC_PURGE_DELAY=0` and
+`MIMALLOC_ALLOW_THP=0`; a `serve` started without them uses more (worker
+34,456 idle, 84,180 after a login).
 
 | Process | Idle (60 s after start) | After 200 API reads and 20 plans |
 |---|---|---|
-| monitor | 13,544 | 13,628 |
-| runner | 10,824 | 10,824 |
-| worker | 34,472 | 35,752 |
-| Total | 58,840 | 60,204 |
+| monitor | 8,524 | 8,620 |
+| runner | 5,744 | 5,744 |
+| worker | 9,040 | 11,672 |
+| Total | 23,308 | 26,036 |
+
+About 6.4 MiB of each process is the shared, clean pages of the binary. A
+login briefly uses the 64 MiB Argon2 block; the worker is back to 11,904 kB
+5 s later.
 
 ## Usage
 

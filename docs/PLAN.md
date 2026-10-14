@@ -379,6 +379,11 @@ fails on > 3 % regression without an explicit override in the PR body):
 | `module-resolver,web` only | ≤ 6 MiB | ≤ 20 MiB |
 | `module-*` only, no web, no acme, no update (CLI) | ≤ 3 MiB | ≤ 10 MiB |
 
+Idle RSS: `serve` runs a monitor, a runner and a worker (and an acme process
+with ACME). Measure under the packaged unit, which sets the mimalloc options.
+On 2026-10-14 the full default + `ui` build met the 30 MiB figure both per
+process and as the sum of the three (22.8 MiB; `PROGRESS.md`).
+
 Spike 00 baseline (aarch64-musl, stripped, TLS+HTTP+ACME+argon2+mimalloc-secure, no modules, no SPA): 2.77 MiB with aws-lc-rs, 2.30 MiB with ring. The CLI row therefore requires the CLI build to exclude the TLS/HTTP/ACME/update stack (features off), not a smaller TLS stack. All three rows are re-derived from real builds at the end of Phase 4 and recorded in `size-baseline.json`. FreeBSD artifacts are dynamically linked against the base system libc (zig sysroot pins the minimum FreeBSD version, currently 14.0); "single static binary" applies to Linux musl targets.
 
 Rust: latest stable pinned in `rust-toolchain.toml` (currently 1.98.0), edition 2024,

@@ -457,7 +457,7 @@ any egress §5 would add), `PENTEST_CHECKLIST.md` (ASVS L2), `[privilege]
 mode = "capability-user"` with polkit and the doctor check, optional mTLS,
 `de-DE`/`ja-JP` translations (marked `# needs-review`; done 2026-10-09, machine-drafted, see PROGRESS), the twelve-locale infrastructure (done 2026-10-10: directory-driven catalogue, compressed text, lazy web bundles; the nine directories `en-GB`, `zh-CN`, `zh-TW`, `es-ES`, `pt-BR`, `fr-FR`, `ru-RU`, `hi-IN` and `bn-BD` are still to be translated, see `docs/TRANSLATING.md`), `cargo-mutants` and
 `cargo geiger` jobs, `cargo semver-checks` for `detent-core`, final size/RSS
-numbers in the README (done 2026-10-13, `PROGRESS.md`; the three-process idle RSS, 57.5 MiB, is over the PLAN §4.1 30 MiB figure), then v1.0.0. Acceptance is in PLAN Phase 12.
+numbers in the README (done 2026-10-13, `PROGRESS.md`; the three-process idle RSS, 57.5 MiB, was over the PLAN §4.1 30 MiB figure; fixed 2026-10-14: the unit sets `MIMALLOC_PURGE_DELAY=0` and `MIMALLOC_ALLOW_THP=0`, total idle 22.8 MiB, worker 8.8 MiB, `PROGRESS.md`), then v1.0.0. Acceptance is in PLAN Phase 12.
 
 `[privilege] mode = "capability-user"`: done in code 2026-10-09
 (`PROGRESS.md`). Test-host run 2026-10-10: the mode works (processes and
