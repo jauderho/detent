@@ -148,7 +148,8 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
 
-      # No cargo cache: cargo does not rebuild a C dependency when
+      # No caches in release jobs (cache poisoning). No cargo cache also because
+      # cargo does not rebuild a C dependency when
       # SOURCE_DATE_EPOCH changes, so a cached mimalloc object kept an older
       # commit's __TIME__ and the two builds differed (release dry run
       # 37173945079).
@@ -158,6 +159,7 @@ jobs:
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: "0.16.0"
+          use-cache: false
 
       - name: Install cargo-zigbuild
         if: runner.os == 'Linux'
@@ -175,6 +177,8 @@ jobs:
       # without the console).
       - name: Install bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          no-cache: true
 
       - name: Build the SPA
         working-directory: web
@@ -295,13 +299,10 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: sbom
-
       - name: Install bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          no-cache: true
 
       - name: Install cargo-cyclonedx
         run: cargo install cargo-cyclonedx --version 0.5.9 --locked
