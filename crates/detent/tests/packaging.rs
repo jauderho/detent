@@ -181,6 +181,18 @@ fn the_unit_has_mimalloc_purge_freed_memory_at_once() {
     );
 }
 
+/// mimalloc asks for transparent huge pages on its arena, so each process
+/// held 2 MiB pages that were mostly empty: 4.7 MiB more in each of the
+/// monitor and the runner on the test host.
+#[test]
+fn the_unit_keeps_mimalloc_off_transparent_huge_pages() {
+    let environment = unit_environment();
+    assert!(
+        environment.contains(&"MIMALLOC_ALLOW_THP=0"),
+        "{environment:?}"
+    );
+}
+
 const UPDATE_UNIT: &str = include_str!("../../../packaging/systemd/detent-update@.service");
 
 /// The value of the first `key=` line of the update template unit.

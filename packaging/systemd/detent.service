@@ -30,6 +30,10 @@ Environment=RUST_LOG=info
 # (1000 ms) the purge waits for a later allocation, so an idle worker kept
 # the 64 MiB Argon2 block of its start-up hash and of each login resident.
 Environment=MIMALLOC_PURGE_DELAY=0
+# No transparent huge pages: mimalloc's 2 MiB pages were mostly empty and
+# cost each process about 4.7 MiB. mimalloc sets PR_SET_THP_DISABLE at start,
+# before confinement.
+Environment=MIMALLOC_ALLOW_THP=0
 
 # User=root: root-confined mode (ADR-001 default). The capability-user
 # drop-in overrides this to User=detent for Phase 12's hardened mode.
