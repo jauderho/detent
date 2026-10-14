@@ -70,7 +70,21 @@ jobs its paths need, and the heavy jobs run after the merge.
 | Shell | `shell` | yes |
 | Action pins | `workflows` | yes |
 | Miri (FFI soundness), both semver jobs, cargo-geiger, both ACME end to end jobs, Rust on macOS | no | yes |
+| systemd-analyze security (packaged units) | `shell` (`packaging/`, `scripts/`, `.github/`) | yes |
 | cargo-fuzz (`fuzz.yml`) | no | push to main (crates, fuzz), nightly, manual |
+
+`systemd-security` runs `systemd-analyze security --offline=true` on copies
+of the packaged units, so it starts nothing: `detent.service` (fails above
+2.6), with the `capability-user.conf` drop-in (1.8), and
+`detent-update@.service` (2.2; 2.1 measured, plus 0.1 tolerance). The
+`--threshold` option takes the exposure times 10 (26, 18, 22). The runner's
+systemd differs from the hosts (259.5 on ubuntu-26.04; 261.3 on a host), and
+a newer systemd can add checks that move a score: the job log records the
+version and prints the full table.
+
+The `acme-serve` job also runs `scripts/tls-check.sh` against the listener
+(`--tls-check` of `scripts/acme-serve-check.sh`): TLS 1.2 refused, TLS 1.3
+accepted, ALPN `h2`.
 
 Other workflows are not required checks and filter at workflow level on a
 pull request: Codespell and Lint Code Base skip fuzz corpora and lockfiles,

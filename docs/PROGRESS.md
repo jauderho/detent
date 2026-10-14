@@ -5,6 +5,12 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-14 - CI gates: systemd-analyze security and tls-check
+
+New `ci.yml` job `systemd-security` (area `shell`, so `packaging/`, `scripts/` and `.github/` changes, and every push, nightly and manual run; in `CI gate` `needs:`). It copies each packaged unit into its own directory and runs `systemd-analyze security --offline=true --threshold=<n>`: `detent.service` 26 (2.6, root-confined, owner accepted), with the `capability-user.conf` drop-in 18 (1.8), and `detent-update@.service` 22 (2.2, gated; 2.1 measured plus 0.1 tolerance). The threshold is the exposure times 10. Scores seen on the ubuntu-26.04 runner (systemd 259.5): 2.6, 1.8 and 2.1, the same as measured on hosts. `scripts/acme-serve-check.sh` gets `--tls-check <script>`; the `acme-serve` job passes `scripts/tls-check.sh`, which checks TLS 1.2 refused, TLS 1.3 accepted and ALPN `h2` against the real `detent serve`. PENTEST 1.14.4 and 14.1.3 Pass, 9.1.2 stays Accepted risk (no `testssl.sh`, owner 2026-10-14) with `tls-check.sh` now in CI, TM-G15 fixed, TM-G16 narrowed. Counts recomputed from the rows by script (186 Pass, 6 Gap, 13 Accepted risk, 41 N/A).
+
+**Trap.** `--threshold` is an integer scale of 0 to 100, not the printed score: `--threshold=2.6` fails with "Failed to parse threshold".
+
 ## 2026-10-14 - Pentest small fixes: Content-Disposition, totp_replayed, show-password
 
 Three signed commits, test first (ASVS 12.3.4 and 14.4.2, 2.8.5, 2.1.12).
