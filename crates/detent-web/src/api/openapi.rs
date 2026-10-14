@@ -87,6 +87,9 @@ pub fn routes() -> Router<AppState> {
 
 /// The document as bytes, baked in at compile time.
 ///
+/// `build.rs` writes it as `docs/openapi.json` with the whitespace removed;
+/// the checked-in file stays pretty-printed for review.
+///
 /// Serving this rather than `ApiDoc::openapi()` is what keeps utoipa's
 /// runtime schema builders — 280 KiB of generated code across the 54
 /// component schemas, measured — out of the shipped binary. It is sound
@@ -94,10 +97,7 @@ pub fn routes() -> Router<AppState> {
 /// [`tests::the_checked_in_document_matches_what_this_build_generates`]
 /// already fails the build if this file and the document this build would
 /// generate differ by a single byte, so the constant cannot go stale.
-const DOCUMENT: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../docs/openapi.json"
-));
+const DOCUMENT: &str = include_str!(concat!(env!("OUT_DIR"), "/openapi.min.json"));
 
 /// `GET /api/v1/openapi.json`.
 ///
@@ -323,6 +323,19 @@ mod tests {
             checked_in.trim_end(),
             "docs/openapi.json is stale; regenerate it with: \
              cargo test -p detent-web api::openapi -- --ignored write_openapi_json"
+        );
+        Ok(())
+    }
+
+    /// The compact body the route serves is the checked-in document.
+    #[test]
+    fn the_served_body_parses_to_the_checked_in_document() -> R {
+        let served: serde_json::Value = serde_json::from_str(super::DOCUMENT)?;
+        let checked_in: serde_json::Value = serde_json::from_str(&read_checked_in(CHECKED_IN)?)?;
+        assert_eq!(served, checked_in);
+        assert!(
+            !super::DOCUMENT.contains('\n'),
+            "the served body is compact"
         );
         Ok(())
     }
