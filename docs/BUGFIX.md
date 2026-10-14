@@ -682,6 +682,23 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   Phase 12 polkit rule done 2026-10-09; testhost runs passed 2026-10-07 and
   2026-10-10, `PROGRESS.md`)
 
+- Security-review answers (owner, 2026-10-14). Accepted for v1: ASVS 2.1.7 and
+  2.1.8 (no common-password list: offline device, 12 to 128 character policy,
+  size budget); 2.4.5 (no pepper); 6.4.1 (secrets in `0600` files); 4.3.1
+  (MFA optional; `auth.totp_required = true` is the hardening step); TM-G12
+  (the security marker skips min-age); TM-G13 (no Landlock on Raspberry Pi
+  OS); TM-G17 (shared uid in capability-user mode); 9.1.2 (no `testssl.sh`;
+  `scripts/tls-check.sh` and the rustls tests); PLAN Phase 6 `detent-acme`
+  coverage of 93 to 94 percent. Open, being implemented for v1: 3.3.4 (session
+  list and revoke); 3.7.1 and 4.3.3 (step-up re-authentication before apply,
+  restore and update); 8.1.4 and 11.1.4 (per-token rate limit with an
+  auth-log event); 1.2.4 (token creation needs a TOTP-satisfied session when
+  `totp_required` is set).
+- Releases (owner, 2026-10-14): skip cutting a release for now; Phase 9 stays
+  `[~]`.
+- Final step before v1.0.0 (owner, 2026-10-14): run the `security-review`
+  skill over the full diff (PLAN Phase 12).
+
 ---
 
 ## 5. After v1: the Jev / TypeSafe experiment (was STAGE2)
