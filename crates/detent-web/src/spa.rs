@@ -914,7 +914,7 @@ mod tests {
         let mut from_rust = super::CLIENT_ROUTES.to_vec();
         from_ts.sort_unstable();
         from_rust.sort_unstable();
-        assert!(!from_ts.is_empty());
+        assert_ne!(from_ts, [] as [&str; 0]);
         assert_eq!(from_rust, from_ts);
         Ok(())
     }
