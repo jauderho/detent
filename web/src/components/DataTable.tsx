@@ -43,40 +43,48 @@ export function DataTable<Row>({
   const { l10n } = useLocalization()
 
   return (
-    <table className={cn('dtable', className)}>
-      {caption === undefined ? null : <caption className="lbl">{caption}</caption>}
-      <thead>
-        <tr>
-          {columns.map((column) => (
-            <th
-              key={column.key}
-              scope="col"
-              className={cn('lbl', column.numeric === true && 'num')}
-            >
-              {column.header}
-            </th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>
-        {rows.length === 0 ? (
+    // A table wider than its panel scrolls here instead of being clipped by the
+    // page. A scroll container is keyboard-focusable in current Chromium and
+    // Firefox, so no tabindex is set; it is named so that stop is announced.
+    <section
+      className="dtable-scroll"
+      aria-label={caption ?? l10n.getString('component-table-region')}
+    >
+      <table className={cn('dtable', className)}>
+        {caption === undefined ? null : <caption className="lbl">{caption}</caption>}
+        <thead>
           <tr>
-            <td className="empty" colSpan={columns.length}>
-              {emptyMessage ?? l10n.getString('component-table-empty')}
-            </td>
+            {columns.map((column) => (
+              <th
+                key={column.key}
+                scope="col"
+                className={cn('lbl', column.numeric === true && 'num')}
+              >
+                {column.header}
+              </th>
+            ))}
           </tr>
-        ) : (
-          rows.map((row) => (
-            <tr key={getRowKey(row)}>
-              {columns.map((column) => (
-                <td key={column.key} className={cn(column.numeric === true && 'num')}>
-                  {column.render(row)}
-                </td>
-              ))}
+        </thead>
+        <tbody>
+          {rows.length === 0 ? (
+            <tr>
+              <td className="empty" colSpan={columns.length}>
+                {emptyMessage ?? l10n.getString('component-table-empty')}
+              </td>
             </tr>
-          ))
-        )}
-      </tbody>
-    </table>
+          ) : (
+            rows.map((row) => (
+              <tr key={getRowKey(row)}>
+                {columns.map((column) => (
+                  <td key={column.key} className={cn(column.numeric === true && 'num')}>
+                    {column.render(row)}
+                  </td>
+                ))}
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
+    </section>
   )
 }

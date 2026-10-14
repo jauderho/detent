@@ -20,6 +20,7 @@ component-modal-close = বন্ধ করুন
 component-switch-off = বন্ধ
 component-switch-on = চালু
 component-table-empty = কোনো রেকর্ড নেই
+component-table-region = ডেটা সারণি
 
 ## API failures
 ## docs/API.md: every failure is `{ code, message_id }`, and `message_id` is a

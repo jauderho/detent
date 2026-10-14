@@ -157,7 +157,48 @@ test.describe('the apply flow', () => {
   })
 })
 
+test.describe('a phone-width screen', () => {
+  /**
+   * `body` clips horizontal overflow, so a section wider than the screen does
+   * not scroll — it is cut off, and a control past the edge cannot be reached.
+   * The width the document asks for is the only place that shows.
+   */
+  test('no section is wider than 390px', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await stubApi(page)
+    await signIn(page)
+
+    for (const section of [
+      'dashboard',
+      'modules',
+      'services',
+      'backups',
+      'audit',
+      'certificates',
+      'settings',
+    ]) {
+      await page.getByRole('link', { name: section }).click()
+      await page.getByRole('heading', { level: 1 }).waitFor()
+      const width = await page.evaluate(() => document.documentElement.scrollWidth)
+      expect(width, section).toBeLessThanOrEqual(390)
+    }
+  })
+})
+
 test.describe('keyboard and focus', () => {
+  test('the first Tab stop is a skip link that moves focus to the page', async ({ page }) => {
+    await stubApi(page)
+    await signIn(page)
+
+    await page.keyboard.press('Tab')
+    const skip = page.getByRole('link', { name: 'skip to content' })
+    await expect(skip).toBeFocused()
+    await expect(skip).toBeInViewport()
+
+    await page.keyboard.press('Enter')
+    await expect(page.getByRole('main')).toBeFocused()
+  })
+
   test('the plan dialog takes focus, traps Tab, and Escape returns it', async ({ page }) => {
     await stubApi(page)
     await signIn(page)

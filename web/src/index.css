@@ -444,8 +444,10 @@ main:focus {
   user-select: none;
   white-space: nowrap;
 }
-.btn:hover:not(:disabled) {
-  background: var(--panel-3);
+@media (hover: hover) {
+  .btn:hover:not(:disabled) {
+    background: var(--panel-3);
+  }
 }
 .btn:active:not(:disabled) {
   transform: translateY(1px);
@@ -464,9 +466,11 @@ main:focus {
   background: var(--blue);
   border-color: var(--blue);
 }
-.btn.primary:hover:not(:disabled) {
-  background: var(--blue-bright);
-  border-color: var(--blue-bright);
+@media (hover: hover) {
+  .btn.primary:hover:not(:disabled) {
+    background: var(--blue-bright);
+    border-color: var(--blue-bright);
+  }
 }
 .btn.primary:disabled {
   color: var(--cta-ink);
@@ -497,9 +501,11 @@ main:focus {
   cursor: pointer;
   user-select: none;
 }
-.tinybtn:hover:not(:disabled) {
-  color: var(--ink);
-  background: var(--panel-3);
+@media (hover: hover) {
+  .tinybtn:hover:not(:disabled) {
+    color: var(--ink);
+    background: var(--panel-3);
+  }
 }
 .tinybtn:active:not(:disabled) {
   transform: translateY(1px);
@@ -531,6 +537,53 @@ main:focus {
 .btngroup > .btn + .btn,
 .btngroup > .tinybtn + .tinybtn {
   border-left: none;
+}
+
+/* The section strip is one row of seven cells, 631px wide — more than a phone.
+   Below that it wraps: each cell grows to fill its row and overlaps its
+   neighbour's hairline by 1px, so the grid keeps single 1px joints in both
+   directions. The left border comes back (width and style only, so the blue of
+   the active cell survives). */
+@media (max-width: 680px) {
+  .nav-strip {
+    flex-wrap: wrap;
+    width: 100%;
+  }
+  .nav-strip > .btn {
+    flex: 1 1 auto;
+    margin-inline-end: -1px;
+    margin-block-end: -1px;
+  }
+  .nav-strip > .btn + .btn {
+    border-left-width: 1px;
+    border-left-style: solid;
+  }
+}
+
+/* Touch screens: 44px targets (Apple HIG) and 16px control text, which is the
+   size below which iOS zooms the page when a field takes focus. Keyed to the
+   input device, not the width, so a narrow desktop window keeps the dense
+   instrument layout. The status bar is a fixed 38px by §6 and keeps its own
+   control sizes. */
+@media (pointer: coarse) {
+  .btn,
+  .tinybtn,
+  .field-control {
+    min-height: 44px;
+  }
+  .tinybtn {
+    min-width: 44px;
+  }
+  .field-control {
+    font-size: 16px;
+  }
+  .switch {
+    width: 66px;
+    height: 44px;
+  }
+  .switch-knob {
+    width: 32px;
+  }
 }
 
 /* ── screen ───────────────────────────────────────────────────────
@@ -632,6 +685,9 @@ main:focus {
   transition: none;
   cursor: pointer;
 }
+.switch:active:not(:disabled) {
+  transform: translateY(1px);
+}
 .switch:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 1px;
@@ -675,6 +731,13 @@ main:focus {
 /* ── data table ───────────────────────────────────────────────────
    AESTHETIC_CONTRACT.md §5 / §6 — hairline-zoned rows, silk-screen
    column headers, tabular-nums on numeric columns. */
+.dtable-scroll {
+  overflow-x: auto;
+}
+.dtable-scroll:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
 .dtable {
   width: 100%;
   border: 1px solid var(--line);

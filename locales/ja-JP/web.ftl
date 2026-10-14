@@ -20,6 +20,7 @@ component-modal-close = 閉じる
 component-switch-off = オフ
 component-switch-on = オン
 component-table-empty = レコードなし
+component-table-region = データ表
 
 ## API failures
 ## docs/API.md: every failure is `{ code, message_id }`, and `message_id` is a

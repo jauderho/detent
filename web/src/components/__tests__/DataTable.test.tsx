@@ -71,4 +71,18 @@ describe('DataTable', () => {
 
     expect(screen.getByText('no services configured')).toBeInTheDocument()
   })
+
+  it('scrolls sideways in a region named by the caption', () => {
+    renderTable(ROWS)
+
+    const region = screen.getByRole('region', { name: 'services' })
+    expect(region).toHaveClass('dtable-scroll')
+    expect(within(region).getByRole('table')).toBeInTheDocument()
+  })
+
+  it('names the region from the localized fallback when there is no caption', () => {
+    renderWithL10n(<DataTable columns={COLUMNS} rows={ROWS} getRowKey={(row) => row.id} />)
+
+    expect(screen.getByRole('region', { name: 'data table' })).toBeInTheDocument()
+  })
 })

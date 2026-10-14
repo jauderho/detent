@@ -116,7 +116,7 @@ export function AppNav() {
 
   return (
     <nav className="wrap" style={NAV_STYLE} aria-label={l10n.getString('nav-label')}>
-      <div className="btngroup">
+      <div className="btngroup nav-strip">
         {LINKS.map((link) => (
           <NavLink
             key={link.key}
@@ -128,7 +128,7 @@ export function AppNav() {
           </NavLink>
         ))}
       </div>
-      <div style={{ marginLeft: 'auto' }}>
+      <div style={{ marginInlineStart: 'auto' }}>
         <Button
           onClick={() => {
             void logout()

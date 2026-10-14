@@ -34,7 +34,9 @@ const TITLE_STYLE = {
   marginBottom: 16,
 } as const
 
-const PANELS_STYLE = { display: 'grid', gap: 16 } as const
+// `minmax(0, 1fr)`, not the implicit `auto` track: an `auto` track grows to its
+// widest table and pushes the panel past the viewport.
+const PANELS_STYLE = { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 16 } as const
 
 type ActionBanner = { tone: BannerTone; message: string }
 

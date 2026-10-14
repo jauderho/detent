@@ -20,6 +20,7 @@ component-modal-close = close
 component-switch-off = off
 component-switch-on = on
 component-table-empty = no records
+component-table-region = data table
 
 ## API failures
 ## docs/API.md: every failure is `{ code, message_id }`, and `message_id` is a
