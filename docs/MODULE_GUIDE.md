@@ -70,7 +70,9 @@ Use TOML literal strings (single quotes) so `\.` needs no escaping. Add
 tag list in `scripts/fixtures/upstream-watch/<id>.tags` and an entry in
 `EXPECTED` in `scripts/upstream-watch.sh`; `scripts/upstream-watch.sh selftest`
 checks them offline. The watch compares versions with `sort -V` and opens an
-issue only when the newest release is newer than `tracked_version`.
+issue only when the newest release is newer than `tracked_version`. A manual
+`workflow_dispatch` run is always a dry run: the workflow passes `--dryrun` when
+the event is `workflow_dispatch`, so only the scheduled run opens issues.
 
 ## 3. Step by step
 
