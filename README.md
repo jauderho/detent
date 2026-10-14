@@ -41,13 +41,24 @@ Targets: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, and the
 two Apple Silicon/Intel macOS equivalents. Cross-compile with
 [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild).
 
-Stripped sizes, `aarch64-unknown-linux-musl`:
+Stripped sizes in bytes, release builds, measured 2026-10-13 at commit
+`9f07124`:
 
-| Build | Bytes |
-|---|---|
-| CLI only (`module-hosts,init-systemd`) | 1,712,952 |
-| Default — all modules, API, TLS | 4,971,696 |
-| Default + `ui` (console embedded) | 5,659,696 |
+| Build | `aarch64-unknown-linux-musl` | `x86_64-unknown-linux-musl` |
+|---|---|---|
+| CLI only (`module-hosts,init-systemd`) | 2,089,464 | 2,343,080 |
+| Default — all modules, API, TLS | 5,921,712 | 7,159,776 |
+| Default + `ui` (console embedded) | 7,176,240 | 8,414,944 |
+
+Memory, `x86_64-unknown-linux-musl`, default + `ui`, root-confined, measured
+2026-10-13 at commit `9f07124` (`VmRSS` in kB; `serve` runs three processes):
+
+| Process | Idle (60 s after start) | After 200 API reads and 20 plans |
+|---|---|---|
+| monitor | 13,544 | 13,628 |
+| runner | 10,824 | 10,824 |
+| worker | 34,472 | 35,752 |
+| Total | 58,840 | 60,204 |
 
 ## Usage
 
