@@ -5,6 +5,10 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-14 - Track G: TPM attestor deferred past v1
+
+Owner decision 2026-10-14: defer the TPM attestor (ACME `device-attest-01`) past v1. Docs only. ADR-017 records the stage-1 findings (key custody, certificate type, AK certificate, dependencies) and what a revisit needs. BUGFIX §4 answered, Track G item struck, PLAN Phase 6 notes the deferral. No code change.
+
 ## 2026-10-14 - CI speed-up: path-based skips, heavy jobs off pull requests, one gate
 
 Owner decision 2026-10-14: CI is too slow. Layout and job matrix are in `docs/RELEASING.md` ("CI layout").

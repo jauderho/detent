@@ -632,7 +632,7 @@ localized, with schema-driven module forms.
 **Deliverables** (`detent-acme`)
 - Account management (key stored `0600`, EAB support), order flow with `instant-acme`, profile selection (`shortlived` default on LE), ARI-driven renewal scheduler, cert store + hot reload into `detent-web`, status/renew ops and UI.
 - `DnsProvider` trait + RFC 2136, Cloudflare, acme-dns, deSEC, hook implementations; propagation checks against authoritative NS via `hickory-client`.
-- `Attestor` trait + TPM 2.0 attestor (feature `acme-attest`), `permanent-identifier`/`hardware-module` identifiers.
+- `Attestor` trait + TPM 2.0 attestor (feature `acme-attest`), `permanent-identifier`/`hardware-module` identifiers. Deferred past v1 (2026-10-14): see ADR-017.
 - Failure UX: expiry warnings in UI/CLI/journal at 50 %/25 % lifetime; never silent.
 
 **Tasks**

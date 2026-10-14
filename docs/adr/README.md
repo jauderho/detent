@@ -48,3 +48,4 @@ File naming: `ADR-NNN-<kebab-slug>.md`, zero-padded to three digits.
 | ADR-014 | In-tree Sigstore bundle verifier | Accepted |
 | ADR-015 | The ACME client runs in its own confined process | Accepted |
 | ADR-016 | Passkeys (WebAuthn) — defer past v1 | Accepted |
+| ADR-017 | TPM device attestation (device-attest-01) deferred past v1 | Deferred |

@@ -541,8 +541,8 @@ at the contract's 38px.
 ### Track G — blocked on the owner or external infrastructure
 
 - `hickory-client` propagation checks (new dependency; ADR-011 cooldown).
-- TPM attestor (`device-attest-01`) with the step-ca + swtpm CI job
-  (`tss-esapi`; cooldown).
+- ~~TPM attestor (`device-attest-01`) with the step-ca + swtpm CI job
+  (`tss-esapi`; cooldown).~~ Deferred past v1 (ADR-017).
 - Let's Encrypt staging run (`docs/spikes/acme-le.md`).
 
 ---
@@ -652,7 +652,7 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   and `token` exit 3 as root and name `sudo -u detent detent <command>`.
 - Track G: defer `hickory-client`, the TPM attestor and the LE staging run past
   v1, so Phase 6 can close? — proposed: defer the TPM attestor; keep the other
-  two for v1 — owner answer:
+  two for v1 — owner answer: defer past v1 (2026-10-14); see ADR-017.
 - D1 optional mount: after an fstab apply, the monitor mounts new entries.
   Needs `CAP_SYS_ADMIN` and the mount syscalls in the monitor. — owner
   answer (2026-10-06): yes, behind a config flag (PLAN §2.4: the capability
