@@ -475,8 +475,7 @@ Fixes from the threat model, in order (each: test first, one commit):
 
 1. ~~**TM-G1 TOTP cannot be enrolled (medium)**~~ Done 2026-10-09 (`PROGRESS.md`): `detent user totp enable|disable`. Web API done 2026-10-10
    (`PROGRESS.md`): `/api/v1/auth/totp`, `/enrol`, `/confirm`, `/disable`.
-   Still open: the settings page in the console (blocked: needs a QR
-   dependency; `bun add lean-qr` was refused in the agent run).
+   Console settings page done 2026-10-10 (`lean-qr` 2.7.4, owner approved).
 2. ~~**TM-G8 / TM-G7 password policy**~~ Done 2026-10-09 (`PROGRESS.md`): 12 to
    128 characters when a password is set, over 128 refused at login, and
    `must_change_password` enforced (`POST /api/v1/auth/password`).

@@ -109,8 +109,10 @@ sudo -u detent detent setup    # prompts for a password; never takes one on argv
 detent serve
 ```
 
-Turn on a second factor (TOTP: SHA-1, 6 digits, 30 s) for an account. The
-command prints an `otpauth://` URI and the base32 key once, then asks for a
+Turn on a second factor (TOTP: SHA-1, 6 digits, 30 s) for an account. A
+signed-in user can do it in the console (settings: password, then a QR code
+and a code; turning it off takes the password and a code). On the command
+line, the command prints an `otpauth://` URI and the base32 key once, then asks for a
 current code from your authenticator and stores the key only if the code is
 valid. The code is read from the terminal, never from argv. Set
 `auth.totp_required = true` in `detent.toml` only after every account has a
