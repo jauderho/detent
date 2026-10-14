@@ -576,7 +576,7 @@ jobs:
         run: |
           sudo scripts/acme-serve-check.sh --verbose \
             --tsig-key-file "$RUNNER_TEMP/tsig.key" --dns-server 127.0.0.1:5300 \
-            --expect-renewal 240 --forced-renew \
+            --expect-renewal 240 --forced-renew --tls-check scripts/tls-check.sh \
             target/debug/detent "$RUNNER_TEMP/pebble/pebble.minica.pem" \
             https://127.0.0.1:14000/dir
 
@@ -996,6 +996,64 @@ jobs:
           done < <(grep -hE '^\s*-?\s*uses:' .github/workflows/*.yml | grep -vE '^\s*#')
           exit "$bad"
 
+  # Exposure score of the packaged units (PENTEST 1.14.4, 14.1.3). Offline
+  # mode reads the unit files and starts nothing. Each unit is copied into its
+  # own directory so the `detent.service.d` drop-in next to the packaged unit
+  # applies only to the capability-user pass. The runner's systemd can differ
+  # from the hosts (261.3 was measured there), so the version is logged and a
+  # score that moves with a newer systemd shows up here first. Thresholds:
+  # root-confined 2.6 (owner accepted, BUGFIX section 4), capability-user 1.8,
+  # update template 2.2 (2.1 measured, plus 0.1 tolerance). A failing pass
+  # prints the full table.
+  systemd-security:
+    name: systemd-analyze security (packaged units)
+    runs-on: ubuntu-26.04
+    needs: changes
+    if: ${{ needs.changes.outputs.shell == 'true' }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: systemd version
+        run: systemd-analyze --version
+
+      - name: Score each unit against its threshold
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          src=packaging/systemd
+          mkdir -p "$work/root" "$work/capuser/detent.service.d" "$work/update"
+          cp "$src/detent.service" "$work/root/"
+          cp "$src/detent.service" "$work/capuser/"
+          cp "$src/detent.service.d/capability-user.conf" "$work/capuser/detent.service.d/"
+          cp "$src/detent-update@.service" "$work/update/"
+
+          fail=0
+          check() {
+            local label="$1" threshold="$2" unit="$3"
+            echo "::group::${label} (threshold ${threshold})"
+            systemd-analyze security --offline=true --no-pager "$unit" || true
+            if systemd-analyze security --offline=true --no-pager \
+              --threshold="$threshold" "$unit" >/dev/null; then
+              echo "${label}: at or below ${threshold}"
+            else
+              echo "::error::${label}: exposure above ${threshold}"
+              fail=1
+            fi
+            echo "::endgroup::"
+          }
+          check "root-confined detent.service" 2.6 "$work/root/detent.service"
+          check "capability-user detent.service" 1.8 "$work/capuser/detent.service"
+          check "detent-update@.service" 2.2 "$work/update/detent-update@.service"
+          exit "$fail"
+
   # The one required status check for the `main` ruleset. It passes when every
   # job above succeeded or was skipped, and fails when any of them failed or
   # was cancelled. A skipped job (path filter, or a heavy job on a pull
@@ -1021,6 +1079,7 @@ jobs:
       - shell
       - size
       - pins
+      - systemd-security
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1

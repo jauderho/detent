@@ -56,6 +56,10 @@
 #                             inside the last hour); the worker's fdatasync
 #                             calls (the audit writers' File::sync_data())
 #                             all succeed. Skipped when unset (the default).
+#   --tls-check <script>     After the first Pebble-issued leaf is served,
+#                             run <script> (scripts/tls-check.sh) against
+#                             127.0.0.1 and --port: TLS 1.2 refused, TLS 1.3
+#                             accepted, ALPN h2. Skipped when unset.
 #   --stop-timeout <secs>    How long `serve` may take to stop after SIGTERM
 #                             (default: 30).
 #   --trace <prefix>         `strace -ff -o` prefix: one file per thread,
@@ -74,6 +78,7 @@
 #      and copies the Pebble CA there (the acme process reads it as `detent`).
 #   2. Starts `detent serve` under `strace -ff` and waits until the leaf that
 #      `openssl s_client` sees is issued by Pebble and names the domain.
+#   2b. With --tls-check: runs the TLS posture script against the listener.
 #   3. With --expect-renewal: waits for the listener to serve a different
 #      Pebble-issued leaf for the same domain with a later notAfter, with no
 #      restart of `serve`.
@@ -112,6 +117,7 @@ STATE_ROOT="/var/lib/detent"
 ISSUE_TIMEOUT=180
 EXPECT_RENEWAL=0
 FORCED_RENEW=false
+TLS_CHECK=""
 STOP_TIMEOUT=30
 TRACE=""
 WORKDIR=""
@@ -188,7 +194,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --tsig-key-file | --write-dns-config | --dns-server | --zone | --domain | \
       --key-name | --port | --state-root | --issue-timeout | --expect-renewal | \
-      --stop-timeout | --trace | --workdir)
+      --stop-timeout | --trace | --workdir | --tls-check)
       need_value "$@"
       case "$1" in
         --tsig-key-file) TSIG_KEY_FILE="$2" ;;
@@ -204,6 +210,7 @@ while [[ $# -gt 0 ]]; do
         --stop-timeout) STOP_TIMEOUT="$2" ;;
         --trace) TRACE="$2" ;;
         --workdir) WORKDIR="$2" ;;
+        --tls-check) TLS_CHECK="$2" ;;
       esac
       shift 2
       ;;
@@ -386,6 +393,9 @@ if [[ "${DRYRUN}" == true ]]; then
   if [[ "${EXPECT_RENEWAL}" -gt 0 ]]; then
     log "would wait up to ${EXPECT_RENEWAL}s for a renewed Pebble leaf"
   fi
+  if [[ -n "${TLS_CHECK}" ]]; then
+    log "would run: ${TLS_CHECK} 127.0.0.1 ${PORT}"
+  fi
   if [[ "${FORCED_RENEW}" == true ]]; then
     log "would mint a write-scope token and POST /api/v1/system/cert/renew, expecting 202"
   fi
@@ -499,6 +509,11 @@ san="$(openssl x509 -noout -ext subjectAltName <<<"${leaf}")"
 log_verbose "SAN: ${san//$'\n'/ }"
 grep -q "DNS:${DOMAIN}\b" <<<"${san}" || die "the leaf does not name ${DOMAIN}: ${san}"
 pass "the leaf names DNS:${DOMAIN}"
+
+if [[ -n "${TLS_CHECK}" ]]; then
+  "${TLS_CHECK}" --verbose 127.0.0.1 "${PORT}" || die "${TLS_CHECK} failed against 127.0.0.1:${PORT}"
+  pass "the listener refuses TLS 1.2, accepts TLS 1.3 and negotiates h2 (${TLS_CHECK##*/})"
+fi
 
 # --- 2. Optional: the served certificate is renewed before it expires -----
 
