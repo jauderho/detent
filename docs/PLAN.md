@@ -631,7 +631,7 @@ localized, with schema-driven module forms.
 
 **Deliverables** (`detent-acme`)
 - Account management (key stored `0600`, EAB support), order flow with `instant-acme`, profile selection (`shortlived` default on LE), ARI-driven renewal scheduler, cert store + hot reload into `detent-web`, status/renew ops and UI.
-- `DnsProvider` trait + RFC 2136, Cloudflare, acme-dns, deSEC, hook implementations; propagation checks against authoritative NS via `hickory-client`.
+- `DnsProvider` trait + RFC 2136, Cloudflare, acme-dns, deSEC, hook implementations; propagation checks against authoritative NS via `hickory-client` (in progress).
 - `Attestor` trait + TPM 2.0 attestor (feature `acme-attest`), `permanent-identifier`/`hardware-module` identifiers. Deferred past v1 (2026-10-14): see ADR-017.
 - Failure UX: expiry warnings in UI/CLI/journal at 50 %/25 % lifetime; never silent.
 
@@ -642,7 +642,7 @@ localized, with schema-driven module forms.
 4. device-attest-01 → verify: CI job with `step-ca` + `swtpm` issues a cert to detent via TPM attestation; negative tests for wrong AK chain.
 5. Hot reload → verify: new cert served without restart (`openssl s_client` shows new serial).
 
-**Acceptance:** 100 % lines (attest paths measured in the swtpm job); fuzz targets for ACME JSON responses and DNS provider responses.
+**Acceptance:** 100 % lines (attest paths measured in the swtpm job), except `detent-acme` at 93 to 94 % (owner accepted 2026-10-14, BUGFIX §4); fuzz targets for ACME JSON responses and DNS provider responses.
 
 **Delegation:** ACME core + attestor → **Fable Low**; providers → Sonnet from a provider template written by Fable Low; CI containers → Sonnet.
 
@@ -753,9 +753,10 @@ Both are commit-confirm modules. Network model is backend-neutral (interface →
 - Translations bootstrap: `de`, `ja` (machine-drafted, marked `# needs-review`), pseudo-locale in CI.
 - `cargo-mutants` weekly job (advisory), `cargo geiger` report in CI, `cargo semver-checks` for `detent-core`/`detent-ffi`.
 - Final size/RSS measurements published in README; `improve-it` skill pass on the UI.
+- Final step before v1.0.0 (owner, 2026-10-14): run the `security-review` skill over the full diff and fix or record every finding.
 - v1.0.0 immutable release.
 
-**Acceptance:** every §2.7 control has a linked test; `systemd-analyze security` ≤ 2.5 (root-confined) and ≤ 1.8 (capability-user); all budgets met; PENTEST checklist all green or explicitly accepted risks with owner.
+**Acceptance:** every §2.7 control has a linked test; `systemd-analyze security` ≤ 2.5 (root-confined; owner accepted 2.6 on 2026-10-10, BUGFIX §4) and ≤ 1.8 (capability-user); all budgets met; PENTEST checklist all green or explicitly accepted risks with owner.
 
 **Delegation:** threat model + pentest checklist → orchestrator (self-escalate to Fable High for the threat model review); mode/polkit → Fable Low; translations/docs → Haiku/Sonnet.
 
