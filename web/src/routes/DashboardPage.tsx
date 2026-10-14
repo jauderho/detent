@@ -51,7 +51,7 @@ const NOTES_STYLE = {
   gap: 4,
 } as const
 
-const NOTES_LIST_STYLE = { margin: 0, paddingLeft: 18 } as const
+const NOTES_LIST_STYLE = { margin: 0, paddingInlineStart: 18 } as const
 
 const PANEL_ACTIONS_STYLE = {
   display: 'flex',

@@ -10,6 +10,7 @@ status-mode-label = режим
 theme-toggle-aria = переключить светлый и тёмный режим
 theme-toggle-title = переключить светлый / тёмный
 status-skip-link = перейти к содержимому
+status-locale-aria = язык интерфейса
 
 ## catfu component layer
 ## Chrome the shared components render themselves. Content strings (field

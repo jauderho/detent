@@ -10,6 +10,7 @@ status-mode-label = मोड
 theme-toggle-aria = लाइट और डार्क मोड बदलें
 theme-toggle-title = लाइट / डार्क बदलें
 status-skip-link = सामग्री पर जाएँ
+status-locale-aria = इंटरफ़ेस भाषा
 
 ## catfu component layer
 ## Chrome the shared components render themselves. Content strings (field

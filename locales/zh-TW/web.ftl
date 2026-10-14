@@ -10,6 +10,7 @@ status-mode-label = 模式
 theme-toggle-aria = 切換淺色與深色模式
 theme-toggle-title = 切換淺色 / 深色
 status-skip-link = 跳到內容
+status-locale-aria = 介面語言
 
 ## catfu component layer
 ## Chrome the shared components render themselves. Content strings (field

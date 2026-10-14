@@ -187,7 +187,7 @@ main:focus {
   align-items: center;
   gap: 8px;
   padding: 0 14px;
-  border-right: 1px solid var(--line);
+  border-inline-end: 1px solid var(--line);
   white-space: nowrap;
 }
 .status .brand {
@@ -296,10 +296,10 @@ main:focus {
 .hstats .cell {
   padding: 11px 12px;
   border-bottom: 1px solid var(--line);
-  border-right: 1px solid var(--line);
+  border-inline-end: 1px solid var(--line);
 }
 .hstats .cell:last-child {
-  border-right: none;
+  border-inline-end: none;
 }
 .hstats .v {
   font-family: "Archivo Variable", "Archivo", sans-serif;
@@ -321,7 +321,7 @@ main:focus {
     grid-template-columns: repeat(2, 1fr);
   }
   .hstats .cell:nth-child(2n) {
-    border-right: none;
+    border-inline-end: none;
   }
 }
 
@@ -353,7 +353,7 @@ main:focus {
 
 /* ── hairline-zoned grid ──────────────────────────────────────────
    AESTHETIC_CONTRACT.md §5 — 1px-separated cells, last column's
-   border-right and last row's border-bottom stripped, :hover shifts to
+   border-inline-end and last row's border-bottom stripped, :hover shifts to
    --panel and never to a new hue. Column count arrives as --cols so the
    reflow media queries below can still win over it. */
 .hgrid {
@@ -367,7 +367,7 @@ main:focus {
   gap: 4px;
   min-height: 96px;
   padding: 12px;
-  border-right: 1px solid var(--line);
+  border-inline-end: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
   transition: none;
 }
@@ -375,7 +375,7 @@ main:focus {
   background: var(--panel);
 }
 .hgrid > .cell.is-last-col {
-  border-right: none;
+  border-inline-end: none;
 }
 .hgrid > .cell.is-last-row {
   border-bottom: none;
@@ -387,19 +387,19 @@ main:focus {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .hgrid > .cell.is-last-col {
-    border-right: 1px solid var(--line);
+    border-inline-end: 1px solid var(--line);
   }
   .hgrid > .cell.is-last-row {
     border-bottom: 1px solid var(--line);
   }
   .hgrid > .cell:nth-child(2n) {
-    border-right: none;
+    border-inline-end: none;
   }
   .hgrid > .cell:nth-last-child(2):nth-child(odd) {
     border-bottom: none;
   }
   .hgrid > .cell:last-child {
-    border-right: none;
+    border-inline-end: none;
     border-bottom: none;
   }
 }
@@ -410,7 +410,7 @@ main:focus {
   }
   .hgrid > .cell,
   .hgrid > .cell.is-last-col {
-    border-right: none;
+    border-inline-end: none;
   }
   .hgrid > .cell.is-last-row {
     border-bottom: 1px solid var(--line);
@@ -536,7 +536,7 @@ main:focus {
 }
 .btngroup > .btn + .btn,
 .btngroup > .tinybtn + .tinybtn {
-  border-left: none;
+  border-inline-start: none;
 }
 
 /* The section strip is one row of seven cells, 631px wide — more than a phone.
@@ -555,8 +555,8 @@ main:focus {
     margin-block-end: -1px;
   }
   .nav-strip > .btn + .btn {
-    border-left-width: 1px;
-    border-left-style: solid;
+    border-inline-start-width: 1px;
+    border-inline-start-style: solid;
   }
 }
 
@@ -707,6 +707,8 @@ main:focus {
   color: var(--ink-dim);
   user-select: none;
 }
+/* The knob's left and right stay physical on purpose: it is a hardware slide
+   switch (§10), off at the left stop whatever the text direction. */
 .switch-knob {
   position: absolute;
   top: 1px;
@@ -745,7 +747,7 @@ main:focus {
 }
 .dtable caption {
   padding: 6px 12px;
-  text-align: left;
+  text-align: start;
   background: var(--chrome);
   border-bottom: 1px solid var(--line);
 }
@@ -755,7 +757,7 @@ main:focus {
   font-weight: 400;
   letter-spacing: 0.16em;
   text-transform: uppercase;
-  text-align: left;
+  text-align: start;
   color: var(--ink-dim);
   background: var(--chrome);
   border-bottom: 1px solid var(--line-2);
@@ -775,7 +777,7 @@ main:focus {
   background: var(--panel);
 }
 .dtable .num {
-  text-align: right;
+  text-align: end;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.04em;
 }
@@ -873,10 +875,10 @@ main:focus {
   gap: 8px;
 }
 .banner.amber {
-  border-left: 2px solid var(--amber);
+  border-inline-start: 2px solid var(--amber);
 }
 .banner.blue {
-  border-left: 2px solid var(--blue);
+  border-inline-start: 2px solid var(--blue);
 }
 @media (max-width: 560px) {
   .banner {

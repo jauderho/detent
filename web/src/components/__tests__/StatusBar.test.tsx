@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { LocalizationProvider, type ReactLocalization } from '@fluent/react'
 import { render, screen } from '@testing-library/react'
-import { createLocalization } from '@/i18n'
+import { createLocalization, loadLocalization } from '@/i18n'
 import { StatusBar } from '../StatusBar'
 
 function renderWithL10n(l10n: ReactLocalization) {
@@ -46,6 +46,12 @@ describe('StatusBar', () => {
     expect(select).toHaveValue('en-US')
     expect(screen.getByRole('option', { name: 'en-US' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'qps-ploc' })).toBeInTheDocument()
+  })
+
+  it('names the locale selector in the interface language', async () => {
+    renderWithL10n(await loadLocalization(['de-DE']))
+
+    expect(screen.getByRole('combobox', { name: 'Oberflächensprache' })).toBeInTheDocument()
   })
 
   it('renders a live tabular-nums UTC clock', () => {
