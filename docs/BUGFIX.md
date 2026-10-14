@@ -449,7 +449,7 @@ deferred by the owner.
 - Owner only: E5 / TM-G12 rulesets (`docs/RELEASING.md`); D3 VM runs; the
   v1.0.0 release and the E16 real-install proof, which needs a published
   release; native-speaker review of the translated locales.
-- In progress: the credential-change console banner (ASVS 2.2.3, 2.5.5).
+- Done 2026-10-14: the credential-change console banner (ASVS 2.2.3, 2.5.5; `PROGRESS.md`).
 - Done 2026-10-14: the worker RSS trim (PLAN §4.1; `PROGRESS.md`).
 
 `THREAT_MODEL.md` (STRIDE per component, mapped to tests; it must also cover
@@ -491,9 +491,9 @@ Fixes from the threat model, in order (each: test first, one commit):
    token or expired session, have the monitor log each `WriteTarget`,
    `Restore` and `Service`, and add `detent audit verify`.~~ Done 2026-10-10
    (`PROGRESS.md`); proven on the test host 2026-10-10 (CLI records, `privsep
-   request` log, coalesced `credential_rejected`, `audit verify`). Still open from it: a notice channel to the user on a
-   credential change (ASVS 2.2.3, 2.5.5; console banner, in progress). The
-   remote log sink (1.7.2, 7.3.3) is decided 2026-10-14: journal forwarding
+   request` log, coalesced `credential_rejected`, `audit verify`). Notice to the user on a credential change (ASVS 2.2.3, 2.5.5) done
+   2026-10-14 (`PROGRESS.md`): `GET /api/v1/auth/notices` and a console banner.
+   The remote log sink (1.7.2, 7.3.3) is decided 2026-10-14: journal forwarding
    only (§4).
 4. ~~**Stale statements** in SECURITY_HARDENING, ARCHITECTURE §11 and ADR-012
    (THREAT_MODEL §7).~~ Done 2026-10-10 (`PROGRESS.md`).
@@ -623,9 +623,9 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   - TOTP keys at rest in `users.json` (`0600`, owned by the service
     account): accepted for v1 as a residual, with the same protection as the
     password hash file. Done 2026-10-14: PENTEST 2.8.2 and THREAT_MODEL §8.
-  - Credential-change notice (ASVS 2.2.3, 2.5.5): a console banner. Being
-    implemented on a separate branch; the checklist rows stay Gap until it
-    lands.
+  - Credential-change notice (ASVS 2.2.3, 2.5.5): a console banner. Done
+    2026-10-14 (`PROGRESS.md`). Owner confirmed (2026-10-14): token issue and
+    revoke events are shown to every account (tokens are host-wide).
   - Worker RSS against the PLAN §4.1 30 MiB figure (three-process idle RSS
     57.5 MiB): investigate and trim. Done 2026-10-14 (`PROGRESS.md`): 22.8 MiB idle total.
 - D4: remove build toolchains from testhost. — proposed: after Track C A1–A3 —
