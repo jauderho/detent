@@ -269,7 +269,10 @@ const MONITOR: &[&str] = &[
 /// showed refused and tolerated are left out on purpose: `prctl(PR_SET_NAME)`
 /// (thread names; std ignores the error), `prctl(PR_SET_VMA)` (mimalloc names
 /// its mappings) and `access("/sys/devices/system/node/node1")` (mimalloc's
-/// NUMA probe; it then assumes one node).
+/// NUMA probe; it then assumes one node). No `fchown` and no xattr call
+/// either: `fs::atomic` skips a same-owner `fchown` (the worker replaces only
+/// its own files), and treats `EPERM` from `flistxattr` as "no xattrs"
+/// (traced on the test host, 2026-10-13: a login that rehashes `users.json`).
 ///
 /// **Slice W1 (STAGE4 4.3 item 5):** `fdatasync` added. The C4/S2 traces
 /// only ever exercised the ACME install path, so a genuine gap went unseen

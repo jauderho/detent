@@ -803,6 +803,40 @@ mod tests {
         })
     }
 
+    /// Under the real worker confinement, `write_atomic` replaces a file the
+    /// worker owns (its credential stores: `users.json` on a login rehash)
+    /// and reports the owner kept. `WORKER` has no `fchown` and no xattr
+    /// call: the temp file already has the owner, so no `fchown` is made, and
+    /// the refused `flistxattr` is skipped. Before, the write made a
+    /// same-owner `fchown`, got `EPERM` and reported the owner as lost.
+    #[test]
+    fn enforce_mode_worker_replaces_its_own_file_and_keeps_the_owner()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::fs::atomic::{WriteRequest, write_atomic};
+        in_forked_child(|| {
+            let dir =
+                std::env::temp_dir().join(format!("detent-sandbox-owner-{}", std::process::id()));
+            let state = dir.join("state");
+            if std::fs::create_dir_all(&state).is_err() {
+                return false;
+            }
+            let path = state.join("users.json");
+            if std::fs::write(&path, b"old\n").is_err() {
+                return false;
+            }
+            let Ok(allow) = fixture_allowlist(&dir) else {
+                return false;
+            };
+            if confine(Role::Worker, &Policy::worker(&allow)).is_err() {
+                return false;
+            }
+            let mut request = WriteRequest::new(&path, b"new\n", &state);
+            request.keep_backups = 0;
+            write_atomic(&request).is_ok_and(|outcome| outcome.owner_preserved)
+                && std::fs::read(&path).is_ok_and(|bytes| bytes == b"new\n")
+        })
+    }
+
     /// Confines the worker with the real `confine`, after checking what the
     /// privilege drop left behind. The check runs first because the worker's
     /// seccomp table has no `openat`: `/proc/self/status` cannot be read

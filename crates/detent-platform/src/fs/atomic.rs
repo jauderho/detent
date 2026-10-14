@@ -753,11 +753,16 @@ fn replace_contents(
 
     let mut owner_preserved = true;
     if let Some((uid, gid)) = owner {
-        match fchown(&file, Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid))) {
-            Ok(()) => {}
-            // Not root: mode and xattrs still apply, ownership does not.
-            Err(Errno::PERM) => owner_preserved = false,
-            Err(err) => return Err(io_error("fchown", path, err)),
+        let temp = fstat(&file).map_err(|err| io_error("fstat", path, err))?;
+        // The worker replaces only files it owns, and its seccomp table has
+        // no `fchown`: skip the call when it would change nothing.
+        if chown_changes((temp.st_uid, temp.st_gid), (uid, gid), mode) {
+            match fchown(&file, Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid))) {
+                Ok(()) => {}
+                // Not root: mode and xattrs still apply, ownership does not.
+                Err(Errno::PERM) => owner_preserved = false,
+                Err(err) => return Err(io_error("fchown", path, err)),
+            }
         }
     }
 
@@ -775,6 +780,13 @@ fn replace_contents(
 
     fsync(dir_fd).map_err(|err| io_error("fsync", path, err))?;
     Ok(owner_preserved)
+}
+
+/// Whether `fchown` of the temp file from `current` to `target` changes
+/// anything. A `chown` to the owner the file already has still clears a
+/// set-user-ID or set-group-ID bit, so with one in `mode` the call is made.
+const fn chown_changes(current: (u32, u32), target: (u32, u32), mode: u32) -> bool {
+    current.0 != target.0 || current.1 != target.1 || mode & 0o6000 != 0
 }
 
 /// Whether `err` is the temp file of step 5 refused by its directory: a
@@ -879,7 +891,9 @@ fn create_exclusive(
 
 /// Copy every extended attribute from `source` to `dest`. On Linux this
 /// carries `security.selinux`, which is how the `SELinux` label is preserved
-/// without linking libselinux.
+/// without linking libselinux. The worker's seccomp table refuses every xattr
+/// call with `EPERM`, which counts as "no xattrs here": its own credential
+/// files are replaced with the labels their directory gives a new file.
 fn copy_xattrs(source: &File, dest: &File, path: &Path) -> Result<(), AtomicError> {
     let names = match source.list_xattr() {
         Ok(names) => names,
@@ -1018,12 +1032,25 @@ fn rotate_backups(backup_dir: &Path, keep: usize) -> Result<(), AtomicError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AtomicError, Sha256Digest, TempGuard, create_exclusive, libc_enodata, list_backups,
-        open_dir, restore_backup, write_backup, xattr_unsupported,
+        AtomicError, Sha256Digest, TempGuard, chown_changes, create_exclusive, libc_enodata,
+        list_backups, open_dir, restore_backup, write_backup, xattr_unsupported,
     };
     use std::io::Error;
     use std::path::Path;
     use std::time::SystemTime;
+
+    /// A same-owner `fchown` is skipped: the worker, whose seccomp table has
+    /// no `fchown`, replaces only its own files. A set-id bit, or another
+    /// owner or group, still needs the call.
+    #[test]
+    fn chown_is_made_only_when_it_changes_the_temp_file() {
+        assert!(!chown_changes((999, 979), (999, 979), 0o600));
+        assert!(!chown_changes((0, 0), (0, 0), 0o1644));
+        assert!(chown_changes((999, 979), (0, 0), 0o644));
+        assert!(chown_changes((999, 979), (999, 0), 0o644));
+        assert!(chown_changes((0, 0), (0, 0), 0o4755));
+        assert!(chown_changes((0, 0), (0, 0), 0o2755));
+    }
 
     /// `Errno::NOTSUP` and friends mean "no xattrs here"; anything else is a
     /// real failure that must be propagated.
