@@ -449,8 +449,8 @@ deferred by the owner.
 - Owner only: E5 / TM-G12 rulesets (`docs/RELEASING.md`); D3 VM runs; the
   v1.0.0 release and the E16 real-install proof, which needs a published
   release; native-speaker review of the translated locales.
-- In progress: the credential-change console banner (ASVS 2.2.3, 2.5.5) and
-  the worker RSS trim (PLAN §4.1; §4, 2026-10-14).
+- In progress: the credential-change console banner (ASVS 2.2.3, 2.5.5).
+- Done 2026-10-14: the worker RSS trim (PLAN §4.1; `PROGRESS.md`).
 
 `THREAT_MODEL.md` (STRIDE per component, mapped to tests; it must also cover
 any egress §5 would add), `PENTEST_CHECKLIST.md` (ASVS L2), `[privilege]
@@ -627,7 +627,7 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
     implemented on a separate branch; the checklist rows stay Gap until it
     lands.
   - Worker RSS against the PLAN §4.1 30 MiB figure (three-process idle RSS
-    57.5 MiB): investigate and trim. In progress.
+    57.5 MiB): investigate and trim. Done 2026-10-14 (`PROGRESS.md`): 22.8 MiB idle total.
 - D4: remove build toolchains from testhost. — proposed: after Track C A1–A3 —
   owner answer:
 - libbz2 on testhost: `libbz2-1.0` was downgraded to `1.0.8-6build2` by an earlier
