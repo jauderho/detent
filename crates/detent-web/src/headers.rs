@@ -17,8 +17,8 @@
 
 use axum::extract::Request;
 use axum::http::header::{
-    CACHE_CONTROL, CONTENT_SECURITY_POLICY, REFERRER_POLICY, STRICT_TRANSPORT_SECURITY,
-    X_CONTENT_TYPE_OPTIONS,
+    CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_SECURITY_POLICY, REFERRER_POLICY,
+    STRICT_TRANSPORT_SECURITY, X_CONTENT_TYPE_OPTIONS,
 };
 use axum::http::{HeaderName, HeaderValue};
 use axum::middleware::Next;
@@ -105,6 +105,11 @@ pub const PERMISSIONS_POLICY_VALUE: &str = "accelerometer=(), ambient-light-sens
 /// `Cache-Control` for anything under [`API_PREFIX`].
 pub const CACHE_CONTROL_API: &str = "no-store";
 
+/// `Content-Disposition` for anything under [`API_PREFIX`]: an API answer is
+/// never something a browser should render or save under an attacker's name
+/// (reflected file download, ASVS 12.3.4 and 14.4.2).
+pub const CONTENT_DISPOSITION_API: &str = "attachment; filename=\"api.json\"";
+
 /// Path prefix that marks a response as API output rather than a static asset.
 pub const API_PREFIX: &str = "/api/";
 
@@ -156,15 +161,21 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
     if is_api && !headers.contains_key(CACHE_CONTROL) {
         headers.insert(CACHE_CONTROL, HeaderValue::from_static(CACHE_CONTROL_API));
     }
+    if is_api {
+        headers.insert(
+            CONTENT_DISPOSITION,
+            HeaderValue::from_static(CONTENT_DISPOSITION_API),
+        );
+    }
     response
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        API_PREFIX, CACHE_CONTROL_API, CONTENT_SECURITY_POLICY_VALUE, CROSS_ORIGIN_EMBEDDER_POLICY,
-        CROSS_ORIGIN_EMBEDDER_POLICY_VALUE, CROSS_ORIGIN_OPENER_POLICY,
-        CROSS_ORIGIN_OPENER_POLICY_VALUE, CROSS_ORIGIN_RESOURCE_POLICY,
+        API_PREFIX, CACHE_CONTROL_API, CONTENT_DISPOSITION_API, CONTENT_SECURITY_POLICY_VALUE,
+        CROSS_ORIGIN_EMBEDDER_POLICY, CROSS_ORIGIN_EMBEDDER_POLICY_VALUE,
+        CROSS_ORIGIN_OPENER_POLICY, CROSS_ORIGIN_OPENER_POLICY_VALUE, CROSS_ORIGIN_RESOURCE_POLICY,
         CROSS_ORIGIN_RESOURCE_POLICY_VALUE, PERMISSIONS_POLICY, PERMISSIONS_POLICY_VALUE,
         REFERRER_POLICY_VALUE, STRICT_TRANSPORT_SECURITY_VALUE, THEME_SCRIPT_SHA256,
         X_CONTENT_TYPE_OPTIONS_VALUE, security_headers,
@@ -172,8 +183,8 @@ mod tests {
     use axum::Router;
     use axum::body::Body;
     use axum::http::header::{
-        CACHE_CONTROL, CONTENT_SECURITY_POLICY, REFERRER_POLICY, STRICT_TRANSPORT_SECURITY,
-        X_CONTENT_TYPE_OPTIONS,
+        CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_SECURITY_POLICY, REFERRER_POLICY,
+        STRICT_TRANSPORT_SECURITY, X_CONTENT_TYPE_OPTIONS,
     };
     use axum::http::{HeaderName, Request, StatusCode};
     use axum::response::{IntoResponse as _, Response};
@@ -319,6 +330,25 @@ mod tests {
                 .transpose()?,
             Some(CACHE_CONTROL_API)
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn api_answers_are_attachments_and_other_paths_are_not() -> R {
+        for path in ["/api/v1/modules", "/api/v1/absent"] {
+            let response = get_response(path).await?;
+            assert_eq!(
+                response
+                    .headers()
+                    .get(CONTENT_DISPOSITION)
+                    .map(|v| v.to_str())
+                    .transpose()?,
+                Some(CONTENT_DISPOSITION_API),
+                "{path}"
+            );
+        }
+        let page = get_response("/index.html").await?;
+        assert!(page.headers().get(CONTENT_DISPOSITION).is_none());
         Ok(())
     }
 
