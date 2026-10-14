@@ -6,9 +6,10 @@
 //! the workspace already depends on tokio; wrapping it in a sync shim would
 //! embed a runtime in the library.
 //!
-//! No sleeps live here: the caller steps [`present_challenges`],
-//! [`wait_ready`], and [`finalize`] through their retry loops, or runs the
-//! whole flow at once through [`issue`]. [`leaf_validity_der`]/
+//! The only sleep here is the propagation poll in [`present_challenges`], which
+//! a provider bounds through [`DnsProvider::propagation_wait`]. The caller
+//! steps [`present_challenges`], [`wait_ready`], and [`finalize`] through
+//! their retry loops, or runs the whole flow at once through [`issue`]. [`leaf_validity_der`]/
 //! [`leaf_validity_pem`] and [`ari_identifier_der`]/[`ari_identifier`] parse
 //! a leaf certificate's validity window and ARI identifier, DER or PEM.
 
@@ -25,6 +26,7 @@ use instant_acme::{
 use rustls_pki_types::{CertificateDer, pem::PemObject as _};
 use std::path::Path;
 use std::pin::Pin;
+use std::time::{Duration, Instant};
 
 type AcmeHttpClient = Client<HttpsConnector<HttpConnector>, BodyWrapper<Bytes>>;
 
@@ -149,7 +151,7 @@ pub async fn present_challenges(
             cleanup_challenges(provider, &presented);
             return Err(e);
         }
-        if let Err(e) = provider.wait_propagated(&record) {
+        if let Err(e) = confirm_propagated(provider, &record).await {
             let _ = provider.delete(&record);
             presented.pop();
             cleanup_challenges(provider, &presented);
@@ -163,6 +165,32 @@ pub async fn present_challenges(
         }
     }
     Ok(presented)
+}
+
+/// Polls [`DnsProvider::wait_propagated`] while it answers
+/// [`AcmeError::NotPropagated`], pausing as `provider.propagation_wait()`
+/// says: the pause doubles from `initial_delay` up to `max_delay`, and no
+/// attempt starts that would end after `timeout`. Any other answer, and the
+/// last `NotPropagated` once the time is used, is returned as it is.
+pub(crate) async fn confirm_propagated(
+    provider: &dyn DnsProvider,
+    record: &DnsRecord,
+) -> Result<(), AcmeError> {
+    let wait = provider.propagation_wait();
+    let started = Instant::now();
+    let mut delay = wait.initial_delay.max(Duration::from_millis(1));
+    loop {
+        match provider.wait_propagated(record) {
+            Err(AcmeError::NotPropagated(why)) => {
+                if started.elapsed().saturating_add(delay) >= wait.timeout {
+                    return Err(AcmeError::NotPropagated(why));
+                }
+                tokio::time::sleep(delay).await;
+                delay = delay.saturating_mul(2).min(wait.max_delay);
+            }
+            other => return other,
+        }
+    }
 }
 
 /// Deletes every record in `records` through `provider`, ignoring delete
@@ -1432,6 +1460,122 @@ mod tests {
             !missing.exists(),
             "no credential file must be created on refusal"
         );
+        Ok(())
+    }
+
+    /// Answers `NotPropagated` for the first `behind` attempts, then `Ok`,
+    /// and counts the attempts.
+    struct Lagging {
+        behind: usize,
+        attempts: std::sync::atomic::AtomicUsize,
+        wait: crate::PropagationWait,
+    }
+
+    impl Lagging {
+        fn new(behind: usize, timeout_ms: u64) -> Self {
+            Self {
+                behind,
+                attempts: std::sync::atomic::AtomicUsize::new(0),
+                wait: crate::PropagationWait {
+                    initial_delay: Duration::from_millis(2),
+                    max_delay: Duration::from_millis(8),
+                    timeout: Duration::from_millis(timeout_ms),
+                },
+            }
+        }
+
+        fn attempts(&self) -> usize {
+            self.attempts.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl DnsProvider for Lagging {
+        fn present(&self, _: &DnsRecord) -> Result<(), AcmeError> {
+            Ok(())
+        }
+
+        fn delete(&self, _: &DnsRecord) -> Result<(), AcmeError> {
+            Ok(())
+        }
+
+        fn wait_propagated(&self, _: &DnsRecord) -> Result<(), AcmeError> {
+            let n = self
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < self.behind {
+                Err(AcmeError::NotPropagated(format!("attempt {n}")))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn propagation_wait(&self) -> crate::PropagationWait {
+            self.wait
+        }
+    }
+
+    #[tokio::test]
+    async fn confirm_propagated_polls_until_the_record_shows() -> Result<(), AcmeError> {
+        let record = DnsRecord::new("_acme-challenge.example.test", "v")?;
+        let provider = Lagging::new(3, 5_000);
+        confirm_propagated(&provider, &record).await?;
+        assert_eq!(provider.attempts(), 4);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn confirm_propagated_gives_up_at_the_timeout() -> Result<(), AcmeError> {
+        let record = DnsRecord::new("_acme-challenge.example.test", "v")?;
+        let provider = Lagging::new(usize::MAX, 60);
+        let started = Instant::now();
+        let err = confirm_propagated(&provider, &record)
+            .await
+            .err()
+            .ok_or_else(|| AcmeError::Config("a record that never shows passed".into()))?;
+        // The last answer comes back, and the poll was bounded and repeated.
+        assert!(matches!(err, AcmeError::NotPropagated(_)), "{err:?}");
+        assert!(provider.attempts() > 2, "{} attempts", provider.attempts());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn confirm_propagated_makes_one_attempt_for_a_provider_without_a_wait()
+    -> Result<(), AcmeError> {
+        let record = DnsRecord::new("_acme-challenge.example.test", "v")?;
+        let mut provider = Lagging::new(usize::MAX, 0);
+        provider.wait = crate::PropagationWait::ONCE;
+        assert!(confirm_propagated(&provider, &record).await.is_err());
+        assert_eq!(provider.attempts(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn confirm_propagated_does_not_retry_other_errors() -> Result<(), AcmeError> {
+        struct Broken;
+        impl DnsProvider for Broken {
+            fn present(&self, _: &DnsRecord) -> Result<(), AcmeError> {
+                Ok(())
+            }
+            fn delete(&self, _: &DnsRecord) -> Result<(), AcmeError> {
+                Ok(())
+            }
+            fn wait_propagated(&self, _: &DnsRecord) -> Result<(), AcmeError> {
+                Err(AcmeError::Config("no resolver".into()))
+            }
+            fn propagation_wait(&self) -> crate::PropagationWait {
+                crate::PropagationWait {
+                    initial_delay: Duration::from_millis(1),
+                    max_delay: Duration::from_millis(1),
+                    timeout: Duration::from_secs(60),
+                }
+            }
+        }
+        let record = DnsRecord::new("_acme-challenge.example.test", "v")?;
+        let started = Instant::now();
+        let err = confirm_propagated(&Broken, &record).await.err();
+        assert!(matches!(err, Some(AcmeError::Config(_))), "{err:?}");
+        assert!(started.elapsed() < Duration::from_secs(1));
         Ok(())
     }
 

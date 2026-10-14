@@ -559,6 +559,15 @@ pub const fn arg_rules_for(role: Role) -> &'static [ArgRule] {
 /// `statx`, `write`, `writev`, and `access` (refused, tolerated). That run found `ioctl(FIONBIO)` from
 /// `TcpStream::connect_timeout` in the RFC 2136 exchange; `detent-acme`
 /// now bounds a blocking `connect` on a thread instead (`tsig::within`).
+/// The dns-01 propagation check (`detent-acme`, `hickory-client`) adds no
+/// call: its UDP queries to arbitrary nameserver addresses are `socket`,
+/// `bind` (random source port), `sendto`, `recvfrom` and the reactor's
+/// `epoll_ctl`/`epoll_wait`, and a truncated answer is retried over TCP with
+/// the `connect` path above. The table has no argument rule on `socket`,
+/// `connect` or `sendto`, so the address is free. Not traced live here:
+/// `enforce_mode_acme_reaches_out_but_cannot_listen` sends one UDP datagram
+/// through a tokio socket under the filter, and `acme-serve-check.sh` requires
+/// the query in the confined process with no `EPERM`.
 /// Calls the traces showed refused and tolerated
 /// are left out on purpose: `uname` (glibc resolver setup), `ioctl(FIONREAD)`
 /// (glibc resolver), `prctl(PR_SET_NAME)` (thread names) and

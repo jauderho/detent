@@ -295,6 +295,25 @@ type AcmeStarted = (
     detent_web::Config,
 );
 
+/// `provider`, with the nameserver propagation check in front of the CA
+/// unless `[acme] propagation_timeout_secs = 0`. No query is made here: the
+/// check runs in the acme process, when an order presents its challenge.
+#[cfg(all(feature = "web", feature = "acme-dns-providers"))]
+fn with_propagation_check(provider: Provider, acme: &detent_web::AcmeConfig) -> Provider {
+    let timeout = acme.propagation_timeout_secs.map_or(
+        detent_acme::propagation::DEFAULT_TIMEOUT,
+        std::time::Duration::from_secs,
+    );
+    if timeout.is_zero() {
+        return provider;
+    }
+    Box::new(detent_acme::propagation::PropagationCheck::new(
+        provider,
+        acme.propagation_nameservers.clone(),
+        timeout,
+    ))
+}
+
 /// Forks the acme process (ADR-015) with the provider preflight built, or
 /// reports why it could not.
 ///
@@ -312,6 +331,7 @@ fn start_acme(
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Result<AcmeStarted, Exit>> {
+    let provider = with_propagation_check(provider, &config.acme);
     let issuer =
         match crate::acme::AcmeIssuer::new(&config.acme, provider, crate::acme::ORDER_POLICY) {
             Ok(issuer) => issuer,
@@ -2163,6 +2183,29 @@ mod web_tests {
         let self_signed = complete_acme(dir.path()).replace("\"acme\"", "\"self-signed\"");
         let (outcome, notes) = preflight_acme(dir.path(), &self_signed, dir.path())?;
         assert_eq!(outcome, Ok(false), "{notes}");
+        Ok(())
+    }
+
+    #[cfg(feature = "acme-dns-providers")]
+    /// `[acme] propagation_timeout_secs` picks the wait: unset is the 120 s
+    /// default, a number is that many seconds, `0` leaves the provider bare.
+    #[test]
+    fn the_propagation_check_follows_the_acme_settings() -> R {
+        use super::with_propagation_check;
+        use std::time::Duration;
+        let wait = |secs: Option<u64>| -> Result<Duration, Box<dyn std::error::Error>> {
+            let config = detent_web::AcmeConfig {
+                propagation_timeout_secs: secs,
+                ..detent_web::AcmeConfig::default()
+            };
+            let provider = Box::new(detent_acme::CloudflareProvider::new(SECRET, ZONE_ID)?);
+            Ok(with_propagation_check(provider, &config)
+                .propagation_wait()
+                .timeout)
+        };
+        assert_eq!(wait(None)?, Duration::from_secs(120));
+        assert_eq!(wait(Some(45))?, Duration::from_secs(45));
+        assert_eq!(wait(Some(0))?, Duration::ZERO);
         Ok(())
     }
 

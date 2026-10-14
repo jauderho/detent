@@ -124,6 +124,14 @@ pub struct AcmeConfig {
     /// record. `None` means no provider is configured. Its one secret is in
     /// `secrets.toml` (`crate::secrets`), never in this table.
     pub provider: Option<DnsProviderConfig>,
+    /// Seconds the renewal waits for every authoritative nameserver to
+    /// return the challenge TXT value before it asks the CA to validate.
+    /// `None` waits 120 s; `0` turns the check off.
+    pub propagation_timeout_secs: Option<u64>,
+    /// The nameservers to ask for the challenge record, `ip:port` each. Empty
+    /// finds the zone's own servers through `/etc/resolv.conf`. Set it for a
+    /// split-horizon or private zone.
+    pub propagation_nameservers: Vec<SocketAddr>,
 }
 
 /// `[acme.provider]`: which dns-01 provider to use, selected by `kind`.
@@ -597,6 +605,8 @@ mod tests {
         assert!(config.acme.ca_root.is_none());
         assert!(config.acme.profile.is_none());
         assert!(config.acme.provider.is_none());
+        assert!(config.acme.propagation_timeout_secs.is_none());
+        assert!(config.acme.propagation_nameservers.is_empty());
         assert_eq!(config.auth.argon2, Argon2Params::default());
         assert_eq!(config.auth.argon2.m_kib, None);
         assert_eq!(config.auth.argon2.t, 3);
@@ -649,6 +659,8 @@ mod tests {
             credentials_path = "/tmp/acme.json"
             ca_root = "/tmp/ca.pem"
             profile = "shortlived"
+            propagation_timeout_secs = 45
+            propagation_nameservers = ["192.0.2.53:53", "[2001:db8::53]:5353"]
 
             [auth]
             idle_timeout_secs = 60
@@ -696,6 +708,14 @@ mod tests {
         );
         assert_eq!(config.acme.ca_root, Some(PathBuf::from("/tmp/ca.pem")));
         assert_eq!(config.acme.profile.as_deref(), Some("shortlived"));
+        assert_eq!(config.acme.propagation_timeout_secs, Some(45));
+        assert_eq!(
+            config.acme.propagation_nameservers,
+            vec![
+                std::net::SocketAddr::from(([192, 0, 2, 53], 53)),
+                std::net::SocketAddr::from(([0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x53], 5353)),
+            ]
+        );
         assert_eq!(config.auth.argon2.m_kib, Some(65536));
         assert_eq!(config.update.min_age_days, 9);
         assert!(config.update.auto_install);
@@ -704,6 +724,18 @@ mod tests {
         assert!(config.mounts.activate_new_entries);
         assert_eq!(config.privilege.mode, PrivilegeMode::CapabilityUser);
         Ok(())
+    }
+
+    #[test]
+    fn a_bad_propagation_setting_is_refused() {
+        for text in [
+            "[acme]\npropagation_nameservers = [\"ns.example\"]\n",
+            "[acme]\npropagation_nameservers = [\"192.0.2.53\"]\n",
+            "[acme]\npropagation_timeout_secs = -1\n",
+            "[acme]\npropagation_timeout_secs = \"soon\"\n",
+        ] {
+            assert!(Config::parse(text).is_err(), "{text:?}");
+        }
     }
 
     #[test]

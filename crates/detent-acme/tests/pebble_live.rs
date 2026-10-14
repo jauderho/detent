@@ -108,26 +108,105 @@ fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
 #[test]
 #[ignore = "needs a live Pebble: run with PEBBLE_URL (+PEBBLE_CA) set and `-- --ignored`"]
 fn pebble_dns01_issuance() -> Result<(), Box<dyn std::error::Error>> {
+    issuance(TEST_DOMAIN, "plain", None)
+}
+
+/// The same issuance with the propagation check in front of the CA: before
+/// `set_ready`, every nameserver in `CHALLTESTSRV_DNS` (default
+/// `127.0.0.1:8053`, challtestsrv's DNS port) must return the TXT value over
+/// UDP.
+#[cfg(feature = "dns-providers")]
+#[test]
+#[ignore = "needs a live Pebble: run with PEBBLE_URL (+PEBBLE_CA) set and `-- --ignored`"]
+fn pebble_dns01_issuance_with_propagation_check() -> Result<(), Box<dyn std::error::Error>> {
+    issuance("prop.le.wtf", "checked", Some(challtestsrv_dns()?))
+}
+
+/// The check holds the order back: nothing publishes the record, so the
+/// nameserver never returns it, the poll runs out its timeout, and the CA is
+/// never asked to validate.
+#[cfg(feature = "dns-providers")]
+#[test]
+#[ignore = "needs a live Pebble: run with PEBBLE_URL (+PEBBLE_CA) set and `-- --ignored`"]
+fn pebble_dns01_unpublished_record_is_never_validated() -> Result<(), Box<dyn std::error::Error>> {
     let directory = std::env::var("PEBBLE_URL")
         .map_err(|_| "PEBBLE_URL must be set when running the ignored Pebble live test")?;
     let ca = std::env::var("PEBBLE_CA").ok().map(PathBuf::from);
-    let challtestsrv =
-        std::env::var("CHALLTESTSRV").unwrap_or_else(|_| "http://localhost:8055".to_owned());
-    let state_dir = std::env::temp_dir().join("detent-pebble-spike-challenges");
-    let creds_path = std::env::temp_dir().join("detent-pebble-spike-account.json");
-    let _ = std::fs::remove_file(&creds_path); // fresh account per full run
-
-    let (issued, ari) = runtime()?.block_on(async {
+    let state_dir = std::env::temp_dir().join("detent-pebble-unpublished-challenges");
+    let creds_path = std::env::temp_dir().join("detent-pebble-unpublished-account.json");
+    let _ = std::fs::remove_file(&creds_path);
+    let provider = detent_acme::propagation::PropagationCheck::new(
+        Box::new(HookProvider::new(&state_dir)),
+        vec![challtestsrv_dns()?],
+        Duration::from_secs(6),
+    );
+    let err = runtime()?.block_on(async {
         let req = IssueRequest {
             directory_url: &directory,
-            domains: &[TEST_DOMAIN],
+            domains: &["unpublished.le.wtf"],
             credentials_path: &creds_path,
             ca_root: ca.as_deref(),
             profile: None,
             contacts: &[],
             eab: None,
         };
-        let hook = HookProvider::new(&state_dir);
+        let policy = RetryPolicy::new()
+            .initial_delay(Duration::from_millis(200))
+            .timeout(Duration::from_secs(30));
+        // The bridge publishes nothing.
+        issue(&req, &provider, &|_| Ok(()), &policy).await.err()
+    });
+    let _ = std::fs::remove_dir_all(&state_dir);
+    assert!(
+        matches!(err, Some(detent_acme::AcmeError::NotPropagated(_))),
+        "expected NotPropagated, got {err:?}"
+    );
+    Ok(())
+}
+
+/// challtestsrv's DNS address from `CHALLTESTSRV_DNS`.
+#[cfg(feature = "dns-providers")]
+fn challtestsrv_dns() -> Result<std::net::SocketAddr, Box<dyn std::error::Error>> {
+    Ok(std::env::var("CHALLTESTSRV_DNS")
+        .unwrap_or_else(|_| "127.0.0.1:8053".to_owned())
+        .parse()?)
+}
+
+/// One full issuance for `domain`. `label` keeps the state of two runs apart;
+/// `nameserver` puts the propagation check in front of the hook provider.
+fn issuance(
+    domain: &str,
+    label: &str,
+    nameserver: Option<std::net::SocketAddr>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = std::env::var("PEBBLE_URL")
+        .map_err(|_| "PEBBLE_URL must be set when running the ignored Pebble live test")?;
+    let ca = std::env::var("PEBBLE_CA").ok().map(PathBuf::from);
+    let challtestsrv =
+        std::env::var("CHALLTESTSRV").unwrap_or_else(|_| "http://localhost:8055".to_owned());
+    let state_dir = std::env::temp_dir().join(format!("detent-pebble-spike-challenges-{label}"));
+    let creds_path = std::env::temp_dir().join(format!("detent-pebble-spike-account-{label}.json"));
+    let _ = std::fs::remove_file(&creds_path); // fresh account per full run
+
+    let (issued, ari) = runtime()?.block_on(async {
+        let req = IssueRequest {
+            directory_url: &directory,
+            domains: &[domain],
+            credentials_path: &creds_path,
+            ca_root: ca.as_deref(),
+            profile: None,
+            contacts: &[],
+            eab: None,
+        };
+        let hook: Box<dyn detent_acme::DnsProvider> = match nameserver {
+            #[cfg(feature = "dns-providers")]
+            Some(ns) => Box::new(detent_acme::propagation::PropagationCheck::new(
+                Box::new(HookProvider::new(&state_dir)),
+                vec![ns],
+                Duration::from_secs(30),
+            )),
+            _ => Box::new(HookProvider::new(&state_dir)),
+        };
         let bridge = |record: &detent_acme::DnsRecord| {
             publish_to_challtestsrv(&state_dir, record, &challtestsrv)?;
             Ok(())
@@ -136,7 +215,7 @@ fn pebble_dns01_issuance() -> Result<(), Box<dyn std::error::Error>> {
         let policy = RetryPolicy::new()
             .initial_delay(Duration::from_millis(200))
             .timeout(Duration::from_secs(30));
-        let (issued, account, _) = issue(&req, &hook, &bridge, &policy).await?;
+        let (issued, account, _) = issue(&req, hook.as_ref(), &bridge, &policy).await?;
         println!("account: {}", account.id());
         println!(
             "chain:   {} PEM block(s)",
@@ -157,8 +236,8 @@ fn pebble_dns01_issuance() -> Result<(), Box<dyn std::error::Error>> {
         let fresh = detent_acme::should_renew_ari(
             &account,
             &issued.chain_pem,
-            now - 60,
-            now + 576_000,
+            now.saturating_sub(60),
+            now.saturating_add(576_000),
             now,
         )
         .await?;
@@ -168,7 +247,7 @@ fn pebble_dns01_issuance() -> Result<(), Box<dyn std::error::Error>> {
 
     // Cleanup: withdraw the hook files and TXT records.
     let _ = std::fs::remove_dir_all(&state_dir);
-    unpublish_from_challtestsrv(&format!("_acme-challenge.{TEST_DOMAIN}"), &challtestsrv);
+    unpublish_from_challtestsrv(&format!("_acme-challenge.{domain}"), &challtestsrv);
 
     // Assertions: chain parses (PEM → DER, SEQUENCE tag) and the requested
     // domain appears in the leaf DER (SAN dNSName entries are IA5String, so
@@ -184,7 +263,7 @@ fn pebble_dns01_issuance() -> Result<(), Box<dyn std::error::Error>> {
         Some(0x30),
         "DER must open with a SEQUENCE"
     );
-    let domain_bytes = TEST_DOMAIN.as_bytes();
+    let domain_bytes = domain.as_bytes();
     assert!(
         der.windows(domain_bytes.len()).any(|w| w == domain_bytes),
         "requested domain missing from leaf DER SANs"

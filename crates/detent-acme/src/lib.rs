@@ -24,6 +24,8 @@ pub mod attest;
 #[cfg(any(feature = "dns-providers", feature = "fuzzing"))]
 mod https;
 pub mod order;
+#[cfg(feature = "dns-providers")]
+pub mod propagation;
 #[cfg(any(feature = "dns-providers", feature = "fuzzing"))]
 pub mod providers;
 pub mod schedule;
@@ -201,6 +203,35 @@ pub trait DnsProvider: Send + Sync {
     fn wait_propagated(&self, _record: &DnsRecord) -> Result<(), AcmeError> {
         Ok(())
     }
+
+    /// How long the order flow keeps polling [`DnsProvider::wait_propagated`]
+    /// while it answers [`AcmeError::NotPropagated`]. The default is one
+    /// attempt, so a provider that does not ask for more behaves as before.
+    fn propagation_wait(&self) -> PropagationWait {
+        PropagationWait::ONCE
+    }
+}
+
+/// The bounds of the propagation poll: the first pause, the longest pause
+/// (the pause doubles up to it) and the total time. The order flow owns the
+/// loop and the sleeping; a provider only states the numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PropagationWait {
+    /// The pause before the second attempt.
+    pub initial_delay: std::time::Duration,
+    /// The longest pause between two attempts.
+    pub max_delay: std::time::Duration,
+    /// No new attempt starts when it would end after this much time.
+    pub timeout: std::time::Duration,
+}
+
+impl PropagationWait {
+    /// One attempt and no waiting.
+    pub const ONCE: Self = Self {
+        initial_delay: std::time::Duration::ZERO,
+        max_delay: std::time::Duration::ZERO,
+        timeout: std::time::Duration::ZERO,
+    };
 }
 
 // ---------------------------------------------------------------------------

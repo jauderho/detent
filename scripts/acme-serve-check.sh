@@ -87,7 +87,8 @@
 #      answer, the new auth audit record and the "too soon" log line.
 #   5. Finds the four processes in the trace (monitor, runner, acme, worker),
 #      and checks the acme process: uid `detent`, NoNewPrivs 1, Seccomp 2,
-#      Landlock applied, and the TSIG update sent from it.
+#      Landlock applied, the TSIG update sent from it, and the UDP query of
+#      the propagation check (`propagation_nameservers` is the test server).
 #   6. Sends SIGTERM to the whole process group of `serve`, as systemd's
 #      default KillMode=control-group does, and requires all four processes
 #      to end within the stop timeout. The monitor has no SIGTERM handler:
@@ -367,6 +368,7 @@ directory_url = "${DIRECTORY_URL}"
 domains = ["${DOMAIN}"]
 credentials_path = "${STATE_ROOT}/acme/account.json"
 ca_root = "${CA_COPY}"
+propagation_nameservers = ["${DNS_SERVER}"]
 
 [acme.provider]
 kind = "rfc2136"
@@ -726,6 +728,12 @@ for pid in "${MAIN}" "${RUNNER}" "${ACME}" "${WORKER}"; do
   running "${pid}" || die "process ${pid} is not running"
 done
 pass "four processes run: monitor ${MAIN}, runner ${RUNNER}, acme ${ACME}, worker ${WORKER}"
+
+# The propagation check: before it asked Pebble to validate, the acme process
+# queried the nameserver over UDP (hickory-client), under its seccomp filter.
+[[ -n "$(tree_matches "${ACME}" "^(sendto|sendmsg)\(.*htons\(${DNS_PORT}\)")" ]] ||
+  die "the acme process sent no UDP query to ${DNS_SERVER} (the propagation check)"
+pass "the acme process queried ${DNS_SERVER} over UDP for the challenge record"
 
 status_field() {
   awk -v f="$1:" '$1 == f { print $2 }' "/proc/${ACME}/status"

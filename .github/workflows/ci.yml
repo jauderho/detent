@@ -413,10 +413,10 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Build detent-acme
-        run: cargo build -p detent-acme
+        run: cargo build --locked -p detent-acme --features dns-providers
 
       - name: Clippy (detent-acme)
-        run: cargo clippy -p detent-acme --all-targets -- -D warnings
+        run: cargo clippy --locked -p detent-acme --features dns-providers --all-targets -- -D warnings
 
       # See docs/spikes/acme-le.md for the flag gotchas (-dnsserver, not
       # -dns01; pebble's DNSResolver JSON key is ignored). Both containers
@@ -472,7 +472,11 @@ jobs:
           curl -fsS -X POST -d '{"host":"_acme-challenge.preflight.le.wtf."}' http://127.0.0.1:8055/clear-txt || true
           # The spike test writes both the cert chain and sanity assertions (DER,
           # SAN = le.wtf). Capture its --nocapture output into the workflow log.
-          cargo test -p detent-acme -- --ignored --nocapture
+          # `dns-providers` adds the propagation-check runs: the same issuance
+          # with every nameserver asked for the TXT value (challtestsrv answers
+          # on 127.0.0.1:8053) before Pebble validates, and a run where nothing
+          # is published that must stop at the check.
+          cargo test --locked -p detent-acme --features dns-providers -- --ignored --nocapture
 
   # ADR-015 slice C4: `detent serve` with `tls.bootstrap = "acme"`, run as
   # root, gets a certificate from Pebble by dns-01 through the RFC 2136

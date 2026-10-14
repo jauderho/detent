@@ -1453,12 +1453,33 @@ mod tests {
         Ok(())
     }
 
+    /// One datagram to `echo` and back, on a tokio socket.
+    async fn udp_echo(echo: std::net::SocketAddr) -> bool {
+        let Ok(socket) = tokio::net::UdpSocket::bind("0.0.0.0:0").await else {
+            return false;
+        };
+        if socket.send_to(b"ping", echo).await.is_err() {
+            return false;
+        }
+        let mut buf = [0u8; 16];
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            socket.recv_from(&mut buf),
+        )
+        .await
+        {
+            Ok(Ok((n, _))) => buf.get(..n) == Some(b"ping".as_slice()),
+            _ => false,
+        }
+    }
+
     /// The acme child's work under its enforced filter. Returns `0`, or the
     /// number of the first step that failed.
     fn acme_probe(
         port: u16,
         trusted: rustls_pki_types::CertificateDer<'static>,
         unlistened: tokio::net::TcpSocket,
+        echo: std::net::SocketAddr,
         credentials: &Path,
     ) -> i32 {
         use std::net::ToSocketAddrs as _;
@@ -1499,6 +1520,13 @@ mod tests {
             if !refused(unlistened.listen(1)) {
                 return 14;
             }
+            // A UDP DNS exchange as the propagation check makes it
+            // (`hickory-client` over a tokio socket): `socket`, `bind`,
+            // `sendto` to an arbitrary server address, `recvfrom`, and the
+            // reactor's `epoll_ctl`.
+            if !udp_echo(echo).await {
+                return 18;
+            }
             match fetch_over_tls(port, trusted).await {
                 Ok(body) if body == b"pong" => 0,
                 Ok(_) => 15,
@@ -1512,7 +1540,9 @@ mod tests {
     /// filter the child resolves `localhost`, writes its credentials
     /// directory, and fetches `https://localhost:<port>/` from the parent over
     /// TLS 1.3 on a current-thread tokio runtime; a UDP socket binds to port
-    /// 0 (musl's resolver), and `listen` answers `EPERM`.
+    /// 0 (musl's resolver) and a tokio UDP socket exchanges one datagram with
+    /// a loopback server (the propagation check's DNS queries), and `listen`
+    /// answers `EPERM`.
     #[test]
     fn enforce_mode_acme_reaches_out_but_cannot_listen() -> Result<(), Box<dyn std::error::Error>> {
         use crate::privsep::spawn::{SpawnConfig, spawn_acme};
@@ -1540,14 +1570,27 @@ mod tests {
         let unlistened = tokio::net::TcpSocket::new_v4()?;
         unlistened.bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))?;
         let trusted = cert.der().clone();
+        let echo = std::net::UdpSocket::bind("127.0.0.1:0")?;
+        let echo_addr = echo.local_addr()?;
+        echo.set_read_timeout(Some(std::time::Duration::from_secs(20)))?;
 
-        // The fork happens before the server thread starts.
+        // The fork happens before the server threads start.
         let (handle, ()) = spawn_acme(
             &SpawnConfig::unprivileged(),
             &hooks,
             (),
-            move |_channel, ()| acme_probe(addr.port(), trusted, unlistened, &credentials),
+            move |_channel, ()| {
+                acme_probe(addr.port(), trusted, unlistened, echo_addr, &credentials)
+            },
         )?;
+        let echo_thread = std::thread::spawn(move || {
+            let mut buf = [0u8; 64];
+            if let Ok((n, from)) = echo.recv_from(&mut buf)
+                && let Some(packet) = buf.get(..n)
+            {
+                let _ = echo.send_to(packet, from);
+            }
+        });
         let server_thread = std::thread::spawn(move || {
             let served = serve_one_https(&listener, std::sync::Arc::new(tls_config));
             (served, listener)
@@ -1556,6 +1599,9 @@ mod tests {
         // Unblock `accept` if the child never connected.
         drop(std::net::TcpStream::connect(addr));
         let (served, _listener) = server_thread.join().map_err(|_| "server thread panicked")?;
+        // A child that never sent leaves the echo thread waiting; free it.
+        drop(std::net::UdpSocket::bind("127.0.0.1:0")?.send_to(b"x", echo_addr));
+        echo_thread.join().map_err(|_| "echo thread panicked")?;
         assert_eq!(status, Some(0), "the acme probe failed; server: {served:?}");
         assert!(served.is_ok(), "{served:?}");
         let account = dir.path().join("acme/account/account.json");
