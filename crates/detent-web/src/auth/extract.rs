@@ -851,7 +851,10 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert!(fixture.audit.records().is_empty());
+        assert_eq!(
+            fixture.audit.records(),
+            [] as [crate::auth::audit::AuthRecord; 0]
+        );
         Ok(())
     }
 

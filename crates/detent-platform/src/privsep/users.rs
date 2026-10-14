@@ -230,13 +230,13 @@ short:x
                 .to_string()
                 .contains('x')
         );
-        assert!(
-            !LookupError::Unreadable {
+        assert_ne!(
+            LookupError::Unreadable {
                 path: missing,
                 source: std::io::Error::from(std::io::ErrorKind::NotFound),
             }
-            .to_string()
-            .is_empty()
+            .to_string(),
+            ""
         );
         Ok(())
     }

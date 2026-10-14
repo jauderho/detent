@@ -1333,7 +1333,7 @@ mod tests {
         )?;
         assert_eq!(exit, Exit::Ok);
         let text = String::from_utf8(out)?;
-        assert!(!text.is_empty());
+        assert_ne!(text, "");
         assert!(!text.contains("cli-dryrun"), "{text}");
         Ok(())
     }
@@ -1447,7 +1447,7 @@ mod tests {
             },
             seccomp: Outcome::Applied,
         };
-        assert!(degradation_notes(&full).is_empty());
+        assert_eq!(degradation_notes(&full), [] as [std::string::String; 0]);
         let degraded = Confinement {
             landlock: LandlockOutcome::Unavailable {
                 reason: "old kernel".to_owned(),
@@ -2690,8 +2690,8 @@ mod web_tests {
             },
         );
         assert_eq!(status, 1);
-        assert!(out.is_empty());
-        assert!(!notes.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
+        assert_ne!(notes, [] as [u8; 0]);
         Ok(())
     }
 
@@ -2787,7 +2787,7 @@ mod web_tests {
             &mut streams,
         );
         assert!(prepared.is_none());
-        assert!(!notes.is_empty());
+        assert_ne!(notes, [] as [u8; 0]);
         Ok(())
     }
 
@@ -2938,7 +2938,7 @@ mod web_tests {
             },
         )?;
         assert_eq!(exit, Exit::Failed);
-        assert!(!notes.is_empty());
+        assert_ne!(notes, [] as [u8; 0]);
         Ok(())
     }
 
@@ -2974,7 +2974,7 @@ mod web_tests {
             },
         )?;
         assert_eq!(exit, Exit::Failed);
-        assert!(!notes.is_empty());
+        assert_ne!(notes, [] as [u8; 0]);
         Ok(())
     }
 
@@ -3514,7 +3514,13 @@ mod web_tests {
             ]
         );
         // Read-only: nothing is audited.
-        assert!(renew_records(&mut mcp)?.is_empty());
+        assert_eq!(
+            renew_records(&mut mcp)?,
+            [] as [(
+                detent_ops::AuditResult,
+                std::option::Option<std::string::String>
+            ); 0]
+        );
         server.stop()
     }
 

@@ -382,7 +382,7 @@ mod tests {
         .ok_or("a different certificate was trusted")?;
         assert!(matches!(err, ListenerError::Tls(_)), "{err:?}");
         // The request never left the client.
-        assert!(joined(handle)?.is_empty());
+        assert_eq!(joined(handle)?, [] as [u8; 0]);
         Ok(())
     }
 

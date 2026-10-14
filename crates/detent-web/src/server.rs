@@ -599,7 +599,7 @@ mod tests {
         match Server::bind(&config, tls, healthz()).await {
             Err(err @ ServerError::Bind { .. }) => {
                 assert_eq!(err.message_id().as_str(), "web-server-bind-failed");
-                assert!(!err.to_string().is_empty());
+                assert_ne!(err.to_string(), "");
             }
             other => return Err(format!("expected a bind error, got {other:?}").into()),
         }
@@ -616,8 +616,8 @@ mod tests {
         )];
         for (error, id) in cases {
             assert_eq!(error.message_id().as_str(), id);
-            assert!(!error.to_string().is_empty());
-            assert!(!format!("{error:?}").is_empty());
+            assert_ne!(error.to_string(), "");
+            assert_ne!(format!("{error:?}"), "");
             assert!(
                 CATALOGUE
                     .lines()

@@ -200,21 +200,13 @@ mod tests {
         ] {
             let messages = Messages::new(Some(tag));
             assert_eq!(messages.locale(), expected, "{tag}");
-            assert!(
-                !messages
-                    .get(MessageId::new("cli-severity-error"))
-                    .is_empty()
-            );
+            assert_ne!(messages.get(MessageId::new("cli-severity-error")), "");
         }
         // A malformed tag falls through to the environment (`LANG` and
         // friends), whatever that is, without panicking or rendering blanks.
         let messages = Messages::new(Some("!!!"));
-        assert!(!messages.locale().is_empty());
-        assert!(
-            !messages
-                .get(MessageId::new("cli-severity-error"))
-                .is_empty()
-        );
+        assert_ne!(messages.locale(), "");
+        assert_ne!(messages.get(MessageId::new("cli-severity-error")), "");
         assert!(format!("{:?}", Messages::new(Some("en-US"))).contains("en-US"));
     }
 
@@ -251,7 +243,10 @@ mod tests {
         assert!(first.contains("no hostnames"));
         let second = rendered.get(1).ok_or("three lines were rendered")?;
         assert!(second.contains("bad host"));
-        assert!(messages.diagnostics(&Diagnostics::new()).is_empty());
+        assert_eq!(
+            messages.diagnostics(&Diagnostics::new()),
+            [] as [std::string::String; 0]
+        );
         Ok(())
     }
 

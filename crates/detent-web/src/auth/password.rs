@@ -253,7 +253,7 @@ mod tests {
         match Hasher::new(broken, 4096) {
             Err(err @ AuthError::Params(_)) => {
                 assert_eq!(err.message_id().as_str(), "web-auth-argon2-params");
-                assert!(!err.to_string().is_empty());
+                assert_ne!(err.to_string(), "");
             }
             other => return Err(format!("expected a parameter failure, got {other:?}").into()),
         }

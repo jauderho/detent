@@ -1108,7 +1108,7 @@ mod tests {
             })
         );
         assert_eq!(issuer.calls, 0);
-        assert!(installer.installed.is_empty());
+        assert_eq!(installer.installed, [] as [std::string::String; 0]);
         Ok(())
     }
 
@@ -1228,7 +1228,7 @@ mod tests {
             matches!(outcome, Err(RenewError::Issue(AcmeError::NoDns01Challenge))),
             "{outcome:?}"
         );
-        assert!(installer.installed.is_empty());
+        assert_eq!(installer.installed, [] as [std::string::String; 0]);
 
         // A chain that does not parse is not sent to the worker.
         let mut issuer = FakeIssuer::answering([Ok(Issued {
@@ -1245,7 +1245,7 @@ mod tests {
             &mut None,
         ))?;
         assert!(matches!(outcome, Err(RenewError::Chain)), "{outcome:?}");
-        assert!(installer.installed.is_empty());
+        assert_eq!(installer.installed, [] as [std::string::String; 0]);
         Ok(())
     }
 
@@ -1641,7 +1641,7 @@ mod tests {
         });
         assert!(ended?.is_err(), "the loop ended on its own");
         assert_eq!(rounds, 1);
-        assert!(installer.installed.is_empty());
+        assert_eq!(installer.installed, [] as [std::string::String; 0]);
         assert!(logs.contains("a local file operation failed"), "{logs}");
         assert!(!logs.contains(SECRET), "{logs}");
         Ok(())
@@ -2074,7 +2074,7 @@ mod tests {
             })
         );
         assert_eq!(issuer.calls, 0);
-        assert!(installer.installed.is_empty());
+        assert_eq!(installer.installed, [] as [std::string::String; 0]);
         assert!(logs.contains("too soon after the last order"), "{logs}");
         Ok(())
     }
@@ -2846,7 +2846,7 @@ mod tests {
             .renew_now()
             .err()
             .ok_or("the renewer outlived the link")?;
-        assert!(!late.is_empty());
+        assert_ne!(late, "");
         assert!(format!("{renewer:?}").contains("Renewer"));
         Ok(())
     }

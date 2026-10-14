@@ -678,7 +678,7 @@ mod tests {
         assert_eq!(alice.name, "alice");
         assert!(alice.must_change_password);
         assert!(!alice.totp_enrolled);
-        assert!(!alice.created.is_empty());
+        assert_ne!(alice.created, "");
         assert!(
             reloaded
                 .verify_password(&hasher, "alice", "hunter2")

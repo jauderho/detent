@@ -610,7 +610,7 @@ mod tests {
             }
             other => return Err(format!("expected a label refusal, got {other:?}").into()),
         }
-        assert!(store.list().is_empty());
+        assert_eq!(store.list(), [] as [crate::auth::token::TokenView; 0]);
         Ok(())
     }
 
@@ -759,7 +759,7 @@ mod tests {
         let (token, _view) = store.issue("laptop", Scope::Read, None)?;
         std::fs::remove_file(store.path())?;
         store.refresh()?;
-        assert!(store.list().is_empty());
+        assert_eq!(store.list(), [] as [crate::auth::token::TokenView; 0]);
         match store.authenticate(token.expose(), 0) {
             Err(AuthError::UnknownToken) => {}
             other => return Err(format!("a deleted token still worked: {other:?}").into()),

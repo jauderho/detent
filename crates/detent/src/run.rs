@@ -1865,8 +1865,8 @@ mod tests {
             },
         );
         assert_eq!(exit, Exit::Usage);
-        assert!(out.is_empty());
-        assert!(!notes.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
+        assert_ne!(notes, [] as [u8; 0]);
         Ok(())
     }
 
@@ -1891,7 +1891,7 @@ mod tests {
         assert!(out.contains("version"), "{out}");
         let (exit, out, _) = run_with(&["detent"])?;
         assert_eq!(exit, Exit::Usage);
-        assert!(!out.is_empty());
+        assert_ne!(out, "");
         Ok(())
     }
 
@@ -1911,7 +1911,7 @@ mod tests {
         );
         assert_eq!(exit, Exit::Usage);
         assert_eq!(String::from_utf8(out)?.trim(), "no command was given.");
-        assert!(notes.is_empty());
+        assert_eq!(notes, [] as [u8; 0]);
         Ok(())
     }
     #[test]
@@ -2026,8 +2026,8 @@ mod tests {
             false,
         )?;
         assert_eq!(run.exit, Exit::Failed);
-        assert!(run.out.is_empty());
-        assert!(!run.notes.is_empty());
+        assert_eq!(run.out, "");
+        assert_ne!(run.notes, "");
         assert!(never.borrow().is_empty());
         assert!(never_swapped.borrow().is_empty());
         Ok(())
@@ -2051,7 +2051,7 @@ mod tests {
             true,
         )?;
         assert_eq!(run.exit, Exit::Failed);
-        assert!(run.out.is_empty());
+        assert_eq!(run.out, "");
         assert!(run.notes.contains("update failed"), "{}", run.notes);
         Ok(())
     }
@@ -3141,8 +3141,8 @@ mod tests {
         assert_eq!(parsed.get("tag"), Some(&serde_json::json!("v0.0.2")));
         let (exit, out, notes) = run_check(&FailingFeed, &current, &policy, now, &renderer)?;
         assert_eq!(exit, Exit::Failed);
-        assert!(out.is_empty());
-        assert!(!notes.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
+        assert_ne!(notes, [] as [u8; 0]);
         Ok(())
     }
     #[cfg(feature = "update")]
@@ -3313,8 +3313,8 @@ mod tests {
             Exit::Failed,
             "bad cached tag must not serve the stamp"
         );
-        assert!(out.is_empty());
-        assert!(!notes.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
+        assert_ne!(notes, [] as [u8; 0]);
         Ok(())
     }
     #[cfg(feature = "update")]
@@ -3338,7 +3338,7 @@ mod tests {
             "offline",
         )?;
         assert_eq!(exit, Exit::Failed);
-        assert!(out.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
         assert!(String::from_utf8(notes)?.contains("offline"));
         Ok(())
     }
@@ -3452,8 +3452,8 @@ mod tests {
             },
         )?;
         assert_eq!(exit, Exit::Failed);
-        assert!(out.is_empty());
-        assert!(!notes.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
+        assert_ne!(notes, [] as [u8; 0]);
         Ok(())
     }
     #[cfg(feature = "update")]
@@ -3487,7 +3487,7 @@ mod tests {
     #[test]
     fn the_caller_is_named_for_the_audit_log() {
         let who = caller();
-        assert!(!who.subject.is_empty());
+        assert_ne!(who.subject, "");
         assert_eq!(who.kind, detent_ops::IdentityKind::LocalUser);
     }
 
@@ -3549,8 +3549,8 @@ mod tests {
                 let parsed: serde_json::Value = serde_json::from_slice(&out)?;
                 assert!(parsed.pointer("/text").is_some(), "{parsed}");
             } else {
-                assert!(out.is_empty());
-                assert!(!notes.is_empty());
+                assert_eq!(out, [] as [u8; 0]);
+                assert_ne!(notes, [] as [u8; 0]);
             }
         }
         Ok(())
@@ -3753,7 +3753,7 @@ mod tests {
                 },
             )?;
             assert_eq!(exit == Exit::Privilege, privileged);
-            assert!(!String::from_utf8(notes)?.is_empty());
+            assert_ne!(String::from_utf8(notes)?, "");
         }
         assert_eq!(fx.contents()?, b"v1\n");
         fx.session.finish()?;
@@ -4146,7 +4146,7 @@ mod tests {
             );
             assert_eq!(exit, Exit::Failed, "{argv:?}");
             assert!(out.is_empty(), "{argv:?} wrote data for a failure");
-            assert!(!notes.is_empty());
+            assert_ne!(notes, [] as [u8; 0]);
         }
         Ok(())
     }
@@ -4175,7 +4175,7 @@ mod tests {
         assert_eq!(exit, Exit::Failed);
         let notes = String::from_utf8(notes)?;
         assert!(notes.contains("unknown commit id 1"), "{notes}");
-        assert!(out.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
         Ok(())
     }
 

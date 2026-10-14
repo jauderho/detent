@@ -294,7 +294,7 @@ mod tests {
         for (error, id) in cases {
             assert_eq!(error.message_id().as_str(), id);
             assert!(!error.to_string().is_empty(), "{error:?} renders empty");
-            assert!(!format!("{error:?}").is_empty());
+            assert_ne!(format!("{error:?}"), "");
             assert!(
                 catalogue
                     .lines()

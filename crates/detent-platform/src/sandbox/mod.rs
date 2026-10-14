@@ -683,7 +683,7 @@ mod tests {
                 .writable_paths
                 .contains(&PathBuf::from("/run/detent/staging"))
         );
-        assert!(policy.retained_caps.is_empty());
+        assert_eq!(policy.retained_caps, [] as [Capability; 0]);
         assert!(!policy.require_landlock);
         Ok(())
     }
@@ -695,7 +695,7 @@ mod tests {
         let dir = Path::new("/tmp/detent-sandbox-test-acme");
         let policy = Policy::acme(dir);
         assert_eq!(policy.writable_paths, vec![dir.to_path_buf()]);
-        assert!(policy.retained_caps.is_empty());
+        assert_eq!(policy.retained_caps, [] as [Capability; 0]);
         assert!(policy.require_seccomp);
         assert!(!policy.require_landlock);
         assert!(!policy.require_caps);

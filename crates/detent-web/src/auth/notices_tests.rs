@@ -273,7 +273,7 @@ async fn a_failed_change_is_not_a_notice() -> R {
             .record(&AuthRecord::new(event, "alice", AuditResult::Error));
     }
     let id = sign_in(state, "alice").await?;
-    assert!(kinds(&notices_for(state, &id).await?).is_empty());
+    assert_eq!(kinds(&notices_for(state, &id).await?), [] as [&str; 0]);
     Ok(())
 }
 

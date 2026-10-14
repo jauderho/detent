@@ -2629,7 +2629,7 @@ mod tests {
         assert_eq!(descriptor.checks.len(), 4);
         assert_eq!(descriptor.services.len(), 3);
         for svc in descriptor.services {
-            assert!(svc.units.bsdrc.is_empty());
+            assert_eq!(svc.units.bsdrc, [] as [&str; 0]);
         }
     }
 
@@ -2678,7 +2678,7 @@ mod tests {
             assert_eq!(first.name, "eth0");
             assert!(first.dhcp_v4);
             assert!(first.dhcp_v6);
-            assert!(first.addresses.is_empty());
+            assert_eq!(first.addresses, [] as [String; 0]);
             let ctx = ValidationCtx::new(&host);
             let diags = NetworkModule::validate(&model, &ctx);
             assert!(
@@ -2795,7 +2795,7 @@ mod tests {
     #[test]
     fn validate_flags_interface_names_the_renderer_refuses() {
         let mut model = NetworkModule::defaults(&profile(Os::Linux));
-        assert!(name_errors(&model).is_empty());
+        assert_eq!(name_errors(&model), [] as [String; 0]);
         // Every renderer accepts ASCII alphanumerics and `-_.` only, and a
         // leading `-` reads as an option to ifup, ip and networkctl.
         for bad in ["eth/0", "eth0:1", "ethé", "-eth0", "eth\"0", "-"] {
@@ -3162,7 +3162,7 @@ mod tests {
         let rendered = NetworkModule::render(&doc);
         assert!(!rendered.contains("1.2.3.4/24"));
         let back = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
-        assert!(back.interfaces[0].addresses.is_empty());
+        assert_eq!(back.interfaces[0].addresses, [] as [String; 0]);
         Ok(())
     }
 
@@ -3370,7 +3370,7 @@ mod tests {
         let (indent, value) = super::parse_netplan_list_item("    -")
             .unwrap_or_else(|| panic!("bare dash must parse"));
         assert_eq!(indent, 4);
-        assert!(value.is_empty());
+        assert_eq!(value, "");
         assert_eq!(super::parse_netplan_list_item("  not-a-list"), None);
     }
 
@@ -4095,7 +4095,7 @@ mod tests {
             .iter()
             .find(|i| i.name == "eth2")
             .unwrap_or_else(|| panic!("eth2 missing"));
-        assert!(eth2.routes.is_empty());
+        assert_eq!(eth2.routes, [] as [crate::Route; 0]);
         assert!(eth2.bridge.is_none());
         Ok(())
     }

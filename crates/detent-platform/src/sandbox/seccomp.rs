@@ -942,7 +942,7 @@ mod tests {
     fn every_table_entry_resolves_or_is_arch_specific() -> Result<(), Box<dyn std::error::Error>> {
         for role in [Role::Monitor, Role::Worker, Role::Acme] {
             let names = syscalls_for(role);
-            assert!(!names.is_empty());
+            assert_ne!(names, [] as [&str; 0]);
             for arch in [Arch::X86_64, Arch::Aarch64] {
                 let numbers = numbers_for(role, arch)?;
                 assert!(
@@ -1237,8 +1237,8 @@ mod tests {
                 }
             }
         }
-        assert!(super::arg_rules_for(Role::Monitor).is_empty());
-        assert!(super::arg_rules_for(Role::Acme).is_empty());
+        assert_eq!(super::arg_rules_for(Role::Monitor), []);
+        assert_eq!(super::arg_rules_for(Role::Acme), []);
         let names: Vec<_> = super::arg_rules_for(Role::Worker)
             .iter()
             .map(|r| r.name)

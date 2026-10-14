@@ -1297,7 +1297,7 @@ mod tests {
             let bytes = encode(&request).unwrap_or_default();
             assert!(!bytes.is_empty(), "{request:?} encoded to nothing");
             assert_eq!(decode::<Request>(&bytes).ok(), Some(request.clone()));
-            assert!(!format!("{request:?}").is_empty());
+            assert_ne!(format!("{request:?}"), "");
         }
     }
 
@@ -1309,7 +1309,7 @@ mod tests {
             // Error variants must render without panicking and must not be
             // empty, since they reach the UI.
             if let Response::Error(err) = &response {
-                assert!(!err.to_string().is_empty());
+                assert_ne!(err.to_string(), "");
             }
         }
     }

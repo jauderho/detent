@@ -679,7 +679,7 @@ mod tests {
                 .transpose()?,
             Some(etag.as_str())
         );
-        assert!(body_bytes(second).await?.is_empty());
+        assert_eq!(body_bytes(second).await?, [] as [u8; 0]);
         Ok(())
     }
 
@@ -718,7 +718,7 @@ mod tests {
     async fn a_missing_asset_with_an_extension_is_404_not_the_app_shell() -> R {
         let response = app().oneshot(get("/assets/does-not-exist.js")?).await?;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert!(body_bytes(response).await?.is_empty());
+        assert_eq!(body_bytes(response).await?, [] as [u8; 0]);
         Ok(())
     }
 
@@ -726,7 +726,7 @@ mod tests {
     async fn an_api_shaped_path_is_refused_not_handed_the_app_shell() -> R {
         let response = app().oneshot(get("/api/v1/nope")?).await?;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert!(body_bytes(response).await?.is_empty());
+        assert_eq!(body_bytes(response).await?, [] as [u8; 0]);
         Ok(())
     }
 

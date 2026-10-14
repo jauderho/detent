@@ -527,6 +527,6 @@ mod tests {
     #[test]
     fn asset_name_tracks_target_triple() {
         assert_eq!(asset_name(), format!("detent-{}", target_triple()));
-        assert!(!target_triple().is_empty());
+        assert_ne!(target_triple(), "");
     }
 }

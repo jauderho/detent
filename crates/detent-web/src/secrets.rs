@@ -277,7 +277,7 @@ mod tests {
         let (text, debug) = (err.to_string(), format!("{err:?}"));
         assert!(!text.contains(VALUE), "{text}");
         assert!(!debug.contains(VALUE), "{debug}");
-        assert!(!text.is_empty());
+        assert_ne!(text, "");
     }
 
     #[test]

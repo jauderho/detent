@@ -751,7 +751,7 @@ fn list_modules_returns_every_registered_descriptor() -> TestResult {
     };
     assert_eq!(ids, vec!["fake"]);
     // Read-only operations are not audited.
-    assert!(fx.records().is_empty());
+    assert_eq!(fx.records(), [] as [detent_ops::AuditRecord; 0]);
     fx.finish()
 }
 
@@ -984,7 +984,7 @@ fn plan_diffs_the_candidate_and_writes_nothing() -> TestResult {
     );
 
     assert_eq!(fx.contents()?, "a\nb\n");
-    assert!(fx.records().is_empty());
+    assert_eq!(fx.records(), [] as [detent_ops::AuditRecord; 0]);
     fx.finish()
 }
 
@@ -999,10 +999,13 @@ fn plan_reports_no_change_for_an_identical_candidate() -> TestResult {
         return Err("Plan must answer with a plan report".into());
     };
     assert!(!plan.would_change);
-    assert!(plan.diff.is_empty());
+    assert_eq!(plan.diff, [] as [detent_ops::Hunk; 0]);
     assert_eq!(plan.unified_diff, "");
-    assert!(plan.affected_services.is_empty());
-    assert!(plan.checks.is_empty());
+    assert_eq!(
+        plan.affected_services,
+        [] as [detent_ops::report::AffectedService; 0]
+    );
+    assert_eq!(plan.checks, [] as [detent_ops::report::CheckReport; 0]);
     fx.finish()
 }
 
@@ -1265,7 +1268,7 @@ fn plan_does_not_run_checks_for_a_model_with_errors() -> TestResult {
     // validate-before-checks gate.
     assert!(matches!(fx.run(plan("BAD")), Err(OpsError::Invalid { .. })));
     assert_eq!(fx.check_runs(), 0, "a root validator ran on invalid input");
-    assert!(fx.records().is_empty());
+    assert_eq!(fx.records(), [] as [detent_ops::AuditRecord; 0]);
 
     // The same harness does run the check for a valid model.
     fx.run(plan("b\n"))?;
@@ -1296,7 +1299,7 @@ fn a_plan_that_ran_checks_is_audited() -> TestResult {
 fn a_plan_without_checks_is_not_audited() -> TestResult {
     let mut fx = harness(b"a\n", Setup::default())?;
     fx.run(plan("b\n"))?;
-    assert!(fx.records().is_empty());
+    assert_eq!(fx.records(), [] as [detent_ops::AuditRecord; 0]);
     fx.finish()
 }
 
@@ -1420,7 +1423,7 @@ fn no_op_apply_skips_write_commit_and_audit() -> TestResult {
         return Err("ListBackups must answer with a listing".into());
     };
     assert!(backups.is_empty(), "a no-op apply created a backup");
-    assert!(fx.records().is_empty());
+    assert_eq!(fx.records(), [] as [detent_ops::AuditRecord; 0]);
     fx.finish()
 }
 
@@ -2249,7 +2252,7 @@ fn a_failed_mount_start_is_reported_and_the_commit_stays_pending() -> TestResult
     let report = apply_v2(&mut fx)?;
     let mounts = report.mounts.ok_or("a mounts report")?;
     assert!(mounts.activated);
-    assert!(mounts.units.is_empty());
+    assert_eq!(mounts.units, [] as [detent_ops::report::MountReport; 0]);
     assert!(
         mounts
             .error
@@ -2534,7 +2537,7 @@ fn service_status_is_asked_of_the_monitor_and_never_run_in_the_worker() -> TestR
     assert_eq!(status.unit, "fake.service");
     assert_eq!(status.state, State::Active);
     assert_eq!(status.enabled, Some(true));
-    assert!(fx.records().is_empty());
+    assert_eq!(fx.records(), [] as [detent_ops::AuditRecord; 0]);
     // Exactly one request left the engine for the read, and it names a
     // binding id, not a unit.
     let statuses: Vec<_> = fx
@@ -2775,7 +2778,7 @@ fn cert_status_answers_from_the_hook_and_writes_no_audit_record() -> TestResult 
     assert_eq!(status_calls.load(Ordering::SeqCst), 1);
     assert_eq!(renew_calls.load(Ordering::SeqCst), 0);
     // Read-only: no record, exactly as for `HostProfile`.
-    assert!(fx.records().is_empty());
+    assert_eq!(fx.records(), [] as [detent_ops::AuditRecord; 0]);
     fx.finish()
 }
 
@@ -2877,7 +2880,7 @@ fn cert_status_is_unsupported_in_the_engine_and_writes_no_audit_record() -> Test
     ));
     // Read-only ops return before auditing (engine.rs `!mutating` early
     // return); CertRenew above is the mutating contrast that writes one.
-    assert!(fx.records().is_empty());
+    assert_eq!(fx.records(), [] as [detent_ops::AuditRecord; 0]);
     fx.finish()
 }
 
@@ -2898,7 +2901,7 @@ fn update_status_is_unsupported_in_the_engine_and_writes_no_audit_record() -> Te
     ));
     // Read-only, so the `!mutating` early return skips auditing, exactly as
     // for CertStatus above.
-    assert!(fx.records().is_empty());
+    assert_eq!(fx.records(), [] as [detent_ops::AuditRecord; 0]);
     fx.finish()
 }
 /// The two audit records of one `UpdateApply`: started, then `result`

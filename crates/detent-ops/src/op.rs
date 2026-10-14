@@ -401,7 +401,7 @@ mod tests {
             let json = serde_json::to_value(&op)?;
             assert_eq!(serde_json::from_value::<Operation>(json)?, op);
             kinds.push(op.kind());
-            assert!(!format!("{op:?}").is_empty());
+            assert_ne!(format!("{op:?}"), "");
             assert_eq!(op.clone(), op);
         }
         assert_eq!(kinds.len(), 17);

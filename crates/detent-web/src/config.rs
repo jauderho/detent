@@ -588,11 +588,11 @@ mod tests {
         assert_eq!(config.listen.request_timeout_secs, 30);
         assert_eq!(config.tls.bootstrap, Bootstrap::SelfSigned);
         assert_eq!(config.tls.cert_dir, PathBuf::from(DEFAULT_CERT_DIR));
-        assert!(config.tls.hostnames.is_empty());
+        assert_eq!(config.tls.hostnames, [] as [String; 0]);
         assert_eq!(config.acme, AcmeConfig::default());
         assert!(config.acme.directory_url.is_none());
-        assert!(config.acme.contacts.is_empty());
-        assert!(config.acme.domains.is_empty());
+        assert_eq!(config.acme.contacts, [] as [String; 0]);
+        assert_eq!(config.acme.domains, [] as [String; 0]);
         assert!(config.acme.credentials_path.is_none());
         assert!(config.acme.ca_root.is_none());
         assert!(config.acme.profile.is_none());

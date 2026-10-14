@@ -633,8 +633,8 @@ mod tests {
             map_write_error(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
             ChannelError::Io(_)
         ));
-        assert!(!ChannelError::Closed.to_string().is_empty());
-        assert!(!ChannelError::Timeout.to_string().is_empty());
+        assert_ne!(ChannelError::Closed.to_string(), "");
+        assert_ne!(ChannelError::Timeout.to_string(), "");
     }
 
     /// A clone is a second handle on the same socket: a frame sent through

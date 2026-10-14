@@ -2980,11 +2980,11 @@ mod tests {
     fn defaults_follow_the_detected_backend() {
         let defaults = ResolverModule::defaults(&profile());
         assert_eq!(defaults.resolv.len(), 2, "loopback + options");
-        assert!(defaults.resolved.is_empty());
-        assert!(defaults.unbound.is_empty());
+        assert_eq!(defaults.resolved, [] as [ResolvedEntry; 0]);
+        assert_eq!(defaults.unbound, [] as [UnboundEntry; 0]);
 
         let defaults = ResolverModule::defaults(&profile_versions(&[(SERVICE_RESOLVED, "257")]));
-        assert!(defaults.resolv.is_empty());
+        assert_eq!(defaults.resolv, [] as [ResolvEntry; 0]);
         assert_eq!(
             defaults.resolved.first(),
             Some(&ResolvedEntry::Resolve),

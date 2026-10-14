@@ -1024,7 +1024,7 @@ mod tests {
     fn a_bootstrap_certificate_loads_into_the_provider() -> R {
         let pair = pair()?;
         let key = pair.to_certified_key()?;
-        assert!(!key.cert.is_empty());
+        assert_ne!(key.cert, [] as [rustls::pki_types::CertificateDer<'_>; 0]);
         Ok(())
     }
 
@@ -1087,7 +1087,7 @@ mod tests {
         // handshake in `tests/tls.rs`. Here we only prove generation succeeds
         // for names of both kinds and that a bad name is refused.
         let ok = bootstrap_self_signed(&["box.example".to_owned(), "10.0.0.1".to_owned()])?;
-        assert!(!ok.cert_der().is_empty());
+        assert_ne!(ok.cert_der(), [] as [u8; 0]);
 
         // rcgen only rejects a SAN that is not representable as IA5 (ASCII),
         // so a non-ASCII name is the reachable failure.
@@ -1106,7 +1106,7 @@ mod tests {
         // `localhost` is always added; asking for it explicitly must not make
         // the certificate carry it twice.
         let pair = bootstrap_self_signed(&["localhost".to_owned()])?;
-        assert!(!pair.cert_der().is_empty());
+        assert_ne!(pair.cert_der(), [] as [u8; 0]);
         Ok(())
     }
 
@@ -1146,7 +1146,10 @@ mod tests {
         assert!(outcome.is_err(), "the poisoning thread did not panic");
         assert!(store.current.is_poisoned());
 
-        assert!(!store.current().cert.is_empty());
+        assert_ne!(
+            store.current().cert,
+            [] as [rustls::pki_types::CertificateDer<'_>; 0]
+        );
         let renewed = pair()?;
         store.replace(&renewed)?;
         assert_eq!(
@@ -1302,7 +1305,7 @@ mod tests {
 
         // A bootstrap pair has no intermediates and still serves exactly one.
         let bootstrap = pair()?;
-        assert!(bootstrap.intermediates_der().is_empty());
+        assert_eq!(bootstrap.intermediates_der(), [] as [Vec<u8>; 0]);
         assert_eq!(bootstrap.to_certified_key()?.cert.len(), 1);
         Ok(())
     }

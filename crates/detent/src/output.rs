@@ -738,7 +738,7 @@ mod tests {
         let unchanged = OpOutcome::Planned(Box::new(crate::tests_support::planned(false)));
         let (out, notes) = render(&unchanged, false)?;
         assert!(out.is_empty(), "an unchanged plan prints no diff: {out}");
-        assert!(!notes.is_empty());
+        assert_ne!(notes, "");
         Ok(())
     }
 
@@ -750,7 +750,7 @@ mod tests {
 
         let (out, notes) = render(&crate::tests_support::module_view(false), false)?;
         assert!(out.is_empty(), "{out}");
-        assert!(!notes.is_empty());
+        assert_ne!(notes, "");
         Ok(())
     }
 
@@ -824,7 +824,7 @@ mod tests {
             let mut text = Vec::new();
             let exit = renderer(&messages, false).error(&mut text, &error, context)?;
             let rendered = String::from_utf8(text)?;
-            assert!(!rendered.is_empty());
+            assert_ne!(rendered, "");
             assert!(
                 !rendered.contains(error.message_id().as_str()),
                 "{error:?} rendered an unresolved id: {rendered}"
@@ -858,7 +858,7 @@ mod tests {
             },
             ErrorContext::default(),
         )?;
-        assert!(!String::from_utf8(text)?.is_empty());
+        assert_ne!(String::from_utf8(text)?, "");
         Ok(())
     }
 
@@ -915,9 +915,9 @@ mod tests {
         };
         let mut sink = Vec::new();
         quiet.note(&mut sink, MessageId::new("cli-valid"), &[])?;
-        assert!(sink.is_empty());
+        assert_eq!(sink, [] as [u8; 0]);
         quiet.line(&mut sink, MessageId::new("cli-valid"), &[])?;
-        assert!(!sink.is_empty());
+        assert_ne!(sink, [] as [u8; 0]);
         Ok(())
     }
 
@@ -1103,7 +1103,7 @@ mod tests {
                     assert!(parsed.pointer("/plan").is_some(), "{parsed}");
                 } else {
                     let notes = String::from_utf8(notes)?;
-                    assert!(!notes.is_empty());
+                    assert_ne!(notes, "");
                     assert!(!notes.contains("cli-dryrun"), "{notes}");
                     assert_eq!(text.starts_with("--- "), with_plan, "{text}");
                 }
@@ -1219,7 +1219,7 @@ mod tests {
             &mut notes,
             &crate::tests_support::dry_run_plan(report),
         )?;
-        assert!(out.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
         let notes = String::from_utf8(notes)?;
         assert!(notes.contains(&module), "{notes}");
         assert!(notes.contains(&path), "{notes}");
@@ -1246,7 +1246,7 @@ mod tests {
             },
         );
         assert!(result.is_err());
-        assert!(out.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
     }
 
     /// The certificate outcomes come from the `detent mcp` hook only: the
@@ -1272,7 +1272,7 @@ mod tests {
             let mut out = Vec::new();
             let mut notes = Vec::new();
             assert!(renderer.outcome(&mut out, &mut notes, &outcome).is_err());
-            assert!(out.is_empty());
+            assert_eq!(out, [] as [u8; 0]);
         }
     }
 }

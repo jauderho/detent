@@ -1196,14 +1196,14 @@ mod tests {
             missing_guards(&["defaults".to_owned(), "nosuid".to_owned()]),
             vec!["nodev", "noexec"]
         );
-        assert!(
+        assert_eq!(
             missing_guards(
                 &MOUNT_GUARDS
                     .iter()
                     .map(|g| (*g).to_owned())
                     .collect::<Vec<_>>()
-            )
-            .is_empty()
+            ),
+            [] as [&str; 0]
         );
     }
 
@@ -1269,9 +1269,15 @@ mod tests {
         let with_root = Model {
             entries: vec![entry("r", "/", "ext4", &["defaults"], 0, 1), data],
         };
-        assert!(findings(&with_root, NO_ROOT_ENTRY, Severity::Warning).is_empty());
+        assert_eq!(
+            findings(&with_root, NO_ROOT_ENTRY, Severity::Warning),
+            [] as [std::string::String; 0]
+        );
         // An empty table is the documented default, not a finding.
-        assert!(findings(&Model::default(), NO_ROOT_ENTRY, Severity::Warning).is_empty());
+        assert_eq!(
+            findings(&Model::default(), NO_ROOT_ENTRY, Severity::Warning),
+            [] as [std::string::String; 0]
+        );
     }
 
     #[test]
@@ -1521,7 +1527,7 @@ mod tests {
         assert!(descriptor.commit_confirm);
         assert!(descriptor.reload_unit_files);
         assert!(descriptor.added_mounts.is_some());
-        assert!(descriptor.services.is_empty());
+        assert_eq!(descriptor.services, []);
         assert_eq!(descriptor.targets.len(), 2);
         for target in descriptor.targets {
             assert!((target.backend_detect)(&profile(Os::Linux, "h")));
@@ -1556,14 +1562,23 @@ mod tests {
 
     #[test]
     fn added_mounts_skips_unchanged_and_removed_entries() {
-        assert!(added(BASE, BASE).is_empty());
-        assert!(added(BASE, "UUID=1 / ext4 defaults 0 1\n").is_empty());
+        assert_eq!(
+            added(BASE, BASE),
+            [] as [(std::string::String, std::string::String); 0]
+        );
+        assert_eq!(
+            added(BASE, "UUID=1 / ext4 defaults 0 1\n"),
+            [] as [(std::string::String, std::string::String); 0]
+        );
     }
 
     #[test]
     fn added_mounts_skips_an_entry_whose_options_alone_changed() {
         let current = BASE.replace("/srv ext4 defaults", "/srv ext4 defaults,noatime");
-        assert!(added(BASE, &current).is_empty());
+        assert_eq!(
+            added(BASE, &current),
+            [] as [(std::string::String, std::string::String); 0]
+        );
     }
 
     #[test]
@@ -1584,7 +1599,10 @@ mod tests {
              UUID=7 /a/../b ext4 defaults 0 0\n\
              not an entry\n"
         );
-        assert!(added(BASE, &current).is_empty());
+        assert_eq!(
+            added(BASE, &current),
+            [] as [(std::string::String, std::string::String); 0]
+        );
     }
 
     #[test]

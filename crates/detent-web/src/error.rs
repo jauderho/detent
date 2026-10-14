@@ -315,7 +315,7 @@ mod tests {
             assert_eq!(api.status(), status);
             assert_eq!(api.message_id().as_str(), id.as_str());
             assert_eq!(api.body().code, code_for(status));
-            assert!(!api.body().code.is_empty());
+            assert_ne!(api.body().code, "");
         }
     }
 

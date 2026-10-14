@@ -437,7 +437,10 @@ mod tests {
             test_cert_store()?,
             dir.path().to_path_buf(),
         );
-        assert!(app.auth.tokens.list().is_empty());
+        assert_eq!(
+            app.auth.tokens.list(),
+            [] as [crate::auth::token::TokenView; 0]
+        );
         Ok(())
     }
 

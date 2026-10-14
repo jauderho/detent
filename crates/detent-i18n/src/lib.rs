@@ -1123,7 +1123,7 @@ mod tests {
         // not a specific outcome. The precedence/parsing logic itself is covered
         // exhaustively above via resolve_env_locale.
         let localizer = Localizer::for_env();
-        assert!(!localizer.locale().is_empty());
+        assert_ne!(localizer.locale(), "");
     }
 
     // ---- get / get_args / has / unknown id ----
@@ -1232,7 +1232,10 @@ mod tests {
     #[test]
     fn render_all_empty_diagnostics_is_empty() {
         let localizer = Localizer::en_us();
-        assert!(localizer.render_all(&Diagnostics::new()).is_empty());
+        assert_eq!(
+            localizer.render_all(&Diagnostics::new()),
+            [] as [std::string::String; 0]
+        );
     }
 
     #[test]

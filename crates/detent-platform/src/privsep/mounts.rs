@@ -655,7 +655,7 @@ mod tests {
                 ),
                 "an unknown target"
             );
-            assert!(units.calls().is_empty());
+            assert_eq!(units.calls(), [] as [(&str, Vec<String>); 0]);
             assert!(!fx.records.join(RECORD).exists());
         }
         Ok(())
@@ -685,7 +685,7 @@ mod tests {
         forget_started(&fx.records)?;
         let after = Units::default();
         assert_eq!(stop_started(&fx.allow, &fx.records, &after)?, Vec::new());
-        assert!(after.calls().is_empty());
+        assert_eq!(after.calls(), [] as [(&str, Vec<String>); 0]);
         Ok(())
     }
 
@@ -699,7 +699,7 @@ mod tests {
             stop_started(&fx.allow, &fx.records, &units),
             Err(HookError::Failed(_))
         ));
-        assert!(units.calls().is_empty());
+        assert_eq!(units.calls(), [] as [(&str, Vec<String>); 0]);
         assert!(!fx.records.join(RECORD).exists());
         Ok(())
     }
@@ -713,7 +713,7 @@ mod tests {
         std::fs::write(&record, text)?;
         let units = Units::default();
         assert!(stop_started(&fx.allow, &fx.records, &units).is_err());
-        assert!(units.calls().is_empty());
+        assert_eq!(units.calls(), [] as [(&str, Vec<String>); 0]);
         Ok(())
     }
 

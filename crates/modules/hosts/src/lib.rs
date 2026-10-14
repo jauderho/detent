@@ -1239,7 +1239,7 @@ mod tests {
         let doc = HostsModule::parse(&src).map_err(|e| e.to_string())?;
         assert_eq!(HostsModule::render(&doc), src);
         let model = HostsModule::to_model(&doc).map_err(|e| e.to_string())?;
-        assert!(model.entries.is_empty());
+        assert_eq!(model.entries, [] as [Entry; 0]);
         Ok(())
     }
 
@@ -1249,7 +1249,7 @@ mod tests {
         let doc = HostsModule::parse(src).map_err(|e| e.to_string())?;
         assert_eq!(HostsModule::render(&doc), src);
         let model = HostsModule::to_model(&doc).map_err(|e| e.to_string())?;
-        assert!(model.entries.is_empty());
+        assert_eq!(model.entries, [] as [Entry; 0]);
         Ok(())
     }
 
@@ -1267,7 +1267,7 @@ mod tests {
         let doc = HostsModule::parse(src).map_err(|e| e.to_string())?;
         assert_eq!(HostsModule::render(&doc), src);
         let model = HostsModule::to_model(&doc).map_err(|e| e.to_string())?;
-        assert!(model.entries.is_empty());
+        assert_eq!(model.entries, [] as [Entry; 0]);
         Ok(())
     }
 
@@ -1319,7 +1319,7 @@ mod tests {
             let mut u = Unstructured::new(data);
             let model = Model::arbitrary(&mut u).unwrap_or_default();
             for e in &model.entries {
-                assert!(!e.hostnames.is_empty());
+                assert_ne!(e.hostnames, [] as [std::string::String; 0]);
                 for name in &e.hostnames {
                     assert!(is_valid_hostname(name), "generated invalid name {name:?}");
                 }

@@ -257,7 +257,7 @@ mod tests {
             replace_all(2, 1),
             vec![Step::Delete(0), Step::Delete(1), Step::Insert(0)]
         );
-        assert!(replace_all(0, 0).is_empty());
+        assert_eq!(replace_all(0, 0), [] as [Step; 0]);
         let old = [1, 2];
         let new = [3];
         assert_eq!(replay(&old, &new, &replace_all(2, 1)), Some(vec![3]));

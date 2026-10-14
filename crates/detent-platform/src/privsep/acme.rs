@@ -823,10 +823,9 @@ mod tests {
                 .to_string()
                 .contains("hello first")
         );
-        assert!(
-            !AcmeChannelError::Channel(ChannelError::Closed)
-                .to_string()
-                .is_empty()
+        assert_ne!(
+            AcmeChannelError::Channel(ChannelError::Closed).to_string(),
+            ""
         );
     }
 }

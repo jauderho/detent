@@ -1206,7 +1206,7 @@ mod tests {
     fn a_deadline_is_rfc3339_utc() {
         let deadline = deadline_rfc3339(90);
         assert!(deadline.ends_with('Z'), "{deadline} is not UTC RFC 3339");
-        assert!(!deadline_rfc3339(0).is_empty());
+        assert_ne!(deadline_rfc3339(0), "");
     }
 
     #[test]

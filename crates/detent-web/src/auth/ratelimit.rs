@@ -361,7 +361,10 @@ mod tests {
         let limiter = RateLimiter::new(5);
         let start = Instant::now();
         for attempt in 0_u32..4 {
-            assert!(limiter.record_failure(ip(1), "alice", start).is_empty());
+            assert_eq!(
+                limiter.record_failure(ip(1), "alice", start),
+                [] as [Principal; 0]
+            );
             assert!(
                 limiter.check(ip(1), "alice", start).is_ok(),
                 "locked out after {attempt} failures"
@@ -389,7 +392,10 @@ mod tests {
     fn a_lockout_expires_on_its_own() -> R {
         let limiter = RateLimiter::new(1);
         let start = Instant::now();
-        assert!(!limiter.record_failure(ip(1), "alice", start).is_empty());
+        assert_ne!(
+            limiter.record_failure(ip(1), "alice", start),
+            [] as [Principal; 0]
+        );
         assert_eq!(retry_after(&limiter, start), Some(BASE_BACKOFF.as_secs()));
 
         // Half way through: still locked, and the answer has been rounded up.
@@ -420,7 +426,10 @@ mod tests {
         let _ = limiter.record_failure(ip(1), "alice", start);
         let _ = limiter.record_failure(ip(1), "alice", start);
         assert!(limiter.check(ip(1), "alice", start).is_ok());
-        assert!(!limiter.record_failure(ip(1), "alice", start).is_empty());
+        assert_ne!(
+            limiter.record_failure(ip(1), "alice", start),
+            [] as [Principal; 0]
+        );
     }
 
     #[test]
@@ -536,7 +545,10 @@ mod tests {
         let limiter = RateLimiter::new(0);
         let start = Instant::now();
         assert!(limiter.check(ip(1), "alice", start).is_ok());
-        assert!(!limiter.record_failure(ip(1), "alice", start).is_empty());
+        assert_ne!(
+            limiter.record_failure(ip(1), "alice", start),
+            [] as [Principal; 0]
+        );
     }
 
     #[test]

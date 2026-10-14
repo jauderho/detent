@@ -366,7 +366,7 @@ fn systemd_fixture_parses_to_its_interfaces() {
     assert!(iface.dhcp_v4 || iface.dhcp_v6);
     assert!(iface.addresses.iter().any(|a| a == "192.168.1.10/24"));
     assert!(iface.dns.iter().any(|d| d == "192.168.1.1"));
-    assert!(!iface.routes.is_empty());
+    assert_ne!(iface.routes, [] as [detent_module_network::Route; 0]);
     assert!(iface.vlan.is_some());
 }
 
@@ -398,7 +398,7 @@ fn netplan_fixture_parses_to_its_interfaces() {
     assert_eq!(iface.name, "eth0");
     assert!(iface.addresses.iter().any(|a| a == "192.168.1.10/24"));
     assert_eq!(iface.gateway_v4.as_deref(), Some("192.168.1.1"));
-    assert!(!iface.routes.is_empty());
+    assert_ne!(iface.routes, [] as [detent_module_network::Route; 0]);
 }
 
 #[test]

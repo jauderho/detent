@@ -188,7 +188,10 @@ fn keep_backups_zero_disables_backups() -> TestResult {
     let out = write_atomic(&req)?;
     assert!(out.backup.is_none());
     assert!(!fx.backups.exists());
-    assert!(list_backups(&fx.backups)?.is_empty());
+    assert_eq!(
+        list_backups(&fx.backups)?,
+        [] as [detent_platform::fs::BackupEntry; 0]
+    );
     Ok(())
 }
 
@@ -463,7 +466,10 @@ fn list_backups_ignores_foreign_entries() -> TestResult {
         fx.backups.join("README"),
         fx.backups.join("2026-01-02T00:00:00.000000000Z-aabbccdd"),
     )?;
-    assert!(list_backups(&fx.backups)?.is_empty());
+    assert_eq!(
+        list_backups(&fx.backups)?,
+        [] as [detent_platform::fs::BackupEntry; 0]
+    );
 
     fs::write(&fx.target, b"old\n")?;
     write_atomic(&request(&fx.target, b"new\n", &fx.backups))?;
@@ -496,7 +502,10 @@ fn backup_failure_aborts_the_write() -> TestResult {
 #[test]
 fn list_backups_on_missing_directory_is_empty() -> TestResult {
     let fx = fixture()?;
-    assert!(list_backups(&fx.backups)?.is_empty());
+    assert_eq!(
+        list_backups(&fx.backups)?,
+        [] as [detent_platform::fs::BackupEntry; 0]
+    );
     Ok(())
 }
 

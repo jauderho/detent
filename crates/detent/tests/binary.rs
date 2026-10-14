@@ -72,8 +72,8 @@ fn malformed_stdin_is_a_usage_error_too() -> TestResult {
 fn an_unknown_module_exits_one() -> TestResult {
     let output = run(&["config", "no-such-module", "defaults"], "")?;
     assert_eq!(code(&output), Some(1));
-    assert!(output.stdout.is_empty());
-    assert!(!output.stderr.is_empty());
+    assert_eq!(output.stdout, [] as [u8; 0]);
+    assert_ne!(output.stderr, [] as [u8; 0]);
     Ok(())
 }
 
@@ -123,7 +123,7 @@ fn mcp_refused_startup_writes_nothing_to_stdout() -> TestResult {
         .stderr(Stdio::piped())
         .output()?;
     assert_eq!(code(&output), Some(1));
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, [] as [u8; 0]);
     let stderr = String::from_utf8(output.stderr)?;
     assert!(stderr.contains("mcp startup refused"), "{stderr}");
     Ok(())
@@ -493,7 +493,7 @@ fn mcp_with_an_unreadable_token_store_refuses_to_start() -> TestResult {
     std::fs::write(root.join("state").join("tokens.json"), b"not json")?;
     let output = run_mcp(&root.to_string_lossy(), Some("any"), &["mcp"])?;
     assert_eq!(code(&output), Some(1));
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, [] as [u8; 0]);
     let notes = String::from_utf8(output.stderr)?;
     assert!(
         notes.contains("the request could not be completed"),
@@ -578,7 +578,7 @@ fn mcp_refuses_to_start_over_a_corrupt_commit_marker() -> TestResult {
 
     let output = run_mcp(&state, Some(&token), &["--dryrun", "mcp"])?;
     assert_eq!(code(&output), Some(1));
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, [] as [u8; 0]);
     let notes = String::from_utf8(output.stderr)?;
     assert!(
         notes.contains("the privileged helper could not be started"),
@@ -762,7 +762,7 @@ fn mcp_http_refuses_root_and_gates_every_request_on_the_bearer() -> TestResult {
     if rustix::process::geteuid().is_root() {
         let output = run_mcp(&state, Some(&token), &["mcp", "--transport", "http"])?;
         assert_eq!(code(&output), Some(3));
-        assert!(output.stdout.is_empty());
+        assert_eq!(output.stdout, [] as [u8; 0]);
         let notes = String::from_utf8(output.stderr)?;
         assert!(
             notes.contains("mcp http transport cannot run as root"),
@@ -954,6 +954,6 @@ fn mcp_stdio_fails_when_the_client_hangs_up_before_initialize() -> TestResult {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, [] as [u8; 0]);
     Ok(())
 }

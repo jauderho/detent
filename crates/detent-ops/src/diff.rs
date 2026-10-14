@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn splitting_keeps_terminators_and_handles_a_missing_final_newline() {
-        assert!(split_lines("").is_empty());
+        assert_eq!(split_lines(""), [] as [&str; 0]);
         assert_eq!(split_lines("a\n"), vec!["a\n"]);
         assert_eq!(split_lines("a\nb"), vec!["a\n", "b"]);
         assert_eq!(split_lines("a\r\nb\r\n"), vec!["a\r\n", "b\r\n"]);
@@ -292,8 +292,8 @@ mod tests {
 
     #[test]
     fn identical_inputs_produce_no_hunks() {
-        assert!(diff("", "", DEFAULT_CONTEXT).is_empty());
-        assert!(diff("a\nb\n", "a\nb\n", DEFAULT_CONTEXT).is_empty());
+        assert_eq!(diff("", "", DEFAULT_CONTEXT), [] as [Hunk; 0]);
+        assert_eq!(diff("a\nb\n", "a\nb\n", DEFAULT_CONTEXT), [] as [Hunk; 0]);
         assert_eq!(render_unified("a", "b", &[]), "");
     }
 

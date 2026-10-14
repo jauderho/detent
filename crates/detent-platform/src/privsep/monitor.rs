@@ -2542,8 +2542,8 @@ mod tests {
         std::fs::set_permissions(&etc, std::fs::Permissions::from_mode(0o770))?;
         let checks = RecordingChecks::default();
         assert_candidate_dir_refused(&run_check_beside(&etc.join("target.conf"), &checks)?);
-        assert!(checks.seen().is_empty());
-        assert!(entries(&etc)?.is_empty());
+        assert_eq!(checks.seen(), [] as [(PathBuf, Vec<u8>); 0]);
+        assert_eq!(entries(&etc)?, [] as [String; 0]);
         assert_eq!(
             std::fs::metadata(&etc)?.permissions().mode() & 0o777,
             0o770,
@@ -2562,8 +2562,8 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link)?;
         let checks = RecordingChecks::default();
         assert_candidate_dir_refused(&run_check_beside(&link.join("target.conf"), &checks)?);
-        assert!(checks.seen().is_empty());
-        assert!(entries(&real)?.is_empty());
+        assert_eq!(checks.seen(), [] as [(PathBuf, Vec<u8>); 0]);
+        assert_eq!(entries(&real)?, [] as [String; 0]);
         Ok(())
     }
 
@@ -2590,8 +2590,8 @@ mod tests {
         )?;
         let checks = RecordingChecks::default();
         assert_candidate_dir_refused(&run_check_beside(&etc.join("target.conf"), &checks)?);
-        assert!(checks.seen().is_empty());
-        assert!(entries(&etc)?.is_empty());
+        assert_eq!(checks.seen(), [] as [(PathBuf, Vec<u8>); 0]);
+        assert_eq!(entries(&etc)?, [] as [String; 0]);
         Ok(())
     }
 
@@ -4356,7 +4356,7 @@ mod tests {
         };
         let mut monitor = greeted(allow, hooks);
         assert_candidate_dir_refused(&write_v2(&mut monitor)?);
-        assert!(checks.seen().is_empty());
+        assert_eq!(checks.seen(), [] as [(PathBuf, Vec<u8>); 0]);
         assert_eq!(std::fs::read(&target)?, b"v1");
         assert_eq!(entries(&etc)?, ["target.conf"]);
         Ok(())
@@ -5654,7 +5654,7 @@ mod tests {
             .ok_or("expected a recovered commit")?;
         assert_eq!(recovered.commit, CommitId(1));
         assert_eq!(recovered.restored, 1);
-        assert!(recovered.failures.is_empty());
+        assert_eq!(recovered.failures, [] as [String; 0]);
         assert_eq!(std::fs::read(&fx.target)?, b"v1");
         assert!(!fx.state_root.join(PENDING_COMMIT_MARKER).exists());
         Ok(())

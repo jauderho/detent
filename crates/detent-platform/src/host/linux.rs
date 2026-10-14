@@ -180,7 +180,7 @@ mod tests {
         let distro = detect_distro(&fs).unwrap_or_default();
         assert_eq!(distro.id, "debian");
         assert_eq!(distro.version_id.as_deref(), Some("12"));
-        assert!(distro.id_like.is_empty());
+        assert_eq!(distro.id_like, [] as [String; 0]);
     }
 
     #[test]
@@ -361,7 +361,7 @@ mod tests {
             detect_resolver_backend(&fs, &mut notes),
             ResolverBackend::SystemdResolved
         );
-        assert!(notes.is_empty());
+        assert_eq!(notes, [] as [String; 0]);
     }
 
     #[test]

@@ -602,7 +602,7 @@ mod tests {
         let decoded = parse_json(&minimal_v2()).expect("v2 entry parses");
         assert!(decoded.is_rekor_v2());
         assert_eq!(decoded.integrated_time, 0);
-        assert!(decoded.signed_entry_timestamp.is_empty());
+        assert_eq!(decoded.signed_entry_timestamp, [] as [u8; 0]);
 
         // An integratedTime on a v2 entry is never used.
         let mut value = minimal_v2();
@@ -655,11 +655,9 @@ mod tests {
             with(1, "not base64!"),
             Err(BundleError::BadBase64(_))
         ));
-        assert!(
-            parse_json(&minimal())
-                .unwrap()
-                .rfc3161_timestamps
-                .is_empty()
+        assert_eq!(
+            parse_json(&minimal()).unwrap().rfc3161_timestamps,
+            [] as [std::vec::Vec<u8>; 0]
         );
     }
 

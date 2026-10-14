@@ -463,8 +463,8 @@ mod tests {
             EngineError::Ops(OpsError::UnknownModule { .. })
         ));
         assert_eq!(err.message_id().as_str(), "ops-unknown-module");
-        assert!(!err.to_string().is_empty());
-        assert!(!format!("{err:?}").is_empty());
+        assert_ne!(err.to_string(), "");
+        assert_ne!(format!("{err:?}"), "");
 
         drop(handle);
         thread.join()?;
@@ -529,7 +529,7 @@ mod tests {
             .ok_or("expected a stopped engine")?;
         assert!(matches!(err, EngineError::Stopped));
         assert_eq!(err.message_id().as_str(), "web-engine-stopped");
-        assert!(!err.to_string().is_empty());
+        assert_ne!(err.to_string(), "");
         assert!(
             CATALOGUE.lines().any(|line| line
                 .split('=')

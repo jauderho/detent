@@ -2980,7 +2980,7 @@ mod tests {
         for os in [Os::MacOs, Os::Other] {
             assert_eq!(DhcpModule::defaults(&profile(os, "")), linux);
         }
-        assert!(!linux.dnsmasq.is_empty());
+        assert_ne!(linux.dnsmasq, [] as [DnsmasqSetting; 0]);
         assert_eq!(linux.kea_v4, KeaConfig::default());
         assert_eq!(linux.kea_v6, KeaConfig::default());
         assert!(!linux.dnsmasq.iter().any(|s| s.key == "dhcp-authoritative"));

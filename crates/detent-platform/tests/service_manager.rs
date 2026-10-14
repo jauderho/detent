@@ -291,7 +291,14 @@ fn systemd_reload_unit_files_is_unavailable_without_systemctl() {
         mgr.reload_unit_files(),
         Err(ServiceError::Unavailable(_))
     ));
-    assert!(fake.calls().is_empty());
+    assert_eq!(
+        fake.calls(),
+        [] as [(
+            std::string::String,
+            std::vec::Vec<std::string::String>,
+            std::time::Duration
+        ); 0]
+    );
 }
 
 #[test]
@@ -301,7 +308,14 @@ fn other_init_systems_have_no_unit_files_to_reload_and_run_nothing() -> TestResu
     let launchd = LaunchdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
     assert!(openrc.reload_unit_files()?.contains("OpenRC"));
     assert!(launchd.reload_unit_files()?.contains("launchd"));
-    assert!(fake.calls().is_empty());
+    assert_eq!(
+        fake.calls(),
+        [] as [(
+            std::string::String,
+            std::vec::Vec<std::string::String>,
+            std::time::Duration
+        ); 0]
+    );
     Ok(())
 }
 
@@ -517,7 +531,14 @@ fn systemd_refuses_a_bad_tag_before_running_anything() {
             "{tag:?}"
         );
     }
-    assert!(fake.calls().is_empty());
+    assert_eq!(
+        fake.calls(),
+        [] as [(
+            std::string::String,
+            std::vec::Vec<std::string::String>,
+            std::time::Duration
+        ); 0]
+    );
 }
 
 #[test]
@@ -528,7 +549,14 @@ fn systemd_without_systemctl_cannot_start_an_update() {
         mgr.start_update("v1.2.3"),
         Err(ServiceError::Unavailable(_))
     ));
-    assert!(fake.calls().is_empty());
+    assert_eq!(
+        fake.calls(),
+        [] as [(
+            std::string::String,
+            std::vec::Vec<std::string::String>,
+            std::time::Duration
+        ); 0]
+    );
 }
 
 #[test]
@@ -545,7 +573,14 @@ fn other_init_systems_cannot_start_an_update_and_run_nothing() {
             Err(ServiceError::Unsupported(ref message)) if message.contains("needs systemd")
         ));
     }
-    assert!(fake.calls().is_empty());
+    assert_eq!(
+        fake.calls(),
+        [] as [(
+            std::string::String,
+            std::vec::Vec<std::string::String>,
+            std::time::Duration
+        ); 0]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -747,7 +782,14 @@ fn other_init_systems_do_not_start_mount_units() {
             Err(ServiceError::Unsupported(_))
         ));
     }
-    assert!(fake.calls().is_empty());
+    assert_eq!(
+        fake.calls(),
+        [] as [(
+            std::string::String,
+            std::vec::Vec<std::string::String>,
+            std::time::Duration
+        ); 0]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -959,7 +1001,14 @@ fn invalid_unit_names_are_rejected_before_any_process_is_run() {
             matches!(openrc.status(&units), Err(ServiceError::InvalidUnitName(_))),
             "expected {bad:?} to be rejected by OpenRcManager"
         );
-        assert!(fake.calls().is_empty());
+        assert_eq!(
+            fake.calls(),
+            [] as [(
+                std::string::String,
+                std::vec::Vec<std::string::String>,
+                std::time::Duration
+            ); 0]
+        );
     }
 }
 
@@ -978,7 +1027,14 @@ fn overlong_unit_name_is_rejected() {
         mgr.status(&units),
         Err(ServiceError::InvalidUnitName(_))
     ));
-    assert!(fake.calls().is_empty());
+    assert_eq!(
+        fake.calls(),
+        [] as [(
+            std::string::String,
+            std::vec::Vec<std::string::String>,
+            std::time::Duration
+        ); 0]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1214,7 +1270,14 @@ fn launchd_act_is_unsupported_and_never_spawns_a_process() {
         mgr.act(&units, ServiceAction::Restart),
         Err(ServiceError::Unsupported(_))
     ));
-    assert!(fake.calls().is_empty());
+    assert_eq!(
+        fake.calls(),
+        [] as [(
+            std::string::String,
+            std::vec::Vec<std::string::String>,
+            std::time::Duration
+        ); 0]
+    );
 }
 
 #[test]
@@ -1374,7 +1437,7 @@ fn real_rc_service_smoke_test() -> TestResult {
         bsdrc: &[],
     };
     match mgr.status(&units) {
-        Ok(status) => assert!(!status.unit.is_empty()),
+        Ok(status) => assert_ne!(status.unit, ""),
         Err(ServiceError::NoKnownUnit { .. }) => {}
         Err(other) => return Err(format!("unexpected error: {other}").into()),
     }

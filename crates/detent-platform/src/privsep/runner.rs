@@ -970,7 +970,10 @@ mod tests {
             );
             client.start_added_mounts(MOUNTED_TARGET)?;
             client.forget_started_mounts()?;
-            assert!(client.stop_started_mounts()?.is_empty());
+            assert_eq!(
+                client.stop_started_mounts()?,
+                [] as [crate::privsep::proto::MountOutcome; 0]
+            );
             Ok(())
         })
     }

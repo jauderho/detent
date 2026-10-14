@@ -122,7 +122,7 @@ mod tests {
         let mut names = fs.list_dir("/etc/netplan");
         names.sort();
         assert_eq!(names, vec!["01.yaml".to_string()]);
-        assert!(fs.list_dir("/etc/empty").is_empty());
+        assert_eq!(fs.list_dir("/etc/empty"), [] as [String; 0]);
         assert!(fs.exists("/etc/empty"));
         assert!(!fs.exists("/etc/missing"));
     }

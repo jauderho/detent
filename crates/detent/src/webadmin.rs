@@ -1185,7 +1185,7 @@ mod tests {
             },
         )?;
         assert_eq!(exit, Exit::Usage);
-        assert!(!notes.is_empty());
+        assert_ne!(notes, [] as [u8; 0]);
         Ok(())
     }
 
@@ -1566,7 +1566,7 @@ mod tests {
         let ran = run_user(&settings, false, &action, "123456\n")?;
         assert_eq!(ran.exit, Exit::Usage);
         assert!(ran.out.is_empty(), "{}", ran.out);
-        assert!(!ran.notes.is_empty());
+        assert_ne!(ran.notes, "");
         Ok(())
     }
 
@@ -1596,7 +1596,7 @@ mod tests {
             },
         )?;
         assert_eq!(exit, Exit::Ok);
-        assert!(out.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
         assert!(!String::from_utf8(notes)?.contains("otpauth"));
         assert!(!enrolled(&settings)?);
         Ok(())
@@ -1737,7 +1737,10 @@ mod tests {
             },
         )?;
         assert_eq!(exit, Exit::Ok, "{}", String::from_utf8_lossy(&notes));
-        assert!(TokenStore::load(&settings.state_root)?.list().is_empty());
+        assert_eq!(
+            TokenStore::load(&settings.state_root)?.list(),
+            [] as [detent_web::auth::TokenView; 0]
+        );
 
         // Revoking an id that no longer exists is a usage error.
         let mut input = std::io::empty();
@@ -1829,8 +1832,11 @@ mod tests {
             },
         )?;
         assert_eq!(exit, Exit::Ok);
-        assert!(TokenStore::load(&settings.state_root)?.list().is_empty());
-        assert!(!notes.is_empty());
+        assert_eq!(
+            TokenStore::load(&settings.state_root)?.list(),
+            [] as [detent_web::auth::TokenView; 0]
+        );
+        assert_ne!(notes, [] as [u8; 0]);
 
         let mut input = std::io::empty();
         let mut out = Vec::new();
@@ -1885,9 +1891,12 @@ mod tests {
         )?;
 
         assert_eq!(exit, Exit::Usage);
-        assert!(out.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
         assert!(String::from_utf8(notes)?.contains("expires-secs is too large"));
-        assert!(TokenStore::load(&settings.state_root)?.list().is_empty());
+        assert_eq!(
+            TokenStore::load(&settings.state_root)?.list(),
+            [] as [detent_web::auth::TokenView; 0]
+        );
         Ok(())
     }
 
@@ -1919,8 +1928,8 @@ mod tests {
             },
         )?;
         assert_eq!(exit, Exit::Failed);
-        assert!(out.is_empty());
-        assert!(!notes.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
+        assert_ne!(notes, [] as [u8; 0]);
         Ok(())
     }
 
@@ -2100,7 +2109,7 @@ mod tests {
             },
         )?;
         assert_eq!(exit, Exit::Failed);
-        assert!(!notes.is_empty());
+        assert_ne!(notes, [] as [u8; 0]);
         Ok(())
     }
 
@@ -2193,7 +2202,7 @@ mod tests {
             },
         )?;
         assert_eq!(exit, Exit::Ok);
-        assert!(!String::from_utf8(out)?.trim().is_empty());
+        assert_ne!(String::from_utf8(out)?.trim(), "");
         Ok(())
     }
 
@@ -2225,8 +2234,8 @@ mod tests {
             },
         )?;
         assert_eq!(exit, Exit::Ok);
-        assert!(out.is_empty());
-        assert!(!notes.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
+        assert_ne!(notes, [] as [u8; 0]);
         assert!(UserStore::load(&settings.state_root)?.is_empty());
 
         let mut input = b"correct-horse-1\ncorrect-horse-1\n".as_slice();
@@ -2246,8 +2255,8 @@ mod tests {
             },
         )?;
         assert_eq!(exit, Exit::Ok);
-        assert!(out.is_empty());
-        assert!(!notes.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
+        assert_ne!(notes, [] as [u8; 0]);
 
         let mut input = std::io::empty();
         let mut out = Vec::new();
@@ -2266,8 +2275,8 @@ mod tests {
             },
         )?;
         assert_eq!(exit, Exit::Ok);
-        assert!(out.is_empty());
-        assert!(!notes.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
+        assert_ne!(notes, [] as [u8; 0]);
 
         let mut input = std::io::empty();
         let mut out = Vec::new();
@@ -2286,8 +2295,8 @@ mod tests {
             },
         )?;
         assert_eq!(exit, Exit::Ok);
-        assert!(out.is_empty());
-        assert!(!notes.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
+        assert_ne!(notes, [] as [u8; 0]);
         Ok(())
     }
 
@@ -2343,7 +2352,7 @@ mod tests {
             },
         )?;
         assert_eq!(exit, Exit::Usage);
-        assert!(!notes.is_empty());
+        assert_ne!(notes, [] as [u8; 0]);
         Ok(())
     }
 
@@ -2497,7 +2506,7 @@ mod tests {
             },
         )?;
         assert_eq!(exit, Exit::Usage);
-        assert!(!notes.is_empty());
+        assert_ne!(notes, [] as [u8; 0]);
         assert!(UserStore::load(&settings.state_root)?.is_empty());
         Ok(())
     }
@@ -2535,7 +2544,7 @@ mod tests {
                 .and_then(serde_json::Value::as_bool),
             Some(true)
         );
-        assert!(notes.is_empty());
+        assert_eq!(notes, [] as [u8; 0]);
         Ok(())
     }
 
@@ -2732,7 +2741,7 @@ mod tests {
             },
         )?;
         assert_eq!(exit, Exit::Usage);
-        assert!(!notes.is_empty());
+        assert_ne!(notes, [] as [u8; 0]);
         Ok(())
     }
 

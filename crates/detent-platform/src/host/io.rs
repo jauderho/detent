@@ -84,7 +84,10 @@ mod tests {
             None
         );
         assert_eq!(fs.read_link("/nonexistent/path/for/detent/tests"), None);
-        assert!(fs.list_dir("/nonexistent/path/for/detent/tests").is_empty());
+        assert_eq!(
+            fs.list_dir("/nonexistent/path/for/detent/tests"),
+            [] as [String; 0]
+        );
     }
 
     #[test]

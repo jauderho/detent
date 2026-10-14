@@ -977,7 +977,7 @@ mod tests {
             )
             .await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert!(fixture.audit.events().is_empty());
+        assert_eq!(fixture.audit.events(), [] as [AuthEvent; 0]);
         Ok(())
     }
 
@@ -1454,7 +1454,7 @@ mod tests {
             )
             .await?;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert!(fixture.audit.events().is_empty());
+        assert_eq!(fixture.audit.events(), [] as [AuthEvent; 0]);
         Ok(())
     }
 
@@ -1998,7 +1998,7 @@ mod tests {
             body.pointer("/message_id").and_then(|v| v.as_str()),
             Some("web-auth-busy")
         );
-        assert!(fixture.audit.events().is_empty());
+        assert_eq!(fixture.audit.events(), [] as [AuthEvent; 0]);
 
         drop(held);
         let accepted = app(&fixture.state)

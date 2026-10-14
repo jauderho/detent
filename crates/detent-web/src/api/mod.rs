@@ -441,7 +441,10 @@ mod tests {
         let caller = Caller::resolve(state, &headers, std::time::Instant::now(), unix_now())?;
 
         assert!(super::authorize(state, &caller, &Operation::CertStatus).is_ok());
-        assert!(fixture.audit.records().is_empty());
+        assert_eq!(
+            fixture.audit.records(),
+            [] as [crate::auth::audit::AuthRecord; 0]
+        );
 
         let error = super::authorize(state, &caller, &Operation::CertRenew)
             .err()

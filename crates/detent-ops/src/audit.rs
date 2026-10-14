@@ -796,7 +796,7 @@ mod tests {
         assert_eq!(entry.after_hash, entry.new_hash);
         assert_eq!(entry.commit_id, Some(7));
         assert_eq!(entry.error_id.as_deref(), Some("ops-hash-conflict"));
-        assert!(!entry.ts.is_empty());
+        assert_ne!(entry.ts, "");
         let json = serde_json::to_value(&entry)?;
         assert_eq!(serde_json::from_value::<AuditRecord>(json)?, entry);
         assert_eq!(entry.clone(), entry);
@@ -870,7 +870,7 @@ mod tests {
         let sink = FileAudit::under_state_root(dir.path());
         assert!(sink.path().ends_with("detent-audit.jsonl"));
         // Reading before anything was written is not an error.
-        assert!(sink.query(&AuditQuery::default())?.is_empty());
+        assert_eq!(sink.query(&AuditQuery::default())?, [] as [AuditRecord; 0]);
         assert!(matches!(sink.verify(), Err(AuditError::Chain(_))));
 
         sink.record(&record("root", Some("hosts"), AuditResult::Ok))?;
@@ -989,7 +989,7 @@ mod tests {
         let dir = tempfile::TempDir::new()?;
         let sink = FileAudit::new(dir.path().join("audit.jsonl"));
         std::fs::write(sink.path(), "")?;
-        assert!(sink.query(&AuditQuery::default())?.is_empty());
+        assert_eq!(sink.query(&AuditQuery::default())?, [] as [AuditRecord; 0]);
         Ok(())
     }
 
@@ -1334,7 +1334,7 @@ mod tests {
             limit: Some(0),
             ..AuditQuery::default()
         })?;
-        assert!(out.is_empty());
+        assert_eq!(out, [] as [AuditRecord; 0]);
         Ok(())
     }
 
@@ -1402,7 +1402,7 @@ mod tests {
     fn the_null_sink_keeps_nothing() -> R {
         let sink = NullAudit;
         sink.record(&record("root", None, AuditResult::Ok))?;
-        assert!(sink.query(&AuditQuery::default())?.is_empty());
+        assert_eq!(sink.query(&AuditQuery::default())?, [] as [AuditRecord; 0]);
         assert_eq!(format!("{NullAudit:?}"), "NullAudit");
         Ok(())
     }
@@ -1429,7 +1429,7 @@ mod tests {
             1
         );
         assert!(format!("{sink:?}").contains("CaptureAudit"));
-        assert!(CaptureAudit::default().records().is_empty());
+        assert_eq!(CaptureAudit::default().records(), [] as [AuditRecord; 0]);
         Ok(())
     }
 }

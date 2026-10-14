@@ -379,7 +379,7 @@ mod tests {
             .with_kind(IdentityKind::Session)
             .with_client_ip("198.51.100.7")
             .with_detail(MessageId::new("web-auth-invalid-credentials"));
-        assert!(!record.ts.is_empty());
+        assert_ne!(record.ts, "");
         assert_eq!(record.subject, "alice");
         assert_eq!(record.client_ip.as_deref(), Some("198.51.100.7"));
         assert_eq!(
@@ -510,7 +510,7 @@ mod tests {
             &sink,
             &AuthRecord::new(AuthEvent::LoginFailed, "alice", AuditResult::Error),
         );
-        assert!(sink.query(None).is_empty());
+        assert_eq!(sink.query(None), [] as [AuthRecord; 0]);
     }
 
     #[test]
@@ -585,7 +585,7 @@ mod tests {
             &sink,
             &AuthRecord::new(AuthEvent::LoginSucceeded, "alice", AuditResult::Ok),
         );
-        assert!(sink.query(None).is_empty());
+        assert_eq!(sink.query(None), [] as [AuthRecord; 0]);
         assert_eq!(format!("{sink:?}"), "NullAuthAudit");
     }
 }

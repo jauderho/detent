@@ -664,7 +664,10 @@ mod tests {
         assert!(empty.check(CheckId(0)).is_none());
         assert!(empty.binding(BindingId(0)).is_none());
         assert!(empty.module(ModuleId(0)).is_none());
-        assert!(empty.hello_ack().targets.is_empty());
+        assert_eq!(
+            empty.hello_ack().targets,
+            [] as [crate::privsep::proto::TargetInfo; 0]
+        );
         Ok(())
     }
 
