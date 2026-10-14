@@ -142,6 +142,31 @@ async fn a_tls13_client_negotiates_tls13_and_h2() -> TestResult {
     running.shutdown().await
 }
 
+/// PLAN §2.7: the bootstrap certificate's key is ECDSA on P-256.
+#[test]
+fn the_bootstrap_certificate_key_is_ecdsa_p256() -> TestResult {
+    use x509_parser::prelude::{FromDer as _, X509Certificate};
+
+    /// id-ecPublicKey, RFC 5480.
+    const OID_EC_PUBLIC_KEY: &str = "1.2.840.10045.2.1";
+    /// secp256r1 / prime256v1, RFC 5480.
+    const OID_P256: &str = "1.2.840.10045.3.1.7";
+
+    let pair = bootstrap_self_signed(&[HOST.to_owned()])?;
+    let (rest, cert) = X509Certificate::from_der(pair.cert_der())?;
+    assert!(rest.is_empty(), "trailing bytes after the certificate");
+    let spki = cert.public_key();
+    assert_eq!(spki.algorithm.algorithm.to_id_string(), OID_EC_PUBLIC_KEY);
+    let curve = spki
+        .algorithm
+        .parameters
+        .as_ref()
+        .ok_or("no curve parameter")?
+        .as_oid()?;
+    assert_eq!(curve.to_id_string(), OID_P256);
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_tls12_only_client_is_refused() -> TestResult {
     let running = start(8).await?;

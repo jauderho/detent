@@ -243,6 +243,22 @@ mod tests {
         Ok(())
     }
 
+    /// PLAN §2.7: `m=64 MiB, t=3, p=1` on a host with room for it. Checked on
+    /// the parameters the hasher reports and on the PHC string a real hash
+    /// carries, so a drift in either shows.
+    #[test]
+    fn the_default_cost_is_64_mib_3_iterations_1_lane() -> R {
+        for ram_mib in [1024, 4096] {
+            let hasher = Hasher::new(Argon2Params::default(), ram_mib)?;
+            assert_eq!(hasher.cost(), (65536, 3, 1), "ram {ram_mib} MiB");
+        }
+        let hasher = Hasher::new(Argon2Params::default(), 4096)?;
+        let phc = hasher.hash("hunter2")?;
+        assert!(phc.starts_with("$argon2id$v=19$m=65536,t=3,p=1$"), "{phc}");
+        assert!(!hasher.needs_rehash(&phc));
+        Ok(())
+    }
+
     #[test]
     fn unusable_parameters_are_a_typed_failure() -> R {
         let broken = Argon2Params {
@@ -355,6 +371,71 @@ mod tests {
         );
         Ok(())
     }
+    /// The CI-safe companion of the `#[ignore]`d ±10 % test above, which stays
+    /// as it is. This one asks only whether the dummy hash is *skipped or
+    /// cheapened*: a missing Argon2 pass on the unknown-user branch is a
+    /// factor of hundreds, so a factor-of-two bound on interleaved medians
+    /// catches it and shared-runner noise cannot trip it.
+    #[test]
+    fn unknown_user_costs_within_a_factor_of_two_of_a_wrong_password() -> R {
+        use std::time::Instant;
+
+        // Large enough that Argon2 dominates a `HashMap` lookup by orders of
+        // magnitude, small enough to keep the test under a few seconds.
+        let params = Argon2Params {
+            m_kib: Some(16384),
+            t: 3,
+            p: 1,
+        };
+        let hasher = Hasher::new(params, 4096)?;
+        let phc = hasher.hash("the real password")?;
+        let time = |body: &dyn Fn()| -> u128 {
+            let started = Instant::now();
+            body();
+            started.elapsed().as_nanos()
+        };
+        let known = || {
+            let _ = hasher.verify("wrong password", &phc);
+        };
+        let unknown = || {
+            let _ = hasher.verify_dummy("wrong password");
+        };
+        known();
+        unknown();
+
+        let mut known_ns = Vec::new();
+        let mut unknown_ns = Vec::new();
+        for iteration in 0_u32..15 {
+            if iteration % 2 == 0 {
+                known_ns.push(time(&known));
+                unknown_ns.push(time(&unknown));
+            } else {
+                unknown_ns.push(time(&unknown));
+                known_ns.push(time(&known));
+            }
+        }
+        let median = |mut timings: Vec<u128>| -> u128 {
+            timings.sort_unstable();
+            timings.get(timings.len() / 2).copied().unwrap_or_default()
+        };
+        let wrong_password = median(known_ns);
+        let unknown_user = median(unknown_ns);
+        assert!(
+            unknown_user > 0 && wrong_password > 0,
+            "a zero timing means the clock is too coarse to judge"
+        );
+        let (low, high) = if wrong_password < unknown_user {
+            (wrong_password, unknown_user)
+        } else {
+            (unknown_user, wrong_password)
+        };
+        assert!(
+            high <= low.saturating_mul(2),
+            "median wrong-password {wrong_password} ns vs unknown-user {unknown_user} ns"
+        );
+        Ok(())
+    }
+
     #[test]
     fn a_parameter_rotation_marks_only_old_hashes_for_rehash() -> R {
         let old = Hasher::new(

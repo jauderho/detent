@@ -334,7 +334,7 @@ fn install_seccomp_inner(role: Role) -> Result<(), seccomp::SeccompError> {
 #[cfg(test)]
 mod tests {
     use super::super::{Hooks, Outcome, Policy, Role, SandboxError, confine};
-    use super::seccomp_verdict;
+    use super::{harden_dumpable, seccomp_verdict};
     use crate::privsep::allowlist::{Allowlist, Config};
     use crate::privsep::proto::{Request, Response};
     use crate::privsep::spawn::SandboxHooks;
@@ -639,6 +639,40 @@ mod tests {
             let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
             let reported = status.lines().any(|l| l == "NoNewPrivs:\t1");
             applied && reported
+        })
+    }
+
+    /// PLAN §2.7 / sandbox step 2: `confine` clears the dumpable flag.
+    ///
+    /// Two halves, because the flag cannot be read back after `confine`:
+    /// `/proc/self/status` has no `Dumpable:` line (only the unrelated
+    /// `CoreDumping:`), and the seccomp tables of both roles refuse `prctl`,
+    /// so `PR_GET_DUMPABLE` answers `EPERM` once the filter is on. So this
+    /// reads the flag back with `PR_GET_DUMPABLE` around `harden_dumpable`
+    /// (the one call `confine` makes), and separately checks that `confine`
+    /// itself reports the outcome `Applied`.
+    #[test]
+    fn dumpable_is_cleared_by_confine() -> Result<(), Box<dyn std::error::Error>> {
+        use rustix::process::{DumpableBehavior, dumpable_behavior};
+
+        in_forked_child(|| {
+            if dumpable_behavior() != Ok(DumpableBehavior::Dumpable) {
+                return false;
+            }
+            matches!(harden_dumpable(), Outcome::Applied)
+                && dumpable_behavior() == Ok(DumpableBehavior::NotDumpable)
+        })?;
+
+        in_forked_child(|| {
+            let dir =
+                std::env::temp_dir().join(format!("detent-sandbox-dump-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            let Ok(allow) = fixture_allowlist(&dir) else {
+                return false;
+            };
+            // `Role::Monitor`, as in `no_new_privs_is_set_afterwards`.
+            confine(Role::Monitor, &Policy::monitor(&allow))
+                .is_ok_and(|confinement| matches!(confinement.dumpable_cleared, Outcome::Applied))
         })
     }
 

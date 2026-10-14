@@ -967,6 +967,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "utoipa",
+ "x509-parser",
  "zeroize",
 ]
 

@@ -507,6 +507,37 @@ mod tests {
         Ok(Request::builder().uri(path).body(Body::empty())?)
     }
 
+    // -- PLAN §2.7 "Misc" controls -------------------------------------------
+
+    /// [`app`] behind `/healthz` and the production middleware stack, so the
+    /// answers carry whatever headers the server really adds.
+    fn hardened() -> Router {
+        crate::server::harden(
+            crate::server::healthz().merge(app()),
+            std::time::Duration::from_secs(30),
+        )
+    }
+
+    #[tokio::test]
+    async fn no_answer_carries_a_server_header() -> R {
+        for path in [
+            "/",
+            "/healthz",
+            "/assets/app-AbCdEfGh.js",
+            "/a/client/route",
+            "/missing-AbCdEfGh.js",
+            "/api/v1/no-such-endpoint",
+        ] {
+            let response = hardened().oneshot(get(path)?).await?;
+            assert!(
+                response.headers().get(header::SERVER).is_none(),
+                "{path} answered {} with a Server header",
+                response.status()
+            );
+        }
+        Ok(())
+    }
+
     // -- content negotiation --------------------------------------------------
 
     #[tokio::test]

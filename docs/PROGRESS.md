@@ -5,6 +5,16 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-14 - PLAN §2.7 control tests
+
+Added a test for each §2.7 control the audit found untested. Names are in `docs/SECURITY_HARDENING.md`.
+
+**Pass:** bootstrap key is ECDSA P-256 (`tests/tls.rs`); default Argon2 cost is 64 MiB, 3, 1 (`password.rs`); no `Server` header (`spa.rs`); `PR_SET_DUMPABLE` is applied by `confine` (`sandbox/linux.rs`, run on the Linux test host as root). New dev-dependency in `detent-web`: `x509-parser`, already in the lock.
+
+**Fail, so not committed (production bugs):** the server prefers `X25519` over `X25519MLKEM768` (rustls `prefer-post-quantum` is off); `/metrics` and `/assets/` answer 200 with the app shell.
+
+**Traps.** `/proc/self/status` has no `Dumpable:` line, and `prctl` is refused by seccomp after `confine`, so the flag cannot be read back afterwards. The `#[ignore]`d ±10 % timing test stays ignored; a 2x-bound companion runs in CI.
+
 ## 2026-10-14 - Track G: dns-01 propagation check (hickory-net)
 
 Before the acme process tells the CA to validate a dns-01 challenge, it asks every authoritative nameserver of the zone for the `_acme-challenge` TXT value and waits until all return it. Bounded: pauses of 2 s doubling to 15 s, 3 s per query, 12 s per call, `[acme] propagation_timeout_secs` (default 120; `0` turns the check off). `[acme] propagation_nameservers` (`ip:port` list) asks exactly those servers instead of finding the zone's own (split-horizon DNS, private zones, tests).

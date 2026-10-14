@@ -83,6 +83,8 @@ proptest = { workspace = true }
 # because the code was never compiled in.
 rustls = { workspace = true, features = ["tls12"] }
 tempfile = { workspace = true }
+# Parses the bootstrap certificate's public key in `tests/tls.rs`; test-only.
+x509-parser = { workspace = true }
 # `pem` is test-only for the same reason: the ACME PEM-bridge fixtures need
 # `cert.pem()` / `serialize_pem()`, and the shipped binary never parses PEM.
 rcgen = { workspace = true, features = ["pem"] }
