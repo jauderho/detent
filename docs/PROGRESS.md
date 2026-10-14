@@ -5,6 +5,16 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-14 - D3: Phase 7 and Phase 8 acceptance run in containers
+
+Owner decision 2026-10-14: no VMs; run the acceptance in containers on the test host. `spikes/d3-containers.sh` builds one podman container per distro (Debian 13, Ubuntu 26.04, Fedora 44, Arch) with systemd as PID 1, a private loopback-only network, all capabilities except `CAP_SYS_TIME`; `spikes/d3-inside.sh` runs get, validate, plan and apply per module (CLI for chrony, samba, nfs; the API with `confirm_secs` for resolver, mounts, dhcp, network), checks the written file and the service, and runs one bad network change with a 60 s window. Results and method: [`spikes/d3-containers.md`](spikes/d3-containers.md). Build under test: `0.1.1` at `59fb2eb`, cross-built; nothing compiled on the test host; no code changed.
+
+**Result.** samba, nfs (Debian, Ubuntu) and mounts pass (mounts includes `scripts/mounts-activation-check.sh`, 20 checks, and a byte-identical fstab after rollback). chrony passes only after the stock `sourcedir`/`confdir` lines are removed. resolver, dhcp and network are blocked by faults found here; BUGFIX Track D 4 to 12 hold the exact output of each (audit log owner after a root CLI write, module-wide external checks, `resolved.conf` not writable under the packaged unit, one target per module and no network-stack detection, silent null model, stock configs refused, ifupdown rewrite drops `source`, wrong service unit for network, `kea -t` as root). Commit-confirm as a file mechanism works: on four flavours the file came back 61 to 62 s after a 60 s window with no confirm. The live link state was not restored (the rollback replays the networkd action), so the Phase 8 acceptance is not met. Track D item 3 is marked done in containers; the VM-only rest is listed there.
+
+**Not testable in a container:** automount units (`Starting of ...automount unsupported`), chrony service state (`CAP_SYS_TIME` dropped), nfs-server on Fedora/Arch, the Landlock line of `doctor`, real NetworkManager, netplan and networkd links.
+
+**Test host.** Installed `podman crun passt uidmap` and the dependencies apt added (`netavark libyajl2 golang-github-containers-image libsubid5 conmon golang-github-containers-common`); purged again, with the podman storage, all containers and images (also the four base images) and the staging directories. No detent file is left; `/var/lib/detent` holds only `monitor.lock`; the `detent` account stays.
+
 ## 2026-10-14 - SPA fallback serves the shell only for client routes
 
 `/metrics`, `/metrics/`, `/assets/`, `/assets` and `/legacy/` answered 200 with `index.html`, because `fallback` served the shell for any path whose last segment had no `.`. Now `crates/detent-web/src/spa.rs` serves it only for `CLIENT_ROUTES` (one trailing slash allowed; `:id` matches one segment). Every other path that is not an asset answers 404 with a fixed HTML page; the security headers stay. Stacked on PR #49.

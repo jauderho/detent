@@ -41,7 +41,7 @@ criteria, flip its status line in `PLAN.md` §5.
 | 0–5 | `[x]` | Done. |
 | 6 ACME | `[~]` | In-repo core done: confined acme process (ADR-015), dns-01 providers + TSIG, scheduled and forced renewal, hot reload, `cert status`, renew button, Pebble CI with a 180 s profile. Open: §3 Track B. Blocked: §3 Track G. |
 | 7 Modules wave 1 | `[~]` | resolver, chrony, mounts, nfs, samba landed. Open: §3 Track D. |
-| 8 Modules wave 2 | `[~]` | network, dhcp landed. Open: VM acceptance runs (§3 Track D). |
+| 8 Modules wave 2 | `[~]` | network, dhcp landed. Container acceptance run done 2026-10-14, faults open (§3 Track D 4 to 12). |
 | 9 Release + update | `[~]` | Workflows, verifier (ADR-014), swap, rollback, healthz, install POST landed. Open: §3 Track E. |
 | 10 FFI + MCP | `[x]` | Done. |
 | 11 BSD | `[deferred]` | Parked (PLAN §1.6). Do not schedule. |
@@ -332,10 +332,118 @@ deferred by the owner.
    checks `x-detent.since` against the detected version (error if older,
    warning if unknown); chrony and samba gate real directives; the web form
    disables a field that needs a newer service and says why.
-3. **VM acceptance runs** (owner): Phase 7 per-module spikes
-   (`docs/spikes/m-<module>.md`) and the Phase 8 matrix (Debian ifupdown +
-   NM, Ubuntu netplan, Fedora NM, Arch networkd), including one deliberate
-   misconfiguration rolled back by commit-confirm.
+3. **Acceptance runs.** Done in containers 2026-10-14 (owner decision D3,
+   no VMs): `docs/spikes/d3-containers.md`, `spikes/d3-containers.sh`. The
+   Phase 7 per-module checks and the Phase 8 matrix ran on Debian, Ubuntu,
+   Fedora and Arch containers, with one deliberate misconfiguration rolled
+   back by commit-confirm. The run found the faults in items 4 to 12; the
+   Phase 8 acceptance is **not met** until they are fixed and the run is
+   repeated. VM-only and still open: real links for NetworkManager, netplan
+   and networkd; `x-systemd.automount`; `chrony` serving time; the Landlock
+   line of `doctor`. Evidence below is from `0.1.1` at `59fb2eb`; every
+   item was seen on the distros named, see the spike for the other rows.
+4. **Root CLI write before `serve` breaks every API apply.** After
+   `packaging/install.sh`, a one-shot `detent config nfs apply ...` as root
+   creates `/var/lib/detent/audit` root-owned. Then `detent serve` runs, and
+   `POST /api/v1/modules/<id>/apply` answers
+   `{"code":"internal","message_id":"ops-audit-unavailable"}`; the journal has
+   `ERROR detent_ops::engine: the audit record could not be persisted
+   error=audit log i/o failed: Permission denied (os error 13)`. Seen on all
+   four distros. Fix idea: the CLI creates the audit files as the worker
+   account, or `serve` repairs the owner at start. Test: root CLI apply, then
+   serve, then API apply must give 200.
+5. **External checks are per module, not per target.** An apply fails closed
+   when any declared validator does not run or fails (`ops-check-failed`),
+   so a module with checks for several backends cannot apply unless every
+   backend's tool is present and judges every candidate:
+   - resolver: `unbound-checkconf` runs on the `resolved.conf` candidate:
+     `the upstream validator /usr/sbin/unbound-checkconf ran; passed: no.
+     /etc/systemd/.detent-candidate-nSGv8s:19: error: unknown keyword
+     '[Resolve]'`. Without the tool: `did not run. monitor refused the
+     request: i/o error: failed to start /usr/sbin/unbound-checkconf: No
+     such file or directory (os error 2)`; the apply fails as well.
+   - dhcp: with dnsmasq the Kea checks fail: `kea-dhcp4 ran; passed: no.
+     Syntax check failed with: Unable to open file /etc/.detent-candidate-9JshLh`
+     and `kea-dhcp6 ... :690.1: Invalid character: i`.
+   - network: `netplan generate` (`failed to start /usr/sbin/netplan`),
+     `nmcli general`, `ifup -n -a` and `networkctl status` (`systemd-networkd
+     is not running`) all must pass. Also `networkctl status` passes in the
+     CLI `plan` but the apply under `serve` still answers `ops-check-failed`
+     (Ubuntu, networkd running, other three validators stubbed): the cause
+     under the unit's sandbox is not isolated.
+   Fix idea: declare checks per target or per backend, run only those whose
+   backend is present, and skip (report) a validator that is not installed.
+6. **Packaged unit cannot write `/etc/systemd/resolved.conf`.** With the
+   validator stubbed, the resolver apply answers `ops-privsep-failed`;
+   monitor log: `write_target ... outcome="error" error="i/o error: openat:
+   read-only filesystem or storage medium"`. `packaging/systemd/detent.service`
+   has `ProtectSystem=strict` and lists `-/etc/systemd/resolved.conf.d` but not
+   `/etc/systemd/resolved.conf`. A drop-in `ReadWritePaths=/etc/systemd/resolved.conf`
+   made the apply, the file and the rollback pass (Debian, Ubuntu, Fedora).
+7. **Modules edit one target; backend detection never sees the network
+   stack.**
+   - resolver: an edit to the `unbound` model is written into
+     `/etc/systemd/resolved.conf` (`+server:` / `+    qname-minimisation: yes`
+     in the plan diff) when systemd-resolved is installed.
+   - dhcp: Kea cannot be edited: `plan` says `this edit cannot be expressed in
+     the file's format: kea settings cannot be applied to a dnsmasq
+     configuration file`, `apply` answers `core-edit-unsupported`, on every
+     distro that has dnsmasq installed (the first target wins).
+   - network: `nm_backend_detect`, `networkd_backend_detect` and
+     `netplan_backend_detect` read `HostProfile::service_version`, but the
+     probes (`SERVICE_PROBES`) only cover chrony, samba, unbound, dnsmasq,
+     kea and resolvectl. With any of those installed the only target is
+     `/etc/network/interfaces`, on every distro (`plan`: `+++
+     /etc/network/interfaces`, `applying this would affect
+     systemd-networkd.service`), including Ubuntu (netplan), Fedora (NM) and
+     Arch (networkd). With the probed services hidden, the networkd directory
+     target is chosen and `get` answers `"model":null` (in one debug run
+     `plan` answered `monitor refused the request: i/o error: target is not
+     a regular file`). NetworkManager keyfile, netplan and networkd
+     drop-in writing were therefore never reached.
+8. **A missing target file is a silent null model.** `detent config <m> get`
+   exits 0 with `"model":null,"current_hash":null,"diagnostics":[]` when none
+   of the module's fixed paths exists: chrony reads only
+   `/etc/chrony/chrony.conf` (Fedora and Arch use `/etc/chrony.conf`);
+   resolver needs `/etc/systemd/resolved.conf` (absent on Fedora and Arch,
+   vendor file under `/usr/lib/systemd/`); network needs
+   `/etc/network/interfaces` (absent on Ubuntu, Fedora, Arch). `plan` says
+   `the managed file does not exist; create it ...`. Fix idea: follow the
+   PLAN file lists per distro, or report a clear error in `get`.
+9. **Stock distro configs are refused.** chrony: `error: `sourcedir` loads
+   external files or runs an external program; this module refuses directives
+   that cross its configured file boundary.` for the stock Debian 13, Ubuntu
+   26.04 and Fedora 44 files (`sourcedir`, `confdir`); dnsmasq on Fedora:
+   `error: `conf-dir` loads external files or runs commands; ...`
+   (`apply` answers `422 ops-invalid-model`). `validate` prints the error and
+   exits 0 while `plan` and `apply` exit 1. A host with the stock file cannot
+   edit any setting. Decide: allow the stock include lines, or make `validate`
+   exit non-zero.
+10. **network ifupdown rewrite drops the `source` line.** On Debian 13, `plan`
+    of a one-interface model shows `-source /etc/network/interfaces.d/*`
+    replaced by `+auto mgmt0`, `+iface mgmt0 inet static`, `+	address
+    192.0.2.1/24`. The include of `interfaces.d` is lost, so a stanza kept
+    there stops applying. Test: a file with `source` plus a model edit must
+    keep the `source` line.
+11. **network service action and rollback use the wrong unit.** The first
+    service binding is `systemd-networkd.service`, whatever stack owns the
+    file. Debian ifupdown: apply with `service_action: reload` leaves `mgmt0`
+    unconfigured; after the 60 s rollback the file is back but the link keeps
+    the bad address (`mgmt0@if2 UP 198.51.100.1/24`; the rollback replays the
+    networkd reload). Fedora, no networkd unit: `ops-privsep-failed`, monitor
+    `unavailable: no known unit name resolved on this host (tried
+    ["systemd-networkd.service"])`. Fix idea: choose the binding from the
+    backend that owns the written file, and for ifupdown/NM/netplan use that
+    backend's apply command.
+12. **`kea-dhcp4 -t` cannot open any file as root in the container.** `kea-dhcp4
+    -t /etc/kea/kea-dhcp4.conf` as root: `Syntax check failed with: Unable to
+    open file /etc/kea/kea-dhcp4.conf`; as `_kea` it passes. Kea 2.6.3
+    (Debian) and 3.0.4 (Ubuntu). Not shown to happen outside a container;
+    check on the test host before D5 is fixed, because the check runs as root.
+    Also minor: every `systemctl stop detent` logs `the web server did not
+    stop cleanly: privsep channel failed`; once, a CLI start after a stop
+    during an open window logged `recovered unconfirmed commit 1; restored 1
+    targets with 1 failures.` (not reproduced).
 
 ### Track E — Milestone M3 (release path)
 
