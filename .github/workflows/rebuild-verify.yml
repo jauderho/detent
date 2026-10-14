@@ -48,7 +48,7 @@ env:
   # hash-for-hash, so it must use the same toolchain release.yml did.
   # The checked-out tag carries its own rust-toolchain.toml; bump this
   # alongside that file on deliberate upgrades.
-  RUST_TOOLCHAIN: "1.98.1"
+  RUST_TOOLCHAIN: "1.99.0"
 
 jobs:
   rebuild-verify:

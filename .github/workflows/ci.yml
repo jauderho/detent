@@ -24,7 +24,7 @@ permissions:
 
 env:
   # The ubuntu-26.04 image provisions only `stable-*` (install-rust.sh:
-  # `--default-toolchain=stable`); there is no versioned `1.98.1-*` dir,
+  # `--default-toolchain=stable`); there is no versioned `1.99.0-*` dir,
   # so a versioned channel would download on first use. RUSTUP_TOOLCHAIN
   # outranks rust-toolchain.toml, forcing every cargo/rustc/rustup step
   # onto the preinstalled default with no download. The pin file stays
@@ -244,7 +244,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # Workflow env forces RUSTUP_TOOLCHAIN=stable (outranks the
-      # `rust-toolchain.toml` 1.98.1 pin), so plain `cargo` resolves to
+      # `rust-toolchain.toml` 1.99.0 pin), so plain `cargo` resolves to
       # stable where cargo-miri is not installed. Route through the
       # nightly toolchain explicitly.
       # No MIRIFLAGS needed: the suite passes under default isolation.
@@ -591,8 +591,8 @@ jobs:
     if: ${{ github.event_name != 'pull_request' }}
     env:
       # Override workflow-wide `stable`: this job installs the pinned
-      # toolchain (macOS images lag at 1.98.0) and must use it, not default.
-      RUSTUP_TOOLCHAIN: "1.98.1"
+      # toolchain (macOS images may lag) and must use it, not default.
+      RUSTUP_TOOLCHAIN: "1.99.0"
     steps:
       # harden-runner supports GitHub-hosted macOS runners in audit mode
       # only (as release.yml's macOS build legs use it).
@@ -606,13 +606,13 @@ jobs:
         with:
           persist-credentials: false
 
-      # macOS images still ship 1.98.0 (Ubuntu 26.04 already has 1.98.1),
+      # macOS images may lag the Ubuntu 26.04 image,
       # so this one job installs the pinned toolchain instead of using
       # the preinstalled copy. Revisit when the macOS image catches up.
       - name: Install Rust toolchain (pinned to rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
-          toolchain: "1.98.1"
+          toolchain: "1.99.0"
           components: clippy
 
       - name: Cache cargo

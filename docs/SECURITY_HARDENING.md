@@ -201,8 +201,8 @@ quietly into the tables above.
    so a versioned channel would download a second copy), the `rust`/`size` jobs
    fail closed with a drift check that reads preinstalled stable from `$RUNNER_TEMP`
    (outside the checkout, where neither the env override nor the pin file masks it),
-   `rust-macos` installs pinned `1.98.1` with a job-level override, and
-   `release.yml`/`rebuild-verify.yml` keep exact `RUST_TOOLCHAIN: "1.98.1"` via
+   `rust-macos` installs pinned `1.99.0` with a job-level override, and
+   `release.yml`/`rebuild-verify.yml` keep exact `RUST_TOOLCHAIN: "1.99.0"` via
    `dtolnay` for hash-for-hash reproducibility (ADR-011).
 
    Neither of these had anything to do with the security controls this document

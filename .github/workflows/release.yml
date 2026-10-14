@@ -29,7 +29,7 @@ env:
   # toolchain cannot drift with the runner image. Bump deliberately
   # together with rust-toolchain.toml. The `rust` job's drift step in
   # ci.yml fails closed when preinstalled stable moves past the pin.
-  RUST_TOOLCHAIN: "1.98.1"
+  RUST_TOOLCHAIN: "1.99.0"
 
 jobs:
   build:
