@@ -12,6 +12,7 @@
 
 import { describe, expect, it } from 'bun:test'
 import { screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import type { SessionView } from '@/api/auth'
 import { errorResponse, jsonResponse, renderWithProviders, stubFetch } from '@/test/providers'
 import App from '../App'
@@ -39,6 +40,19 @@ describe('App', () => {
     expect(screen.getByRole('navigation', { name: 'sections' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'modules' })).toHaveAttribute('href', ROUTES.modules)
     expect(screen.getByRole('button', { name: 'sign out' })).toBeInTheDocument()
+  })
+
+  it('offers a skip link that moves focus to the main landmark', async () => {
+    const stub = stubFetch([jsonResponse(SESSION)])
+    renderWithProviders(<App />, { fetch: stub.fetch, route: INERT_ROUTE })
+    await screen.findByText(NOT_FOUND)
+
+    const skip = screen.getByRole('link', { name: 'skip to content' })
+    expect(document.querySelector('a, button, input, select')).toBe(skip)
+
+    await userEvent.click(skip)
+
+    expect(screen.getByRole('main')).toHaveFocus()
   })
 
   it('shows sign-in with no section strip when nobody is signed in', async () => {

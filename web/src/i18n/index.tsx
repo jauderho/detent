@@ -179,6 +179,13 @@ export function AppLocalizationProvider({ children }: { children: ReactNode }) {
     }
   }, [locale, built])
 
+  // The page language follows the messages on screen, so a screen reader picks
+  // the right voice and the browser the right CJK glyphs after a switch.
+  const shown = built?.locale
+  useEffect(() => {
+    if (shown !== undefined) document.documentElement.lang = shown
+  }, [shown])
+
   if (built === null) return null
   return <LocalizationProvider l10n={built.l10n}>{children}</LocalizationProvider>
 }

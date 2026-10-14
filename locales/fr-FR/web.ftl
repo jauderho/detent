@@ -9,6 +9,7 @@ status-clock-label = utc
 status-mode-label = mode
 theme-toggle-aria = basculer entre le mode clair et le mode sombre
 theme-toggle-title = basculer clair / sombre
+status-skip-link = aller au contenu
 
 ## catfu component layer
 ## Chrome the shared components render themselves. Content strings (field

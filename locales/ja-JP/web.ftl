@@ -9,6 +9,7 @@ status-clock-label = utc
 status-mode-label = モード
 theme-toggle-aria = ライトモードとダークモードを切り替える
 theme-toggle-title = ライト / ダークを切り替え
+status-skip-link = 本文へスキップ
 
 ## catfu component layer
 ## Chrome the shared components render themselves. Content strings (field

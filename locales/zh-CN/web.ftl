@@ -9,6 +9,7 @@ status-clock-label = utc
 status-mode-label = 模式
 theme-toggle-aria = 切换浅色和深色模式
 theme-toggle-title = 切换浅色 / 深色
+status-skip-link = 跳到内容
 
 ## catfu component layer
 ## Chrome the shared components render themselves. Content strings (field

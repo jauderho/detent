@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'bun:test'
 import { FluentBundle } from '@fluent/bundle'
 import { useLocalization } from '@fluent/react'
-import { act, render, screen } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {
   AppLocalizationProvider,
@@ -211,6 +211,26 @@ describe('AppLocalizationProvider', () => {
     })
 
     expect(await screen.findByText('Module')).toBeInTheDocument()
+  })
+
+  it('sets the page language to the locale on screen', async () => {
+    let switchTo: (locale: AvailableLocale) => void = () => undefined
+    function Probe() {
+      switchTo = useLocale().setLocale
+      return null
+    }
+    render(
+      <AppLocalizationProvider>
+        <Probe />
+      </AppLocalizationProvider>,
+    )
+    expect(document.documentElement.lang).toBe('en-US')
+
+    await act(async () => {
+      switchTo('de-DE')
+    })
+
+    await waitFor(() => expect(document.documentElement.lang).toBe('de-DE'))
   })
 })
 
