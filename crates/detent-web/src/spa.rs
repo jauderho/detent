@@ -8,8 +8,8 @@
 //!   asset at that path? ──yes──▶ negotiate encoding ──▶ 200 or 304, cached
 //!            │no
 //!            ▼
-//!   last path segment has a "."? ──yes──▶ 404 (a missing asset)
-//!            │no
+//!   one of the SPA's own client routes ([`CLIENT_ROUTES`])? ──no──▶ 404
+//!            │yes                                  (static error page)
 //!            ▼
 //!   serve `index.html` ──▶ 200 (client-side routing takes it from there)
 //! ```
@@ -45,12 +45,12 @@
 //! * **A hashed asset is cached forever; everything else is revalidated.**
 //!   See [`is_hashed_asset`] for the exact pattern this recognises and where
 //!   it comes from.
-//! * **A missing asset is a 404, never `index.html`.** Only a path whose
-//!   final segment carries no `.` falls back to the app shell — see
-//!   [`looks_like_asset`]. Handing a client-side route to `index.html` makes
-//!   the SPA's own router take over; handing a mistyped or deleted asset
-//!   path to it would turn a deploy mistake into a confusing parse error
-//!   instead of a 404.
+//! * **Only a client route gets `index.html`; anything else is a 404.** The
+//!   shell is served for the paths in [`CLIENT_ROUTES`] (the SPA's own
+//!   routes, kept equal to `web/src/routes/paths.ts` by a test) and for
+//!   nothing else. A mistyped asset, a probe such as `/metrics`, and a
+//!   directory path such as `/assets/` all answer 404 with a static page, so
+//!   the console never looks like it serves a path it does not have.
 //! * **`/api/**` never reaches the SPA fallback**, even for a path this
 //!   build's API does not register: [`fallback`] refuses it before
 //!   consulting [`AssetSource`] at all, so an API 404 is never HTML.
@@ -94,6 +94,26 @@ const CACHE_CONTROL_IMMUTABLE: &str = "public, max-age=31536000, immutable";
 /// deploy cannot strand a browser on a shell that references chunks that no
 /// longer exist.
 const CACHE_CONTROL_REVALIDATE: &str = "no-cache";
+
+/// The SPA's client routes, as `web/src/routes/paths.ts` `ROUTES` lists
+/// them; `:name` stands for any one non-empty segment. The test
+/// `client_routes_match_paths_ts` fails when the two lists differ.
+const CLIENT_ROUTES: &[&str] = &[
+    "/login",
+    "/",
+    "/modules",
+    "/modules/:id",
+    "/services",
+    "/backups",
+    "/audit",
+    "/certificates",
+    "/settings",
+];
+
+/// The static page for a 404 the SPA answers itself. No script, no style,
+/// no link: nothing for the content security policy to allow.
+const NOT_FOUND_PAGE: &str = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+<title>Not found</title></head><body><h1>Not found</h1></body></html>";
 
 // ---------------------------------------------------------------------------
 // Where the bytes come from
@@ -218,8 +238,8 @@ async fn fallback(
     if let Some(response) = asset_response(source.as_ref(), &logical, &headers) {
         return response;
     }
-    if looks_like_asset(&logical) {
-        return StatusCode::NOT_FOUND.into_response();
+    if !is_client_route(path) {
+        return not_found_page();
     }
     asset_response(source.as_ref(), INDEX_HTML, &headers)
         .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response())
@@ -236,16 +256,48 @@ fn logical_path(request_path: &str) -> String {
     }
 }
 
-/// Whether `logical_path`'s final segment carries a `.` — the signal this
-/// module uses to tell a missing *asset* (404) from an unmatched *client
-/// route* (served `index.html`). None of `web/dist`'s own directory
-/// segments carry a `.`, so this is unambiguous for every asset this crate
-/// ships.
-fn looks_like_asset(logical_path: &str) -> bool {
-    logical_path
-        .rsplit('/')
-        .next()
-        .is_some_and(|segment| segment.contains('.'))
+/// Whether `request_path` is one of [`CLIENT_ROUTES`]. One trailing slash
+/// is allowed, as the SPA's router allows it; an empty segment elsewhere
+/// never matches.
+fn is_client_route(request_path: &str) -> bool {
+    let path = match request_path.strip_suffix('/') {
+        Some("") | None => request_path,
+        Some(rest) => rest,
+    };
+    if path == "/" && request_path != "/" {
+        return false;
+    }
+    CLIENT_ROUTES.iter().any(|route| {
+        let mut want = route.split('/');
+        let mut have = path.split('/');
+        loop {
+            match (want.next(), have.next()) {
+                (None, None) => return true,
+                (Some(w), Some(h)) if w.starts_with(':') => {
+                    if h.is_empty() {
+                        return false;
+                    }
+                }
+                (Some(w), Some(h)) if w == h => {}
+                _ => return false,
+            }
+        }
+    })
+}
+
+/// A 404 with the static page, revalidated like the shell.
+fn not_found_page() -> Response {
+    let mut response = (StatusCode::NOT_FOUND, NOT_FOUND_PAGE).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(CACHE_CONTROL_REVALIDATE),
+    );
+    response
 }
 
 // ---------------------------------------------------------------------------
@@ -445,7 +497,7 @@ fn content_type(path: &str) -> &'static str {
 mod tests {
     use super::{
         AssetSource, CACHE_CONTROL_IMMUTABLE, CACHE_CONTROL_REVALIDATE, accepts, content_type,
-        etag_for, if_none_match_hits, is_hashed_asset, logical_path, looks_like_asset, routes,
+        etag_for, if_none_match_hits, is_client_route, is_hashed_asset, logical_path, routes,
         routes_with, table,
     };
     use axum::Router;
@@ -737,7 +789,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_root_and_an_unmatched_route_both_get_index_html() -> R {
-        for path in ["/", "/dashboard/settings"] {
+        for path in ["/", "/modules/hosts"] {
             let response = app().oneshot(get(path)?).await?;
             assert_eq!(response.status(), StatusCode::OK, "{path}");
             assert_eq!(body_bytes(response).await?, b"<html>index</html>", "{path}");
@@ -749,7 +801,7 @@ mod tests {
     async fn a_missing_asset_with_an_extension_is_404_not_the_app_shell() -> R {
         let response = app().oneshot(get("/assets/does-not-exist.js")?).await?;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert_eq!(body_bytes(response).await?, [] as [u8; 0]);
+        assert_ne!(body_bytes(response).await?, b"<html>index</html>");
         Ok(())
     }
 
@@ -814,12 +866,112 @@ mod tests {
     }
 
     #[test]
-    fn looks_like_asset_is_true_only_for_a_dotted_final_segment() {
-        assert!(looks_like_asset("assets/app.js"));
-        assert!(looks_like_asset("favicon.ico"));
-        assert!(!looks_like_asset("dashboard"));
-        assert!(!looks_like_asset("dashboard/settings"));
-        assert!(!looks_like_asset(""));
+    fn is_client_route_matches_routes_params_and_one_trailing_slash() {
+        for yes in [
+            "/",
+            "/login",
+            "/modules",
+            "/modules/",
+            "/modules/hosts",
+            "/modules/hosts/",
+        ] {
+            assert!(is_client_route(yes), "{yes}");
+        }
+        for no in [
+            "",
+            "/metrics",
+            "/metrics/",
+            "/assets",
+            "/assets/",
+            "/modules//",
+            "/modules//x",
+            "/modules/hosts/extra",
+            "//",
+            "/login//",
+            "/dashboard/settings",
+        ] {
+            assert!(!is_client_route(no), "{no}");
+        }
+    }
+
+    /// `CLIENT_ROUTES` must equal the `ROUTES` object in
+    /// `web/src/routes/paths.ts`, so the two cannot drift.
+    #[test]
+    fn client_routes_match_paths_ts() -> R {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../web/src/routes/paths.ts"
+        ))?;
+        let block = source
+            .split("export const ROUTES = {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .ok_or("no ROUTES object in paths.ts")?;
+        let mut from_ts: Vec<&str> = block
+            .lines()
+            .filter_map(|line| line.split_once(": '")?.1.strip_suffix("',"))
+            .collect();
+        let mut from_rust = super::CLIENT_ROUTES.to_vec();
+        from_ts.sort_unstable();
+        from_rust.sort_unstable();
+        assert!(!from_ts.is_empty());
+        assert_eq!(from_rust, from_ts);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn every_client_route_gets_the_app_shell() -> R {
+        for route in super::CLIENT_ROUTES {
+            let path = route.replace(":id", "hosts");
+            for path in [path.clone(), format!("{}/", path.trim_end_matches('/'))] {
+                let response = hardened().oneshot(get(&path)?).await?;
+                assert_eq!(response.status(), StatusCode::OK, "{path}");
+                assert_eq!(body_bytes(response).await?, b"<html>index</html>", "{path}");
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_404_from_the_spa_is_a_static_page_with_the_security_headers() -> R {
+        let response = hardened().oneshot(get("/metrics")?).await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(
+            response
+                .headers()
+                .contains_key(header::CONTENT_SECURITY_POLICY)
+        );
+        assert!(
+            response
+                .headers()
+                .contains_key(header::X_CONTENT_TYPE_OPTIONS)
+        );
+        let body = String::from_utf8(body_bytes(response).await?)?;
+        assert!(
+            body.contains("Not found") && !body.contains("<script"),
+            "{body}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn metrics_answers_404_and_not_the_app_shell() -> R {
+        for path in ["/metrics", "/metrics/"] {
+            let response = hardened().oneshot(get(path)?).await?;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+            assert_ne!(body_bytes(response).await?, b"<html>index</html>", "{path}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_directory_path_is_404_and_not_a_listing_or_the_shell() -> R {
+        for path in ["/assets/", "/assets", "/legacy/"] {
+            let response = hardened().oneshot(get(path)?).await?;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+            assert_ne!(body_bytes(response).await?, b"<html>index</html>", "{path}");
+        }
+        Ok(())
     }
 
     #[test]

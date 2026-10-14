@@ -82,7 +82,7 @@ release (compromised token).
 | API errors are codes + Fluent ids, never raw internal errors | information disclosure via stack traces/internal error text | `crates/detent-web/src/error.rs` | `the_body_is_a_code_and_a_fluent_id_and_nothing_else`, `every_auth_failure_maps_to_a_status_and_a_code`, `every_ops_error_variant_maps_to_its_documented_status` (`error.rs`) |
 | Precompressed, hashed-asset SPA serving; app-shell fallback does not leak API paths | cache poisoning; API route confusion with static serving | `crates/detent-web/src/spa.rs` | `hashed_assets_are_immutable_and_everything_else_revalidates`, `a_missing_asset_with_an_extension_is_404_not_the_app_shell`, `an_api_shaped_path_is_refused_not_handed_the_app_shell` (`spa.rs`) |
 | `Server` header removed | fingerprinting | `crates/detent-web/src/server.rs` (`harden`) | `no_answer_carries_a_server_header` (`spa.rs`): `/`, `/healthz`, an asset, a client route, a missing asset and an unknown API path, behind `harden`. |
-| `/metrics` absent; no directory listing | information disclosure | `crates/detent-web/src/spa.rs` (`fallback`) | **Controls not met; no passing test.** Tests were written and fail: `/metrics` and `/assets/` answer 200 with the app shell, because the SPA fallback serves `index.html` for any path whose last segment has no `.`. See [Gaps](#gaps). |
+| `/metrics` absent; no directory listing; error pages static | information disclosure | `crates/detent-web/src/spa.rs` (`fallback`, `CLIENT_ROUTES`, `is_client_route`) | The shell is served only for the SPA's own client routes. Any other path that is not an asset (`/metrics`, `/assets/`, `/legacy/`) answers 404 with a fixed HTML page and the security headers: `metrics_answers_404_and_not_the_app_shell`, `a_directory_path_is_404_and_not_a_listing_or_the_shell`, `a_404_from_the_spa_is_a_static_page_with_the_security_headers`, `is_client_route_matches_routes_params_and_one_trailing_slash`; every client route still gets the shell, with and without a trailing slash: `every_client_route_gets_the_app_shell`; the Rust list equals `ROUTES` in `web/src/routes/paths.ts`: `client_routes_match_paths_ts` (`spa.rs`). |
 | Output escaping (React) / per-format quoting in rendered config | XSS in the admin UI; injection into rendered config files | `web/src` (React routes, forms, components); `crates/detent-core/src/conformance.rs` for the render side | UI escaping: the SPA is built (`web/src` has routes, forms and components), and `web/src` contains no `dangerouslySetInnerHTML` and no `innerHTML` outside tests, so React's text escaping applies to rendered values. Config-rendering quoting: `invariant_5_injection_probes_are_rejected` (module-conformance macro, instantiated per module, e.g. `crates/modules/hosts/tests/conformance.rs`) — proves injection probes are rejected on the render path that Phase 4 already ships. |
 
 ## Local privilege (privsep + Landlock + seccomp + caps + allow-lists)
@@ -235,13 +235,13 @@ quietly into the tables above.
    `a_second_commit_confirm_apply_while_one_is_pending_writes_nothing`
    (`crates/detent-ops/tests/engine.rs`) asserts that a second `Apply` while one
    commit is pending is refused with `CommitPending` and writes nothing.
-10. **Three PLAN §2.7 controls fail their tests (found 2026-10-14).** The tests
-   were written and not committed, since each fails.
+10. **A PLAN §2.7 control fails its test (found 2026-10-14).** The test was
+   written and not committed, since it fails.
    * Key exchange: the server ranks `X25519MLKEM768` last, not first.
-   * `/metrics` answers 200 with the app shell.
-   * A directory path such as `/assets/` answers 200 with the app shell.
 
-   The `Server` header test passes and is in the table above.
+   `/metrics` and directory paths answered 200 with the app shell; fixed
+   2026-10-14 (see the `/metrics` row above). The `Server` header test passes
+   and is in the table above.
 11. ~~**Reproducible builds, SBOM, provenance and immutable releases** are
    Phase 9 work with no evidence in this document.~~ **Fixed 2026-10-09** for
    reproducible builds, SBOM and provenance (`release.yml` jobs `reproducible`,

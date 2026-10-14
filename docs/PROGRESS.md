@@ -5,6 +5,16 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-14 - SPA fallback serves the shell only for client routes
+
+`/metrics`, `/metrics/`, `/assets/`, `/assets` and `/legacy/` answered 200 with `index.html`, because `fallback` served the shell for any path whose last segment had no `.`. Now `crates/detent-web/src/spa.rs` serves it only for `CLIENT_ROUTES` (one trailing slash allowed; `:id` matches one segment). Every other path that is not an asset answers 404 with a fixed HTML page; the security headers stay. Stacked on PR #49.
+
+**No drift.** The Rust list is a copy of `ROUTES` in `web/src/routes/paths.ts`; the test `client_routes_match_paths_ts` reads that file and fails if the lists differ. Add a route in both places.
+
+**Behaviour change.** An unknown client path such as `/foo` is now a server 404, not the console's own "not found" page. `web/e2e` runs on `vite preview`, so it does not test this fallback; `every_client_route_gets_the_app_shell` does.
+
+Docs: `docs/SECURITY_HARDENING.md` maps the tests; Gaps item 10 keeps only the key-exchange gap.
+
 ## 2026-10-14 - PLAN §2.7 control tests
 
 Added a test for each §2.7 control the audit found untested. Names are in `docs/SECURITY_HARDENING.md`.
