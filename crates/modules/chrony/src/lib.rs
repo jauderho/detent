@@ -196,9 +196,10 @@ fn render_line(setting: &Setting) -> Result<String, EditError> {
 
 /// Whether this backend is the right one for `profile`.
 ///
-/// chrony.conf lives at the compiled-in Linux path on every distribution this
-/// module targets; macOS builds of chronyd use a different prefix
-/// (`/opt/homebrew/etc/chrony.conf`), which is not this module's target.
+/// Every Linux distribution this module targets keeps chrony.conf at one of
+/// the two paths in [`TARGETS`]; macOS builds of chronyd use a different
+/// prefix (`/opt/homebrew/etc/chrony.conf`), which is not this module's
+/// target.
 fn chrony_backend_detect(profile: &HostProfile) -> bool {
     profile.os == Os::Linux
 }
@@ -207,9 +208,21 @@ fn chrony_backend_detect(profile: &HostProfile) -> bool {
 /// user-supplied (PLAN §2.3): a request can select a module, it can never name
 /// the file the module writes. `mode` and `owner` are what the platform layer
 /// enforces after an atomic write.
+///
+/// `chrony.conf` is declared at two paths: Debian and Ubuntu use
+/// `/etc/chrony/chrony.conf`, Fedora and Arch `/etc/chrony.conf`. The module
+/// manages the first one that exists ([`ModuleDescriptor::relocated`]), the
+/// Debian path when neither does.
 static TARGETS: &[Target] = &[
     Target {
         path: PathSpec::new("/etc/chrony/chrony.conf"),
+        kind: TargetKind::File,
+        mode: 0o644,
+        owner: Owner::Root,
+        backend_detect: chrony_backend_detect,
+    },
+    Target {
+        path: PathSpec::new("/etc/chrony.conf"),
         kind: TargetKind::File,
         mode: 0o644,
         owner: Owner::Root,
@@ -1062,6 +1075,35 @@ mod tests {
         }
     }
 
+    /// D8: Debian and Ubuntu keep the file at `/etc/chrony/chrony.conf`,
+    /// Fedora and Arch at `/etc/chrony.conf`. The module manages exactly one
+    /// of them: the first one the host has, the Debian path when it has none.
+    #[test]
+    fn the_file_is_read_at_the_path_the_distribution_uses() {
+        let host = profile(Os::Linux, "host");
+        let first = DESCRIPTOR
+            .targets
+            .iter()
+            .find(|target| (target.backend_detect)(&host));
+        for (present, expected) in [
+            (&["/etc/chrony/chrony.conf"][..], "/etc/chrony/chrony.conf"),
+            (&["/etc/chrony.conf"][..], "/etc/chrony.conf"),
+            (
+                &["/etc/chrony/chrony.conf", "/etc/chrony.conf"][..],
+                "/etc/chrony/chrony.conf",
+            ),
+            (&[][..], "/etc/chrony/chrony.conf"),
+        ] {
+            let chosen = first.map(|first| {
+                DESCRIPTOR
+                    .relocated(first, &host, |path| present.contains(&path))
+                    .path
+                    .as_str()
+            });
+            assert_eq!(chosen, Some(expected), "{present:?}");
+        }
+    }
+
     /// The include lines of the stock Debian 13, Ubuntu 26.04 and Fedora 44
     /// files are kept with a warning, not refused (owner decision
     /// 2026-10-15).
@@ -1278,7 +1320,7 @@ mod tests {
     fn descriptor_declares_its_targets_and_backend() {
         let descriptor = ChronyModule::descriptor();
         assert_eq!(descriptor.id, ChronyModule::ID);
-        assert_eq!(descriptor.targets.len(), 3);
+        assert_eq!(descriptor.targets.len(), 4);
         for target in descriptor.targets {
             assert!((target.backend_detect)(&profile(Os::Linux, "h")));
             assert!(!(target.backend_detect)(&profile(Os::MacOs, "h")));

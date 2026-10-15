@@ -172,6 +172,9 @@ enum Targets {
     /// A decoy first target whose `backend_detect` is false, then the real
     /// one, so the engine must select on the detector rather than on order.
     DecoyThenReal,
+    /// First the same file name in a directory that does not exist, then the
+    /// real one: the engine must take the one that exists (D8).
+    MissingThenRelocated,
     /// None at all.
     None,
 }
@@ -203,6 +206,17 @@ fn build_descriptor(id: &'static str, target: &Path, shape: Shape) -> &'static M
                 target.with_extension("decoy").display().to_string(),
             )),
             backend_detect: never,
+            ..real
+        });
+    }
+    if shape.targets == Targets::MissingThenRelocated {
+        let missing = target
+            .parent()
+            .unwrap_or(target)
+            .join("absent")
+            .join(target.file_name().unwrap_or_default());
+        list.push(Target {
+            path: PathSpec::new(leak_str(missing.display().to_string())),
             ..real
         });
     }
@@ -791,7 +805,63 @@ fn get_module_reports_no_model_when_the_target_is_missing() -> TestResult {
     };
     assert_eq!(view.model, None);
     assert_eq!(view.current_hash, None);
+    // D8: a missing file is said, not a silent null model.
+    let found: Vec<_> = view
+        .diagnostics
+        .iter()
+        .map(|d| (d.id.as_str(), d.severity, d.args.get("path").cloned()))
+        .collect();
+    assert_eq!(
+        found,
+        vec![(
+            "ops-target-missing",
+            Severity::Warning,
+            Some(fx.target.display().to_string())
+        )]
+    );
+    fx.finish()
+}
+
+/// D8: a module that declares one file at two paths (chrony:
+/// `/etc/chrony/chrony.conf` on Debian, `/etc/chrony.conf` on Fedora and
+/// Arch) reads, plans and writes the one that exists.
+#[test]
+fn a_file_declared_at_two_paths_is_read_and_written_where_it_exists() -> TestResult {
+    let mut fx = harness(
+        b"v1\n",
+        Setup {
+            shape: Shape {
+                targets: Targets::MissingThenRelocated,
+                ..Shape::default()
+            },
+            ..Setup::default()
+        },
+    )?;
+    let outcome = fx.run(Operation::GetModule {
+        id: MODULE.to_owned(),
+    })?;
+    let OpOutcome::Module(view) = outcome else {
+        return Err("GetModule must answer with a module view".into());
+    };
+    assert_eq!(
+        view.model
+            .as_ref()
+            .and_then(|model| model.pointer("/text"))
+            .and_then(Value::as_str),
+        Some("v1\n")
+    );
     assert!(view.diagnostics.is_empty());
+    let outcome = fx.run(Operation::Plan {
+        id: MODULE.to_owned(),
+        model: json!({"text": "v2\n"}),
+    })?;
+    let OpOutcome::Planned(plan) = outcome else {
+        return Err("Plan must answer with a plan report".into());
+    };
+    assert_eq!(plan.path, fx.target.display().to_string());
+    fx.run(apply("v2\n", None))?;
+    assert_eq!(fx.contents()?, "v2\n");
+    assert!(!fx.target.with_file_name("absent").exists());
     fx.finish()
 }
 

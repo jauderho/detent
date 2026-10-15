@@ -27,9 +27,11 @@
 //! commit still rolls back on its own deadline whether or not anything ever
 //! calls [`Operation::RollbackCommit`].
 
+use std::path::Path;
 use std::time::Duration;
 
 use detent_core::descriptor::{ModuleDescriptor, ValidationCtx};
+use detent_core::diag::{Diagnostic, MessageId, Severity};
 use detent_core::module::{DynModule, ParseError};
 use detent_platform::fs::atomic::Sha256Digest;
 use detent_platform::host::Detected;
@@ -377,7 +379,9 @@ impl OpsEngine {
         let schema = module.schema_json();
         let secret_pointers = module.secret_pointers();
         let wiring = wiring(&self.client, descriptor, &self.host.profile)?;
-        let contents = self.client.read_target(wiring.target).ok();
+        let read = self.client.read_target(wiring.target);
+        let missing = matches!(read, Err(ClientError::Remote(ProtoError::NotFound)));
+        let contents = read.ok();
 
         let (model, current_hash) = match contents {
             Some(contents) => {
@@ -392,7 +396,14 @@ impl OpsEngine {
         let ctx = ValidationCtx::new(&self.host.profile);
         let diagnostics = match model {
             Some(ref model) => module.validate_json(model, &ctx)?,
-            None => detent_core::diag::Diagnostics::new(),
+            // A missing file is said, not left as a silent null model.
+            None => missing
+                .then(|| {
+                    Diagnostic::new(Severity::Warning, MessageId::new("ops-target-missing"))
+                        .with_arg("path", wiring.path.clone())
+                })
+                .into_iter()
+                .collect(),
         };
         Ok(OpOutcome::Module(Box::new(ModuleView {
             descriptor,
@@ -917,7 +928,8 @@ fn module_id(
 /// The target is the first one the module's own `backend_detect` accepts for
 /// this host — that is how a module with several backends (resolver, network)
 /// selects the file that actually applies — falling back to the first target
-/// the monitor advertised.
+/// the monitor advertised. A file the module declares at more than one path
+/// is taken where it exists ([`ModuleDescriptor::relocated`]).
 fn wiring(
     client: &Client,
     descriptor: &'static ModuleDescriptor,
@@ -941,7 +953,13 @@ fn wiring(
         .targets
         .iter()
         .filter(|target| (target.backend_detect)(profile))
-        .find_map(|target| {
+        .find(|target| {
+            advertised
+                .iter()
+                .any(|info| info.path == target.path.as_str())
+        })
+        .map(|target| descriptor.relocated(target, profile, |path| Path::new(path).exists()))
+        .and_then(|target| {
             advertised
                 .iter()
                 .find(|info| info.path == target.path.as_str())

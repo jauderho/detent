@@ -29,7 +29,7 @@
 //! no trace of its own either.
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 
 use detent_core::descriptor::{HostProfile, ModuleDescriptor};
@@ -576,7 +576,8 @@ fn operate(
 }
 
 /// The file a module manages on this host: the first target its own detector
-/// accepts, falling back to the first declared one — the same rule
+/// accepts, taken where it exists when the module declares it at more than
+/// one path, falling back to the first declared one — the same rule
 /// `detent_ops`'s engine applies when it resolves wiring.
 #[must_use]
 pub fn target_path(
@@ -589,6 +590,7 @@ pub fn target_path(
         .targets
         .iter()
         .find(|target| (target.backend_detect)(profile))
+        .map(|target| descriptor.relocated(target, profile, |path| Path::new(path).exists()))
         .or_else(|| descriptor.targets.first())
         .map(|target| target.path.as_str())
 }
