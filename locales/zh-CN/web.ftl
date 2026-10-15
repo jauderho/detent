@@ -81,6 +81,7 @@ web-auth-store-unwritable = 无法为写入准备此主机上的某个凭据文�
 web-auth-store-write-failed = 无法写入此主机上的某个凭据文件。
 web-auth-token-limit = 此主机已持有 api 令牌数量的上限。
 web-auth-token-unknown = 该 api 令牌不存在、已被吊销或已过期。
+web-auth-session-unknown = 该会话不存在或已结束。
 web-auth-totp-secret-invalid = 该验证器密钥不是有效的 base32。
 web-auth-totp-enrolled = 此账户已有第二因素。请先关闭它，再添加新的。
 web-auth-totp-not-enrolled = 此账户没有可关闭的第二因素。

@@ -81,6 +81,7 @@ web-auth-store-unwritable = eine Zugangsdatendatei auf diesem Host konnte nicht 
 web-auth-store-write-failed = eine Zugangsdatendatei auf diesem Host konnte nicht geschrieben werden.
 web-auth-token-limit = dieser Host hält bereits die maximale Anzahl an API-Token.
 web-auth-token-unknown = dieses API-Token existiert nicht, wurde widerrufen oder ist abgelaufen.
+web-auth-session-unknown = diese Sitzung existiert nicht oder ist bereits beendet.
 web-auth-totp-secret-invalid = dieses Authenticator-Geheimnis ist kein gültiges Base32.
 web-auth-totp-enrolled = dieses Konto hat bereits einen zweiten Faktor. schalten Sie ihn ab, bevor Sie einen neuen hinzufügen.
 web-auth-totp-not-enrolled = dieses Konto hat keinen zweiten Faktor, der abgeschaltet werden könnte.

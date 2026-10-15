@@ -1,8 +1,8 @@
 //! The auth event log (PLAN §2.7, "Misc": *audit for every auth event*).
 //!
 //! ```text
-//!   login / logout / lockout / token issue / token revoke / scope denied
-//!   / certificate renewal request
+//!   login / logout / session revoke / lockout / token issue / token revoke
+//!   / scope denied / certificate renewal request
 //!            │
 //!            ├─▶ tracing::info!(… "detent audit")  ── journald, one stream
 //!            └─▶ AuthAudit sink ─▶ <state_root>/audit/detent-auth.jsonl (0600)
@@ -78,6 +78,10 @@ pub enum AuthEvent {
     PasswordChangeFailed,
     /// A session was explicitly ended.
     LoggedOut,
+    /// A session was ended from the session list (ASVS 3.3.4): by its handle,
+    /// or with every other session of the same user. One record per ended
+    /// session; the subject is the user it belonged to.
+    SessionRevoked,
     /// An API token was minted.
     TokenIssued,
     /// An API token was revoked.

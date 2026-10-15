@@ -81,6 +81,7 @@ web-auth-store-unwritable = এই হোস্টের একটি ক্র�
 web-auth-store-write-failed = এই হোস্টের একটি ক্রেডেনশিয়াল ফাইল লেখা যায়নি।
 web-auth-token-limit = এই হোস্টে ইতিমধ্যেই api টোকেনের সর্বোচ্চ সংখ্যা আছে।
 web-auth-token-unknown = ওই api টোকেন নেই, বাতিল করা হয়েছে, অথবা মেয়াদোত্তীর্ণ হয়েছে।
+web-auth-session-unknown = ওই সেশন নেই অথবা ইতিমধ্যে শেষ হয়েছে।
 web-auth-totp-secret-invalid = ওই অথেন্টিকেটর সিক্রেট বৈধ base32 নয়।
 web-auth-totp-enrolled = এই অ্যাকাউন্টে ইতিমধ্যে একটি দ্বিতীয় ফ্যাক্টর আছে। নতুন যোগ করার আগে এটি বন্ধ করুন।
 web-auth-totp-not-enrolled = এই অ্যাকাউন্টে বন্ধ করার মতো কোনো দ্বিতীয় ফ্যাক্টর নেই।

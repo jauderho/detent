@@ -81,6 +81,7 @@ web-auth-store-unwritable = このホスト上の資格情報ファイルを書�
 web-auth-store-write-failed = このホスト上の資格情報ファイルに書き込めませんでした。
 web-auth-token-limit = このホストはすでに API トークンの最大数を保持しています。
 web-auth-token-unknown = その API トークンは存在しないか、失効しているか、期限が切れています。
+web-auth-session-unknown = そのセッションは存在しないか、すでに終了しています。
 web-auth-totp-secret-invalid = その認証アプリのシークレットは有効な base32 ではありません。
 web-auth-totp-enrolled = このアカウントにはすでに第二要素があります。新しく追加する前に無効にしてください。
 web-auth-totp-not-enrolled = このアカウントには無効にする第二要素がありません。

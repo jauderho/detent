@@ -25,6 +25,10 @@
 //! * **The table is capped.** [`MAX_SESSIONS`] live sessions is the limit;
 //!   past it, logins are refused (and audited) rather than allowed to grow the
 //!   map without bound.
+//! * **A session is listed by a handle, never by its id** (ASVS 3.3.4). The
+//!   handle is [`HANDLE_BYTES`] fresh random bytes, drawn apart from the id
+//!   and replaced on rotation, so nothing about the id can be derived from
+//!   it. A handle only ends a session of the same subject.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -33,12 +37,13 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
+use subtle::ConstantTimeEq as _;
 
 use crate::authz::Scopes;
 
 use super::AuthError;
 use super::ratelimit::RateLimiter;
-use super::secret::Secret;
+use super::secret::{self, Secret};
 use super::token::TokenStore;
 use super::totp::TotpSecret;
 
@@ -61,6 +66,10 @@ pub const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 /// key shown on an unattended screen is soon worthless.
 pub const PENDING_TOTP_TTL: Duration = Duration::from_mins(10);
 
+/// Random bytes behind a session handle: 128 bits, so a handle of another
+/// session cannot be guessed.
+pub const HANDLE_BYTES: usize = 16;
+
 /// One authenticated browser session.
 #[derive(Clone)]
 pub struct Session {
@@ -80,6 +89,9 @@ pub struct Session {
     /// is allowed. Set at login from the stored flag; the session may then
     /// only change the password, read itself and end.
     pub must_change_password: bool,
+    /// The public name of this session in the session list: random, not
+    /// derived from the id, and replaced on rotation.
+    pub handle: String,
 }
 
 impl fmt::Debug for Session {
@@ -126,6 +138,27 @@ impl fmt::Debug for SessionView {
             .field("must_change_password", &self.must_change_password)
             .finish_non_exhaustive()
     }
+}
+
+/// One entry of `GET /api/v1/auth/sessions`.
+///
+/// It names the session by its handle only. The id, its digest and the CSRF
+/// token are not fields, so no serializer can reach them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(utoipa::ToSchema))]
+pub struct SessionSummary {
+    /// The handle to end this session with.
+    pub handle: String,
+    /// When it was established, as Unix seconds.
+    pub created_unix_s: i64,
+    /// When it was last used, as Unix seconds.
+    pub last_seen_unix_s: i64,
+    /// Seconds until it expires, idle and absolute limits combined.
+    pub expires_in_secs: u64,
+    /// Whether a second factor was presented.
+    pub totp_satisfied: bool,
+    /// Whether this is the session the request came with.
+    pub current: bool,
 }
 
 /// The `Set-Cookie` value that establishes a session.
@@ -201,6 +234,27 @@ fn key_of(presented: &str) -> [u8; 32] {
     Sha256::digest(presented.as_bytes()).into()
 }
 
+/// A new session handle: [`HANDLE_BYTES`] random bytes as lowercase hex.
+///
+/// # Errors
+///
+/// [`AuthError::Entropy`] when the system cannot produce random bytes.
+fn new_handle() -> Result<String, AuthError> {
+    Ok(secret::hex(&secret::random_bytes::<HANDLE_BYTES>()?))
+}
+
+/// Whether `stored` and `presented` are the same handle, compared in constant
+/// time, so the time of a refused revoke says nothing about other handles.
+fn handle_eq(stored: &str, presented: &str) -> bool {
+    stored.len() == presented.len() && bool::from(stored.as_bytes().ct_eq(presented.as_bytes()))
+}
+
+/// `instant` as Unix seconds, given that `now` is `now_unix`.
+fn unix_of(instant: Instant, now: Instant, now_unix: i64) -> i64 {
+    let ago = i64::try_from(now.saturating_duration_since(instant).as_secs()).unwrap_or(i64::MAX);
+    now_unix.saturating_sub(ago)
+}
+
 impl SessionStore {
     /// A store with the configured timeouts and [`MAX_SESSIONS`] capacity.
     #[must_use]
@@ -264,6 +318,7 @@ impl SessionStore {
             last_seen: now,
             totp_satisfied,
             must_change_password: false,
+            handle: new_handle()?,
         };
         let mut entries = self
             .entries
@@ -333,6 +388,7 @@ impl SessionStore {
     ) -> Result<Option<(Secret, Session)>, AuthError> {
         let fresh = Secret::random()?;
         let csrf = Secret::random()?;
+        let handle = new_handle()?;
         let mut entries = self
             .entries
             .lock()
@@ -361,6 +417,9 @@ impl SessionStore {
             // Fresh credentials were just verified; the caller restricts the
             // session again when the account still owes a password change.
             must_change_password: false,
+            // A new id gets a new handle: a handle seen before the rotation
+            // names nothing after it.
+            handle,
         };
         entries.insert(
             key_of(fresh.expose()),
@@ -380,6 +439,66 @@ impl SessionStore {
         };
         entries.retain(|_, e| e.session.subject != subject);
     }
+
+    /// The live sessions of `subject`, newest first. The one whose handle is
+    /// `current` is marked. Expired sessions are removed first, so none is
+    /// listed.
+    #[must_use]
+    pub fn list(
+        &self,
+        subject: &str,
+        current: &str,
+        now: Instant,
+        now_unix: i64,
+    ) -> Vec<SessionSummary> {
+        let Ok(mut entries) = self.entries.lock() else {
+            return Vec::new();
+        };
+        Self::evict_expired(&mut entries, self.idle, self.absolute, now);
+        let mut listed: Vec<SessionSummary> = entries
+            .values()
+            .filter(|entry| entry.session.subject == subject)
+            .map(|entry| SessionSummary {
+                handle: entry.session.handle.clone(),
+                created_unix_s: unix_of(entry.session.created, now, now_unix),
+                last_seen_unix_s: unix_of(entry.session.last_seen, now, now_unix),
+                expires_in_secs: self.expires_in(&entry.session, now).as_secs(),
+                totp_satisfied: entry.session.totp_satisfied,
+                current: handle_eq(&entry.session.handle, current),
+            })
+            .collect();
+        listed.sort_by(|a, b| {
+            b.created_unix_s
+                .cmp(&a.created_unix_s)
+                .then_with(|| a.handle.cmp(&b.handle))
+        });
+        listed
+    }
+
+    /// End the session of `subject` that `handle` names. Answers whether one
+    /// was removed: `false` for an unknown handle and for a handle of another
+    /// subject alike, so the caller cannot tell the two apart.
+    pub fn revoke_handle(&self, subject: &str, handle: &str) -> bool {
+        let Ok(mut entries) = self.entries.lock() else {
+            return false;
+        };
+        let before = entries.len();
+        entries
+            .retain(|_, e| !(handle_eq(&e.session.handle, handle) && e.session.subject == subject));
+        before != entries.len()
+    }
+
+    /// End every session of `subject` except the one `keep` names. Answers
+    /// how many went.
+    pub fn revoke_others(&self, subject: &str, keep: &str) -> usize {
+        let Ok(mut entries) = self.entries.lock() else {
+            return 0;
+        };
+        let before = entries.len();
+        entries.retain(|_, e| e.session.subject != subject || handle_eq(&e.session.handle, keep));
+        before.saturating_sub(entries.len())
+    }
+
     /// Invalidate a session. Answers whether one was actually removed.
     pub fn logout(&self, presented: &str) -> bool {
         let Ok(mut entries) = self.entries.lock() else {
@@ -858,14 +977,131 @@ mod tests {
         let now = Instant::now();
         let (id, session) = store.create("alice", Scopes::read_write(), false, now)?;
         let view = store.view(&session, now);
-        let rendered = format!("{store:?} {session:?} {view:?} {id:?}");
+        let listed = store.list("alice", &session.handle, now, 0);
+        let rendered = format!("{store:?} {session:?} {view:?} {id:?} {listed:?}");
         assert!(!rendered.contains(id.expose()), "{rendered}");
+        let json = serde_json::to_string(&listed)?;
+        assert!(!json.contains(id.expose()), "{json}");
+        assert!(!json.contains(session.csrf_token.expose()), "{json}");
+        assert!(
+            !json.contains(&crate::auth::secret::hex(&super::key_of(id.expose()))),
+            "{json}"
+        );
         assert!(
             !rendered.contains(session.csrf_token.expose()),
             "{rendered}"
         );
         assert!(rendered.contains("live: 1"), "{rendered}");
         assert!(rendered.contains("alice"), "{rendered}");
+        Ok(())
+    }
+
+    #[test]
+    fn every_session_gets_its_own_random_handle_unrelated_to_its_id() -> R {
+        let store = store();
+        let now = Instant::now();
+        let mut handles = std::collections::HashSet::new();
+        for _ in 0_u32..32 {
+            let (id, session) = store.create("alice", Scopes::read_write(), false, now)?;
+            assert_eq!(session.handle.len(), super::HANDLE_BYTES.saturating_mul(2));
+            assert!(
+                session
+                    .handle
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+            );
+            // Not the id, not a piece of it, not a piece of its digest.
+            assert!(!id.expose().contains(&session.handle));
+            let digest = crate::auth::secret::hex(&super::key_of(id.expose()));
+            assert!(!digest.contains(&session.handle));
+            assert!(handles.insert(session.handle.clone()), "a handle repeated");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rotation_replaces_the_handle_and_the_old_one_ends_nothing() -> R {
+        let store = store();
+        let now = Instant::now();
+        let (first, before) = store.create("alice", Scopes::read_write(), false, now)?;
+        let (second, after) = store
+            .rotate(first.expose(), "alice", None, None, now)?
+            .ok_or("nothing was rotated")?;
+        assert_ne!(before.handle, after.handle);
+        assert!(!store.revoke_handle("alice", &before.handle));
+        assert!(store.lookup(second.expose(), now).is_some());
+        assert!(store.revoke_handle("alice", &after.handle));
+        assert!(store.lookup(second.expose(), now).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn the_list_holds_only_the_subjects_live_sessions_and_marks_the_current_one() -> R {
+        let store = store();
+        let start = Instant::now();
+        let base_unix = 1_800_000_000_i64;
+        let (_old, old) = store.create("alice", Scopes::read_write(), false, start)?;
+        let later = at(start, 600);
+        let (_mine, mine) = store.create("alice", Scopes::read_write(), true, later)?;
+        let (_bob, bob) = store.create("bob", Scopes::read_write(), false, later)?;
+
+        let now = at(start, 700);
+        let now_unix = base_unix.saturating_add(700);
+        let listed = store.list("alice", &mine.handle, now, now_unix);
+        assert_eq!(listed.len(), 2, "{listed:?}");
+        // Newest first; Bob's session is not in Alice's list.
+        let first = listed.first().ok_or("empty list")?;
+        let second = listed.get(1).ok_or("one entry")?;
+        assert_eq!(first.handle, mine.handle);
+        assert!(first.current);
+        assert!(first.totp_satisfied);
+        assert_eq!(first.created_unix_s, base_unix.saturating_add(600));
+        assert_eq!(first.last_seen_unix_s, base_unix.saturating_add(600));
+        assert_eq!(first.expires_in_secs, IDLE.as_secs().saturating_sub(100));
+        assert_eq!(second.handle, old.handle);
+        assert!(!second.current);
+        assert_eq!(second.created_unix_s, base_unix);
+        assert!(listed.iter().all(|entry| entry.handle != bob.handle));
+
+        // An expired session is removed, not listed.
+        let late = at(start, 1501);
+        let listed = store.list("alice", &mine.handle, late, base_unix);
+        assert_eq!(listed.len(), 0, "{listed:?}");
+        assert_eq!(store.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn a_handle_of_another_subject_ends_nothing() -> R {
+        let store = store();
+        let now = Instant::now();
+        let (alice_id, alice) = store.create("alice", Scopes::read_write(), false, now)?;
+        let (_bob_id, bob) = store.create("bob", Scopes::read_write(), false, now)?;
+        assert!(!store.revoke_handle("bob", &alice.handle));
+        assert!(!store.revoke_handle("alice", "not a handle"));
+        assert!(!store.revoke_handle("alice", ""));
+        assert!(store.lookup(alice_id.expose(), now).is_some());
+        assert_eq!(store.len(), 2);
+        assert!(store.revoke_handle("bob", &bob.handle));
+        assert!(!store.revoke_handle("bob", &bob.handle), "ended twice");
+        assert_eq!(store.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn revoking_the_others_keeps_the_current_session_and_other_subjects() -> R {
+        let store = store();
+        let now = Instant::now();
+        let (keep_id, keep) = store.create("alice", Scopes::read_write(), false, now)?;
+        for _ in 0_u32..3 {
+            let (_id, _s) = store.create("alice", Scopes::read_write(), false, now)?;
+        }
+        let (bob_id, _bob) = store.create("bob", Scopes::read_write(), false, now)?;
+        assert_eq!(store.revoke_others("alice", &keep.handle), 3);
+        assert!(store.lookup(keep_id.expose(), now).is_some());
+        assert!(store.lookup(bob_id.expose(), now).is_some());
+        assert_eq!(store.len(), 2);
+        assert_eq!(store.revoke_others("alice", &keep.handle), 0);
         Ok(())
     }
 

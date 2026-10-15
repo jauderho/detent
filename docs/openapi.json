@@ -311,6 +311,164 @@
         }
       }
     },
+    "/api/v1/auth/sessions": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`GET /api/v1/auth/sessions`.",
+        "description": "# Errors\n\n401 for no session or a bearer token, 403 for a session that owes a\npassword change.",
+        "operationId": "auth_sessions",
+        "responses": {
+          "200": {
+            "description": "The live sessions of the signed-in user, newest first; the one the request came with has `current` set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SessionSummary"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No session; a bearer token is refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The session must change its password first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/sessions/revoke-others": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`POST /api/v1/auth/sessions/revoke-others`.",
+        "description": "# Errors\n\n401 for no session or a bearer token, 403 for a failed CSRF check or a\nsession that owes a password change.",
+        "operationId": "auth_sessions_revoke_others",
+        "responses": {
+          "200": {
+            "description": "Every other session of this user is ended; the current one stays",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevokedSessions"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No session; a bearer token is refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The CSRF check failed, or the session must change its password first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/sessions/{handle}/revoke": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`POST /api/v1/auth/sessions/{handle}/revoke`.",
+        "description": "# Errors\n\n401 for no session or a bearer token, 403 for a failed CSRF check or a\nsession that owes a password change, 404 when no session of the caller\nhas that handle.",
+        "operationId": "auth_session_revoke",
+        "parameters": [
+          {
+            "name": "handle",
+            "in": "path",
+            "description": "The handle from `GET /api/v1/auth/sessions`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The session is ended; when it was the current one, the cookie is cleared"
+          },
+          "401": {
+            "description": "No session; a bearer token is refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The CSRF check failed, or the session must change its password first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No session of this user has that handle",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
     "/api/v1/auth/totp": {
       "get": {
         "tags": [
@@ -2761,6 +2919,20 @@
           }
         }
       },
+      "RevokedSessions": {
+        "type": "object",
+        "description": "What `POST /api/v1/auth/sessions/revoke-others` answers.",
+        "required": [
+          "ended"
+        ],
+        "properties": {
+          "ended": {
+            "type": "integer",
+            "description": "How many sessions were ended.",
+            "minimum": 0
+          }
+        }
+      },
       "RolledBackView": {
         "type": "object",
         "description": "Answer to `RollbackCommit`.",
@@ -2899,6 +3071,48 @@
           "unit": {
             "type": "string",
             "description": "The unit name actually resolved and queried, i.e. the alternative\nfrom [`UnitNames`] that exists on this host."
+          }
+        }
+      },
+      "SessionSummary": {
+        "type": "object",
+        "description": "One entry of `GET /api/v1/auth/sessions`.\n\nIt names the session by its handle only. The id, its digest and the CSRF\ntoken are not fields, so no serializer can reach them.",
+        "required": [
+          "handle",
+          "created_unix_s",
+          "last_seen_unix_s",
+          "expires_in_secs",
+          "totp_satisfied",
+          "current"
+        ],
+        "properties": {
+          "created_unix_s": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it was established, as Unix seconds."
+          },
+          "current": {
+            "type": "boolean",
+            "description": "Whether this is the session the request came with."
+          },
+          "expires_in_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds until it expires, idle and absolute limits combined.",
+            "minimum": 0
+          },
+          "handle": {
+            "type": "string",
+            "description": "The handle to end this session with."
+          },
+          "last_seen_unix_s": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it was last used, as Unix seconds."
+          },
+          "totp_satisfied": {
+            "type": "boolean",
+            "description": "Whether a second factor was presented."
           }
         }
       },

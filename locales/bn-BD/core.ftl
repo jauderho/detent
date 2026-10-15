@@ -298,6 +298,7 @@ web-auth-unauthenticated = এটি করতে সাইন ইন করু�
 web-auth-ambiguous-credentials = সেশন কুকি অথবা বেয়ারার টোকেন পাঠান, দুটো একসঙ্গে নয়।
 web-auth-csrf-rejected = এই অনুরোধ তার ক্রস-সাইট যাচাই পাস করেনি।
 web-auth-token-unknown = ওই api টোকেন নেই, বাতিল করা হয়েছে, অথবা মেয়াদোত্তীর্ণ হয়েছে।
+web-auth-session-unknown = ওই সেশন নেই অথবা ইতিমধ্যে শেষ হয়েছে।
 web-auth-token-limit = এই হোস্টে ইতিমধ্যেই api টোকেনের সর্বোচ্চ সংখ্যা আছে।
 web-auth-totp-secret-invalid = ওই অথেন্টিকেটর সিক্রেট বৈধ base32 নয়।
 web-auth-totp-enrolled = এই অ্যাকাউন্টে ইতিমধ্যে একটি দ্বিতীয় ফ্যাক্টর আছে। নতুন যোগ করার আগে এটি বন্ধ করুন।

@@ -298,6 +298,7 @@ web-auth-unauthenticated = この操作を行うにはサインインしてく�
 web-auth-ambiguous-credentials = セッションクッキーかベアラートークンのどちらか一方だけを送信してください。両方は送信できません。
 web-auth-csrf-rejected = このリクエストはクロスサイトチェックに合格しませんでした。
 web-auth-token-unknown = その API トークンは存在しないか、失効しているか、期限が切れています。
+web-auth-session-unknown = そのセッションは存在しないか、すでに終了しています。
 web-auth-token-limit = このホストはすでに API トークンの最大数を保持しています。
 web-auth-totp-secret-invalid = その認証アプリのシークレットは有効な base32 ではありません。
 web-auth-totp-enrolled = このアカウントにはすでに第二要素があります。新しく追加する前に無効にしてください。

@@ -39,6 +39,7 @@ pub mod ratelimit;
 pub mod routes;
 pub mod secret;
 pub mod session;
+pub mod sessions;
 pub mod token;
 pub mod tokenlimit;
 pub mod totp;
@@ -55,7 +56,9 @@ pub use password::Hasher;
 pub use ratelimit::{Principal, RateLimiter};
 pub use routes::{LoginRequest, Route};
 pub use secret::Secret;
-pub use session::{COOKIE_NAME, Session, SessionStore, SessionView, set_cookie_value};
+pub use session::{
+    COOKIE_NAME, Session, SessionStore, SessionSummary, SessionView, set_cookie_value,
+};
 pub use token::{TokenIdentity, TokenRecord, TokenStore, TokenView};
 pub use totp::{OtpAuthUri, TotpSecret};
 pub use users::{UserStore, UserView, VerifiedUser, check_password};
@@ -159,6 +162,10 @@ pub enum AuthError {
     /// No API token matches, or the one that matches has expired.
     #[error("that api token is not usable")]
     UnknownToken,
+    /// No session of the caller has that handle: it never existed, it ended,
+    /// or it belongs to another user. The three are one answer.
+    #[error("no such session")]
+    UnknownSession,
     /// The token store already holds as many tokens as it will.
     #[error("no more api tokens can be issued")]
     TokenLimit,
@@ -239,6 +246,7 @@ impl AuthError {
             Self::AmbiguousCredentials => MessageId::new("web-auth-ambiguous-credentials"),
             Self::CsrfRejected => MessageId::new("web-auth-csrf-rejected"),
             Self::UnknownToken => MessageId::new("web-auth-token-unknown"),
+            Self::UnknownSession => MessageId::new("web-auth-session-unknown"),
             Self::TokenLimit => MessageId::new("web-auth-token-limit"),
             Self::TotpSecretInvalid => MessageId::new("web-auth-totp-secret-invalid"),
             Self::TotpEnrolled => MessageId::new("web-auth-totp-enrolled"),
@@ -273,7 +281,7 @@ impl AuthError {
             | Self::TotpNotEnrolled
             | Self::TotpNoPending
             | Self::TotpRequired => S::CONFLICT,
-            Self::UnknownUser | Self::UnknownToken => S::NOT_FOUND,
+            Self::UnknownUser | Self::UnknownToken | Self::UnknownSession => S::NOT_FOUND,
             Self::NameInvalid { .. }
             | Self::PasswordTooShort
             | Self::PasswordTooLong
@@ -396,6 +404,7 @@ mod tests {
             AuthError::AmbiguousCredentials,
             AuthError::CsrfRejected,
             AuthError::UnknownToken,
+            AuthError::UnknownSession,
             AuthError::TokenLimit,
             AuthError::TotpSecretInvalid,
             AuthError::TotpEnrolled,

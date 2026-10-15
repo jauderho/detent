@@ -80,6 +80,29 @@ no window (`since` is `null`, the rest is empty). It takes a session cookie
 only (a bearer token gets `401`), and a session that must change its
 password gets `403`.
 
+## Active sessions
+
+A signed-in user lists and ends its own sessions (ASVS 3.3.4). The routes
+take a session cookie only (a bearer token gets `401`), and a session that
+must change its password gets `403`. Only sessions of the same user are
+listed or ended.
+
+- `GET /api/v1/auth/sessions` answers the live sessions, newest first. Each
+  has `handle`, `created_unix_s`, `last_seen_unix_s`, `expires_in_secs`,
+  `totp_satisfied` and `current` (`true` for the session the request came
+  with). The `handle` is random and made apart from the session id, and it
+  changes when the session id changes. No id, id digest or CSRF token is in
+  the answer.
+- `POST /api/v1/auth/sessions/{handle}/revoke` ends that session and
+  answers `204`. When it is the current session, the cookie is cleared, as
+  for `POST /api/v1/auth/logout`. An unknown handle, an ended session and a
+  handle of another user all answer `404 web-auth-session-unknown`.
+- `POST /api/v1/auth/sessions/revoke-others` ends every other session of
+  the user, keeps the current one, and answers `{ ended }`.
+
+Both POST routes need the CSRF token. Each ended session writes one
+`session_revoked` record to the auth log, kind `session`.
+
 ## Scopes
 
 Every credential holds `read`, or `read` and `write` together — there is no

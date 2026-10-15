@@ -123,6 +123,76 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/auth/sessions`.
+         * @description # Errors
+         *
+         *     401 for no session or a bearer token, 403 for a session that owes a
+         *     password change.
+         */
+        get: operations["auth_sessions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/sessions/revoke-others": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/auth/sessions/revoke-others`.
+         * @description # Errors
+         *
+         *     401 for no session or a bearer token, 403 for a failed CSRF check or a
+         *     session that owes a password change.
+         */
+        post: operations["auth_sessions_revoke_others"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/sessions/{handle}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/auth/sessions/{handle}/revoke`.
+         * @description # Errors
+         *
+         *     401 for no session or a bearer token, 403 for a failed CSRF check or a
+         *     session that owes a password change, 404 when no session of the caller
+         *     has that handle.
+         */
+        post: operations["auth_session_revoke"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/totp": {
         parameters: {
             query?: never;
@@ -1164,6 +1234,11 @@ export interface components {
              */
             target: number;
         };
+        /** @description What `POST /api/v1/auth/sessions/revoke-others` answers. */
+        RevokedSessions: {
+            /** @description How many sessions were ended. */
+            ended: number;
+        };
         /** @description Answer to `RollbackCommit`. */
         RolledBackView: {
             /**
@@ -1230,6 +1305,35 @@ export interface components {
              *     from [`UnitNames`] that exists on this host.
              */
             unit: string;
+        };
+        /**
+         * @description One entry of `GET /api/v1/auth/sessions`.
+         *
+         *     It names the session by its handle only. The id, its digest and the CSRF
+         *     token are not fields, so no serializer can reach them.
+         */
+        SessionSummary: {
+            /**
+             * Format: int64
+             * @description When it was established, as Unix seconds.
+             */
+            created_unix_s: number;
+            /** @description Whether this is the session the request came with. */
+            current: boolean;
+            /**
+             * Format: int64
+             * @description Seconds until it expires, idle and absolute limits combined.
+             */
+            expires_in_secs: number;
+            /** @description The handle to end this session with. */
+            handle: string;
+            /**
+             * Format: int64
+             * @description When it was last used, as Unix seconds.
+             */
+            last_seen_unix_s: number;
+            /** @description Whether a second factor was presented. */
+            totp_satisfied: boolean;
         };
         /**
          * @description What `GET /api/v1/auth/session` answers.
@@ -1656,6 +1760,130 @@ export interface operations {
             };
             /** @description No session */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    auth_sessions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The live sessions of the signed-in user, newest first; the one the request came with has `current` set */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionSummary"][];
+                };
+            };
+            /** @description No session; a bearer token is refused */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The session must change its password first */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    auth_sessions_revoke_others: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every other session of this user is ended; the current one stays */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevokedSessions"];
+                };
+            };
+            /** @description No session; a bearer token is refused */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The CSRF check failed, or the session must change its password first */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    auth_session_revoke: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The handle from `GET /api/v1/auth/sessions` */
+                handle: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The session is ended; when it was the current one, the cookie is cleared */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No session; a bearer token is refused */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The CSRF check failed, or the session must change its password first */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No session of this user has that handle */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

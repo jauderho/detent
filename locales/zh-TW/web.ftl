@@ -81,6 +81,7 @@ web-auth-store-unwritable = 無法為寫入準備此主機上的某個認證資�
 web-auth-store-write-failed = 無法寫入此主機上的某個認證資訊檔案。
 web-auth-token-limit = 此主機已持有 api 權杖數量的上限。
 web-auth-token-unknown = 該 api 權杖不存在、已被撤銷或已過期。
+web-auth-session-unknown = 該工作階段不存在或已結束。
 web-auth-totp-secret-invalid = 該驗證器金鑰不是有效的 base32。
 web-auth-totp-enrolled = 此帳戶已有第二因素。請先關閉它，再新增新的。
 web-auth-totp-not-enrolled = 此帳戶沒有可關閉的第二因素。

@@ -297,6 +297,7 @@ web-auth-unauthenticated = entre para fazer isso.
 web-auth-ambiguous-credentials = envie um cookie de sessão ou um token bearer, não os dois.
 web-auth-csrf-rejected = esta solicitação não passou nas verificações entre sites.
 web-auth-token-unknown = esse token de api não existe, foi revogado ou expirou.
+web-auth-session-unknown = essa sessão não existe ou já foi encerrada.
 web-auth-token-limit = este host já tem o número máximo de tokens de api.
 web-auth-totp-secret-invalid = esse segredo do autenticador não é um base32 válido.
 web-auth-totp-enrolled = esta conta já tem um segundo fator. desative-o antes de adicionar um novo.

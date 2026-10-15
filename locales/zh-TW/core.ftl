@@ -298,6 +298,7 @@ web-auth-unauthenticated = 請先登入再執行此操作。
 web-auth-ambiguous-credentials = 請傳送工作階段 cookie 或 bearer 權杖二者之一，不要同時傳送。
 web-auth-csrf-rejected = 此要求未通過跨站檢查。
 web-auth-token-unknown = 該 api 權杖不存在、已被撤銷或已過期。
+web-auth-session-unknown = 該工作階段不存在或已結束。
 web-auth-token-limit = 此主機已持有 api 權杖數量的上限。
 web-auth-totp-secret-invalid = 該驗證器金鑰不是有效的 base32。
 web-auth-totp-enrolled = 此帳戶已有第二因素。請先關閉它，再新增新的。

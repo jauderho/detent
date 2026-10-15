@@ -298,6 +298,7 @@ web-auth-unauthenticated = 请先登录再执行此操作。
 web-auth-ambiguous-credentials = 请发送会话 cookie 或 bearer 令牌二者之一，不要同时发送。
 web-auth-csrf-rejected = 此请求未通过跨站检查。
 web-auth-token-unknown = 该 api 令牌不存在、已被吊销或已过期。
+web-auth-session-unknown = 该会话不存在或已结束。
 web-auth-token-limit = 此主机已持有 api 令牌数量的上限。
 web-auth-totp-secret-invalid = 该验证器密钥不是有效的 base32。
 web-auth-totp-enrolled = 此账户已有第二因素。请先关闭它，再添加新的。

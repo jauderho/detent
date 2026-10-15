@@ -298,6 +298,7 @@ web-auth-unauthenticated = connectez-vous pour faire cela.
 web-auth-ambiguous-credentials = envoyez soit un cookie de session, soit un jeton bearer, pas les deux.
 web-auth-csrf-rejected = cette requête n'a pas passé ses vérifications inter-sites.
 web-auth-token-unknown = ce jeton api n'existe pas, est révoqué ou a expiré.
+web-auth-session-unknown = cette session n'existe pas ou est déjà terminée.
 web-auth-token-limit = cet hôte détient déjà le nombre maximal de jetons api.
 web-auth-totp-secret-invalid = ce secret d'authentificateur n'est pas du base32 valide.
 web-auth-totp-enrolled = ce compte a déjà un second facteur. désactivez-le avant d'en ajouter un nouveau.

@@ -12,6 +12,7 @@
 //!   GET  /auth/notices ─▶ [`super::notices`] (credential changes since the last sign-in)
 //!   POST /auth/password ─▶ current password ─▶ new password ─▶ new session
 //!   GET|POST /auth/totp* ─▶ [`super::enrolment`] (second factor on and off)
+//!   GET|POST /auth/sessions* ─▶ [`super::sessions`] (list and end own sessions)
 //! ```
 //!
 //! Phase 4c owns the rest of `/api/v1`; this module registers the routes
@@ -97,6 +98,15 @@ pub const TOTP_CONFIRM_PATH: &str = "/api/v1/auth/totp/confirm";
 /// Where it turns its second factor off.
 pub const TOTP_DISABLE_PATH: &str = "/api/v1/auth/totp/disable";
 
+/// Where a signed-in caller lists its own live sessions.
+pub const SESSIONS_PATH: &str = "/api/v1/auth/sessions";
+
+/// Where it ends one of them by its handle.
+pub const SESSION_REVOKE_PATH: &str = "/api/v1/auth/sessions/{handle}/revoke";
+
+/// Where it ends all of them except the one the request came with.
+pub const SESSIONS_REVOKE_OTHERS_PATH: &str = "/api/v1/auth/sessions/revoke-others";
+
 /// Fluent id of a request body that is not the shape the endpoint expects.
 pub const MALFORMED_BODY_ID: &str = "web-request-malformed";
 
@@ -138,7 +148,7 @@ pub struct Route {
 /// Every route this module registers.
 #[must_use]
 pub fn table() -> &'static [Route] {
-    static TABLE: [Route; 9] = [
+    static TABLE: [Route; 12] = [
         Route {
             method: Method::POST,
             path: LOGIN_PATH,
@@ -184,6 +194,21 @@ pub fn table() -> &'static [Route] {
             path: TOTP_DISABLE_PATH,
             mutating: true,
         },
+        Route {
+            method: Method::GET,
+            path: SESSIONS_PATH,
+            mutating: false,
+        },
+        Route {
+            method: Method::POST,
+            path: SESSION_REVOKE_PATH,
+            mutating: true,
+        },
+        Route {
+            method: Method::POST,
+            path: SESSIONS_REVOKE_OTHERS_PATH,
+            mutating: true,
+        },
     ];
     &TABLE
 }
@@ -201,6 +226,12 @@ pub fn routes() -> axum::Router<AppState> {
         .route(TOTP_ENROL_PATH, post(super::enrolment::enrol))
         .route(TOTP_CONFIRM_PATH, post(super::enrolment::confirm))
         .route(TOTP_DISABLE_PATH, post(super::enrolment::disable))
+        .route(SESSIONS_PATH, get(super::sessions::list))
+        .route(SESSION_REVOKE_PATH, post(super::sessions::revoke))
+        .route(
+            SESSIONS_REVOKE_OTHERS_PATH,
+            post(super::sessions::revoke_others),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -668,7 +699,7 @@ pub(super) fn established(id: &Secret, view: &SessionView) -> Response {
 /// and both cookie values are a fixed name and lowercase hex. Skipping rather
 /// than panicking keeps the `panic = "deny"` posture, exactly as
 /// [`crate::headers::security_headers`] does.
-fn set_cookie(response: &mut Response, value: &str) {
+pub(super) fn set_cookie(response: &mut Response, value: &str) {
     if let Ok(value) = HeaderValue::from_str(value) {
         response.headers_mut().insert(header::SET_COOKIE, value);
     }
@@ -766,7 +797,7 @@ mod tests {
     // -- the table -----------------------------------------------------------
 
     #[test]
-    fn the_table_and_the_router_describe_the_same_nine_routes() {
+    fn the_table_and_the_router_describe_the_same_twelve_routes() {
         let paths: Vec<&str> = table().iter().map(|route| route.path).collect();
         assert_eq!(
             paths,
@@ -780,11 +811,14 @@ mod tests {
                 super::TOTP_ENROL_PATH,
                 super::TOTP_CONFIRM_PATH,
                 super::TOTP_DISABLE_PATH,
+                super::SESSIONS_PATH,
+                super::SESSION_REVOKE_PATH,
+                super::SESSIONS_REVOKE_OTHERS_PATH,
             ]
         );
         assert_eq!(
             table().iter().filter(|route| route.mutating).count(),
-            6,
+            8,
             "{:?}",
             table()
         );

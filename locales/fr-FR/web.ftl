@@ -81,6 +81,7 @@ web-auth-store-unwritable = un fichier d'identifiants sur cet hôte n'a pas pu �
 web-auth-store-write-failed = un fichier d'identifiants sur cet hôte n'a pas pu être écrit.
 web-auth-token-limit = cet hôte détient déjà le nombre maximal de jetons api.
 web-auth-token-unknown = ce jeton api n'existe pas, est révoqué ou a expiré.
+web-auth-session-unknown = cette session n'existe pas ou est déjà terminée.
 web-auth-totp-secret-invalid = ce secret d'authentificateur n'est pas du base32 valide.
 web-auth-totp-enrolled = ce compte a déjà un second facteur. désactivez-le avant d'en ajouter un nouveau.
 web-auth-totp-not-enrolled = ce compte n'a pas de second facteur à désactiver.

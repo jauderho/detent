@@ -297,6 +297,7 @@ web-auth-unauthenticated = войдите, чтобы сделать это.
 web-auth-ambiguous-credentials = отправьте либо cookie сеанса, либо токен bearer, но не оба сразу.
 web-auth-csrf-rejected = этот запрос не прошёл межсайтовые проверки.
 web-auth-token-unknown = этого api-токена не существует, он отозван или истёк.
+web-auth-session-unknown = этого сеанса не существует, или он уже завершён.
 web-auth-token-limit = на этом хосте уже выдано максимальное число api-токенов.
 web-auth-totp-secret-invalid = этот секрет аутентификатора не является допустимым base32.
 web-auth-totp-enrolled = у этой учётной записи уже есть второй фактор. отключите его, прежде чем добавить новый.
