@@ -341,6 +341,7 @@ static CHECKS: &[ExternalCheck] = &[ExternalCheck {
         ArgTemplate::TempFile,
     ],
     expects: CheckExpectation::ExitZero,
+    applies_to: &[],
 }];
 
 /// The services a change to these files affects. There is no daemon unit to
