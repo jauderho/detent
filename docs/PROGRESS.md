@@ -5,6 +5,22 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-14 - Step-up re-authentication (ASVS 3.7.1, 4.3.3)
+
+Owner decisions 2026-10-14: build for v1; console sessions only, bearer tokens are not affected; the step-up holds for 5 minutes. Route in `crates/detent-web/src/auth/stepup.rs`; API in `docs/API.md` "Step-up".
+
+**API.** `POST /api/v1/auth/reauth` (`WriteCaller`, so CSRF; a session that owes a password change gets 403; a bearer token gets 401) takes `{ password, totp_code? }` and answers `200 { step_up_expires_in_secs: 300 }`. It runs the login checks for the session's user: the login `RateLimiter` (a failure counts toward the same lockout and 429), the Argon2 permit cap, and `check_totp` (a fresh code when enrolled; a spent code is `TotpReplayed`). `GET /api/v1/auth/session` gains `step_up_expires_in_secs` (`null` when none). New `AuthError::StepUpRequired`: `403`, code `forbidden` (the code comes from the status, as for every error), message id `web-auth-step-up-required`. New auth events `step_up_succeeded`, `step_up_failed`; README "Alerting" lists `event=StepUpFailed`.
+
+**Gate.** `ScopedAuthz::requires_step_up` matches every `Operation` by name: `Apply`, `Restore`, `CertRenew`, `UpdateApply`. `api::authorize` calls `Caller::require_step_up` after the scope check, so every handler that authorizes gets it before the engine or the acme channel is reached. Session callers only. The refusal is not audited (the SPA hits it in normal use); a wrong password at `/reauth` is.
+
+**Choices.** `Session::step_up: Option<Instant>`, `STEP_UP_TTL` 5 min, expiry at exactly 300 s. Login rotation drops the step-up: rotation only happens at sign-in, which is a new login. A password or TOTP change already ends every session of the user, so the step-up goes with them. A fresh sign-in is not a step-up.
+
+**SPA.** `web/src/api/stepup.ts` `withStepUp` is the one place the refusal is handled; `web/src/app/StepUp.tsx` `StepUpProvider`/`useStepUp` show the dialog (password, and the code field unless `GET /auth/totp` says not enrolled) and send the refused request once more on success. The four mutation hooks (`useApplyModule`, `useRestoreBackup`, `useApplyUpdate`, `useRequestCertRenew`) use it. Requests refused while the dialog is open wait for it. The apply confirmation dialog stays under the step-up dialog until it answers.
+
+**Tests.** Store: `a_step_up_holds_for_five_minutes_and_not_one_second_more`, `a_step_up_is_set_only_on_the_live_session_presented`, `rotation_drops_the_step_up`. Gate: `step_up_is_required_for_exactly_apply_restore_update_and_cert_renew` (`authz.rs`), `a_session_needs_a_step_up_younger_than_five_minutes_for_the_gated_operations`, `a_bearer_token_is_never_asked_for_a_step_up` (`extract.rs`), `a_session_without_a_step_up_is_refused_the_four_operations_before_any_work`, `a_bearer_token_needs_no_step_up_for_the_four_operations` (`api/integration_tests.rs`). Route (`auth/stepup_tests.rs`): success and audit, wrong password audited and locking out login too, TOTP required and replay refused, CSRF required, token and no credential 401, restricted session 403, malformed and oversized bodies, password change ends the step-up, no secret in `Debug`. `cert_renew_refuses_a_session_without_the_csrf_token` now steps up first (it tests CSRF). SPA: `api/__tests__/stepup.test.ts`, `app/__tests__/StepUp.test.tsx`; e2e `apply asks for the password, then applies` and an axe scan with the dialog open. Mutations (gate removed, `<=` at 300 s, step-up kept on rotation, TOTP check skipped, no retry in `withStepUp`) each fail tests.
+
+Docs: PENTEST 3.7.1 and 4.3.3 Pass, gap 14 struck, counts recomputed from the rows by script (191 Pass, 1 Gap, 13 Accepted risk, 41 N/A; the one Gap is 1.2.4); TM-G9 fixed, WEB-16 covered; SECURITY_HARDENING row; BUGFIX §4 line marked.
+
 ## 2026-10-14 - Active session list and revoke (ASVS 3.3.4)
 
 Owner decision 2026-10-14: build for v1. A signed-in user lists and ends its own sessions. Routes in `crates/detent-web/src/auth/sessions.rs`; API in `docs/API.md` "Active sessions".

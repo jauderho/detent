@@ -103,6 +103,31 @@ listed or ended.
 Both POST routes need the CSRF token. Each ended session writes one
 `session_revoked` record to the auth log, kind `session`.
 
+## Step-up
+
+A session must enter its password again before it may apply a module,
+restore a backup, start an update or renew the certificate (ASVS 3.7.1,
+4.3.3). The step-up holds for 5 minutes. Bearer tokens do not need one.
+
+- `POST /api/v1/auth/reauth` takes `{ password, totp_code? }`. The password
+  is the one of the session's user. When the account has a second factor, a
+  fresh code is needed too; a code that was already used is refused. The
+  answer is `200 { step_up_expires_in_secs: 300 }`. A wrong password or code
+  is `401 web-auth-invalid-credentials` and counts in the login rate limiter,
+  with the same lockout and `429`. The route needs the CSRF token; a bearer
+  token gets `401`, and a session that must change its password gets `403`.
+- Without a step-up in the last 5 minutes, the four operations answer
+  `403 web-auth-step-up-required` (`code` is `forbidden`) before any work is
+  done. Send `POST /api/v1/auth/reauth`, then send the request again.
+- `GET /api/v1/auth/session` has `step_up_expires_in_secs`: the seconds the
+  step-up still holds, or `null` when there is none.
+
+A sign-in starts without a step-up, also when it replaces an older session
+of the same browser. A password change and a second-factor change end every
+session of the user, so the step-up ends with them. The auth log gets
+`step_up_succeeded` or `step_up_failed` (a reused code is `totp_replayed`,
+a lockout `locked_out`), kind `session`.
+
 ## Scopes
 
 Every credential holds `read`, or `read` and `write` together — there is no

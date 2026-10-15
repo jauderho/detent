@@ -138,6 +138,8 @@ these events:
   rest).
 - `event=TokenRateLimited`: an API token went over its request budget (one
   line when it starts; none again until the budget has refilled).
+- `event=StepUpFailed`: a session gave a wrong password or code before an
+  apply, restore, update or certificate renewal.
 
 ```bash
 journalctl -u detent --since -1h --grep 'detent audit.*event=(LockedOut|ScopeDenied)'

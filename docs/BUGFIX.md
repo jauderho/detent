@@ -800,8 +800,8 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   OS); TM-G17 (shared uid in capability-user mode); 9.1.2 (no `testssl.sh`;
   `scripts/tls-check.sh` and the rustls tests); PLAN Phase 6 `detent-acme`
   coverage of 93 to 94 percent. Open, being implemented for v1: ~~3.3.4 (session
-  list and revoke)~~ done 2026-10-14; 3.7.1 and 4.3.3 (step-up re-authentication before apply,
-  restore and update); ~~8.1.4 and 11.1.4 (per-token rate limit with an
+  list and revoke)~~ done 2026-10-14; ~~3.7.1 and 4.3.3 (step-up re-authentication before apply,
+  restore and update)~~ done 2026-10-14; ~~8.1.4 and 11.1.4 (per-token rate limit with an
   auth-log event)~~ Done 2026-10-14 (`PROGRESS.md`); 1.2.4 (token creation needs a TOTP-satisfied session when
   `totp_required` is set).
 - Releases (owner, 2026-10-14): skip cutting a release for now; Phase 9 stays
