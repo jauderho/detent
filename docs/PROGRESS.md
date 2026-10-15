@@ -5,6 +5,18 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-15 - D3 faults: audit log owner (D4) and resolved.conf in the unit (D6)
+
+**D4 cause.** `FileAudit` created `<state_root>/audit` and `detent-audit.jsonl` with the uid of the writer. A root CLI apply before `serve` made both root-owned (`0700`/`0600`), so the worker (uid `detent`) got `EACCES` and every API apply answered `ops-audit-unavailable`. The reverse order was broken too: `ensure_private` refuses a directory the process does not own, so a root CLI write after `serve` failed on the `detent`-owned directory.
+
+**D4 owner model.** The audit directory and log belong to the owner of the state root (the worker account; `tmpfiles.d` makes `/var/lib/detent` `detent:detent 0700`), in root-confined and capability-user mode alike (the CLI is root in both). `FileAudit::under_state_root` uses two new helpers in `detent_platform::fs::private_dir`: `ensure_private_as_parent` (directory `0700`, owner of its parent, opened `O_DIRECTORY | O_NOFOLLOW`, `fchown`/`fchmod` on the descriptor) and `open_append_as` (log opened `O_NOFOLLOW`; a new owner only for a regular file with one link, so a planted hard link is never given away). Only a writer that is not the owner calls `fchown`; the worker owns what it makes and calls none. No seccomp, Landlock, capability or unit change. `FileAudit::new` (no state root) keeps `ensure_private`. A host an older version left broken is repaired by the next root CLI write, or by `chown -R detent:detent /var/lib/detent/audit`.
+
+**D6.** `detent.service` now lists `-/etc/systemd/resolved.conf` (absent on Fedora and Arch) and `-/etc/fstab.d` (a mounts target that was missing too). A file entry is enough: with `/etc/systemd` read-only the temp file is refused (`EROFS`), and `fs::atomic` writes the existing file in place with the write-in-progress marker; the validator candidate falls back to staging. Allowing `/etc/systemd` would have opened the unit files. Every other target (hosts, resolver, chrony, mounts, nfs, samba, dhcp, network) was already covered. `capability-user.conf` does not change `ReadWritePaths`.
+
+**Tests.** `every_module_target_is_in_read_write_paths` (`crates/detent/tests/packaging.rs`; failed before with `not writable under the unit: ["/etc/systemd/resolved.conf", "/etc/fstab.d"]`). `enforce_mode_worker_appends_to_an_audit_log_a_root_run_made` (`sandbox/linux.rs`, root, CI root job: root, then the confined worker as `nobody`, then root, then the worker append to one log; failed before with the worker's `Permission denied (os error 13)`); `private_dir.rs`: `a_directory_becomes_0700_and_names_the_owner_of_its_parent`, `the_parent_owner_check_refuses_a_symlinked_directory`, `a_new_file_is_created_with_the_mode_and_appended_to`, `a_symlinked_file_is_refused_and_its_target_is_not_written`, `a_file_with_two_links_is_not_given_another_owner`.
+
+**Not yet run on a host.** The root tests ran in a local privileged aarch64 musl container (`sandbox::linux::tests`: 31 passed; `enforce_mode_monitor_runs_real_validators_through_the_runner` fails there only because the image has no `findmnt`/`systemctl`). The D3 container acceptance must be repeated for the `order` and resolver rows.
+
 ## 2026-10-14 - API tokens from the console (ASVS 1.2.4)
 
 Owner decision 2026-10-14: the console manages API tokens, and minting needs a session that satisfied TOTP when `auth.totp_required` is set. The CLI (`detent token create|list|revoke`) is unchanged. Routes in `crates/detent-web/src/auth/tokens.rs`; API in `docs/API.md` "API tokens".

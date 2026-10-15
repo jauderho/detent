@@ -342,7 +342,7 @@ deferred by the owner.
    and networkd; `x-systemd.automount`; `chrony` serving time; the Landlock
    line of `doctor`. Evidence below is from `0.1.1` at `59fb2eb`; every
    item was seen on the distros named, see the spike for the other rows.
-4. **Root CLI write before `serve` breaks every API apply.** After
+4. ~~**Root CLI write before `serve` breaks every API apply.**~~ Done 2026-10-15 (PROGRESS.md). After
    `packaging/install.sh`, a one-shot `detent config nfs apply ...` as root
    creates `/var/lib/detent/audit` root-owned. Then `detent serve` runs, and
    `POST /api/v1/modules/<id>/apply` answers
@@ -373,7 +373,7 @@ deferred by the owner.
      under the unit's sandbox is not isolated.
    Fix idea: declare checks per target or per backend, run only those whose
    backend is present, and skip (report) a validator that is not installed.
-6. **Packaged unit cannot write `/etc/systemd/resolved.conf`.** With the
+6. ~~**Packaged unit cannot write `/etc/systemd/resolved.conf`.**~~ Done 2026-10-15 (PROGRESS.md). With the
    validator stubbed, the resolver apply answers `ops-privsep-failed`;
    monitor log: `write_target ... outcome="error" error="i/o error: openat:
    read-only filesystem or storage medium"`. `packaging/systemd/detent.service`
