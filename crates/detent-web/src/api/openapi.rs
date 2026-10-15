@@ -11,7 +11,7 @@
 //!                                                               │   module's test fails if
 //!                                                               │   it drifts by one byte)
 //!   at RUN time:                                                │
-//!     include_str!(docs/openapi.json) ──▶ DOCUMENT ─────────────┘
+//!     docs/openapi.json, compact, deflated ──▶ DEFLATED ────────┘
 //!                                             │
 //!                                             ▼
 //!                                GET /api/v1/openapi.json (authenticated)
@@ -85,10 +85,11 @@ pub fn routes() -> Router<AppState> {
     Router::new().route(PATH, get(serve))
 }
 
-/// The document as bytes, baked in at compile time.
+/// The document, baked in at compile time.
 ///
-/// `build.rs` writes it as `docs/openapi.json` with the whitespace removed;
-/// the checked-in file stays pretty-printed for review.
+/// `build.rs` writes it as `docs/openapi.json` with the whitespace removed,
+/// deflated (miniz level 10, the inflater `detent-i18n` already links); the
+/// checked-in file stays pretty-printed for review. [`document`] inflates it.
 ///
 /// Serving this rather than `ApiDoc::openapi()` is what keeps utoipa's
 /// runtime schema builders — 280 KiB of generated code across the 54
@@ -97,7 +98,17 @@ pub fn routes() -> Router<AppState> {
 /// [`tests::the_checked_in_document_matches_what_this_build_generates`]
 /// already fails the build if this file and the document this build would
 /// generate differ by a single byte, so the constant cannot go stale.
-const DOCUMENT: &str = include_str!(concat!(env!("OUT_DIR"), "/openapi.min.json"));
+const DEFLATED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/openapi.min.json.deflate"));
+
+include!(concat!(env!("OUT_DIR"), "/openapi_len.rs"));
+
+/// The compact document, inflated from [`DEFLATED`]. `None` only if the
+/// embedded bytes are damaged; `build.rs` proves they inflate.
+fn document() -> Option<String> {
+    miniz_oxide::inflate::decompress_to_vec_with_limit(DEFLATED, DOCUMENT_LEN)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+}
 
 /// `GET /api/v1/openapi.json`.
 ///
@@ -117,14 +128,19 @@ const DOCUMENT: &str = include_str!(concat!(env!("OUT_DIR"), "/openapi.min.json"
         (status = 401, description = "No credential", body = crate::error::ErrorBody),
     ),
 ))]
-async fn serve(_caller: crate::auth::extract::Caller) -> impl axum::response::IntoResponse {
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "application/json; charset=utf-8",
-        )],
-        DOCUMENT,
-    )
+async fn serve(_caller: crate::auth::extract::Caller) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    match document() {
+        Some(text) => (
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "application/json; charset=utf-8",
+            )],
+            text,
+        )
+            .into_response(),
+        None => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 /// `POST /api/v1/auth/login`. The real handler is `crate::auth::routes::login`.
@@ -337,12 +353,15 @@ mod tests {
     /// The compact body the route serves is the checked-in document.
     #[test]
     fn the_served_body_parses_to_the_checked_in_document() -> R {
-        let served: serde_json::Value = serde_json::from_str(super::DOCUMENT)?;
+        let document = super::document().ok_or("the embedded document does not inflate")?;
+        assert_eq!(document.len(), super::DOCUMENT_LEN);
+        let served: serde_json::Value = serde_json::from_str(&document)?;
         let checked_in: serde_json::Value = serde_json::from_str(&read_checked_in(CHECKED_IN)?)?;
         assert_eq!(served, checked_in);
+        assert!(!document.contains('\n'), "the served body is compact");
         assert!(
-            !super::DOCUMENT.contains('\n'),
-            "the served body is compact"
+            super::DEFLATED.len() < document.len(),
+            "the embedded body is deflated"
         );
         Ok(())
     }

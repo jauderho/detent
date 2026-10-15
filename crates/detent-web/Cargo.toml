@@ -27,6 +27,9 @@ getrandom = { workspace = true }
 hmac = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
+# Inflates the embedded `OpenAPI` document (`src/api/openapi.rs`). Already in
+# the binary through `detent-i18n`.
+miniz_oxide = { workspace = true }
 rcgen = { workspace = true }
 # Only pulled in by the `ui` feature (PLAN §4.2); see `src/spa.rs`.
 rust-embed = { workspace = true, optional = true }
@@ -54,7 +57,9 @@ tracing = { workspace = true }
 zeroize = { workspace = true }
 
 [build-dependencies]
-# `build.rs` re-serialises `docs/openapi.json` compactly (see `src/api/openapi.rs`).
+# `build.rs` re-serialises `docs/openapi.json` compactly and deflates it (see
+# `src/api/openapi.rs`).
+miniz_oxide = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]

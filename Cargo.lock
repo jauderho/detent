@@ -946,6 +946,7 @@ dependencies = [
  "hmac",
  "hyper",
  "hyper-util",
+ "miniz_oxide",
  "proptest",
  "rcgen",
  "rust-embed",
