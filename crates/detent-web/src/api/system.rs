@@ -141,6 +141,7 @@ pub(super) async fn cert(
     tag = "system",
     responses(
         (status = 202, description = "The ACME client was asked to renew now", body = RenewRequested),
+        (status = 403, description = "The caller lacks the write scope (`web-denied-scope`), or is a session without a step-up in the last five minutes (`web-auth-step-up-required`, see `POST /api/v1/auth/reauth`)", body = crate::error::ErrorBody),
         (status = 409, description = "No ACME client runs: `tls.bootstrap` is not `acme`", body = crate::error::ErrorBody),
         (status = 503, description = "The request did not reach the ACME client", body = crate::error::ErrorBody),
     ),
@@ -344,6 +345,7 @@ fn status_from_stamp(
     responses(
         (status = 202, description = "The update started in the background", body = UpdateStartedView),
         (status = 400, description = "The version is not a release tag", body = crate::error::ErrorBody),
+        (status = 403, description = "The caller lacks the write scope (`web-denied-scope`), or is a session without a step-up in the last five minutes (`web-auth-step-up-required`, see `POST /api/v1/auth/reauth`)", body = crate::error::ErrorBody),
         (status = 409, description = "The release is not newer than the running version, or an update is already running", body = crate::error::ErrorBody),
         (status = 500, description = "The update could not be started on this host", body = crate::error::ErrorBody),
     ),

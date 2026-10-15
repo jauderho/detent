@@ -287,6 +287,7 @@ web-auth-password-too-short = 密码至少须有 12 个字符。
 web-auth-password-too-long = 密码最多只能有 128 个字符。
 web-auth-password-unchanged = 新密码必须与当前密码不同。
 web-auth-password-change-required = 请先修改密码，然后再进行其他操作。
+web-auth-step-up-required = 请重新输入密码以执行此操作。
 web-auth-user-name-invalid = `{$name}` 不是可用的用户名；请使用 1 到 32 个 `a-z`、`0-9`、`.`、`_` 或 `-` 字符，并以字母或数字开头。
 web-auth-user-exists = 名为 `{$name}` 的用户已存在。
 web-auth-user-unknown = 没有名为 `{$name}` 的用户。

@@ -287,6 +287,7 @@ web-auth-password-too-short = पासवर्ड में कम से क�
 web-auth-password-too-long = पासवर्ड में अधिकतम 128 वर्ण हो सकते हैं।
 web-auth-password-unchanged = नया पासवर्ड मौजूदा पासवर्ड से अलग होना चाहिए।
 web-auth-password-change-required = कुछ भी और करने से पहले अपना पासवर्ड बदलें।
+web-auth-step-up-required = ऐसा करने के लिए अपना पासवर्ड फिर से दर्ज करें।
 web-auth-user-name-invalid = `{$name}` उपयोग योग्य उपयोगकर्ता नाम नहीं है; `a-z`, `0-9`, `.`, `_` या `-` के 1 से 32 वर्ण उपयोग करें, जो किसी अक्षर या अंक से शुरू हों।
 web-auth-user-exists = `{$name}` नाम का उपयोगकर्ता पहले से मौजूद है।
 web-auth-user-unknown = `{$name}` नाम का कोई उपयोगकर्ता नहीं है।

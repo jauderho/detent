@@ -159,6 +159,37 @@ impl ScopedAuthz {
             | Operation::AuditQuery(_) => Scope::Read,
         }
     }
+
+    /// Whether `op` needs a recent step-up when a session asks for it
+    /// (ASVS 3.7.1, 4.3.3): the operations that rewrite a file, put an old
+    /// one back, replace the running binary or replace the serving
+    /// certificate. A bearer token is never asked for one.
+    ///
+    /// Matched variant by variant for the same reason as
+    /// [`required_scope`](Self::required_scope): a new operation must be
+    /// placed here on purpose.
+    #[must_use]
+    pub const fn requires_step_up(op: &Operation) -> bool {
+        match *op {
+            Operation::Apply { .. }
+            | Operation::Restore { .. }
+            | Operation::CertRenew
+            | Operation::UpdateApply { .. } => true,
+            Operation::ListModules
+            | Operation::GetModule { .. }
+            | Operation::Validate { .. }
+            | Operation::Plan { .. }
+            | Operation::ConfirmCommit { .. }
+            | Operation::RollbackCommit { .. }
+            | Operation::ListBackups { .. }
+            | Operation::ServiceStatus { .. }
+            | Operation::ServiceAction { .. }
+            | Operation::HostProfile
+            | Operation::CertStatus
+            | Operation::UpdateStatus
+            | Operation::AuditQuery(_) => false,
+        }
+    }
 }
 
 impl Authz for ScopedAuthz {
@@ -179,7 +210,7 @@ mod tests {
     use super::{DENIED_SCOPE_ID, Scope, ScopedAuthz, Scopes};
     use detent_ops::authz::Authz as _;
     use detent_ops::identity::Identity;
-    use detent_ops::op::{Operation, ServiceCommand};
+    use detent_ops::op::{OpKind, Operation, ServiceCommand};
     use detent_platform::privsep::proto::{BackupId, CommitId};
     use serde_json::json;
 
@@ -251,6 +282,30 @@ mod tests {
                 op.is_mutating(),
                 "{op:?} maps to {needed:?}"
             );
+        }
+    }
+
+    #[test]
+    fn step_up_is_required_for_exactly_apply_restore_update_and_cert_renew() {
+        let all = every_operation();
+        assert_eq!(all.len(), 17, "a variant is missing from the walk");
+        let needing: Vec<OpKind> = all
+            .iter()
+            .filter(|op| ScopedAuthz::requires_step_up(op))
+            .map(Operation::kind)
+            .collect();
+        assert_eq!(
+            needing,
+            vec![
+                OpKind::Apply,
+                OpKind::Restore,
+                OpKind::CertRenew,
+                OpKind::UpdateApply
+            ]
+        );
+        // Each of them already needs `write`.
+        for op in all.iter().filter(|op| ScopedAuthz::requires_step_up(op)) {
+            assert_eq!(ScopedAuthz::required_scope(op), Scope::Write, "{op:?}");
         }
     }
 

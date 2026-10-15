@@ -165,6 +165,28 @@ impl Caller {
         self.session.as_ref()
     }
 
+    /// Refuse an operation that needs a step-up when this caller is a
+    /// session whose step-up is missing or older than
+    /// [`session::STEP_UP_TTL`] at `now`. A bearer token always passes.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::StepUpRequired`].
+    pub fn require_step_up(
+        &self,
+        op: &detent_ops::Operation,
+        now: Instant,
+    ) -> Result<(), AuthError> {
+        match self.session.as_ref() {
+            Some(session)
+                if ScopedAuthz::requires_step_up(op) && session.step_up_left(now).is_none() =>
+            {
+                Err(AuthError::StepUpRequired)
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// The session and the id it was reached by.
     ///
     /// # Errors
@@ -1059,6 +1081,115 @@ mod tests {
                 .events()
                 .contains(&crate::auth::audit::AuthEvent::CredentialRejected)
         );
+        Ok(())
+    }
+
+    /// The four operations that need a step-up, and three that do not.
+    fn gated_and_not() -> (Vec<detent_ops::Operation>, Vec<detent_ops::Operation>) {
+        use detent_ops::Operation;
+        use detent_platform::privsep::proto::{BackupId, CommitId};
+        let gated = vec![
+            Operation::Apply {
+                id: "hosts".to_owned(),
+                model: serde_json::json!({}),
+                expected_hash: None,
+                service_action: None,
+                confirm: None,
+            },
+            Operation::Restore {
+                id: "hosts".to_owned(),
+                backup_id: BackupId(0),
+                expected_hash: None,
+            },
+            Operation::UpdateApply {
+                version: "v1.2.3".to_owned(),
+            },
+            Operation::CertRenew,
+        ];
+        let open = vec![
+            Operation::ServiceAction {
+                id: "hosts".to_owned(),
+                action: detent_ops::ServiceCommand::Restart,
+            },
+            Operation::ConfirmCommit {
+                commit_id: CommitId(1),
+            },
+            Operation::Plan {
+                id: "hosts".to_owned(),
+                model: serde_json::json!({}),
+            },
+        ];
+        (gated, open)
+    }
+
+    #[test]
+    fn a_session_needs_a_step_up_younger_than_five_minutes_for_the_gated_operations() -> R {
+        let fixture = test_state()?;
+        let start = Instant::now();
+        let (id, _session) =
+            fixture
+                .state
+                .auth
+                .sessions
+                .create("alice", Scopes::read_write(), false, start)?;
+        let (gated, open) = gated_and_not();
+
+        let caller = Caller::resolve(&fixture.state, &with_cookie(id.expose()), start, unix_now())?;
+        for op in &gated {
+            match caller.require_step_up(op, start) {
+                Err(err @ AuthError::StepUpRequired) => {
+                    assert_eq!(err.status(), StatusCode::FORBIDDEN);
+                    assert_eq!(err.message_id().as_str(), "web-auth-step-up-required");
+                }
+                other => return Err(format!("{op:?} was not refused: {other:?}").into()),
+            }
+        }
+        for op in &open {
+            caller.require_step_up(op, start)?;
+        }
+
+        assert!(fixture.state.auth.sessions.step_up(id.expose(), start));
+        let ttl = crate::auth::session::STEP_UP_TTL;
+        let inside = start
+            .checked_add(ttl.saturating_sub(Duration::from_secs(1)))
+            .ok_or("clock overflow")?;
+        let caller = Caller::resolve(
+            &fixture.state,
+            &with_cookie(id.expose()),
+            inside,
+            unix_now(),
+        )?;
+        for op in &gated {
+            caller.require_step_up(op, inside)?;
+        }
+        let outside = start.checked_add(ttl).ok_or("clock overflow")?;
+        let caller = Caller::resolve(
+            &fixture.state,
+            &with_cookie(id.expose()),
+            outside,
+            unix_now(),
+        )?;
+        for op in &gated {
+            assert!(
+                matches!(
+                    caller.require_step_up(op, outside),
+                    Err(AuthError::StepUpRequired)
+                ),
+                "{op:?} passed with a step-up five minutes old"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_bearer_token_is_never_asked_for_a_step_up() -> R {
+        let fixture = test_state()?;
+        let (token, _view) = fixture.state.auth.tokens.issue("ci", Scope::Write, None)?;
+        let caller = resolve(&fixture, &with_bearer(token.expose()))?;
+        let (gated, open) = gated_and_not();
+        for op in gated.iter().chain(&open) {
+            caller.require_step_up(op, Instant::now())?;
+        }
         Ok(())
     }
 

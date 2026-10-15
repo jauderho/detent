@@ -1,8 +1,8 @@
 //! The auth event log (PLAN §2.7, "Misc": *audit for every auth event*).
 //!
 //! ```text
-//!   login / logout / session revoke / lockout / token issue / token revoke
-//!   / scope denied / certificate renewal request
+//!   login / logout / session revoke / step-up / lockout / token issue
+//!   / token revoke / scope denied / certificate renewal request
 //!            │
 //!            ├─▶ tracing::info!(… "detent audit")  ── journald, one stream
 //!            └─▶ AuthAudit sink ─▶ <state_root>/audit/detent-auth.jsonl (0600)
@@ -82,6 +82,14 @@ pub enum AuthEvent {
     /// or with every other session of the same user. One record per ended
     /// session; the subject is the user it belonged to.
     SessionRevoked,
+    /// A session stepped up (`POST /api/v1/auth/reauth`, ASVS 3.7.1): its
+    /// password, and its second factor when the account has one, were
+    /// accepted again.
+    StepUpSucceeded,
+    /// A step-up was refused: a wrong password, or a missing or wrong code.
+    /// It counts toward the login lockout. A replayed code is
+    /// [`Self::TotpReplayed`] instead.
+    StepUpFailed,
     /// An API token was minted.
     TokenIssued,
     /// An API token was revoked.

@@ -29,6 +29,11 @@
 //!   handle is [`HANDLE_BYTES`] fresh random bytes, drawn apart from the id
 //!   and replaced on rotation, so nothing about the id can be derived from
 //!   it. A handle only ends a session of the same subject.
+//! * **A step-up lasts [`STEP_UP_TTL`] and dies with its session id**
+//!   (ASVS 3.7.1, 4.3.3). Only `POST /api/v1/auth/reauth` sets it. Rotation
+//!   happens only at sign-in, which is a new login, so the rotated session
+//!   starts without one; a password change or a TOTP change ends every
+//!   session of the user, so the step-up goes with them.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -70,6 +75,10 @@ pub const PENDING_TOTP_TTL: Duration = Duration::from_mins(10);
 /// session cannot be guessed.
 pub const HANDLE_BYTES: usize = 16;
 
+/// How long a step-up (a fresh password, and code when the account has a
+/// second factor) lets a session do the operations that need one.
+pub const STEP_UP_TTL: Duration = Duration::from_mins(5);
+
 /// One authenticated browser session.
 #[derive(Clone)]
 pub struct Session {
@@ -92,6 +101,18 @@ pub struct Session {
     /// The public name of this session in the session list: random, not
     /// derived from the id, and replaced on rotation.
     pub handle: String,
+    /// When the session last stepped up, if it has since its login.
+    pub step_up: Option<Instant>,
+}
+
+impl Session {
+    /// How long the step-up of this session still holds at `now`: `None`
+    /// when there is none, or when [`STEP_UP_TTL`] has passed since it.
+    #[must_use]
+    pub fn step_up_left(&self, now: Instant) -> Option<Duration> {
+        let since = now.saturating_duration_since(self.step_up?);
+        (since < STEP_UP_TTL).then(|| STEP_UP_TTL.saturating_sub(since))
+    }
 }
 
 impl fmt::Debug for Session {
@@ -126,6 +147,10 @@ pub struct SessionView {
     pub totp_satisfied: bool,
     /// Whether this session may do nothing but change the password.
     pub must_change_password: bool,
+    /// Seconds until the step-up of this session ends; `null` when it has
+    /// none, so the next apply, restore, update or certificate renewal asks
+    /// for the password first.
+    pub step_up_expires_in_secs: Option<u64>,
 }
 
 impl fmt::Debug for SessionView {
@@ -136,6 +161,7 @@ impl fmt::Debug for SessionView {
             .field("expires_in_secs", &self.expires_in_secs)
             .field("totp_satisfied", &self.totp_satisfied)
             .field("must_change_password", &self.must_change_password)
+            .field("step_up_expires_in_secs", &self.step_up_expires_in_secs)
             .finish_non_exhaustive()
     }
 }
@@ -319,6 +345,7 @@ impl SessionStore {
             totp_satisfied,
             must_change_password: false,
             handle: new_handle()?,
+            step_up: None,
         };
         let mut entries = self
             .entries
@@ -420,6 +447,9 @@ impl SessionStore {
             // A new id gets a new handle: a handle seen before the rotation
             // names nothing after it.
             handle,
+            // Rotation is a new sign-in, not the same login going on; the
+            // operations that need a step-up ask for it again.
+            step_up: None,
         };
         entries.insert(
             key_of(fresh.expose()),
@@ -543,6 +573,27 @@ impl SessionStore {
             expires_in_secs: self.expires_in(session, now).as_secs(),
             totp_satisfied: session.totp_satisfied,
             must_change_password: session.must_change_password,
+            step_up_expires_in_secs: session.step_up_left(now).map(|left| left.as_secs()),
+        }
+    }
+
+    /// Record that the session `presented` names stepped up at `now`.
+    /// Answers whether a live session took it.
+    pub fn step_up(&self, presented: &str, now: Instant) -> bool {
+        let Ok(mut entries) = self.entries.lock() else {
+            return false;
+        };
+        let key = key_of(presented);
+        match entries.get_mut(&key) {
+            Some(entry) if entry.id.ct_eq(presented) => {
+                if expired(&entry.session, self.idle, self.absolute, now) {
+                    entries.remove(&key);
+                    return false;
+                }
+                entry.session.step_up = Some(now);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -1102,6 +1153,66 @@ mod tests {
         assert!(store.lookup(bob_id.expose(), now).is_some());
         assert_eq!(store.len(), 2);
         assert_eq!(store.revoke_others("alice", &keep.handle), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn a_step_up_holds_for_five_minutes_and_not_one_second_more() -> R {
+        let store = store();
+        let start = Instant::now();
+        let (id, session) = store.create("alice", Scopes::read_write(), false, start)?;
+        assert!(session.step_up.is_none());
+        assert!(session.step_up_left(start).is_none());
+        assert_eq!(store.view(&session, start).step_up_expires_in_secs, None);
+
+        let stepped = at(start, 60);
+        assert!(store.step_up(id.expose(), stepped));
+        let inside = at(stepped, super::STEP_UP_TTL.as_secs().saturating_sub(1));
+        let found = store.lookup(id.expose(), inside).ok_or("no session")?;
+        assert_eq!(found.step_up_left(inside), Some(Duration::from_secs(1)));
+        assert_eq!(store.view(&found, inside).step_up_expires_in_secs, Some(1));
+        assert_eq!(
+            store.view(&found, stepped).step_up_expires_in_secs,
+            Some(super::STEP_UP_TTL.as_secs())
+        );
+
+        let outside = at(stepped, super::STEP_UP_TTL.as_secs());
+        assert!(found.step_up_left(outside).is_none());
+        assert_eq!(store.view(&found, outside).step_up_expires_in_secs, None);
+        assert_eq!(super::STEP_UP_TTL, Duration::from_mins(5));
+        Ok(())
+    }
+
+    #[test]
+    fn a_step_up_is_set_only_on_the_live_session_presented() -> R {
+        let store = store();
+        let start = Instant::now();
+        let (alice, _s) = store.create("alice", Scopes::read_write(), false, start)?;
+        let (other, _s) = store.create("alice", Scopes::read_write(), false, start)?;
+        assert!(store.step_up(alice.expose(), start));
+        let other_session = store.lookup(other.expose(), start).ok_or("no session")?;
+        assert!(other_session.step_up.is_none());
+        assert!(!store.step_up("not a session", start));
+        assert!(!store.step_up(&"0".repeat(64), start));
+        // An expired session takes no step-up and is removed.
+        let late = at(start, IDLE.as_secs());
+        assert!(!store.step_up(other.expose(), late));
+        assert!(store.lookup(other.expose(), late).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn rotation_drops_the_step_up() -> R {
+        let store = store();
+        let now = Instant::now();
+        let (first, _s) = store.create("alice", Scopes::read_write(), false, now)?;
+        assert!(store.step_up(first.expose(), now));
+        let (second, rotated) = store
+            .rotate(first.expose(), "alice", None, None, now)?
+            .ok_or("nothing was rotated")?;
+        assert!(rotated.step_up.is_none());
+        let found = store.lookup(second.expose(), now).ok_or("no session")?;
+        assert!(found.step_up_left(now).is_none());
         Ok(())
     }
 

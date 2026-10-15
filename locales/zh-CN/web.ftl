@@ -70,6 +70,7 @@ web-auth-entropy-unavailable = 系统随机数生成器出现故障，因此无�
 web-auth-hash-failed = 无法对密码进行哈希。
 web-auth-invalid-credentials = 用户名、密码或验证码不正确。
 web-auth-password-change-required = 请先修改密码，然后再进行其他操作。
+web-auth-step-up-required = 请重新输入密码以执行此操作。
 web-auth-password-too-long = 密码最多只能有 128 个字符。
 web-auth-password-too-short = 密码至少须有 12 个字符。
 web-auth-password-unchanged = 新密码必须与当前密码不同。

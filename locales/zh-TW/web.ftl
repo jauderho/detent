@@ -70,6 +70,7 @@ web-auth-entropy-unavailable = 系統亂數產生器發生故障，因此無法�
 web-auth-hash-failed = 無法對密碼進行雜湊。
 web-auth-invalid-credentials = 使用者名稱、密碼或驗證碼不正確。
 web-auth-password-change-required = 請先變更密碼，然後再進行其他操作。
+web-auth-step-up-required = 請重新輸入密碼以執行此操作。
 web-auth-password-too-long = 密碼最多只能有 128 個字元。
 web-auth-password-too-short = 密碼至少須有 12 個字元。
 web-auth-password-unchanged = 新密碼必須與目前的密碼不同。

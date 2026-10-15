@@ -286,6 +286,7 @@ web-auth-password-too-short = пароль должен содержать не 
 web-auth-password-too-long = пароль может содержать не более 128 символов.
 web-auth-password-unchanged = новый пароль должен отличаться от текущего.
 web-auth-password-change-required = смените пароль, прежде чем делать что-либо ещё.
+web-auth-step-up-required = введите пароль ещё раз, чтобы сделать это.
 web-auth-user-name-invalid = `{$name}` не подходит как имя пользователя; используйте от 1 до 32 символов из `a-z`, `0-9`, `.`, `_` или `-`, начиная с буквы или цифры.
 web-auth-user-exists = пользователь с именем `{$name}` уже существует.
 web-auth-user-unknown = пользователя с именем `{$name}` нет.

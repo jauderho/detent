@@ -286,6 +286,7 @@ web-auth-password-too-short = uma senha deve ter pelo menos 12 caracteres.
 web-auth-password-too-long = uma senha pode ter no máximo 128 caracteres.
 web-auth-password-unchanged = a nova senha deve ser diferente da atual.
 web-auth-password-change-required = altere sua senha antes de fazer qualquer outra coisa.
+web-auth-step-up-required = digite sua senha novamente para fazer isso.
 web-auth-user-name-invalid = `{$name}` não é um nome de usuário utilizável; use de 1 a 32 caracteres entre `a-z`, `0-9`, `.`, `_` ou `-`, começando com uma letra ou um dígito.
 web-auth-user-exists = já existe um usuário chamado `{$name}`.
 web-auth-user-unknown = não há usuário chamado `{$name}`.

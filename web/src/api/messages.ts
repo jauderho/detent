@@ -68,6 +68,7 @@ export const API_MESSAGE_IDS = [
   'web-auth-rate-limited',
   'web-auth-session-limit',
   'web-auth-session-unknown',
+  'web-auth-step-up-required',
   'web-auth-store-malformed',
   'web-auth-store-unreadable',
   'web-auth-store-unwritable',

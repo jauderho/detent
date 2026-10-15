@@ -70,6 +70,7 @@ web-auth-entropy-unavailable = системный генератор случа�
 web-auth-hash-failed = не удалось вычислить хеш пароля.
 web-auth-invalid-credentials = имя пользователя, пароль или код были неверны.
 web-auth-password-change-required = смените пароль, прежде чем делать что-либо ещё.
+web-auth-step-up-required = введите пароль ещё раз, чтобы сделать это.
 web-auth-password-too-long = пароль может содержать не более 128 символов.
 web-auth-password-too-short = пароль должен содержать не менее 12 символов.
 web-auth-password-unchanged = новый пароль должен отличаться от текущего.

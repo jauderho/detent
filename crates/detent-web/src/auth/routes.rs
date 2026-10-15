@@ -13,6 +13,7 @@
 //!   POST /auth/password ─▶ current password ─▶ new password ─▶ new session
 //!   GET|POST /auth/totp* ─▶ [`super::enrolment`] (second factor on and off)
 //!   GET|POST /auth/sessions* ─▶ [`super::sessions`] (list and end own sessions)
+//!   POST /auth/reauth ─▶ [`super::stepup`] (password again before a risky write)
 //! ```
 //!
 //! Phase 4c owns the rest of `/api/v1`; this module registers the routes
@@ -107,6 +108,11 @@ pub const SESSION_REVOKE_PATH: &str = "/api/v1/auth/sessions/{handle}/revoke";
 /// Where it ends all of them except the one the request came with.
 pub const SESSIONS_REVOKE_OTHERS_PATH: &str = "/api/v1/auth/sessions/revoke-others";
 
+/// Where a signed-in caller steps up: enters its password again (and its
+/// code, when the account has a second factor) before an apply, a restore,
+/// an update or a certificate renewal.
+pub const REAUTH_PATH: &str = "/api/v1/auth/reauth";
+
 /// Fluent id of a request body that is not the shape the endpoint expects.
 pub const MALFORMED_BODY_ID: &str = "web-request-malformed";
 
@@ -148,7 +154,7 @@ pub struct Route {
 /// Every route this module registers.
 #[must_use]
 pub fn table() -> &'static [Route] {
-    static TABLE: [Route; 12] = [
+    static TABLE: [Route; 13] = [
         Route {
             method: Method::POST,
             path: LOGIN_PATH,
@@ -209,6 +215,11 @@ pub fn table() -> &'static [Route] {
             path: SESSIONS_REVOKE_OTHERS_PATH,
             mutating: true,
         },
+        Route {
+            method: Method::POST,
+            path: REAUTH_PATH,
+            mutating: true,
+        },
     ];
     &TABLE
 }
@@ -232,6 +243,7 @@ pub fn routes() -> axum::Router<AppState> {
             SESSIONS_REVOKE_OTHERS_PATH,
             post(super::sessions::revoke_others),
         )
+        .route(REAUTH_PATH, post(super::stepup::reauth))
 }
 
 // ---------------------------------------------------------------------------
@@ -598,7 +610,7 @@ async fn attempt(
 /// [`AuthError::UnknownUser`] or a store variant when the accepted counter
 /// cannot be recorded — a code that cannot be marked used is refused rather
 /// than accepted, because accepting it would leave it replayable.
-fn check_totp(
+pub(super) fn check_totp(
     state: &AppState,
     verified: &VerifiedUser,
     code: Option<&str>,
@@ -797,7 +809,7 @@ mod tests {
     // -- the table -----------------------------------------------------------
 
     #[test]
-    fn the_table_and_the_router_describe_the_same_twelve_routes() {
+    fn the_table_and_the_router_describe_the_same_thirteen_routes() {
         let paths: Vec<&str> = table().iter().map(|route| route.path).collect();
         assert_eq!(
             paths,
@@ -814,11 +826,12 @@ mod tests {
                 super::SESSIONS_PATH,
                 super::SESSION_REVOKE_PATH,
                 super::SESSIONS_REVOKE_OTHERS_PATH,
+                super::REAUTH_PATH,
             ]
         );
         assert_eq!(
             table().iter().filter(|route| route.mutating).count(),
-            8,
+            9,
             "{:?}",
             table()
         );

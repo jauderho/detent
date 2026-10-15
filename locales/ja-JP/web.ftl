@@ -70,6 +70,7 @@ web-auth-entropy-unavailable = システムの乱数生成器が失敗したた�
 web-auth-hash-failed = パスワードをハッシュ化できませんでした。
 web-auth-invalid-credentials = ユーザー名、パスワード、またはコードが正しくありません。
 web-auth-password-change-required = 他の操作の前にパスワードを変更してください。
+web-auth-step-up-required = この操作を行うにはパスワードを再入力してください。
 web-auth-password-too-long = パスワードは 128 文字以下にしてください。
 web-auth-password-too-short = パスワードは 12 文字以上にしてください。
 web-auth-password-unchanged = 新しいパスワードは現在のパスワードと異なるものにしてください。

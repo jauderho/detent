@@ -106,6 +106,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/reauth": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/auth/reauth`.
+         * @description # Errors
+         *
+         *     400 for a malformed body, 401 for no session, a bearer token or refused
+         *     credentials, 403 for a failed CSRF check or a session that owes a password
+         *     change, 429 while the user or the address is locked out, 503 when every
+         *     hashing slot is taken.
+         */
+        post: operations["auth_reauth"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/session": {
         parameters: {
             query?: never;
@@ -1214,6 +1239,13 @@ export interface components {
             /** @description Whether applying would change anything at all. */
             would_change: boolean;
         };
+        /** @description The body of `POST /api/v1/auth/reauth`. */
+        ReauthRequest: {
+            /** @description The password of the signed-in user. */
+            password: string;
+            /** @description The six-digit TOTP code, when the account has a second factor. */
+            totp_code?: string | null;
+        };
         /** @description Answer to `POST /api/v1/system/cert/renew`. */
         RenewRequested: {
             /** @description Always `true`: the ACME client got the request. */
@@ -1354,6 +1386,13 @@ export interface components {
             must_change_password: boolean;
             /** @description Scope names, `["read"]` or `["read", "write"]`. */
             scopes: string[];
+            /**
+             * Format: int64
+             * @description Seconds until the step-up of this session ends; `null` when it has
+             *     none, so the next apply, restore, update or certificate renewal asks
+             *     for the password first.
+             */
+            step_up_expires_in_secs?: number | null;
             /** @description The user this session belongs to. */
             subject: string;
             /** @description Whether a second factor was presented. */
@@ -1383,6 +1422,14 @@ export interface components {
          * @enum {string}
          */
         State: "active" | "inactive" | "failed" | "activating" | "deactivating" | "unknown";
+        /** @description What a successful step-up answers. */
+        StepUp: {
+            /**
+             * Format: int64
+             * @description Seconds the step-up holds: [`STEP_UP_SECS`].
+             */
+            step_up_expires_in_secs: number;
+        };
         /**
          * @description How `serde` renders a [`SystemTime`]: two integers, not an RFC 3339
          *     string.
@@ -1730,6 +1777,75 @@ export interface operations {
                 };
             };
             /** @description The hashing cap is reached or the session table is full */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    auth_reauth: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReauthRequest"];
+            };
+        };
+        responses: {
+            /** @description The session stepped up: for the next five minutes it may apply, restore, update and renew the certificate */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StepUp"];
+                };
+            };
+            /** @description The body is not the expected shape */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No session (a bearer token is refused), or the password or code was refused */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The CSRF check failed, or the session must change its password first */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Too many failed sign-ins or step-ups */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The hashing cap is reached */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -2326,6 +2442,15 @@ export interface operations {
                     "application/json": components["schemas"]["ApplyReport"];
                 };
             };
+            /** @description The caller lacks the write scope (`web-denied-scope`), or is a session without a step-up in the last five minutes (`web-auth-step-up-required`, see `POST /api/v1/auth/reauth`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description No such module */
             404: {
                 headers: {
@@ -2412,6 +2537,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RestoredView"];
+                };
+            };
+            /** @description The caller lacks the write scope (`web-denied-scope`), or is a session without a step-up in the last five minutes (`web-auth-step-up-required`, see `POST /api/v1/auth/reauth`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
             /** @description No such module */
@@ -2659,6 +2793,15 @@ export interface operations {
                     "application/json": components["schemas"]["RenewRequested"];
                 };
             };
+            /** @description The caller lacks the write scope (`web-denied-scope`), or is a session without a step-up in the last five minutes (`web-auth-step-up-required`, see `POST /api/v1/auth/reauth`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description No ACME client runs: `tls.bootstrap` is not `acme` */
             409: {
                 headers: {
@@ -2752,6 +2895,15 @@ export interface operations {
             };
             /** @description The version is not a release tag */
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The caller lacks the write scope (`web-denied-scope`), or is a session without a step-up in the last five minutes (`web-auth-step-up-required`, see `POST /api/v1/auth/reauth`) */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

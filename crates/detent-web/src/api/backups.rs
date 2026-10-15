@@ -129,6 +129,7 @@ fn render_backups(outcome: OpOutcome) -> Result<Json<Vec<BackupInfo>>, ApiError>
     request_body = RestoreRequest,
     responses(
         (status = 200, description = "The backup was put back", body = RestoredView),
+        (status = 403, description = "The caller lacks the write scope (`web-denied-scope`), or is a session without a step-up in the last five minutes (`web-auth-step-up-required`, see `POST /api/v1/auth/reauth`)", body = crate::error::ErrorBody),
         (status = 404, description = "No such module", body = crate::error::ErrorBody),
         (status = 409, description = "The target changed since `expected_hash` was read", body = crate::error::ErrorBody),
     ),

@@ -256,6 +256,7 @@ impl utoipa::Modify for SecurityAddon {
         crate::auth::sessions::list,
         crate::auth::sessions::revoke,
         crate::auth::sessions::revoke_others,
+        crate::auth::stepup::reauth,
         healthz_doc,
         super::modules::list,
         super::modules::get_one,

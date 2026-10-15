@@ -70,6 +70,7 @@ web-auth-entropy-unavailable = o gerador de números aleatórios do sistema falh
 web-auth-hash-failed = não foi possível gerar o hash da senha.
 web-auth-invalid-credentials = o nome de usuário, a senha ou o código não estava correto.
 web-auth-password-change-required = altere sua senha antes de fazer qualquer outra coisa.
+web-auth-step-up-required = digite sua senha novamente para fazer isso.
 web-auth-password-too-long = uma senha pode ter no máximo 128 caracteres.
 web-auth-password-too-short = uma senha deve ter pelo menos 12 caracteres.
 web-auth-password-unchanged = a nova senha deve ser diferente da atual.

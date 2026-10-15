@@ -70,6 +70,7 @@ web-auth-entropy-unavailable = सिस्टम का रैंडम नं�
 web-auth-hash-failed = पासवर्ड का हैश नहीं बनाया जा सका।
 web-auth-invalid-credentials = उपयोगकर्ता नाम, पासवर्ड या कोड सही नहीं था।
 web-auth-password-change-required = कुछ भी और करने से पहले अपना पासवर्ड बदलें।
+web-auth-step-up-required = ऐसा करने के लिए अपना पासवर्ड फिर से दर्ज करें।
 web-auth-password-too-long = पासवर्ड में अधिकतम 128 वर्ण हो सकते हैं।
 web-auth-password-too-short = पासवर्ड में कम से कम 12 वर्ण होने चाहिए।
 web-auth-password-unchanged = नया पासवर्ड मौजूदा पासवर्ड से अलग होना चाहिए।

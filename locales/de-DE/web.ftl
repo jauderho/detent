@@ -70,6 +70,7 @@ web-auth-entropy-unavailable = der Zufallszahlengenerator des Systems ist ausgef
 web-auth-hash-failed = das Passwort konnte nicht gehasht werden.
 web-auth-invalid-credentials = der Benutzername, das Passwort oder der Code war nicht korrekt.
 web-auth-password-change-required = ändere dein Passwort, bevor du etwas anderes tust.
+web-auth-step-up-required = gib dein Passwort erneut ein, um das zu tun.
 web-auth-password-too-long = ein Passwort darf höchstens 128 Zeichen haben.
 web-auth-password-too-short = ein Passwort muss mindestens 12 Zeichen haben.
 web-auth-password-unchanged = das neue Passwort muss sich vom aktuellen unterscheiden.

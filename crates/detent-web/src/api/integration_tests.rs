@@ -1458,6 +1458,13 @@ async fn cert_renew_refuses_a_session_without_the_csrf_token() -> R {
         builder.body(Body::empty())
     };
 
+    // The renewal needs a step-up too (ASVS 3.7.1); this test is about CSRF.
+    assert!(
+        state
+            .auth
+            .sessions
+            .step_up(id.expose(), std::time::Instant::now())
+    );
     let refused = app(&state).oneshot(request(None)?).await?;
     assert_eq!(refused.status(), StatusCode::FORBIDDEN);
     assert_eq!(renewer.calls(), 0);
@@ -1467,6 +1474,142 @@ async fn cert_renew_refuses_a_session_without_the_csrf_token() -> R {
         .await?;
     assert_eq!(accepted.status(), StatusCode::ACCEPTED);
     assert_eq!(renewer.calls(), 1);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Step-up re-authentication (ASVS 3.7.1, 4.3.3)
+// ---------------------------------------------------------------------------
+
+/// The four routes whose operation needs a step-up, each with a body it
+/// accepts.
+fn step_up_routes() -> [(&'static str, String); 4] {
+    [
+        ("/api/v1/modules/hosts/apply", r#"{"model":{}}"#.to_owned()),
+        (
+            "/api/v1/modules/hosts/backups/0/restore",
+            format!(r#"{{"expected_hash":"{}"}}"#, "0".repeat(64)),
+        ),
+        (
+            "/api/v1/system/update",
+            r#"{"version":"v9.9.9"}"#.to_owned(),
+        ),
+        (RENEW, String::new()),
+    ]
+}
+
+/// `POST path` from a browser session, with every CSRF proof.
+async fn session_post(
+    state: &AppState,
+    id: &str,
+    csrf: &str,
+    path: &str,
+    body: &str,
+) -> Result<axum::response::Response, Box<dyn std::error::Error>> {
+    Ok(app(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(path)
+                .header(header::HOST, "box.example:3333")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, format!("{}={id}", crate::auth::COOKIE_NAME))
+                .header(crate::csrf::SEC_FETCH_SITE, crate::csrf::SAME_ORIGIN)
+                .header(header::ORIGIN, "https://box.example:3333")
+                .header(crate::csrf::CSRF_HEADER, csrf)
+                .body(Body::from(body.to_owned()))?,
+        )
+        .await?)
+}
+
+/// What each of the four answers once the gate lets it through: the live
+/// engine has no module and no update runner, and the renewer is a fake.
+const PAST_THE_GATE: [(StatusCode, &str); 4] = [
+    (StatusCode::NOT_FOUND, "ops-unknown-module"),
+    (StatusCode::NOT_FOUND, "ops-unknown-module"),
+    (StatusCode::INTERNAL_SERVER_ERROR, "ops-unsupported"),
+    (StatusCode::ACCEPTED, ""),
+];
+
+#[tokio::test]
+async fn a_session_without_a_step_up_is_refused_the_four_operations_before_any_work() -> R {
+    let live = Live::new()?;
+    let renewer = std::sync::Arc::new(FakeRenewer::default());
+    let state = live
+        .state()
+        .clone()
+        .with_cert_renewer(std::sync::Arc::clone(&renewer) as _);
+    let (id, session) = state.auth.sessions.create(
+        "alice",
+        crate::authz::Scopes::read_write(),
+        false,
+        std::time::Instant::now(),
+    )?;
+    let csrf = session.csrf_token.expose();
+
+    for (path, body) in step_up_routes() {
+        let response = session_post(&state, id.expose(), csrf, path, &body).await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+        assert_eq!(
+            error_body(response).await?,
+            (
+                "forbidden".to_owned(),
+                "web-auth-step-up-required".to_owned()
+            ),
+            "{path}"
+        );
+    }
+    // Nothing reached the engine or the acme client, and nothing was
+    // recorded as a renewal request.
+    assert_eq!(renewer.calls(), 0);
+    assert!(
+        !live
+            .state
+            .audit
+            .events()
+            .contains(&AuthEvent::CertRenewRequested)
+    );
+
+    // After a step-up, each one reaches the work behind the gate.
+    assert!(
+        state
+            .auth
+            .sessions
+            .step_up(id.expose(), std::time::Instant::now())
+    );
+    for ((path, body), (status, message)) in step_up_routes().into_iter().zip(PAST_THE_GATE) {
+        let response = session_post(&state, id.expose(), csrf, path, &body).await?;
+        assert_eq!(response.status(), status, "{path}");
+        if !message.is_empty() {
+            assert_eq!(error_body(response).await?.1, message, "{path}");
+        }
+    }
+    assert_eq!(renewer.calls(), 1);
+
+    drop(state);
+    live.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_bearer_token_needs_no_step_up_for_the_four_operations() -> R {
+    let live = Live::new()?;
+    let renewer = std::sync::Arc::new(FakeRenewer::default());
+    let state = live
+        .state()
+        .clone()
+        .with_cert_renewer(std::sync::Arc::clone(&renewer) as _);
+    let (_read, write) = tokens(&state)?;
+    for ((path, body), (status, message)) in step_up_routes().into_iter().zip(PAST_THE_GATE) {
+        let response = post(&state, path, Some(&write), &body).await?;
+        assert_eq!(response.status(), status, "{path}");
+        if !message.is_empty() {
+            assert_eq!(error_body(response).await?.1, message, "{path}");
+        }
+    }
+    assert_eq!(renewer.calls(), 1);
+    drop(state);
+    live.shutdown();
     Ok(())
 }
 

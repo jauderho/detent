@@ -215,9 +215,17 @@ pub fn check_depth(model: &serde_json::Value) -> Result<(), ApiError> {
 /// from the route table alone: a mismatch between the two is a test failure,
 /// not a silent grant.
 ///
+/// It is also the one place the step-up gate is applied (ASVS 3.7.1,
+/// 4.3.3): a session asking for an operation
+/// [`ScopedAuthz::requires_step_up`](crate::authz::ScopedAuthz::requires_step_up)
+/// names, without a step-up in the last
+/// [`STEP_UP_TTL`](crate::auth::session::STEP_UP_TTL), is refused here,
+/// before the engine or any other work.
+///
 /// # Errors
 ///
-/// [`ApiError`] (403) when the policy refuses.
+/// [`ApiError`] (403) when the policy refuses, and (403,
+/// `web-auth-step-up-required`) when a step-up is missing.
 pub fn authorize(state: &AppState, caller: &Caller, op: &Operation) -> Result<(), ApiError> {
     caller
         .authz()
@@ -232,7 +240,10 @@ pub fn authorize(state: &AppState, caller: &Caller, op: &Operation) -> Result<()
                 .with_detail(denied.id),
             );
             ApiError::from(OpsError::Denied(denied))
-        })
+        })?;
+    caller
+        .require_step_up(op, std::time::Instant::now())
+        .map_err(ApiError::from)
 }
 
 /// A [`ServiceCommand`](detent_ops::ServiceCommand), as a request body may

@@ -40,6 +40,7 @@ pub mod routes;
 pub mod secret;
 pub mod session;
 pub mod sessions;
+pub mod stepup;
 pub mod token;
 pub mod tokenlimit;
 pub mod totp;
@@ -119,6 +120,11 @@ pub enum AuthError {
     /// The session may only change its password until it has.
     #[error("the password must be changed before anything else")]
     PasswordChangeRequired,
+    /// The operation needs a step-up (`POST /api/v1/auth/reauth`) less than
+    /// [`session::STEP_UP_TTL`] old, and the session has none. Bearer tokens
+    /// are never asked for one.
+    #[error("the password must be entered again for this operation")]
+    StepUpRequired,
     /// A user by that name is already on file.
     #[error("that user already exists")]
     UserExists,
@@ -234,6 +240,7 @@ impl AuthError {
             Self::PasswordTooLong => MessageId::new("web-auth-password-too-long"),
             Self::PasswordUnchanged => MessageId::new("web-auth-password-unchanged"),
             Self::PasswordChangeRequired => MessageId::new("web-auth-password-change-required"),
+            Self::StepUpRequired => MessageId::new("web-auth-step-up-required"),
             Self::UserExists => MessageId::new("web-auth-user-exists"),
             Self::UnknownUser => MessageId::new("web-auth-user-unknown"),
             Self::InvalidCredentials | Self::TotpReplayed => {
@@ -274,7 +281,9 @@ impl AuthError {
             }
             Self::RateLimited { .. } => S::TOO_MANY_REQUESTS,
             Self::SessionLimit | Self::Busy => S::SERVICE_UNAVAILABLE,
-            Self::CsrfRejected | Self::PasswordChangeRequired => S::FORBIDDEN,
+            Self::CsrfRejected | Self::PasswordChangeRequired | Self::StepUpRequired => {
+                S::FORBIDDEN
+            }
             Self::UserExists
             | Self::TokenLimit
             | Self::TotpEnrolled
@@ -403,6 +412,7 @@ mod tests {
             AuthError::Unauthenticated,
             AuthError::AmbiguousCredentials,
             AuthError::CsrfRejected,
+            AuthError::StepUpRequired,
             AuthError::UnknownToken,
             AuthError::UnknownSession,
             AuthError::TokenLimit,

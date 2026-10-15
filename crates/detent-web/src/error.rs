@@ -301,6 +301,7 @@ mod tests {
             (AuthError::InvalidCredentials, StatusCode::UNAUTHORIZED),
             (AuthError::Unauthenticated, StatusCode::UNAUTHORIZED),
             (AuthError::CsrfRejected, StatusCode::FORBIDDEN),
+            (AuthError::StepUpRequired, StatusCode::FORBIDDEN),
             (AuthError::UnknownToken, StatusCode::NOT_FOUND),
             (AuthError::UserExists, StatusCode::CONFLICT),
             (AuthError::TokenLimit, StatusCode::CONFLICT),

@@ -280,6 +280,93 @@
         }
       }
     },
+    "/api/v1/auth/reauth": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`POST /api/v1/auth/reauth`.",
+        "description": "# Errors\n\n400 for a malformed body, 401 for no session, a bearer token or refused\ncredentials, 403 for a failed CSRF check or a session that owes a password\nchange, 429 while the user or the address is locked out, 503 when every\nhashing slot is taken.",
+        "operationId": "auth_reauth",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReauthRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The session stepped up: for the next five minutes it may apply, restore, update and renew the certificate",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StepUp"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is not the expected shape",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No session (a bearer token is refused), or the password or code was refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The CSRF check failed, or the session must change its password first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many failed sign-ins or step-ups",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The hashing cap is reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
     "/api/v1/auth/session": {
       "get": {
         "tags": [
@@ -1028,6 +1115,16 @@
               }
             }
           },
+          "403": {
+            "description": "The caller lacks the write scope (`web-denied-scope`), or is a session without a step-up in the last five minutes (`web-auth-step-up-required`, see `POST /api/v1/auth/reauth`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
             "description": "No such module",
             "content": {
@@ -1152,6 +1249,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RestoredView"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller lacks the write scope (`web-denied-scope`), or is a session without a step-up in the last five minutes (`web-auth-step-up-required`, see `POST /api/v1/auth/reauth`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -1467,6 +1574,16 @@
               }
             }
           },
+          "403": {
+            "description": "The caller lacks the write scope (`web-denied-scope`), or is a session without a step-up in the last five minutes (`web-auth-step-up-required`, see `POST /api/v1/auth/reauth`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "409": {
             "description": "No ACME client runs: `tls.bootstrap` is not `acme`",
             "content": {
@@ -1572,6 +1689,16 @@
           },
           "400": {
             "description": "The version is not a release tag",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller lacks the write scope (`web-denied-scope`), or is a session without a step-up in the last five minutes (`web-auth-step-up-required`, see `POST /api/v1/auth/reauth`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2870,6 +2997,27 @@
           }
         }
       },
+      "ReauthRequest": {
+        "type": "object",
+        "description": "The body of `POST /api/v1/auth/reauth`.",
+        "required": [
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string",
+            "description": "The password of the signed-in user."
+          },
+          "totp_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The six-digit TOTP code, when the account has a second factor."
+          }
+        },
+        "additionalProperties": false
+      },
       "RenewRequested": {
         "type": "object",
         "description": "Answer to `POST /api/v1/system/cert/renew`.",
@@ -3149,6 +3297,15 @@
             },
             "description": "Scope names, `[\"read\"]` or `[\"read\", \"write\"]`."
           },
+          "step_up_expires_in_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Seconds until the step-up of this session ends; `null` when it has\nnone, so the next apply, restore, update or certificate renewal asks\nfor the password first.",
+            "minimum": 0
+          },
           "subject": {
             "type": "string",
             "description": "The user this session belongs to."
@@ -3206,6 +3363,21 @@
           "deactivating",
           "unknown"
         ]
+      },
+      "StepUp": {
+        "type": "object",
+        "description": "What a successful step-up answers.",
+        "required": [
+          "step_up_expires_in_secs"
+        ],
+        "properties": {
+          "step_up_expires_in_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds the step-up holds: [`STEP_UP_SECS`].",
+            "minimum": 0
+          }
+        }
       },
       "SystemTimeView": {
         "type": "object",
