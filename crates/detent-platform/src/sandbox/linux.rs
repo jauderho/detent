@@ -918,6 +918,74 @@ mod tests {
         })
     }
 
+    /// D3 item 4: a root command-line apply ran before `serve` and made the
+    /// audit directory and log. The worker, another uid under its real
+    /// confinement, must still append to them. Before the fix both were
+    /// root-owned and the worker got `EACCES` (the API apply answered
+    /// `ops-audit-unavailable`). A root run after `serve` must append too:
+    /// before the fix it refused the worker-owned directory.
+    #[test]
+    fn enforce_mode_worker_appends_to_an_audit_log_a_root_run_made()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::Write as _;
+        use std::os::unix::fs::DirBuilderExt as _;
+        /// `nobody`, standing in for the worker account.
+        const WORKER_ID: u32 = 65534;
+        // The steps of `FileAudit::open_for_append` (`detent-ops`) under a
+        // state root.
+        fn append(log: &Path) -> bool {
+            let Some(audit) = log.parent() else {
+                return false;
+            };
+            if std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(audit)
+                .is_err()
+            {
+                return false;
+            }
+            let Ok(owner) = crate::fs::private_dir::ensure_private_as_parent(audit) else {
+                return false;
+            };
+            crate::fs::private_dir::open_append_as(log, 0o600, owner)
+                .is_ok_and(|mut file| file.write_all(b"record\n").is_ok())
+        }
+        if !crate::privsep::spawn::is_root() {
+            return Ok(());
+        }
+        in_forked_child(|| {
+            let dir = std::env::temp_dir()
+                .join(format!("detent-sandbox-audit-owner-{}", std::process::id()));
+            let state = dir.join("state");
+            let log = state.join("audit").join("detent-audit.jsonl");
+            if std::fs::create_dir_all(&state).is_err()
+                || std::os::unix::fs::chown(&state, Some(WORKER_ID), Some(WORKER_ID)).is_err()
+            {
+                return false;
+            }
+            let Ok(allow) = fixture_allowlist(&dir) else {
+                return false;
+            };
+            // The worker under `serve`, in a child: a dropped uid stays dropped.
+            let serve = || {
+                in_forked_child(|| {
+                    crate::sandbox::drop_bounding_set();
+                    crate::privsep::sys::drop_to(WORKER_ID, WORKER_ID).is_ok()
+                        && confine(Role::Worker, &Policy::worker(&allow)).is_ok()
+                        && append(&log)
+                })
+                .is_ok()
+            };
+            // A root command line before `serve`, then `serve`, then both again.
+            append(&log)
+                && serve()
+                && append(&log)
+                && serve()
+                && std::fs::read(&log).is_ok_and(|bytes| bytes == b"record\n".repeat(4))
+        })
+    }
+
     /// Under the real worker confinement, `write_atomic` replaces a file the
     /// worker owns (its credential stores: `users.json` on a login rehash)
     /// and reports the owner kept. `WORKER` has no `fchown` and no xattr

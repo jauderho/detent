@@ -652,7 +652,7 @@ const fn widen_mode(bits: RawMode) -> u32 {
 
 /// Convert permission bits back to a [`Mode`], defaulting to `0o600` when the
 /// value does not fit the platform's raw mode type.
-fn to_mode(bits: u32) -> Mode {
+pub(super) fn to_mode(bits: u32) -> Mode {
     Mode::from_bits_truncate(RawMode::try_from(bits).unwrap_or(BACKUP_FILE_MODE as RawMode))
 }
 

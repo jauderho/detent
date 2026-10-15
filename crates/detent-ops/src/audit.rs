@@ -281,6 +281,8 @@ fn newest_first(mut records: Vec<AuditRecord>, limit: Option<usize>) -> Vec<Audi
 pub struct FileAudit {
     path: PathBuf,
     rotate_bytes: u64,
+    /// The directory and the log get the owner of the state root.
+    state_root_owner: bool,
 }
 
 impl FileAudit {
@@ -291,6 +293,7 @@ impl FileAudit {
         Self {
             path: path.into(),
             rotate_bytes: AUDIT_ROTATE_BYTES,
+            state_root_owner: false,
         }
     }
 
@@ -303,9 +306,16 @@ impl FileAudit {
     }
 
     /// The conventional location under a state root (PLAN §2.10).
+    ///
+    /// The directory and the log belong to the owner of the state root (the
+    /// worker account), also when a root command-line run writes them: the
+    /// worker of `serve` appends to the same log (BUGFIX D4).
     #[must_use]
     pub fn under_state_root(state_root: &Path) -> Self {
-        Self::new(state_root.join("audit").join("detent-audit.jsonl"))
+        Self {
+            state_root_owner: true,
+            ..Self::new(state_root.join("audit").join("detent-audit.jsonl"))
+        }
     }
 
     /// The file this sink appends to.
@@ -372,23 +382,34 @@ impl FileAudit {
     }
 
     /// Create the log's directory `0700`, tighten an existing one, and open the log for appending.
+    /// Under a state root, both get the state root's owner.
     ///
     /// When the log is new, the directories that now hold it are fsynced so
     /// the new entries survive a crash.
     fn open_for_append(&self, is_new: bool) -> Result<std::fs::File, AuditError> {
+        use detent_platform::fs::private_dir;
+
         let parent = self.path.parent();
+        let mut owner = None;
         if let Some(parent) = parent {
             DirBuilder::new()
                 .recursive(true)
                 .mode(AUDIT_DIR_MODE)
                 .create(parent)?;
-            detent_platform::fs::private_dir::ensure_private(parent)?;
+            if self.state_root_owner {
+                owner = Some(private_dir::ensure_private_as_parent(parent)?);
+            } else {
+                private_dir::ensure_private(parent)?;
+            }
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(AUDIT_FILE_MODE)
-            .open(&self.path)?;
+        let file = match owner {
+            Some(owner) => private_dir::open_append_as(&self.path, AUDIT_FILE_MODE, owner)?,
+            None => OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(AUDIT_FILE_MODE)
+                .open(&self.path)?,
+        };
         if is_new {
             // The new file's directory, and that directory's own entry.
             for dir in parent.into_iter().chain(parent.and_then(Path::parent)) {
