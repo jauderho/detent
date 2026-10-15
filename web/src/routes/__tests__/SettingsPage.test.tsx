@@ -54,7 +54,13 @@ function sequence(...responses: (() => Response)[]): () => Response {
 }
 
 function render(rules: Parameters<typeof stubFetchByUrl>[0]) {
-  const stub = stubFetchByUrl([['GET /api/v1/auth/session', () => jsonResponse(SESSION)], ...rules])
+  // The session list first: the probe pattern below is a prefix of its URL.
+  // SessionsPanel.test.tsx covers the list itself.
+  const stub = stubFetchByUrl([
+    ['GET /api/v1/auth/sessions', () => jsonResponse([])],
+    ['GET /api/v1/auth/session', () => jsonResponse(SESSION)],
+    ...rules,
+  ])
   renderWithProviders(<AppRoutes />, { fetch: stub.fetch, route: ROUTES.settings })
   return stub
 }

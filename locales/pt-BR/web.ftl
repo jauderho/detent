@@ -192,6 +192,31 @@ totp-disable-submitting = desativando
 totp-enabled-notice = o segundo fator está ativado. entre com um código da próxima vez.
 totp-disabled-notice = o segundo fator está desativado.
 
+## Settings: active sessions
+sessions-panel-label = sessões ativas
+sessions-intro = cada navegador conectado a esta conta. encerre as que você não reconhecer.
+sessions-loading = lendo as sessões ativas.
+sessions-caption = sessões desta conta
+sessions-col-created = conectado em
+sessions-col-last-seen = última atividade
+sessions-col-expires = expira em
+sessions-col-totp = segundo fator
+sessions-col-actions = ações
+sessions-expires-minutes = {$minutes} min
+sessions-totp-yes = sim
+sessions-totp-no = não
+sessions-current = esta sessão
+sessions-end = encerrar
+sessions-end-label = encerrar a sessão conectada em {$time}
+sessions-end-others = encerrar todas as outras sessões
+sessions-confirm-one-title = encerrar esta sessão?
+sessions-confirm-one-body = o navegador conectado em {$time} é desconectado imediatamente.
+sessions-confirm-others-title = encerrar todas as outras sessões?
+sessions-confirm-others-body = todos os outros navegadores conectados a esta conta são desconectados imediatamente. esta sessão continua.
+sessions-confirm-cancel = cancelar
+sessions-ended-one = a sessão foi encerrada.
+sessions-ended-others = outras sessões encerradas: {$count}
+
 ## Pending commit
 pending-commit-message = uma alteração de configuração está aguardando confirmação; ela sofre rollback sozinha quando esta janela se fecha.
 pending-commit-countdown-label = tempo restante para confirmar

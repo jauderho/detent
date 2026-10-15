@@ -192,6 +192,31 @@ totp-disable-submitting = बंद किया जा रहा है
 totp-enabled-notice = दूसरा फ़ैक्टर चालू है। अगली बार कोड के साथ साइन इन करें।
 totp-disabled-notice = दूसरा फ़ैक्टर बंद है।
 
+## Settings: active sessions
+sessions-panel-label = सक्रिय सत्र
+sessions-intro = इस खाते में साइन इन किया हर ब्राउज़र। जिसे आप नहीं पहचानते उसे समाप्त करें।
+sessions-loading = सक्रिय सत्र पढ़े जा रहे हैं।
+sessions-caption = इस खाते के सत्र
+sessions-col-created = साइन इन
+sessions-col-last-seen = अंतिम सक्रियता
+sessions-col-expires = समाप्ति में
+sessions-col-totp = दूसरा कारक
+sessions-col-actions = क्रियाएँ
+sessions-expires-minutes = {$minutes} मिनट
+sessions-totp-yes = हाँ
+sessions-totp-no = नहीं
+sessions-current = यह सत्र
+sessions-end = समाप्त करें
+sessions-end-label = {$time} को साइन इन किया सत्र समाप्त करें
+sessions-end-others = अन्य सभी सत्र समाप्त करें
+sessions-confirm-one-title = यह सत्र समाप्त करें?
+sessions-confirm-one-body = {$time} को साइन इन किया ब्राउज़र तुरंत साइन आउट हो जाता है।
+sessions-confirm-others-title = अन्य सभी सत्र समाप्त करें?
+sessions-confirm-others-body = इस खाते में साइन इन किया हर अन्य ब्राउज़र तुरंत साइन आउट हो जाता है। यह सत्र बना रहता है।
+sessions-confirm-cancel = रद्द करें
+sessions-ended-one = सत्र समाप्त हो गया।
+sessions-ended-others = समाप्त किए गए अन्य सत्र: {$count}
+
 ## Pending commit
 pending-commit-message = एक कॉन्फ़िगरेशन बदलाव पुष्टि की प्रतीक्षा में है; यह विंडो बंद होने पर वह अपने आप रोलबैक हो जाता है।
 pending-commit-countdown-label = पुष्टि के लिए शेष समय

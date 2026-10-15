@@ -88,6 +88,17 @@ test.describe('accessibility', () => {
     expect(describeViolations(results)).toBe('')
   })
 
+  test('the session list with its confirmation open is clean', async ({ page }) => {
+    await stubApi(page)
+    await signIn(page)
+    await page.getByRole('link', { name: 'settings' }).click()
+    await page.getByRole('button', { name: 'end all other sessions' }).click()
+    await page.getByRole('dialog', { name: 'end all other sessions?' }).waitFor()
+
+    const results = await scan(page)
+    expect(describeViolations(results)).toBe('')
+  })
+
   test('an open dialog is clean', async ({ page }) => {
     await stubApi(page)
     await signIn(page)

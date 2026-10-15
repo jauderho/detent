@@ -192,6 +192,31 @@ totp-disable-submitting = বন্ধ করা হচ্ছে
 totp-enabled-notice = দ্বিতীয় ফ্যাক্টর চালু। পরের বার একটি কোড দিয়ে সাইন ইন করুন।
 totp-disabled-notice = দ্বিতীয় ফ্যাক্টর বন্ধ।
 
+## Settings: active sessions
+sessions-panel-label = সক্রিয় সেশন
+sessions-intro = এই অ্যাকাউন্টে সাইন ইন করা প্রতিটি ব্রাউজার। যেগুলো আপনি চেনেন না সেগুলো শেষ করুন।
+sessions-loading = সক্রিয় সেশন পড়া হচ্ছে।
+sessions-caption = এই অ্যাকাউন্টের সেশন
+sessions-col-created = সাইন ইন
+sessions-col-last-seen = সর্বশেষ সক্রিয়
+sessions-col-expires = মেয়াদ শেষ হবে
+sessions-col-totp = দ্বিতীয় ফ্যাক্টর
+sessions-col-actions = কাজ
+sessions-expires-minutes = {$minutes} মিনিট
+sessions-totp-yes = হ্যাঁ
+sessions-totp-no = না
+sessions-current = এই সেশন
+sessions-end = শেষ করুন
+sessions-end-label = {$time} এ সাইন ইন করা সেশন শেষ করুন
+sessions-end-others = অন্য সব সেশন শেষ করুন
+sessions-confirm-one-title = এই সেশন শেষ করবেন?
+sessions-confirm-one-body = {$time} এ সাইন ইন করা ব্রাউজার সঙ্গে সঙ্গে সাইন আউট হয়।
+sessions-confirm-others-title = অন্য সব সেশন শেষ করবেন?
+sessions-confirm-others-body = এই অ্যাকাউন্টে সাইন ইন করা অন্য প্রতিটি ব্রাউজার সঙ্গে সঙ্গে সাইন আউট হয়। এই সেশন থাকে।
+sessions-confirm-cancel = বাতিল
+sessions-ended-one = সেশন শেষ হয়েছে।
+sessions-ended-others = শেষ করা অন্য সেশন: {$count}
+
 ## Pending commit
 pending-commit-message = একটি কনফিগারেশন পরিবর্তন নিশ্চিতকরণের অপেক্ষায় আছে; এই উইন্ডো বন্ধ হলে এটি নিজে থেকেই রোলব্যাক হয়ে যায়।
 pending-commit-countdown-label = নিশ্চিত করার জন্য অবশিষ্ট সময়

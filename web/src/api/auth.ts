@@ -150,3 +150,30 @@ export const NOTICES_QUERY_KEY = ['account', 'notices'] as const
 export function fetchNotices(client: ApiClient): Promise<ApiResult<Notices>> {
   return client.get('/api/v1/auth/notices', { suppressUnauthorizedEvent: true })
 }
+
+export type SessionSummary = components['schemas']['SessionSummary']
+export type RevokedSessions = components['schemas']['RevokedSessions']
+
+/**
+ * Query key for the session list. Outside the `auth` prefix on purpose: it
+ * describes one account, so a new sign-in drops it.
+ */
+export const SESSIONS_QUERY_KEY = ['account', 'sessions'] as const
+
+/** `GET /api/v1/auth/sessions`. Only the sessions of the signed-in account. */
+export function fetchSessions(
+  client: ApiClient,
+  signal?: AbortSignal,
+): Promise<ApiResult<SessionSummary[]>> {
+  return client.get('/api/v1/auth/sessions', signal === undefined ? {} : { signal })
+}
+
+/** `POST /api/v1/auth/sessions/{handle}/revoke`. Answers `204` with no body. */
+export function revokeSession(client: ApiClient, handle: string): Promise<ApiResult<undefined>> {
+  return client.post('/api/v1/auth/sessions/{handle}/revoke', { path: { handle } })
+}
+
+/** `POST /api/v1/auth/sessions/revoke-others`. The current session stays. */
+export function revokeOtherSessions(client: ApiClient): Promise<ApiResult<RevokedSessions>> {
+  return client.post('/api/v1/auth/sessions/revoke-others', {})
+}

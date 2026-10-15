@@ -192,6 +192,31 @@ totp-disable-submitting = turning off
 totp-enabled-notice = the second factor is on. sign in with a code next time.
 totp-disabled-notice = the second factor is off.
 
+## Settings: active sessions
+sessions-panel-label = active sessions
+sessions-intro = every browser signed in to this account. end any you do not recognize.
+sessions-loading = reading the active sessions.
+sessions-caption = sessions of this account
+sessions-col-created = signed in
+sessions-col-last-seen = last active
+sessions-col-expires = expires in
+sessions-col-totp = second factor
+sessions-col-actions = actions
+sessions-expires-minutes = {$minutes} min
+sessions-totp-yes = yes
+sessions-totp-no = no
+sessions-current = this session
+sessions-end = end
+sessions-end-label = end the session signed in on {$time}
+sessions-end-others = end all other sessions
+sessions-confirm-one-title = end this session?
+sessions-confirm-one-body = the browser signed in on {$time} is signed out at once.
+sessions-confirm-others-title = end all other sessions?
+sessions-confirm-others-body = every other browser signed in to this account is signed out at once. this session stays.
+sessions-confirm-cancel = cancel
+sessions-ended-one = the session is ended.
+sessions-ended-others = other sessions ended: {$count}
+
 ## Pending commit
 pending-commit-message = a configuration change is waiting to be confirmed; it rolls back on its own when this window closes.
 pending-commit-countdown-label = time left to confirm

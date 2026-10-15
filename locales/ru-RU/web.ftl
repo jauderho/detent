@@ -192,6 +192,31 @@ totp-disable-submitting = выключение
 totp-enabled-notice = второй фактор включён. в следующий раз войдите с кодом.
 totp-disabled-notice = второй фактор выключен.
 
+## Settings: active sessions
+sessions-panel-label = активные сеансы
+sessions-intro = все браузеры, в которых выполнен вход в эту учётную запись. завершите те, которые вы не узнаёте.
+sessions-loading = чтение активных сеансов.
+sessions-caption = сеансы этой учётной записи
+sessions-col-created = вход
+sessions-col-last-seen = последняя активность
+sessions-col-expires = истекает через
+sessions-col-totp = второй фактор
+sessions-col-actions = действия
+sessions-expires-minutes = {$minutes} мин
+sessions-totp-yes = да
+sessions-totp-no = нет
+sessions-current = этот сеанс
+sessions-end = завершить
+sessions-end-label = завершить сеанс со входом {$time}
+sessions-end-others = завершить все другие сеансы
+sessions-confirm-one-title = завершить этот сеанс?
+sessions-confirm-one-body = браузер со входом {$time} сразу выходит из системы.
+sessions-confirm-others-title = завершить все другие сеансы?
+sessions-confirm-others-body = все другие браузеры, вошедшие в эту учётную запись, сразу выходят из системы. этот сеанс остаётся.
+sessions-confirm-cancel = отмена
+sessions-ended-one = сеанс завершён.
+sessions-ended-others = завершено других сеансов: {$count}
+
 ## Pending commit
 pending-commit-message = изменение конфигурации ожидает подтверждения; когда это окно закроется, оно откатится само.
 pending-commit-countdown-label = осталось времени на подтверждение

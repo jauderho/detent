@@ -192,6 +192,31 @@ totp-disable-submitting = 無効にしています
 totp-enabled-notice = 第二要素は有効です。次回はコードでサインインしてください。
 totp-disabled-notice = 第二要素は無効です。
 
+## Settings: active sessions
+sessions-panel-label = アクティブなセッション
+sessions-intro = このアカウントにサインインしているすべてのブラウザーです。心当たりのないものは終了してください。
+sessions-loading = アクティブなセッションを読み込んでいます。
+sessions-caption = このアカウントのセッション
+sessions-col-created = サインイン日時
+sessions-col-last-seen = 最終アクティブ
+sessions-col-expires = 有効期限まで
+sessions-col-totp = 2 要素目
+sessions-col-actions = 操作
+sessions-expires-minutes = {$minutes} 分
+sessions-totp-yes = はい
+sessions-totp-no = いいえ
+sessions-current = このセッション
+sessions-end = 終了
+sessions-end-label = {$time} にサインインしたセッションを終了
+sessions-end-others = 他のすべてのセッションを終了
+sessions-confirm-one-title = このセッションを終了しますか?
+sessions-confirm-one-body = {$time} にサインインしたブラウザーはすぐにサインアウトされます。
+sessions-confirm-others-title = 他のすべてのセッションを終了しますか?
+sessions-confirm-others-body = このアカウントにサインインしている他のすべてのブラウザーはすぐにサインアウトされます。このセッションは残ります。
+sessions-confirm-cancel = キャンセル
+sessions-ended-one = セッションを終了しました。
+sessions-ended-others = 終了した他のセッション: {$count}
+
 ## Pending commit
 pending-commit-message = 設定の変更が確認待ちです。このウィンドウが閉じると、自動的にロールバックされます。
 pending-commit-countdown-label = 確認までの残り時間

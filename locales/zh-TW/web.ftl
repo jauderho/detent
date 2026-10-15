@@ -192,6 +192,31 @@ totp-disable-submitting = 正在關閉
 totp-enabled-notice = 第二因素已開啟。下次請用驗證碼登入。
 totp-disabled-notice = 第二因素已關閉。
 
+## Settings: active sessions
+sessions-panel-label = 使用中的工作階段
+sessions-intro = 登入此帳戶的所有瀏覽器。結束任何您不認得的工作階段。
+sessions-loading = 正在讀取使用中的工作階段。
+sessions-caption = 此帳戶的工作階段
+sessions-col-created = 登入時間
+sessions-col-last-seen = 最後活動
+sessions-col-expires = 剩餘有效時間
+sessions-col-totp = 第二因素
+sessions-col-actions = 操作
+sessions-expires-minutes = {$minutes} 分鐘
+sessions-totp-yes = 是
+sessions-totp-no = 否
+sessions-current = 目前的工作階段
+sessions-end = 結束
+sessions-end-label = 結束於 {$time} 登入的工作階段
+sessions-end-others = 結束所有其他工作階段
+sessions-confirm-one-title = 結束此工作階段？
+sessions-confirm-one-body = 於 {$time} 登入的瀏覽器將立即登出。
+sessions-confirm-others-title = 結束所有其他工作階段？
+sessions-confirm-others-body = 登入此帳戶的所有其他瀏覽器將立即登出。目前的工作階段保留。
+sessions-confirm-cancel = 取消
+sessions-ended-one = 工作階段已結束。
+sessions-ended-others = 已結束的其他工作階段：{$count}
+
 ## Pending commit
 pending-commit-message = 有一項設定變更正在等待確認；此視窗關閉時，它會自動回復。
 pending-commit-countdown-label = 確認剩餘時間

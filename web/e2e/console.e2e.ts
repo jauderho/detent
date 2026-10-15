@@ -53,6 +53,30 @@ test.describe('sign-in notices', () => {
   })
 })
 
+test.describe('active sessions', () => {
+  test('a keyboard alone ends another session after a confirmation', async ({ page }) => {
+    const calls = await stubApi(page)
+    await signIn(page)
+    await page.getByRole('link', { name: 'settings' }).click()
+
+    const table = page.getByRole('table', { name: 'sessions of this account' })
+    await expect(table.getByText('this session')).toBeVisible()
+    const end = table.getByRole('button', { name: /end the session signed in on/ })
+    await end.focus()
+    await page.keyboard.press('Enter')
+
+    const dialog = page.getByRole('dialog', { name: 'end this session?' })
+    await expect(dialog).toBeVisible()
+    await expect(dialog.locator(':focus')).toHaveCount(1)
+    await dialog.getByRole('button', { name: 'end', exact: true }).focus()
+    await page.keyboard.press('Enter')
+
+    await expect(page.getByText('the session is ended.')).toBeVisible()
+    await expect(end).toBeHidden()
+    expect(calls.some((call) => call.method === 'POST' && call.url.endsWith('/revoke'))).toBe(true)
+  })
+})
+
 test.describe('host text survives the stylesheet', () => {
   /**
    * The console sets `text-transform: lowercase` on the body. That is right for

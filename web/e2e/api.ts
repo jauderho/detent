@@ -175,6 +175,26 @@ const TOTP_ENROLMENT = {
   expires_in_secs: 600,
 }
 
+/** The sessions of the account, as `GET /auth/sessions` lists them. */
+const SESSIONS = [
+  {
+    handle: '0123456789abcdef0123456789abcdef',
+    created_unix_s: 1_789_605_296,
+    last_seen_unix_s: 1_789_605_896,
+    expires_in_secs: 900,
+    totp_satisfied: false,
+    current: true,
+  },
+  {
+    handle: 'fedcba9876543210fedcba9876543210',
+    created_unix_s: 1_789_600_000,
+    last_seen_unix_s: 1_789_600_600,
+    expires_in_secs: 300,
+    totp_satisfied: false,
+    current: false,
+  },
+]
+
 /**
  * Routes `**\/api/v1/**` to the fixtures above and returns the call log.
  *
@@ -190,6 +210,7 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<Re
   let signedIn = false
   let pendingCommit: typeof APPLY_REPORT.commit = null
   let totpEnrolled = false
+  let sessions = [...SESSIONS]
 
   const json = (route: Route, body: unknown, status = 200) =>
     route.fulfill({
@@ -239,6 +260,19 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<Re
     if (path.endsWith('/auth/totp/disable')) {
       totpEnrolled = false
       return json(route, session)
+    }
+    if (path.endsWith('/auth/sessions')) {
+      return json(route, sessions)
+    }
+    if (path.endsWith('/auth/sessions/revoke-others')) {
+      const ended = sessions.filter((each) => !each.current).length
+      sessions = sessions.filter((each) => each.current)
+      return json(route, { ended })
+    }
+    if (path.startsWith('/api/v1/auth/sessions/') && path.endsWith('/revoke')) {
+      const handle = path.split('/').at(-2)
+      sessions = sessions.filter((each) => each.handle !== handle)
+      return route.fulfill({ status: 204, body: '' })
     }
     if (path.endsWith('/auth/logout')) {
       signedIn = false

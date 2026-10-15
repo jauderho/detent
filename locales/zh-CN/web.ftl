@@ -192,6 +192,31 @@ totp-disable-submitting = 正在关闭
 totp-enabled-notice = 第二因素已开启。下次请用验证码登录。
 totp-disabled-notice = 第二因素已关闭。
 
+## Settings: active sessions
+sessions-panel-label = 活动会话
+sessions-intro = 登录到此账户的所有浏览器。结束任何您不认识的会话。
+sessions-loading = 正在读取活动会话。
+sessions-caption = 此账户的会话
+sessions-col-created = 登录时间
+sessions-col-last-seen = 最后活动
+sessions-col-expires = 剩余有效期
+sessions-col-totp = 第二因素
+sessions-col-actions = 操作
+sessions-expires-minutes = {$minutes} 分钟
+sessions-totp-yes = 是
+sessions-totp-no = 否
+sessions-current = 当前会话
+sessions-end = 结束
+sessions-end-label = 结束于 {$time} 登录的会话
+sessions-end-others = 结束所有其他会话
+sessions-confirm-one-title = 结束此会话？
+sessions-confirm-one-body = 于 {$time} 登录的浏览器将立即退出登录。
+sessions-confirm-others-title = 结束所有其他会话？
+sessions-confirm-others-body = 登录到此账户的所有其他浏览器将立即退出登录。当前会话保留。
+sessions-confirm-cancel = 取消
+sessions-ended-one = 会话已结束。
+sessions-ended-others = 已结束的其他会话：{$count}
+
 ## Pending commit
 pending-commit-message = 有一项配置更改正在等待确认；此窗口关闭时，它会自动回滚。
 pending-commit-countdown-label = 确认剩余时间
