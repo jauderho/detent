@@ -67,6 +67,24 @@ export function changePassword(
   })
 }
 
+export type ReauthRequest = components['schemas']['ReauthRequest']
+export type StepUp = components['schemas']['StepUp']
+
+/**
+ * `POST /api/v1/auth/reauth`: the password again, and a code when the
+ * account has a second factor. For five minutes after it, the session may
+ * apply, restore, update and renew the certificate.
+ *
+ * `401` means the password or the code was refused, not that the session is
+ * gone, so it bypasses the global handler like a refused login does.
+ */
+export function reauth(client: ApiClient, request: ReauthRequest): Promise<ApiResult<StepUp>> {
+  return client.post('/api/v1/auth/reauth', {
+    body: request,
+    suppressUnauthorizedEvent: true,
+  })
+}
+
 /** `POST /api/v1/auth/logout`. Answers `204` with no body. */
 export function logout(client: ApiClient): Promise<ApiResult<undefined>> {
   return client.post('/api/v1/auth/logout', { suppressUnauthorizedEvent: true })

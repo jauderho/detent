@@ -218,6 +218,14 @@ sessions-confirm-cancel = キャンセル
 sessions-ended-one = セッションを終了しました。
 sessions-ended-others = 終了した他のセッション: {$count}
 
+## Step-up: the password again before a change to the host
+step-up-title = パスワードを再入力
+step-up-intro = この変更にはパスワードの再入力が必要です。その後5分間は再入力を求めません。
+step-up-form-label = パスワードの確認
+step-up-submit = 確認
+step-up-submitting = 確認中
+step-up-cancel = キャンセル
+
 ## Pending commit
 pending-commit-message = 設定の変更が確認待ちです。このウィンドウが閉じると、自動的にロールバックされます。
 pending-commit-countdown-label = 確認までの残り時間

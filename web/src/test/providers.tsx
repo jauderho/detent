@@ -6,6 +6,7 @@ import { ApiProvider } from '@/api/ApiProvider'
 import { type ApiClient, createApiClient } from '@/api/client'
 import { createQueryClient } from '@/api/queryClient'
 import { PendingCommitProvider } from '@/app/PendingCommit'
+import { StepUpProvider } from '@/app/StepUp'
 import { AuthProvider } from '@/auth/AuthProvider'
 import { createLocalization } from '@/i18n'
 
@@ -134,7 +135,9 @@ export function renderWithProviders(ui: ReactNode, options: ProviderOptions = {}
       <ApiProvider client={client} queryClient={createQueryClient()}>
         <MemoryRouter initialEntries={[options.route ?? '/']}>
           <AuthProvider>
-            <PendingCommitProvider>{ui}</PendingCommitProvider>
+            <PendingCommitProvider>
+              <StepUpProvider>{ui}</StepUpProvider>
+            </PendingCommitProvider>
           </AuthProvider>
         </MemoryRouter>
       </ApiProvider>

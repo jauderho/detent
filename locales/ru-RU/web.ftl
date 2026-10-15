@@ -218,6 +218,14 @@ sessions-confirm-cancel = отмена
 sessions-ended-one = сеанс завершён.
 sessions-ended-others = завершено других сеансов: {$count}
 
+## Step-up: the password again before a change to the host
+step-up-title = введите пароль ещё раз
+step-up-intro = для этого изменения нужен пароль ещё раз. после этого он не запрашивается пять минут.
+step-up-form-label = подтвердите пароль
+step-up-submit = подтвердить
+step-up-submitting = проверка
+step-up-cancel = отмена
+
 ## Pending commit
 pending-commit-message = изменение конфигурации ожидает подтверждения; когда это окно закроется, оно откатится само.
 pending-commit-countdown-label = осталось времени на подтверждение

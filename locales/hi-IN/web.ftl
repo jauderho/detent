@@ -218,6 +218,14 @@ sessions-confirm-cancel = रद्द करें
 sessions-ended-one = सत्र समाप्त हो गया।
 sessions-ended-others = समाप्त किए गए अन्य सत्र: {$count}
 
+## Step-up: the password again before a change to the host
+step-up-title = अपना पासवर्ड फिर से दर्ज करें
+step-up-intro = इस बदलाव के लिए आपका पासवर्ड फिर से चाहिए। उसके बाद पाँच मिनट तक यह फिर नहीं पूछा जाएगा।
+step-up-form-label = अपने पासवर्ड की पुष्टि करें
+step-up-submit = पुष्टि करें
+step-up-submitting = जाँच हो रही है
+step-up-cancel = रद्द करें
+
 ## Pending commit
 pending-commit-message = एक कॉन्फ़िगरेशन बदलाव पुष्टि की प्रतीक्षा में है; यह विंडो बंद होने पर वह अपने आप रोलबैक हो जाता है।
 pending-commit-countdown-label = पुष्टि के लिए शेष समय

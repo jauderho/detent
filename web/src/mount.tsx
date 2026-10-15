@@ -19,6 +19,7 @@ import { BrowserRouter } from 'react-router'
 import App from './App.tsx'
 import { ApiProvider } from './api/ApiProvider'
 import { PendingCommitProvider } from './app/PendingCommit'
+import { StepUpProvider } from './app/StepUp'
 import { AuthProvider } from './auth/AuthProvider'
 import { AppLocalizationProvider } from './i18n'
 
@@ -34,7 +35,9 @@ export function mountApp(rootEl: HTMLElement | null): Root {
           <BrowserRouter>
             <AuthProvider>
               <PendingCommitProvider>
-                <App />
+                <StepUpProvider>
+                  <App />
+                </StepUpProvider>
               </PendingCommitProvider>
             </AuthProvider>
           </BrowserRouter>

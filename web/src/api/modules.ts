@@ -9,6 +9,7 @@
 
 import type { UseMutationResult, UseQueryResult } from '@tanstack/react-query'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useStepUp } from '@/app/StepUp'
 import { useApiClient } from './ApiProvider'
 import type { ApiClient, ApiResult } from './client'
 import { type ApiRequestError, unwrap } from './query'
@@ -126,8 +127,9 @@ export function useApplyModule(
 ): UseMutationResult<ApplyReport, ApiRequestError, ApplyRequest> {
   const client = useApiClient()
   const queryClient = useQueryClient()
+  const stepUp = useStepUp()
   return useMutation({
-    mutationFn: (body: ApplyRequest) => unwrap(applyModule(client, id, body)),
+    mutationFn: (body: ApplyRequest) => unwrap(stepUp(() => applyModule(client, id, body))),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: moduleQueryKey(id) })
     },

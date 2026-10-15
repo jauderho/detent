@@ -218,6 +218,14 @@ sessions-confirm-cancel = 取消
 sessions-ended-one = 会话已结束。
 sessions-ended-others = 已结束的其他会话：{$count}
 
+## Step-up: the password again before a change to the host
+step-up-title = 重新输入密码
+step-up-intro = 此更改需要重新输入密码。之后五分钟内不会再次要求。
+step-up-form-label = 确认密码
+step-up-submit = 确认
+step-up-submitting = 正在检查
+step-up-cancel = 取消
+
 ## Pending commit
 pending-commit-message = 有一项配置更改正在等待确认；此窗口关闭时，它会自动回滚。
 pending-commit-countdown-label = 确认剩余时间

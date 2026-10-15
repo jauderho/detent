@@ -218,6 +218,14 @@ sessions-confirm-cancel = annuler
 sessions-ended-one = la session est fermée.
 sessions-ended-others = autres sessions fermées : {$count}
 
+## Step-up: the password again before a change to the host
+step-up-title = saisissez à nouveau votre mot de passe
+step-up-intro = cette modification demande à nouveau votre mot de passe. il n'est ensuite plus demandé pendant cinq minutes.
+step-up-form-label = confirmer votre mot de passe
+step-up-submit = confirmer
+step-up-submitting = vérification
+step-up-cancel = annuler
+
 ## Pending commit
 pending-commit-message = une modification de configuration attend d'être confirmée ; elle est annulée d'elle-même à la fermeture de cette fenêtre.
 pending-commit-countdown-label = temps restant pour confirmer

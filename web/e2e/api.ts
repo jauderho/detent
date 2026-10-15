@@ -148,6 +148,12 @@ export type StubOptions = {
   profileStatus?: number
   /** Answer `GET /api/v1/auth/notices` with changes, as after a busy absence. */
   withNotices?: boolean
+  /**
+   * Refuse an apply with `403 web-auth-step-up-required` until
+   * `POST /api/v1/auth/reauth` is sent, as the host does for a session
+   * without a recent step-up.
+   */
+  stepUp?: boolean
 }
 
 /** What the notices read answers when there is something to report. */
@@ -211,6 +217,7 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<Re
   let pendingCommit: typeof APPLY_REPORT.commit = null
   let totpEnrolled = false
   let sessions = [...SESSIONS]
+  let steppedUp = options.stepUp !== true
 
   const json = (route: Route, body: unknown, status = 200) =>
     route.fulfill({
@@ -274,6 +281,10 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<Re
       sessions = sessions.filter((each) => each.handle !== handle)
       return route.fulfill({ status: 204, body: '' })
     }
+    if (path.endsWith('/auth/reauth')) {
+      steppedUp = true
+      return json(route, { step_up_expires_in_secs: 300 })
+    }
     if (path.endsWith('/auth/logout')) {
       signedIn = false
       return route.fulfill({ status: 204, body: '' })
@@ -299,6 +310,9 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<Re
       return json(route, [])
     }
     if (path.endsWith('/apply')) {
+      if (!steppedUp) {
+        return json(route, { code: 'forbidden', message_id: 'web-auth-step-up-required' }, 403)
+      }
       pendingCommit = APPLY_REPORT.commit
       return json(route, APPLY_REPORT)
     }

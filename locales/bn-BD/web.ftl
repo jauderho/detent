@@ -218,6 +218,14 @@ sessions-confirm-cancel = বাতিল
 sessions-ended-one = সেশন শেষ হয়েছে।
 sessions-ended-others = শেষ করা অন্য সেশন: {$count}
 
+## Step-up: the password again before a change to the host
+step-up-title = আপনার পাসওয়ার্ড আবার দিন
+step-up-intro = এই পরিবর্তনের জন্য আপনার পাসওয়ার্ড আবার লাগবে। এরপর পাঁচ মিনিট আর চাওয়া হবে না।
+step-up-form-label = আপনার পাসওয়ার্ড নিশ্চিত করুন
+step-up-submit = নিশ্চিত করুন
+step-up-submitting = যাচাই হচ্ছে
+step-up-cancel = বাতিল
+
 ## Pending commit
 pending-commit-message = একটি কনফিগারেশন পরিবর্তন নিশ্চিতকরণের অপেক্ষায় আছে; এই উইন্ডো বন্ধ হলে এটি নিজে থেকেই রোলব্যাক হয়ে যায়।
 pending-commit-countdown-label = নিশ্চিত করার জন্য অবশিষ্ট সময়

@@ -8,6 +8,7 @@
 
 import type { UseMutationResult, UseQueryResult } from '@tanstack/react-query'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useStepUp } from '@/app/StepUp'
 import { useApiClient } from './ApiProvider'
 import type { ApiClient, ApiResult } from './client'
 import { moduleQueryKey } from './modules'
@@ -65,9 +66,10 @@ export function useRestoreBackup(
 ): UseMutationResult<RestoredView, ApiRequestError, { backupId: number; expectedHash: string }> {
   const client = useApiClient()
   const queryClient = useQueryClient()
+  const stepUp = useStepUp()
   return useMutation({
     mutationFn: ({ backupId, expectedHash }: { backupId: number; expectedHash: string }) =>
-      unwrap(restoreBackup(client, moduleId, backupId, expectedHash)),
+      unwrap(stepUp(() => restoreBackup(client, moduleId, backupId, expectedHash))),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: backupsQueryKey(moduleId) })
       void queryClient.invalidateQueries({ queryKey: moduleQueryKey(moduleId) })

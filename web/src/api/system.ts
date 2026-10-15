@@ -8,6 +8,7 @@
 
 import type { UseMutationResult, UseQueryResult } from '@tanstack/react-query'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useStepUp } from '@/app/StepUp'
 import { useApiClient } from './ApiProvider'
 import type { ApiClient, ApiResult } from './client'
 import { type ApiRequestError, unwrap } from './query'
@@ -131,8 +132,9 @@ export function useAudit(query: AuditQuery = {}): UseQueryResult<AuditRecord[], 
 export function useRequestCertRenew(): UseMutationResult<RenewRequested, ApiRequestError, void> {
   const client = useApiClient()
   const queryClient = useQueryClient()
+  const stepUp = useStepUp()
   return useMutation({
-    mutationFn: () => unwrap(requestCertRenew(client)),
+    mutationFn: () => unwrap(stepUp(() => requestCertRenew(client))),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: CERT_QUERY_KEY })
     },
@@ -150,8 +152,9 @@ export function useRequestCertRenew(): UseMutationResult<RenewRequested, ApiRequ
 export function useApplyUpdate(): UseMutationResult<UpdateStarted, ApiRequestError, string> {
   const client = useApiClient()
   const queryClient = useQueryClient()
+  const stepUp = useStepUp()
   return useMutation({
-    mutationFn: (version: string) => unwrap(applyUpdate(client, version)),
+    mutationFn: (version: string) => unwrap(stepUp(() => applyUpdate(client, version))),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: UPDATE_QUERY_KEY })
     },

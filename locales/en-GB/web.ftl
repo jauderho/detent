@@ -219,6 +219,14 @@ sessions-confirm-cancel = cancel
 sessions-ended-one = the session is ended.
 sessions-ended-others = other sessions ended: {$count}
 
+## Step-up: the password again before a change to the host
+step-up-title = enter your password again
+step-up-intro = this change needs your password again. it is not asked again for five minutes.
+step-up-form-label = confirm your password
+step-up-submit = confirm
+step-up-submitting = checking
+step-up-cancel = cancel
+
 ## Pending commit
 pending-commit-message = a configuration change is waiting to be confirmed; it rolls back on its own when this window closes.
 pending-commit-countdown-label = time left to confirm

@@ -99,6 +99,21 @@ test.describe('accessibility', () => {
     expect(describeViolations(results)).toBe('')
   })
 
+  test('the step-up dialog is clean', async ({ page }) => {
+    await stubApi(page, { stepUp: true })
+    await signIn(page)
+    await page.getByRole('link', { name: 'modules' }).click()
+    await page.getByRole('link', { name: 'hosts' }).click()
+    await page.getByRole('button', { name: 'plan', exact: true }).click()
+    await page.getByRole('button', { name: 'apply this change' }).click()
+    await page.getByRole('dialog').getByRole('button', { name: 'apply', exact: true }).click()
+    await page.getByRole('dialog', { name: 'enter your password again' }).waitFor()
+    await page.getByLabel('current password').waitFor()
+
+    const results = await scan(page)
+    expect(describeViolations(results)).toBe('')
+  })
+
   test('an open dialog is clean', async ({ page }) => {
     await stubApi(page)
     await signIn(page)

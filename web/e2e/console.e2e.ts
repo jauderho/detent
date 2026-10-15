@@ -159,6 +159,32 @@ test.describe('the apply flow', () => {
     expect(apply?.body).toMatchObject({ expected_hash: 'b'.repeat(64) })
   })
 
+  test('apply asks for the password, then applies', async ({ page }) => {
+    const calls = await stubApi(page, { stepUp: true })
+    await signIn(page)
+    await page.getByRole('link', { name: 'modules' }).click()
+    await page.getByRole('link', { name: 'hosts' }).click()
+    await page.getByRole('button', { name: 'plan', exact: true }).click()
+    await page.getByRole('button', { name: 'apply this change' }).click()
+    await page.getByRole('dialog').getByRole('button', { name: 'apply', exact: true }).click()
+
+    // The host refused the apply: the console asks for the password, with
+    // focus inside the dialog, and a keyboard alone gets through it.
+    const stepUp = page.getByRole('dialog', { name: 'enter your password again' })
+    await expect(stepUp).toBeVisible()
+    await expect(stepUp.locator(':focus')).toHaveCount(1)
+    await stepUp.getByLabel('current password').focus()
+    await page.keyboard.type('correct horse battery staple')
+    await page.keyboard.press('Enter')
+
+    await expect(stepUp).toBeHidden()
+    await expect(page.getByText(/the change was written to/)).toBeVisible()
+    const applies = calls.filter((call) => call.method === 'POST' && call.url.endsWith('/apply'))
+    expect(applies).toHaveLength(2)
+    const reauth = calls.find((call) => call.url.endsWith('/auth/reauth'))
+    expect(reauth?.body).toEqual({ password: 'correct horse battery staple' })
+  })
+
   /**
    * H21: the commit-confirm window lives on the host, not in the tab. A reload
    * drops every piece of React state, so the banner that comes back after one
