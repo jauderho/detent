@@ -8,8 +8,12 @@
 //! `fixtures/chrony/chrony-4.9/chrony-default.conf` is the stock Fedora/RHEL
 //! `chrony.conf` shape (pools, `makestep`, `rtcsync`, `driftfile`, `logdir`,
 //! drop-in directories, comments and blanks); `fixtures/chrony/edge/` holds the
-//! hand-made adversarial cases.
+//! hand-made adversarial cases. `fixtures/chrony/distro/` holds the stock
+//! files of Debian 13, Ubuntu 26.04, Fedora 44 and Arch, byte for byte as the
+//! packages named below install them.
 
+use detent_core::descriptor::{HostProfile, ValidationCtx};
+use detent_core::diag::Severity;
 use detent_core::module::ConfigModule;
 use detent_module_chrony::{ChronyModule, Model, Setting};
 use proptest::prelude::Strategy;
@@ -25,6 +29,16 @@ const TABS: &str = include_str!("../../../../fixtures/chrony/edge/tabs-and-spaci
 /// Real directives with no dedicated model, plus a garbage line that is not a
 /// directive at all.
 const UNKNOWN: &str = include_str!("../../../../fixtures/chrony/edge/unknown-directives.conf");
+/// The stock `/etc/chrony/chrony.conf` of Debian 13: `chrony` 4.6.1-3+deb13u2,
+/// `/usr/share/chrony/chrony.conf` in the package (the postinst copies it).
+const DEBIAN_13: &str = include_str!("../../../../fixtures/chrony/distro/debian-13.conf");
+/// The stock `/etc/chrony/chrony.conf` of Ubuntu 26.04: `chrony` 4.8-2ubuntu1,
+/// `/usr/share/chrony/chrony.conf` in the package.
+const UBUNTU_26_04: &str = include_str!("../../../../fixtures/chrony/distro/ubuntu-26.04.conf");
+/// The stock `/etc/chrony.conf` of Fedora 44: `chrony` 4.8-5.fc44.
+const FEDORA_44: &str = include_str!("../../../../fixtures/chrony/distro/fedora-44.conf");
+/// The stock `/etc/chrony.conf` of Arch: `chrony` 4.9-1.
+const ARCH: &str = include_str!("../../../../fixtures/chrony/distro/arch.conf");
 
 /// `model_strategy` must generate **valid** models only — values this module's
 /// `apply` would refuse make invariants 3 and 4 vacuous, because their checks
@@ -67,7 +81,17 @@ fn key_probe(value: &str) -> Model {
 // that *starts* with a comment character is a comment line.
 detent_core::module_conformance!(
     ChronyModule,
-    fixtures = [DEFAULT, CRLF, NO_NEWLINE, TABS, UNKNOWN],
+    fixtures = [
+        DEFAULT,
+        CRLF,
+        NO_NEWLINE,
+        TABS,
+        UNKNOWN,
+        DEBIAN_13,
+        UBUNTU_26_04,
+        FEDORA_44,
+        ARCH
+    ],
     model_strategy = model_strategy(),
     injection_probes = [
         value_probe("a\nb"),
@@ -85,7 +109,17 @@ detent_core::module_conformance!(
 /// Every fixture must render back byte for byte.
 #[test]
 fn fixtures_round_trip_losslessly() {
-    for fixture in [DEFAULT, CRLF, NO_NEWLINE, TABS, UNKNOWN] {
+    for fixture in [
+        DEFAULT,
+        CRLF,
+        NO_NEWLINE,
+        TABS,
+        UNKNOWN,
+        DEBIAN_13,
+        UBUNTU_26_04,
+        FEDORA_44,
+        ARCH,
+    ] {
         let doc = ChronyModule::parse(fixture);
         assert_eq!(
             doc.as_ref().map(ChronyModule::render).ok(),
@@ -200,5 +234,104 @@ fn an_edited_value_reaches_the_rendered_file() -> Result<(), String> {
         ChronyModule::render(&doc),
         "# comment\n\nmakestep 0 0\nrtcsync\n# trailing comment\n"
     );
+    Ok(())
+}
+
+#[test]
+fn distro_fixtures_parse_to_their_settings() {
+    let debian_like = |pool: Option<&str>| {
+        let mut settings = Vec::new();
+        settings.extend(pool.map(|pool| expect("pool", pool)));
+        settings.extend([
+            expect("sourcedir", "/run/chrony-dhcp"),
+            expect("sourcedir", "/etc/chrony/sources.d"),
+            expect("keyfile", "/etc/chrony/chrony.keys"),
+            expect("driftfile", "/var/lib/chrony/chrony.drift"),
+            expect("ntsdumpdir", "/var/lib/chrony"),
+            expect("logdir", "/var/log/chrony"),
+            expect("maxupdateskew", "100.0"),
+            expect("rtcsync", ""),
+            expect("makestep", "1 3"),
+            expect("leapseclist", "/usr/share/zoneinfo/leap-seconds.list"),
+            expect("confdir", "/etc/chrony/conf.d"),
+        ]);
+        Model { settings }
+    };
+    assert_eq!(
+        model_of(DEBIAN_13),
+        debian_like(Some("2.debian.pool.ntp.org iburst"))
+    );
+    assert_eq!(model_of(UBUNTU_26_04), debian_like(None));
+    assert_eq!(
+        model_of(FEDORA_44),
+        Model {
+            settings: vec![
+                expect("pool", "2.fedora.pool.ntp.org iburst"),
+                expect("sourcedir", "/run/chrony-dhcp"),
+                expect("driftfile", "/var/lib/chrony/drift"),
+                expect("makestep", "1.0 3"),
+                expect("rtcsync", ""),
+                expect("ntsdumpdir", "/var/lib/chrony"),
+                expect("leapseclist", "/usr/share/zoneinfo/leap-seconds.list"),
+                expect("logdir", "/var/log/chrony"),
+            ]
+        }
+    );
+    assert_eq!(
+        model_of(ARCH),
+        Model {
+            settings: vec![
+                expect("pool", "2.arch.pool.ntp.org iburst"),
+                expect("driftfile", "/var/lib/chrony/drift"),
+                expect("ntsdumpdir", "/var/lib/chrony"),
+                expect("leapseclist", "/usr/share/zoneinfo/leap-seconds.list"),
+                expect("makestep", "1.0 3"),
+                expect("rtcsync", ""),
+            ]
+        }
+    );
+}
+
+/// D9: the stock file of every supported distribution validates without an
+/// error, so a setting can be edited on it; each include line it carries is
+/// one warning, and the edit keeps those lines byte for byte.
+#[test]
+fn a_stock_distro_file_validates_and_an_edit_keeps_its_include_lines() -> Result<(), String> {
+    let host = HostProfile::default_for_tests();
+    let ctx = ValidationCtx::new(&host);
+    for (name, src, includes) in [
+        ("debian-13", DEBIAN_13, 3),
+        ("ubuntu-26.04", UBUNTU_26_04, 3),
+        ("fedora-44", FEDORA_44, 1),
+        ("arch", ARCH, 0),
+    ] {
+        let mut model = model_of(src);
+        let diagnostics = ChronyModule::validate(&model, &ctx);
+        assert!(!diagnostics.has_errors(), "{name}: {diagnostics:?}");
+        let warned = diagnostics
+            .iter()
+            .filter(|d| d.id.as_str() == "chrony-stock-include" && d.severity == Severity::Warning)
+            .count();
+        assert_eq!(warned, includes, "{name}");
+
+        for setting in &mut model.settings {
+            if setting.key == "makestep" {
+                "0.5 5".clone_into(&mut setting.value);
+            }
+        }
+        let mut doc = ChronyModule::parse(src).map_err(|e| e.to_string())?;
+        let report = ChronyModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        assert_eq!(report.changed_lines, 1, "{name}");
+        let rendered = ChronyModule::render(&doc);
+        let include_lines = |text: &str| {
+            text.lines()
+                .filter(|line| line.starts_with("sourcedir") || line.starts_with("confdir"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(include_lines(&rendered), include_lines(src), "{name}");
+        assert_eq!(include_lines(src).len(), includes, "{name}");
+        assert!(rendered.contains("\nmakestep 0.5 5\n"), "{name}");
+    }
     Ok(())
 }

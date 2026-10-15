@@ -22,6 +22,7 @@ chrony-missing-rtcsync = rtcsync सेट नहीं है; हार्ड�
 chrony-rec-nts = पूल {$pool} nts विकल्प के बिना उपयोग हो रहा है; nts-सक्षम स्रोत चुनें ताकि समय की स्पूफ़िंग न हो सके।
 chrony-cmdport-open = cmdport {$port} है; जब तक chronyc को इस होस्ट तक नेटवर्क से पहुँचना आवश्यक न हो, cmdport 0 सेट करें।
 chrony-external-directive = `{$key}` बाहरी फ़ाइलें लोड करता है या बाहरी प्रोग्राम चलाता है; यह मॉड्यूल उन डायरेक्टिव को अस्वीकार करता है जो उसकी तय फ़ाइल-सीमा को पार करते हैं।
+chrony-stock-include = `{$key} {$value}` इस वितरण की मानक include पंक्ति है; इसे जैसा है वैसा रखा जाता है, लेकिन detent इसमें शामिल फ़ाइलों को न पढ़ता है न प्रबंधित करता है।
 
 ## dhcp module — display name, security notes, schema tooltips
 dhcp-name = dhcp
@@ -47,6 +48,7 @@ dhcp-invalid-key = `{$key}` मान्य dnsmasq विकल्प नाम
 dhcp-malformed-cidr = `{$value}` मान्य CIDR प्रीफ़िक्स नहीं है, जैसे `192.168.1.0/24`।
 dhcp-malformed-pool = `{$value}` मान्य पूल नहीं है; `192.168.1.100 - 192.168.1.200` जैसी रेंज या CIDR प्रीफ़िक्स का उपयोग करें।
 dhcp-external-directive = `{$key}` बाहरी फ़ाइलें लोड करता है या कमांड चलाता है; यह मॉड्यूल ऐसे डायरेक्टिव नहीं बनाएगा या बदलेगा जो उसकी तय फ़ाइल-सीमा को पार करते हैं।
+dhcp-stock-include = `{$key}={$value}` इस वितरण की मानक include पंक्ति है; इसे जैसा है वैसा रखा जाता है, लेकिन detent इसमें शामिल फ़ाइलों को न पढ़ता है न प्रबंधित करता है।
 dhcp-authoritative-set = `dhcp-authoritative` dnsmasq को उस सेगमेंट का एकमात्र DHCP सर्वर बना देता है; इसे तभी सेट करें जब कोई अन्य DHCP सर्वर न हो।
 dhcp-kea-interfaces-empty = {$server} में कोई इंटरफ़ेस कॉन्फ़िगर नहीं है और वह हर इंटरफ़ेस पर सुनेगा; इंटरफ़ेस के नाम स्पष्ट रूप से दें।
 dhcp-rec-rebind = domain-needed और bogus-priv दोनों सेट नहीं हैं; वे रीबाइंड हमलों और निजी पतों के लिए अपस्ट्रीम A क्वेरी को फ़िल्टर करते हैं।

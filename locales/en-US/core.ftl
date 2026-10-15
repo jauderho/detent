@@ -23,6 +23,7 @@ chrony-missing-rtcsync = rtcsync is not set; the hardware clock will drift relat
 chrony-rec-nts = the pool {$pool} is used without the nts option; prefer nts-capable sources so time cannot be spoofed.
 chrony-cmdport-open = cmdport is {$port}; set cmdport 0 unless chronyc must reach this host over the network.
 chrony-external-directive = `{$key}` loads external files or runs an external program; this module refuses directives that cross its configured file boundary.
+chrony-stock-include = `{$key} {$value}` is a stock include line of this distribution; it is kept as it is, but detent does not read or manage the files it includes.
 
 ## dhcp module — display name, security notes, schema tooltips
 dhcp-name = dhcp
@@ -48,6 +49,7 @@ dhcp-invalid-key = `{$key}` is not a valid dnsmasq option name; it must be one w
 dhcp-malformed-cidr = `{$value}` is not a valid CIDR prefix, e.g. `192.168.1.0/24`.
 dhcp-malformed-pool = `{$value}` is not a valid pool; use a range like `192.168.1.100 - 192.168.1.200` or a CIDR prefix.
 dhcp-external-directive = `{$key}` loads external files or runs commands; this module will not create or modify directives that cross its configured file boundary.
+dhcp-stock-include = `{$key}={$value}` is a stock include line of this distribution; it is kept as it is, but detent does not read or manage the files it includes.
 dhcp-authoritative-set = `dhcp-authoritative` makes dnsmasq the sole DHCP server on the segment; only set it when no other DHCP server exists.
 dhcp-kea-interfaces-empty = {$server} has no interfaces configured and will listen on every interface; name the interfaces explicitly.
 dhcp-rec-rebind = domain-needed and bogus-priv are not both set; they filter rebind attacks and upstream A-for-private queries.

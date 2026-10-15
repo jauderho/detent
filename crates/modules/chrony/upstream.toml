@@ -17,4 +17,4 @@ release_feed = ""
 
 [fixtures]
 # fixtures/chrony/<dir>/ — real samples this version's parser is held to.
-dirs = ["chrony-4.9", "edge"]
+dirs = ["chrony-4.9", "edge", "distro"]

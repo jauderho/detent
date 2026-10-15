@@ -20,6 +20,10 @@
 //!   (`https://gitlab.isc.org/isc-projects/kea.git`, newest stable tag;
 //!   `doc/examples/kea4/single-subnet.json` and
 //!   `doc/examples/kea6/simple.json`).
+//! * `fixtures/dhcp/distro/fedora-44.dnsmasq.conf` — the stock
+//!   `/etc/dnsmasq.conf` of Fedora 44, byte for byte from the `dnsmasq`
+//!   2.92-4.fc44 package (2026-10-15). It is the upstream sample plus four
+//!   active lines, one of them the stock `conf-dir` include (BUGFIX D9).
 //! * `fixtures/dhcp/edge/` — hand-made adversarial cases: CRLF, no trailing
 //!   newline (dnsmasq and JSONC flavors), tabs and odd spacing around `=`,
 //!   garbage lines that must stay `Unknown`, and a Kea file exercising every
@@ -30,6 +34,8 @@
 //! round-trip and exact-model tests below instead of being re-run under
 //! proptest.
 
+use detent_core::descriptor::{HostProfile, ValidationCtx};
+use detent_core::diag::Severity;
 use detent_core::module::ConfigModule;
 use detent_module_dhcp::{DhcpModule, DnsmasqSetting, KeaConfig, KeaPool, KeaSubnet, Model};
 use proptest::prelude::*;
@@ -43,6 +49,8 @@ const TRUST: &str = include_str!("../../../../fixtures/dhcp/dnsmasq-2.93/trust-a
 const KEA4: &str = include_str!("../../../../fixtures/dhcp/dnsmasq-2.93/kea-dhcp4.conf");
 /// ISC Kea 3.2.0 `doc/examples/kea6/simple.json`.
 const KEA6: &str = include_str!("../../../../fixtures/dhcp/dnsmasq-2.93/kea-dhcp6.conf");
+/// The stock `/etc/dnsmasq.conf` of Fedora 44 (`dnsmasq` 2.92-4.fc44).
+const FEDORA_44: &str = include_str!("../../../../fixtures/dhcp/distro/fedora-44.dnsmasq.conf");
 /// Every line terminated with `\r\n`.
 const CRLF: &str = include_str!("../../../../fixtures/dhcp/edge/crlf.dnsmasq");
 /// Garbage that must stay `Unknown`: two-word lines, `=missing-key`, and the
@@ -267,6 +275,7 @@ detent_core::module_conformance!(
 fn fixtures_round_trip_losslessly() {
     for fixture in [
         EXAMPLE,
+        FEDORA_44,
         TRUST,
         KEA4,
         KEA6,
@@ -516,4 +525,59 @@ fn edge_line_endings_survive_edits() -> Result<(), String> {
         "# hand-made edge fixture: the last line has no terminator\ndomain-needed\ninterface=eth0"
     );
     Ok(())
+}
+
+/// D9: the stock Fedora 44 file parses to its four settings, validates
+/// without an error (the `conf-dir` line is one warning), and an edit keeps
+/// the `conf-dir` line byte for byte.
+#[test]
+fn the_stock_fedora_file_validates_and_an_edit_keeps_its_conf_dir_line() -> Result<(), String> {
+    let conf_dir = "conf-dir=/etc/dnsmasq.d,.rpmnew,.rpmsave,.rpmorig";
+    let mut model = model_of(FEDORA_44);
+    assert_eq!(
+        model.dnsmasq,
+        vec![
+            setting("user", Some("dnsmasq")),
+            setting("group", Some("dnsmasq")),
+            setting("local-service", Some("host")),
+            setting("conf-dir", Some("/etc/dnsmasq.d,.rpmnew,.rpmsave,.rpmorig")),
+        ]
+    );
+    let host = HostProfile::default_for_tests();
+    let diagnostics = DhcpModule::validate(&model, &ValidationCtx::new(&host));
+    assert!(!diagnostics.has_errors(), "{diagnostics:?}");
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|d| d.id.as_str() == "dhcp-stock-include" && d.severity == Severity::Warning)
+            .count(),
+        1
+    );
+
+    model.dnsmasq.insert(3, setting("domain-needed", None));
+    let mut doc = DhcpModule::parse(FEDORA_44).map_err(|e| e.to_string())?;
+    let report = DhcpModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+    assert_eq!(
+        (report.changed_lines, report.added, report.removed),
+        (0, 1, 0)
+    );
+    let rendered = DhcpModule::render(&doc);
+    assert_eq!(rendered.matches(conf_dir).count(), 1);
+    assert_eq!(
+        rendered
+            .lines()
+            .filter(|line| line.starts_with("conf-dir"))
+            .collect::<Vec<_>>(),
+        vec![conf_dir]
+    );
+    assert!(rendered.contains("\ndomain-needed\n"));
+    Ok(())
+}
+
+/// Builds an expected dnsmasq setting.
+fn setting(key: &str, value: Option<&str>) -> DnsmasqSetting {
+    DnsmasqSetting {
+        key: key.to_owned(),
+        value: value.map(str::to_owned),
+    }
 }
