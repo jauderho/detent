@@ -12,6 +12,21 @@ back its real configuration files with the real service.
 
 dnsmasq (`dnsmasq.conf`, `dnsmasq.d/`), Kea DHCPv4 and DHCPv6 (JSON with comments).
 
+## Include lines
+
+A `conf-dir` line is allowed only with one of these values (owner decision
+2026-10-15, BUGFIX D9), key `conf-dir` exactly. It gives the warning
+`dhcp-stock-include`: the line stays in the file byte for byte, detent never
+writes a new one, and it does not read or manage the directory. Every other
+include or script line (`conf-file`, `conf-dir`, `include`, `includedir`,
+`script`, `dhcp-script`, `dhcp-luascript`, `dhcp-scriptuser`) is an error, as
+before.
+
+| Value | Source |
+|---|---|
+| `/etc/dnsmasq.d,.rpmnew,.rpmsave,.rpmorig` | Fedora 44 stock `/etc/dnsmasq.conf` (dnsmasq 2.92-4.fc44), `fixtures/dhcp/distro/fedora-44.dnsmasq.conf` |
+| `/etc/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new` | Debian 13 (2.91-1+deb13u2) and Ubuntu 26.04 (2.92-1): `CONFIG_DIR` in `/etc/default/dnsmasq`, which the init script passes as `-7` (short for `conf-dir`); their `dnsmasq.conf` has no active `conf-dir` |
+
 ## External check
 
 `dnsmasq --test -C <candidate>`, `kea-dhcp4 -t <candidate>`.
