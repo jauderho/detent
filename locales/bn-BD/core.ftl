@@ -22,6 +22,7 @@ chrony-missing-rtcsync = rtcsync সেট করা নেই; হার্ড�
 chrony-rec-nts = পুল {$pool} nts অপশন ছাড়া ব্যবহার করা হচ্ছে; nts-সক্ষম উৎস বেছে নিন যাতে সময় স্পুফ করা না যায়।
 chrony-cmdport-open = cmdport হলো {$port}; chronyc-কে নেটওয়ার্কের মাধ্যমে এই হোস্টে পৌঁছাতে না হলে cmdport 0 সেট করুন।
 chrony-external-directive = `{$key}` বাইরের ফাইল লোড করে বা বাইরের প্রোগ্রাম চালায়; যে ডিরেক্টিভ এই মডিউলের নির্ধারিত ফাইল-সীমা অতিক্রম করে, মডিউলটি সেগুলো প্রত্যাখ্যান করে।
+chrony-stock-include = `{$key} {$value}` এই ডিস্ট্রিবিউশনের মানক include লাইন; এটি যেমন আছে তেমন রাখা হয়, কিন্তু detent এর অন্তর্ভুক্ত ফাইলগুলো পড়ে না বা পরিচালনা করে না।
 
 ## dhcp module — display name, security notes, schema tooltips
 dhcp-name = dhcp
@@ -47,6 +48,7 @@ dhcp-invalid-key = `{$key}` একটি বৈধ dnsmasq অপশনের �
 dhcp-malformed-cidr = `{$value}` একটি বৈধ CIDR প্রিফিক্স নয়, যেমন `192.168.1.0/24`।
 dhcp-malformed-pool = `{$value}` একটি বৈধ পুল নয়; `192.168.1.100 - 192.168.1.200`-এর মতো রেঞ্জ বা CIDR প্রিফিক্স ব্যবহার করুন।
 dhcp-external-directive = `{$key}` বাইরের ফাইল লোড করে বা কমান্ড চালায়; যে ডিরেক্টিভ এই মডিউলের নির্ধারিত ফাইল-সীমা অতিক্রম করে, মডিউলটি সেগুলো তৈরি বা পরিবর্তন করবে না।
+dhcp-stock-include = `{$key}={$value}` এই ডিস্ট্রিবিউশনের মানক include লাইন; এটি যেমন আছে তেমন রাখা হয়, কিন্তু detent এর অন্তর্ভুক্ত ফাইলগুলো পড়ে না বা পরিচালনা করে না।
 dhcp-authoritative-set = `dhcp-authoritative` dnsmasq-কে ওই সেগমেন্টের একমাত্র DHCP সার্ভার বানায়; অন্য কোনো DHCP সার্ভার না থাকলেই কেবল এটি সেট করুন।
 dhcp-kea-interfaces-empty = {$server}-এ কোনো ইন্টারফেস কনফিগার করা নেই এবং এটি প্রতিটি ইন্টারফেসে শুনবে; ইন্টারফেসের নাম স্পষ্টভাবে দিন।
 dhcp-rec-rebind = domain-needed ও bogus-priv দুটোই সেট করা নেই; এগুলো রিবাইন্ড আক্রমণ এবং ব্যক্তিগত ঠিকানার জন্য আপস্ট্রিমে পাঠানো A কোয়েরি ছেঁকে ফেলে।

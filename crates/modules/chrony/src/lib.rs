@@ -372,6 +372,28 @@ const REC_NTS: MessageId = MessageId::new("chrony-rec-nts");
 const CMDPORT_OPEN: MessageId = MessageId::new("chrony-cmdport-open");
 /// Fluent id: a directive loads external files or runs an external program.
 const EXTERNAL_DIRECTIVE: MessageId = MessageId::new("chrony-external-directive");
+/// Fluent id: a stock include line is kept; the files it includes are not
+/// managed.
+const STOCK_INCLUDE: MessageId = MessageId::new("chrony-stock-include");
+
+/// The include lines the stock `chrony.conf` of a supported distribution
+/// carries (owner decision 2026-10-15). [`ChronyModule::validate`] allows a
+/// line only when key and value are exactly one of these; every other
+/// include stays an error. The lines stay in the file byte for byte and the
+/// files they include are never read. Sources, the file as installed:
+///
+/// * `sourcedir /run/chrony-dhcp`: Debian 13 (`chrony` 4.6.1-3+deb13u2),
+///   Ubuntu 26.04 (`chrony` 4.8-2ubuntu1), Fedora 44 (`chrony` 4.8-5.fc44).
+/// * `sourcedir /etc/chrony/sources.d`, `confdir /etc/chrony/conf.d`: Debian
+///   13 and Ubuntu 26.04.
+///
+/// Arch (`chrony` 4.9-1) ships no include line. The files are
+/// `fixtures/chrony/distro/`.
+const STOCK_INCLUDES: &[(&str, &str)] = &[
+    ("sourcedir", "/run/chrony-dhcp"),
+    ("sourcedir", "/etc/chrony/sources.d"),
+    ("confdir", "/etc/chrony/conf.d"),
+];
 
 /// Directives an older `chronyd` refuses, with the release that introduced
 /// each. `validate` reports one that the installed chronyd is too old for. Add
@@ -416,6 +438,32 @@ fn validate_since(item: &Setting, index: usize, ctx: ValidationCtx<'_>, out: &mu
         )
     {
         out.push(found);
+    }
+}
+
+/// Reports a directive that loads external files or runs a program: an
+/// error, except for an exact [`STOCK_INCLUDES`] line, which is a warning.
+fn validate_include(item: &Setting, index: usize, out: &mut Diagnostics) {
+    let field = || FieldPath::new(format!("settings/{index}/key"));
+    if STOCK_INCLUDES
+        .iter()
+        .any(|&(key, value)| item.key == key && item.value == value)
+    {
+        out.push(
+            Diagnostic::new(Severity::Warning, STOCK_INCLUDE)
+                .with_field(field())
+                .with_arg("key", item.key.clone())
+                .with_arg("value", item.value.clone()),
+        );
+    } else if ["include", "includedir", "confdir", "sourcedir", "script"]
+        .iter()
+        .any(|key| item.key.eq_ignore_ascii_case(key))
+    {
+        out.push(
+            Diagnostic::new(Severity::Error, EXTERNAL_DIRECTIVE)
+                .with_field(field())
+                .with_arg("key", item.key.clone()),
+        );
     }
 }
 
@@ -527,16 +575,7 @@ impl ConfigModule for ChronyModule {
                         .with_arg("key", item.key.clone()),
                 );
             }
-            if ["include", "includedir", "confdir", "sourcedir", "script"]
-                .iter()
-                .any(|key| item.key.eq_ignore_ascii_case(key))
-            {
-                diagnostics.push(
-                    Diagnostic::new(Severity::Error, EXTERNAL_DIRECTIVE)
-                        .with_field(FieldPath::new(format!("settings/{index}/key")))
-                        .with_arg("key", item.key.clone()),
-                );
-            }
+            validate_include(item, index, &mut diagnostics);
             validate_since(item, index, *ctx, &mut diagnostics);
             if ["pidfile", "user"]
                 .iter()
@@ -650,8 +689,8 @@ mod tests {
     use super::{
         ALLOW_OPEN, CMDPORT_OPEN, ChronyModule, DESCRIPTOR, DUPLICATE_KEY, EXTERNAL_DIRECTIVE,
         INVALID_KEY, MISSING_MAKESTEP, MISSING_RTCSYNC, Model, PRIVILEGED_DIRECTIVE, REC_NTS,
-        Setting, TOO_MANY_SETTINGS, classify, is_bare_directive, is_valid_key, parse_setting,
-        render_line, schema_with_hints, setting,
+        STOCK_INCLUDE, Setting, TOO_MANY_SETTINGS, classify, is_bare_directive, is_valid_key,
+        parse_setting, render_line, schema_with_hints, setting,
     };
     use detent_core::descriptor::{HostProfile, InitSystem, Os, ValidationCtx};
     use detent_core::diag::{Diagnostic, FieldPath, MessageId, Severity};
@@ -687,6 +726,7 @@ mod tests {
             "chrony-missing-rtcsync",
             "chrony-cmdport-open",
             "chrony-external-directive",
+            "chrony-stock-include",
         ] {
             assert!(
                 CORE_FTL.contains(&format!("{id} =")),
@@ -717,7 +757,7 @@ mod tests {
         assert_eq!(upstream.release_feed, None);
         assert!(UPSTREAM_TOML.contains("release_feed = \"\""));
         assert!(UPSTREAM_TOML.contains("[fixtures]"));
-        assert!(UPSTREAM_TOML.contains("dirs = [\"chrony-4.9\", \"edge\"]"));
+        assert!(UPSTREAM_TOML.contains("dirs = [\"chrony-4.9\", \"edge\", \"distro\"]"));
     }
 
     fn profile(os: Os, hostname: &str) -> HostProfile {
@@ -1019,6 +1059,71 @@ mod tests {
                 settings: vec![setting(key, "/tmp/untrusted")],
             };
             assert!(has(&model, EXTERNAL_DIRECTIVE, Severity::Error), "{key}");
+        }
+    }
+
+    /// The include lines of the stock Debian 13, Ubuntu 26.04 and Fedora 44
+    /// files are kept with a warning, not refused (owner decision
+    /// 2026-10-15).
+    #[test]
+    fn validate_warns_on_a_stock_include_line_and_does_not_refuse_it() {
+        for (key, value) in [
+            ("sourcedir", "/run/chrony-dhcp"),
+            ("sourcedir", "/etc/chrony/sources.d"),
+            ("confdir", "/etc/chrony/conf.d"),
+        ] {
+            let model = Model {
+                settings: vec![setting(key, value)],
+            };
+            assert!(
+                has(&model, STOCK_INCLUDE, Severity::Warning),
+                "{key} {value}"
+            );
+            assert!(
+                !has(&model, EXTERNAL_DIRECTIVE, Severity::Error),
+                "{key} {value}"
+            );
+        }
+    }
+
+    /// Only the exact stock line is allowed: any other directory, form or
+    /// option stays an error.
+    #[test]
+    fn validate_refuses_every_include_line_that_is_not_a_stock_line() {
+        for (key, value) in [
+            ("sourcedir", "/run/chrony-dhcp/"),
+            ("sourcedir", "/run/chrony-dhcp/../../tmp"),
+            ("sourcedir", "/run/../run/chrony-dhcp"),
+            ("sourcedir", "/run//chrony-dhcp"),
+            ("sourcedir", "/run/chrony-dhcp /tmp"),
+            ("sourcedir", "/run/chrony-dhcp "),
+            ("sourcedir", "/RUN/chrony-dhcp"),
+            ("SourceDir", "/run/chrony-dhcp"),
+            ("SOURCEDIR", "/etc/chrony/sources.d"),
+            ("ConfDir", "/etc/chrony/conf.d"),
+            ("sourcedir", "/etc/chrony/sources.d/"),
+            ("sourcedir", "/etc/chrony/conf.d"),
+            ("sourcedir", "/tmp/chrony-dhcp"),
+            ("confdir", "/etc/chrony/conf.d/"),
+            ("confdir", "/etc/chrony/conf.d /tmp"),
+            ("confdir", "/etc/chrony/sources.d"),
+            ("confdir", "/run/chrony-dhcp"),
+            ("confdir", "etc/chrony/conf.d"),
+            ("include", "/etc/chrony/conf.d"),
+            ("includedir", "/etc/chrony/conf.d"),
+            ("script", "/run/chrony-dhcp"),
+        ] {
+            let model = Model {
+                settings: vec![setting(key, value)],
+            };
+            assert!(
+                has(&model, EXTERNAL_DIRECTIVE, Severity::Error),
+                "{key} {value:?}"
+            );
+            assert!(
+                !has(&model, STOCK_INCLUDE, Severity::Warning),
+                "{key} {value:?}"
+            );
         }
     }
 

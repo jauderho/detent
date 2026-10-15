@@ -1912,6 +1912,30 @@ const EMPTY_KEY: MessageId = MessageId::new("dhcp-empty-key");
 const INVALID_KEY: MessageId = MessageId::new("dhcp-invalid-key");
 /// Fluent id: a dnsmasq directive loads external files or runs commands.
 const EXTERNAL_DIRECTIVE: MessageId = MessageId::new("dhcp-external-directive");
+/// Fluent id: a stock include line is kept; the files it includes are not
+/// managed.
+const STOCK_INCLUDE: MessageId = MessageId::new("dhcp-stock-include");
+
+/// The `conf-dir` values a supported distribution configures by default
+/// (owner decision 2026-10-15). [`DhcpModule::validate`] allows a `conf-dir`
+/// line only when its value is exactly one of these; every other include
+/// stays an error. The line stays in the file byte for byte, is never
+/// rendered by detent ([`render_dnsmasq`]), and the directory is never read.
+/// Sources:
+///
+/// * Fedora 44: `conf-dir=/etc/dnsmasq.d,.rpmnew,.rpmsave,.rpmorig` in the
+///   stock `/etc/dnsmasq.conf` (`dnsmasq` 2.92-4.fc44,
+///   `fixtures/dhcp/distro/fedora-44.dnsmasq.conf`).
+/// * Debian 13 and Ubuntu 26.04: their `/etc/dnsmasq.conf` has no active
+///   `conf-dir`; `/etc/default/dnsmasq` sets
+///   `CONFIG_DIR=/etc/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new` and the init
+///   script passes it as `-7`, the short form of `conf-dir` (`dnsmasq`
+///   2.91-1+deb13u2, 2.92-1). An admin who moves it into the file writes this
+///   value.
+const STOCK_CONF_DIRS: &[&str] = &[
+    "/etc/dnsmasq.d,.rpmnew,.rpmsave,.rpmorig",
+    "/etc/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new",
+];
 /// Fluent id: a subnet prefix or `dhcp-range` value is not a valid CIDR.
 const MALFORMED_CIDR: MessageId = MessageId::new("dhcp-malformed-cidr");
 /// Fluent id: a pool value is neither a CIDR prefix nor an `ip - ip` range.
@@ -2007,6 +2031,30 @@ fn default_dnsmasq() -> Vec<DnsmasqSetting> {
         setting("dhcp-leasefile", "/var/lib/dnsmasq/dnsmasq.leases"),
         setting("dhcp-range", "192.168.0.50,192.168.0.150,12h"),
     ]
+}
+
+/// Reports a dnsmasq directive that loads external files or runs commands:
+/// an error, except for a `conf-dir` line whose value is exactly one of
+/// [`STOCK_CONF_DIRS`], which is a warning.
+fn validate_include(item: &DnsmasqSetting, path: &str, out: &mut Diagnostics) {
+    let field = || FieldPath::new(format!("{path}/key"));
+    if item.key == "conf-dir"
+        && let Some(value) = &item.value
+        && STOCK_CONF_DIRS.contains(&value.as_str())
+    {
+        out.push(
+            Diagnostic::new(Severity::Warning, STOCK_INCLUDE)
+                .with_field(field())
+                .with_arg("key", item.key.clone())
+                .with_arg("value", value.clone()),
+        );
+    } else if INCLUDE_KEYS.contains(&item.key.to_ascii_lowercase().as_str()) {
+        out.push(
+            Diagnostic::new(Severity::Error, EXTERNAL_DIRECTIVE)
+                .with_field(field())
+                .with_arg("key", item.key.clone()),
+        );
+    }
 }
 
 // ----------------------------------------------------------------------- module
@@ -2141,13 +2189,7 @@ impl ConfigModule for DhcpModule {
                         .with_arg("key", item.key.clone()),
                 );
             }
-            if INCLUDE_KEYS.contains(&item.key.to_ascii_lowercase().as_str()) {
-                diagnostics.push(
-                    Diagnostic::new(Severity::Error, EXTERNAL_DIRECTIVE)
-                        .with_field(FieldPath::new(format!("{path}/key")))
-                        .with_arg("key", item.key.clone()),
-                );
-            }
+            validate_include(item, &path, &mut diagnostics);
             if item.key == "dhcp-range"
                 && let Some(value) = &item.value
                 && let Some(first) = value.split(',').next()
@@ -2254,9 +2296,9 @@ mod tests {
         AUTHORITATIVE, DhcpDoc, DhcpModule, DnsmasqSetting, EMPTY_KEY, EXTERNAL_DIRECTIVE,
         INCLUDE_KEYS, INVALID_KEY, Jsonc, JsoncRoot, KEA_INTERFACES_EMPTY, KeaConfig, KeaFlavor,
         KeaPool, KeaSubnet, Lit, MALFORMED_CIDR, MALFORMED_POOL, Member, Model, Obj, REC_LIFETIME,
-        REC_REBIND, classify_dnsmasq, decode_json_string, is_valid_dnsmasq_key, is_valid_pool,
-        json_escape, parse_cidr, parse_dnsmasq, parse_jsonc, render_dnsmasq, schema_with_hints,
-        sniffs_jsonc,
+        REC_REBIND, STOCK_INCLUDE, classify_dnsmasq, decode_json_string, is_valid_dnsmasq_key,
+        is_valid_pool, json_escape, parse_cidr, parse_dnsmasq, parse_jsonc, render_dnsmasq,
+        schema_with_hints, sniffs_jsonc,
     };
     use detent_core::descriptor::{HostProfile, InitSystem, Os, ValidationCtx};
     use detent_core::diag::{MessageId, Severity};
@@ -2299,6 +2341,7 @@ mod tests {
             "dhcp-malformed-cidr",
             "dhcp-malformed-pool",
             "dhcp-external-directive",
+            "dhcp-stock-include",
             "dhcp-authoritative-set",
             "dhcp-kea-interfaces-empty",
             "dhcp-rec-rebind",
@@ -2879,6 +2922,100 @@ mod tests {
             let model = dnsmasq_only(vec![dnsmasq_setting(key, Some("/tmp/untrusted"))]);
             assert!(has(&model, EXTERNAL_DIRECTIVE, Severity::Error), "{key}");
         }
+    }
+
+    /// The stock `conf-dir` lines of Fedora 44 and of Debian 13 / Ubuntu 26.04
+    /// are kept with a warning, not refused (owner decision 2026-10-15).
+    #[test]
+    fn validate_warns_on_a_stock_conf_dir_line_and_does_not_refuse_it() {
+        for value in [
+            "/etc/dnsmasq.d,.rpmnew,.rpmsave,.rpmorig",
+            "/etc/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new",
+        ] {
+            let model = dnsmasq_only(vec![dnsmasq_setting("conf-dir", Some(value))]);
+            assert!(has(&model, STOCK_INCLUDE, Severity::Warning), "{value}");
+            assert!(!has(&model, EXTERNAL_DIRECTIVE, Severity::Error), "{value}");
+        }
+    }
+
+    /// Only the exact stock line is allowed: any other directory, suffix list,
+    /// form, case or directive stays an error.
+    #[test]
+    fn validate_refuses_every_include_line_that_is_not_a_stock_line() {
+        for (key, value) in [
+            ("conf-dir", Some("/etc/dnsmasq.d")),
+            ("conf-dir", Some("/etc/dnsmasq.d/")),
+            (
+                "conf-dir",
+                Some("/etc/dnsmasq.d/,.rpmnew,.rpmsave,.rpmorig"),
+            ),
+            ("conf-dir", Some("/etc/dnsmasq.d,.rpmnew,.rpmsave")),
+            (
+                "conf-dir",
+                Some("/etc/dnsmasq.d,.rpmnew,.rpmsave,.rpmorig,*.conf"),
+            ),
+            ("conf-dir", Some("/etc/dnsmasq.d,*.conf")),
+            (
+                "conf-dir",
+                Some("/etc/dnsmasq.d, .rpmnew,.rpmsave,.rpmorig"),
+            ),
+            ("conf-dir", Some("/etc/../tmp,.rpmnew,.rpmsave,.rpmorig")),
+            (
+                "conf-dir",
+                Some("/etc/dnsmasq.d/../../tmp,.rpmnew,.rpmsave,.rpmorig"),
+            ),
+            (
+                "conf-dir",
+                Some("/tmp/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new"),
+            ),
+            (
+                "conf-dir",
+                Some("/ETC/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new"),
+            ),
+            (
+                "conf-dir",
+                Some("/etc/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new "),
+            ),
+            ("conf-dir", None),
+            ("Conf-Dir", Some("/etc/dnsmasq.d,.rpmnew,.rpmsave,.rpmorig")),
+            (
+                "CONF-DIR",
+                Some("/etc/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new"),
+            ),
+            (
+                "conf-file",
+                Some("/etc/dnsmasq.d,.rpmnew,.rpmsave,.rpmorig"),
+            ),
+            (
+                "include",
+                Some("/etc/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new"),
+            ),
+            (
+                "dhcp-script",
+                Some("/etc/dnsmasq.d,.rpmnew,.rpmsave,.rpmorig"),
+            ),
+        ] {
+            let model = dnsmasq_only(vec![dnsmasq_setting(key, value)]);
+            assert!(
+                has(&model, EXTERNAL_DIRECTIVE, Severity::Error),
+                "{key} {value:?}"
+            );
+            assert!(
+                !has(&model, STOCK_INCLUDE, Severity::Warning),
+                "{key} {value:?}"
+            );
+        }
+    }
+
+    /// An allowed stock line is still never written by detent: a model that
+    /// adds one is refused at render time.
+    #[test]
+    fn a_stock_conf_dir_line_is_never_rendered() {
+        let line = dnsmasq_setting("conf-dir", Some("/etc/dnsmasq.d,.rpmnew,.rpmsave,.rpmorig"));
+        assert!(matches!(
+            render_dnsmasq(&line),
+            Err(EditError::Unsupported { .. })
+        ));
     }
 
     #[test]
