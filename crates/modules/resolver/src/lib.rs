@@ -828,16 +828,23 @@ const SERVICE_NM: &str = "NetworkManager";
 /// The service version key unbound is probed under.
 const SERVICE_UNBOUND: &str = "unbound";
 
+/// `/etc/resolv.conf`, the target of the `resolv` section.
+const RESOLV_CONF: PathSpec = PathSpec::new("/etc/resolv.conf");
+/// `/etc/systemd/resolved.conf`, the target of the `resolved` section.
+const RESOLVED_CONF: PathSpec = PathSpec::new("/etc/systemd/resolved.conf");
+/// `/etc/unbound/unbound.conf`, the target of the `unbound` section.
+const UNBOUND_CONF: PathSpec = PathSpec::new("/etc/unbound/unbound.conf");
+
 static RESOLVER_TARGETS: &[Target] = &[
     Target {
-        path: PathSpec::new("/etc/resolv.conf"),
+        path: RESOLV_CONF,
         kind: TargetKind::File,
         mode: 0o644,
         owner: Owner::Root,
         backend_detect: resolv_backend_detect,
     },
     Target {
-        path: PathSpec::new("/etc/systemd/resolved.conf"),
+        path: RESOLVED_CONF,
         kind: TargetKind::File,
         mode: 0o644,
         owner: Owner::Root,
@@ -851,7 +858,7 @@ static RESOLVER_TARGETS: &[Target] = &[
         backend_detect: resolved_backend_detect,
     },
     Target {
-        path: PathSpec::new("/etc/unbound/unbound.conf"),
+        path: UNBOUND_CONF,
         kind: TargetKind::File,
         mode: 0o644,
         owner: Owner::Named("unbound"),
@@ -1538,6 +1545,31 @@ impl ConfigModule for ResolverModule {
             );
         }
         diagnostics
+    }
+
+    /// Each section belongs to one file: an edit of the `unbound` section
+    /// goes to `unbound.conf` even when systemd-resolved is the detected
+    /// backend. A model with no section picks the target by detection.
+    fn model_target(model: &Self::Model) -> Result<Option<PathSpec>, EditError> {
+        let sections = [
+            (!model.resolv.is_empty(), RESOLV_CONF),
+            (!model.resolved.is_empty(), RESOLVED_CONF),
+            (!model.unbound.is_empty(), UNBOUND_CONF),
+        ];
+        let used: Vec<PathSpec> = sections
+            .iter()
+            .filter(|(used, _)| *used)
+            .map(|(_, path)| *path)
+            .collect();
+        match used.as_slice() {
+            [] => Ok(None),
+            [one] => Ok(Some(*one)),
+            _ => Err(EditError::Unsupported {
+                message: "the model holds settings for more than one resolver file; \
+                          apply one section at a time"
+                    .to_owned(),
+            }),
+        }
     }
 
     /// Smart, secure defaults for this host: the managing backend's config
@@ -2600,6 +2632,40 @@ mod tests {
         assert!(has(&diagnostics, REC_DOT));
         assert!(!has(&diagnostics, BACKEND_MISSING));
         assert!(!diagnostics.has_errors());
+    }
+
+    #[test]
+    fn each_section_names_its_own_file() -> Result<(), String> {
+        let target = |model: &Model| {
+            ResolverModule::model_target(model)
+                .map(|path| path.map(detent_core::descriptor::PathSpec::as_str))
+                .map_err(|e| e.to_string())
+        };
+        assert_eq!(target(&m(Vec::new(), Vec::new(), Vec::new()))?, None);
+        let nameserver = ResolvEntry::Nameserver {
+            ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        };
+        assert_eq!(
+            target(&m(vec![nameserver.clone()], Vec::new(), Vec::new()))?,
+            Some("/etc/resolv.conf")
+        );
+        assert_eq!(
+            target(&m(Vec::new(), vec![ResolvedEntry::Resolve], Vec::new()))?,
+            Some("/etc/systemd/resolved.conf")
+        );
+        assert_eq!(
+            target(&m(Vec::new(), Vec::new(), vec![UnboundEntry::Server]))?,
+            Some("/etc/unbound/unbound.conf")
+        );
+        assert!(matches!(
+            ResolverModule::model_target(&m(
+                Vec::new(),
+                vec![ResolvedEntry::Resolve],
+                vec![UnboundEntry::Server]
+            )),
+            Err(EditError::Unsupported { .. })
+        ));
+        Ok(())
     }
 
     #[test]

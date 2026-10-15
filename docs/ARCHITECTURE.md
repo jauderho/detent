@@ -282,6 +282,22 @@ client ─▶ worker: /api/v1 handler ─▶ Operation::Apply ─▶ OpsEngine (
 
 - Apply never creates a missing target: `ReadTarget` answers `NotFound` and
   the engine reports `ops-target-missing` (`engine.rs` `map_client`).
+- One operation reads and writes one **file** target (`engine.rs` `wiring`;
+  a directory target is never chosen). The target is the one the model's
+  section belongs to when the module says so (`ConfigModule::model_target`:
+  a resolver `unbound` section edits `unbound.conf`, a dhcp `kea_v4` section
+  edits `kea-dhcp4.conf`; a model with sections of two files is refused with
+  `core-edit-unsupported`), else the first file target whose
+  `backend_detect` accepts the host, else the module's first file target.
+  `backend_detect` reads `HostProfile::service_versions`, which the platform
+  probes fill (`host/mod.rs` `SERVICE_PROBES`); a network stack counts only
+  while it is in use (`NetworkManager.service`, `systemd-networkd.service`
+  or `networking.service` active, or a `*.yaml` in `/etc/netplan`), with
+  the precedence netplan, `NetworkManager`, networkd, ifupdown.
+  Proof: `a_model_section_edits_its_own_file_not_the_detected_one`,
+  `a_detected_directory_target_is_passed_by_for_the_file`
+  (`detent-ops/tests/engine.rs`),
+  `a_network_stack_counts_only_while_its_unit_is_active` (`host/mod.rs`).
 - The deny-list (step 5b) compares normalised name/value instances as a
   multiset: a directive already in the file may stay unchanged; a new one, or
   a changed value, is refused. It is best effort; see §10.

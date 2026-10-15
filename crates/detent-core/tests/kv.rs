@@ -598,6 +598,16 @@ fn dyn_adapter_speaks_json() {
     let applied = module.apply_json("a=1\n", &serde_json::json!({"pairs": {"a": "2"}}));
     assert_eq!(applied.ok(), Some("a=2\n".to_owned()));
 
+    // A module that names no target per model leaves the choice to
+    // backend detection; the JSON must still be shaped like the model.
+    let target = module.model_target_json(&serde_json::json!({"pairs": {"a": "2"}}));
+    assert_eq!(target.ok(), Some(None));
+    let shape = module.model_target_json(&serde_json::json!([]));
+    assert_eq!(
+        shape.err().map(|e| e.message_id().as_str()),
+        Some("core-model-shape")
+    );
+
     let host = profile();
     let diagnostics = module.validate_json(
         &serde_json::json!({"pairs": {"a": ""}}),

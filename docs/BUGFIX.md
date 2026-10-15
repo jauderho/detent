@@ -380,8 +380,9 @@ deferred by the owner.
    has `ProtectSystem=strict` and lists `-/etc/systemd/resolved.conf.d` but not
    `/etc/systemd/resolved.conf`. A drop-in `ReadWritePaths=/etc/systemd/resolved.conf`
    made the apply, the file and the rollback pass (Debian, Ubuntu, Fedora).
-7. **Modules edit one target; backend detection never sees the network
-   stack.**
+7. ~~**Modules edit one target; backend detection never sees the network
+   stack.**~~ Done 2026-10-15 (`PROGRESS.md`). The D3 rerun is in
+   `spikes/d3-containers.md`.
    - resolver: an edit to the `unbound` model is written into
      `/etc/systemd/resolved.conf` (`+server:` / `+    qname-minimisation: yes`
      in the plan diff) when systemd-resolved is installed.
