@@ -186,6 +186,11 @@ sudo -u detent detent token create ci-readonly
 sudo -u detent detent token list
 ```
 
+The settings page of the console lists, creates and revokes tokens too. It
+asks for the password again first, and shows a new token once. With
+`auth.totp_required`, only a session that signed in with a code may create
+one (docs/API.md "API tokens").
+
 Each token may make 60 requests at once, then 120 a minute; over that it gets
 `429` with `Retry-After`. Change this in `detent.toml` (neither may be zero):
 

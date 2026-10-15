@@ -22,8 +22,9 @@ silently upgrade the other's authority:
   logout for everybody. Idle sessions time out after 15 minutes, every
   session after 8 hours regardless of activity, and signing in again
   invalidates whatever session the request arrived with.
-- **A bearer token** (`Authorization: Bearer <token>`), issued out of band
-  (`detent token create`) with a scope and an optional expiry. A token
+- **A bearer token** (`Authorization: Bearer <token>`), issued by root on
+  the host (`detent token create`) or by a session (see "API tokens") with a
+  scope and an optional expiry. A token
   establishes no session — there is nothing for `/api/v1/auth/session` to
   describe and nothing for `/api/v1/auth/logout` to end. Each token has a
   request budget: `auth.token_burst` requests at once (default 60), then
@@ -102,6 +103,42 @@ listed or ended.
 
 Both POST routes need the CSRF token. Each ended session writes one
 `session_revoked` record to the auth log, kind `session`.
+
+## API tokens
+
+A signed-in user lists, mints and revokes the host's API tokens (ASVS
+1.2.4). Tokens belong to the host, not to an account; every account is an
+administrator. The routes take a session cookie only: a bearer token gets
+`401`, so a token can never mint or revoke a token. A session that must
+change its password gets `403`.
+
+- `GET /api/v1/auth/tokens` answers every token: `id`, `label`, `scopes`
+  (`["read"]` or `["read", "write"]`), `created` (RFC 3339) and
+  `expires_at` (Unix seconds, or `null`). The value and its digest are never
+  in the answer.
+- `POST /api/v1/auth/tokens` takes `{ label, scope, expires_in_secs? }`.
+  `scope` is `read` or `write`. `label` is 1 to 64 printable ASCII
+  characters (`400 web-auth-token-label-invalid` otherwise).
+  `expires_in_secs` is at least 1 and the expiry must fit in Unix seconds
+  (`400 web-auth-token-expiry-invalid`); without it the token does not
+  expire. The answer is `201` with the token's list entry and `token`, the
+  value. This is the only time the value is sent; the host keeps only its
+  SHA-256. A host that already holds 64 tokens answers
+  `409 web-auth-token-limit`.
+- `POST /api/v1/auth/tokens/{id}/revoke` revokes the token and answers
+  `204`. The token stops working at once. An unknown id answers
+  `404 web-auth-token-unknown`.
+
+Both POST routes need the CSRF token, the `write` scope (`403
+web-denied-scope`; no session mints a scope wider than its own) and a
+step-up less than 5 minutes old (`403 web-auth-step-up-required`, see
+"Step-up"). When `auth.totp_required` is set, a session that signed in
+without a code may not mint a token: `403 web-auth-token-totp-required`.
+Sign in again with a code. Each change writes `token_issued` or
+`token_revoked` to the auth log: subject `token:<id>`, kind `session`,
+`actor` the user, and the client address. A token minted or revoked with
+`detent token` on the host is in the list at once, and a console change
+keeps a change the command line made meanwhile.
 
 ## Step-up
 
