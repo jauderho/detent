@@ -27,7 +27,7 @@ use detent_core::descriptor::{
     ServiceBinding, Target, TargetKind, UnitNames, Upstream, ValidationCtx,
 };
 use detent_core::diag::{Diagnostic, Diagnostics, MessageId, Severity};
-use detent_core::module::{DynError, DynModule, ModelError, ParseError};
+use detent_core::module::{DynError, DynModule, EditError, ModelError, ParseError};
 use detent_ops::audit::{AuditError, AuditRecord, AuditSink};
 use detent_ops::report::{MountReport, MountReportState, MountsReport};
 use detent_ops::{
@@ -81,6 +81,19 @@ impl DynModule for FakeModule {
 
     fn schema_json(&self) -> Value {
         json!({"type": "object", "properties": {"text": {"type": "string"}}})
+    }
+
+    /// A model with `"target": "<path>"` edits that file, as a resolver
+    /// model with only an `unbound` section edits `unbound.conf`;
+    /// `"target": "both"` spans two files.
+    fn model_target_json(&self, model: &Value) -> Result<Option<PathSpec>, DynError> {
+        match model.get("target").and_then(Value::as_str) {
+            None => Ok(None),
+            Some("both") => Err(DynError::Edit(EditError::Unsupported {
+                message: "the model holds settings for more than one file".to_owned(),
+            })),
+            Some(path) => Ok(Some(PathSpec::new(leak_str(path.to_owned())))),
+        }
     }
 
     fn parse_to_model_json(&self, src: &str) -> Result<Value, DynError> {
@@ -174,6 +187,9 @@ enum Targets {
     DecoyThenReal,
     /// None at all.
     None,
+    /// A detected drop-in directory first, then the real file: only a file
+    /// can be read and written, so the engine must pass the directory by.
+    DirectoryThenReal,
 }
 
 /// How the descriptor under test is shaped.
@@ -203,6 +219,13 @@ fn build_descriptor(id: &'static str, target: &Path, shape: Shape) -> &'static M
                 target.with_extension("decoy").display().to_string(),
             )),
             backend_detect: never,
+            ..real
+        });
+    }
+    if shape.targets == Targets::DirectoryThenReal {
+        list.push(Target {
+            path: PathSpec::new(leak_str(target.with_extension("d").display().to_string())),
+            kind: TargetKind::DropInDir,
             ..real
         });
     }
@@ -907,6 +930,105 @@ fn a_module_with_no_target_cannot_be_planned() -> TestResult {
         }),
         Err(OpsError::NoTarget { .. })
     ));
+    fx.finish()
+}
+
+#[test]
+fn a_model_section_edits_its_own_file_not_the_detected_one() -> TestResult {
+    let mut fx = harness(
+        b"real\n",
+        Setup {
+            shape: Shape {
+                targets: Targets::DecoyThenReal,
+                ..Shape::default()
+            },
+            ..Setup::default()
+        },
+    )?;
+    // The decoy is not detected, but the model's section belongs to it.
+    let decoy = fx.target.with_extension("decoy");
+    std::fs::write(&decoy, b"decoy\n")?;
+    let model = json!({"text": "edited\n", "target": decoy.display().to_string()});
+    let OpOutcome::Planned(plan) = fx.run(Operation::Plan {
+        id: MODULE.to_owned(),
+        model: model.clone(),
+    })?
+    else {
+        return Err("Plan must answer with a plan report".into());
+    };
+    assert_eq!(plan.path, decoy.display().to_string());
+    assert!(
+        plan.unified_diff.contains("-decoy\n"),
+        "{}",
+        plan.unified_diff
+    );
+    let OpOutcome::Applied(report) = fx.run(Operation::Apply {
+        id: MODULE.to_owned(),
+        model,
+        expected_hash: None,
+        service_action: None,
+        confirm: None,
+    })?
+    else {
+        return Err("Apply must answer with an apply report".into());
+    };
+    assert_eq!(report.path, decoy.display().to_string());
+    assert_eq!(std::fs::read_to_string(&decoy)?, "edited\n");
+    assert_eq!(fx.contents()?, "real\n");
+    // A model that spans two files is refused; nothing is written.
+    assert!(matches!(
+        fx.run(Operation::Apply {
+            id: MODULE.to_owned(),
+            model: json!({"text": "both\n", "target": "both"}),
+            expected_hash: None,
+            service_action: None,
+            confirm: None,
+        }),
+        Err(OpsError::Module(DynError::Edit(
+            EditError::Unsupported { .. }
+        )))
+    ));
+    // A target the module does not own is no target.
+    assert!(matches!(
+        fx.run(Operation::Plan {
+            id: MODULE.to_owned(),
+            model: json!({"text": "x\n", "target": "/etc/elsewhere.conf"}),
+        }),
+        Err(OpsError::NoTarget { .. })
+    ));
+    assert_eq!(fx.contents()?, "real\n");
+    assert_eq!(std::fs::read_to_string(&decoy)?, "edited\n");
+    fx.finish()
+}
+
+#[test]
+fn a_detected_directory_target_is_passed_by_for_the_file() -> TestResult {
+    let mut fx = harness(
+        b"v1\n",
+        Setup {
+            shape: Shape {
+                targets: Targets::DirectoryThenReal,
+                ..Shape::default()
+            },
+            ..Setup::default()
+        },
+    )?;
+    std::fs::create_dir(fx.target.with_extension("d"))?;
+    let OpOutcome::Module(view) = fx.run(Operation::GetModule {
+        id: MODULE.to_owned(),
+    })?
+    else {
+        return Err("GetModule must answer with a module view".into());
+    };
+    assert_eq!(view.model, Some(json!({"text": "v1\n"})));
+    let OpOutcome::Planned(plan) = fx.run(Operation::Plan {
+        id: MODULE.to_owned(),
+        model: json!({"text": "v2\n"}),
+    })?
+    else {
+        return Err("Plan must answer with a plan report".into());
+    };
+    assert_eq!(plan.path, fx.target.display().to_string());
     fx.finish()
 }
 

@@ -29,12 +29,12 @@
 
 use std::time::Duration;
 
-use detent_core::descriptor::{ModuleDescriptor, ValidationCtx};
+use detent_core::descriptor::{ModuleDescriptor, PathSpec, ValidationCtx};
 use detent_core::module::{DynModule, ParseError};
 use detent_platform::fs::atomic::Sha256Digest;
 use detent_platform::host::Detected;
 use detent_platform::privsep::proto::{
-    BackupId, BindingId, CheckId, CommitId, ModuleId, PendingService, ProtoError,
+    BackupId, BindingId, CheckId, CommitId, ModuleId, PathKind, PendingService, ProtoError,
     ServiceAction as WireServiceAction, TargetId, UpdateTagRefusal, WriteReceipt, check_update_tag,
 };
 use detent_platform::privsep::worker::{Client, ClientError};
@@ -376,7 +376,7 @@ impl OpsEngine {
         let descriptor = module.descriptor();
         let schema = module.schema_json();
         let secret_pointers = module.secret_pointers();
-        let wiring = wiring(&self.client, descriptor, &self.host.profile)?;
+        let wiring = wiring(&self.client, descriptor, &self.host.profile, None)?;
         let contents = self.client.read_target(wiring.target).ok();
 
         let (model, current_hash) = match contents {
@@ -436,9 +436,22 @@ impl OpsEngine {
         }
     }
 
+    /// The wiring of an operation on `model`: the target is the file its
+    /// section belongs to, when the module says so, else the detected one.
+    fn model_wiring(&self, id: &str, model: &Value) -> Result<Wiring, OpsError> {
+        let module = find_module(&self.modules, id)?;
+        let target = module.model_target_json(model)?;
+        wiring(
+            &self.client,
+            module.descriptor(),
+            &self.host.profile,
+            target,
+        )
+    }
+
     fn plan(&mut self, id: &str, model: &Value) -> Result<PlanReport, OpsError> {
         let descriptor = find_module(&self.modules, id)?.descriptor();
-        let wiring = wiring(&self.client, descriptor, &self.host.profile)?;
+        let wiring = self.model_wiring(id, model)?;
         let contents = self.client.read_target(wiring.target).map_err(map_client)?;
         let current = decode(&contents.bytes, &wiring.path)?;
 
@@ -530,7 +543,6 @@ impl OpsEngine {
         else {
             return Ok(false);
         };
-        let descriptor = find_module(&self.modules, id)?.descriptor();
         let ctx = ValidationCtx::new(&self.host.profile);
         if find_module(&self.modules, id)?
             .validate_json(model, &ctx)?
@@ -538,7 +550,7 @@ impl OpsEngine {
         {
             return Ok(false);
         }
-        let wiring = wiring(&self.client, descriptor, &self.host.profile)?;
+        let wiring = self.model_wiring(id, model)?;
         if service_action.is_some() && wiring.binding.is_none() {
             return Ok(false);
         }
@@ -576,7 +588,7 @@ impl OpsEngine {
         // 2. Resolve the wiring, and refuse a service action the module has no
         //    binding for *before* writing: a half-applied change (file written,
         //    service never touched) is worse than no change at all.
-        let wiring = wiring(&self.client, descriptor, &self.host.profile)?;
+        let wiring = self.model_wiring(id, model)?;
         if service_action.is_some() && wiring.binding.is_none() {
             return Err(OpsError::NoService {
                 module: descriptor.id.to_owned(),
@@ -839,7 +851,7 @@ impl OpsEngine {
     ) -> Result<OpOutcome, OpsError> {
         let module = module_id(&self.client, find_module(&self.modules, id)?)?;
         let descriptor = find_module(&self.modules, id)?.descriptor();
-        let wiring = wiring(&self.client, descriptor, &self.host.profile)?;
+        let wiring = wiring(&self.client, descriptor, &self.host.profile, None)?;
         let contents = self.client.read_target(wiring.target).map_err(map_client)?;
         hashes.prev = Some(contents.digest);
         if let Some(expected) = expected_hash
@@ -857,7 +869,7 @@ impl OpsEngine {
 
     fn service_action(&mut self, id: &str, action: ServiceCommand) -> Result<OpOutcome, OpsError> {
         let descriptor = find_module(&self.modules, id)?.descriptor();
-        let wiring = wiring(&self.client, descriptor, &self.host.profile)?;
+        let wiring = wiring(&self.client, descriptor, &self.host.profile, None)?;
         let (binding, affected) = wiring.binding.ok_or_else(|| OpsError::NoService {
             module: descriptor.id.to_owned(),
         })?;
@@ -914,14 +926,17 @@ fn module_id(
 /// module operation needs: which target to read and write, which validators to
 /// run, and which service binding to act on.
 ///
-/// The target is the first one the module's own `backend_detect` accepts for
-/// this host — that is how a module with several backends (resolver, network)
-/// selects the file that actually applies — falling back to the first target
-/// the monitor advertised.
+/// Only a file target can be read and written. The target is `model_target`
+/// when the model names one ([`DynModule::model_target_json`]: the file of
+/// the backend whose section the model edits), else the first file target the
+/// module's own `backend_detect` accepts for this host — that is how a module
+/// with several backends (resolver, network) selects the file that actually
+/// applies — falling back to the first file target the monitor advertised.
 fn wiring(
     client: &Client,
     descriptor: &'static ModuleDescriptor,
     profile: &detent_core::descriptor::HostProfile,
+    model_target: Option<PathSpec>,
 ) -> Result<Wiring, OpsError> {
     let no_target = || OpsError::NoTarget {
         module: descriptor.id.to_owned(),
@@ -935,21 +950,24 @@ fn wiring(
     let advertised: Vec<_> = client
         .targets()?
         .iter()
-        .filter(|target| target.module == module)
+        .filter(|target| target.module == module && target.kind == PathKind::File)
         .collect();
-    let preferred = descriptor
-        .targets
-        .iter()
-        .filter(|target| (target.backend_detect)(profile))
-        .find_map(|target| {
-            advertised
-                .iter()
-                .find(|info| info.path == target.path.as_str())
-                .copied()
-        });
-    let chosen = preferred
-        .or_else(|| advertised.first().copied())
-        .ok_or_else(no_target)?;
+    let find = |path: PathSpec| {
+        advertised
+            .iter()
+            .find(|info| info.path == path.as_str())
+            .copied()
+    };
+    let chosen = match model_target {
+        Some(path) => find(path).ok_or_else(no_target)?,
+        None => descriptor
+            .targets
+            .iter()
+            .filter(|target| (target.backend_detect)(profile))
+            .find_map(|target| find(target.path))
+            .or_else(|| advertised.first().copied())
+            .ok_or_else(no_target)?,
+    };
 
     let checks = client
         .tables()
