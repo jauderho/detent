@@ -327,6 +327,7 @@ static CHECKS: &[ExternalCheck] = &[ExternalCheck {
     program: PathSpec::new("/usr/bin/testparm"),
     args: &[ArgTemplate::Literal("-s"), ArgTemplate::TempFile],
     expects: CheckExpectation::ExitZero,
+    applies_to: &[],
 }];
 
 /// The services a change to these files affects. systemd names the classic
@@ -1754,6 +1755,7 @@ mod tests {
                 program: detent_core::descriptor::PathSpec::new("/usr/bin/testparm"),
                 args: &[ArgTemplate::Literal("-s"), ArgTemplate::TempFile],
                 expects: CheckExpectation::ExitZero,
+                applies_to: &[],
             }] as &[ExternalCheck]
         );
         assert!(!descriptor.commit_confirm);

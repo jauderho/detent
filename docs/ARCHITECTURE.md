@@ -233,9 +233,11 @@ confined monitor does not start programs itself.
 - A candidate must be one plain path component naming a regular file (not
   a symlink) directly in the check's candidate directory
   (`staged_candidate`). The runner derives that directory itself from the
-  check's module (`Allowlist::candidate_dir`): the parent of the module's
-  primary target, the one the engine plans against, where the distro's
-  AppArmor profile lets the validator read; there the name must also start
+  check (`Allowlist::check_candidate_dir`): the parent of the first file the
+  check judges (`ExternalCheck::applies_to`), or for a check that judges
+  every target the parent of the module's primary file target, the one the
+  engine plans against, where the distro's AppArmor profile lets the
+  validator read; there the name must also start
   with `.detent-candidate-`, and the directory must pass the monitor's own
   check (`require_trusted_dir`: owned by root or the runner's euid, no group
   or other write bit, not a symlink). A module with no file target uses the staging
@@ -266,13 +268,13 @@ client ─▶ worker: /api/v1 handler ─▶ Operation::Apply ─▶ OpsEngine (
   1. audit "started" record; if it cannot be written, the operation is refused
   2. ReadTarget ─────────────────────────────▶ monitor
   3. module.apply_json(current, model)  (lossless: only changed lines differ)
-  4. RunCheck per declared validator ────────▶ monitor ─▶ runner
+  4. RunCheck per validator of the target ───▶ monitor ─▶ runner
   5. WriteTarget(expected_prev = digest from 2) ─▶ monitor:
        a. id → allow-listed path          (allowlist.rs)
        b. execution deny-list             (exec_deny.rs)   new or changed
           exec directive → refused
        c. module parser + validator       (validate_candidate)
-       d. declared validators again       (revalidate → runner)
+       d. the target's validators again   (revalidate → runner)
        e. atomic write: backup, O_EXCL temp, fsync, rename, fsync(dir)
           (fs/atomic.rs); digest mismatch → Conflict, nothing written
   6. Service action (optional) ──────────────▶ monitor ─▶ runner
@@ -298,6 +300,16 @@ client ─▶ worker: /api/v1 handler ─▶ Operation::Apply ─▶ OpsEngine (
   `a_detected_directory_target_is_passed_by_for_the_file`
   (`detent-ops/tests/engine.rs`),
   `a_network_stack_counts_only_while_its_unit_is_active` (`host/mod.rs`).
+- A validator runs only for the files it judges
+  (`ExternalCheck::applies_to`, empty: every target of the module;
+  `CheckInfo::targets` in `HelloAck`, `PROTO_VERSION` 3): `unbound-checkconf`
+  never judges a `resolved.conf` candidate, the Kea checks never judge a
+  dnsmasq one. A validator of the written file that cannot run, or fails,
+  still fails the apply closed (owner decision H5, `THREAT_MODEL.md` MOD-4).
+  Proof: `a_check_runs_only_when_the_file_it_judges_is_written`
+  (`detent-ops/tests/engine.rs`),
+  `a_check_judges_its_own_files_and_its_candidate_goes_beside_the_first`
+  (`allowlist.rs`).
 - The deny-list (step 5b) compares normalised name/value instances as a
   multiset: a directive already in the file may stay unchanged; a new one, or
   a changed value, is refused. It is best effort; see §10.

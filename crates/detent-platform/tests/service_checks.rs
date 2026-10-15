@@ -102,6 +102,7 @@ fn exit_zero_check_passes_on_a_zero_exit() -> TestResult {
         program: PROGRAM,
         args: &[ArgTemplate::Literal("-p"), ArgTemplate::TempFile],
         expects: CheckExpectation::ExitZero,
+        applies_to: &[],
     };
     let fake = Arc::new(FakeRunner::default().with_response(output(0, "")));
     let runner = ExternalCheckRunner::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
@@ -119,6 +120,7 @@ fn exit_zero_check_fails_on_a_nonzero_exit() -> TestResult {
         program: PROGRAM,
         args: &[ArgTemplate::Literal("-p"), ArgTemplate::TempFile],
         expects: CheckExpectation::ExitZero,
+        applies_to: &[],
     };
     let fake = Arc::new(FakeRunner::default().with_response(output(1, "parse error")));
     let runner = ExternalCheckRunner::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
@@ -136,6 +138,7 @@ fn a_timed_out_check_fails_without_an_exit_code() -> TestResult {
         program: PROGRAM,
         args: &[ArgTemplate::Literal("-p"), ArgTemplate::TempFile],
         expects: CheckExpectation::ExitZero,
+        applies_to: &[],
     };
     let fake = Arc::new(FakeRunner::default().with_response(output_timeout()));
     let runner = ExternalCheckRunner::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
@@ -159,6 +162,7 @@ fn stdout_pattern_check_passes_on_a_substring_match() -> TestResult {
         program: PROGRAM,
         args: &[ArgTemplate::Literal("-s")],
         expects: CheckExpectation::StdoutContains("Loaded services"),
+        applies_to: &[],
     };
     let fake =
         Arc::new(FakeRunner::default().with_response(output(0, "Loaded services file OK\n")));
@@ -176,6 +180,7 @@ fn stdout_pattern_check_fails_when_the_substring_is_absent() -> TestResult {
         program: PROGRAM,
         args: &[ArgTemplate::Literal("-s")],
         expects: CheckExpectation::StdoutContains("Loaded services"),
+        applies_to: &[],
     };
     let fake = Arc::new(FakeRunner::default().with_response(output(0, "nothing relevant here")));
     let runner = ExternalCheckRunner::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
@@ -201,6 +206,7 @@ fn temp_file_is_substituted_at_the_declared_position() -> TestResult {
             ArgTemplate::TempFile,
         ],
         expects: CheckExpectation::ExitZero,
+        applies_to: &[],
     };
     let fake = Arc::new(FakeRunner::default().with_response(output(0, "")));
     let runner = ExternalCheckRunner::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
@@ -228,6 +234,7 @@ fn temp_file_may_appear_before_trailing_literals() -> TestResult {
         program: PROGRAM,
         args: &[ArgTemplate::TempFile, ArgTemplate::Literal("--strict")],
         expects: CheckExpectation::ExitZero,
+        applies_to: &[],
     };
     let fake = Arc::new(FakeRunner::default().with_response(output(0, "")));
     let runner = ExternalCheckRunner::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
@@ -253,6 +260,7 @@ fn a_relative_program_path_is_rejected_without_spawning() {
         program: PathSpec::new("chronyd"),
         args: &[ArgTemplate::TempFile],
         expects: CheckExpectation::ExitZero,
+        applies_to: &[],
     };
     let fake = Arc::new(FakeRunner::default());
     let runner = ExternalCheckRunner::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
@@ -286,11 +294,13 @@ fn real_true_and_false_smoke_test() -> TestResult {
         program: PathSpec::new(true_leaked),
         args: &[],
         expects: CheckExpectation::ExitZero,
+        applies_to: &[],
     };
     let failing = ExternalCheck {
         program: PathSpec::new(false_leaked),
         args: &[],
         expects: CheckExpectation::ExitZero,
+        applies_to: &[],
     };
     let runner = ExternalCheckRunner::new();
     let ok = runner

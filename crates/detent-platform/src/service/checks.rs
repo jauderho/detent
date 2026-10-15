@@ -240,6 +240,7 @@ mod tests {
             program: PathSpec::new("/usr/sbin/chronyd"),
             args: &[ArgTemplate::Literal("-s")],
             expects: CheckExpectation::StdoutContains("Loaded services"),
+            applies_to: &[],
         };
         // Matching stdout but non-zero exit must NOT pass.
         let fake =

@@ -67,7 +67,10 @@ use detent_core::descriptor::{ServiceAction as CoreServiceAction, TargetKind};
 /// [`Response::UnitStatus`] (the answer to [`Request::Service`] with
 /// [`ServiceAction::Status`]) is appended to its enum too; the version stays
 /// `2`, and no request changed.
-pub const PROTO_VERSION: u16 = 2;
+///
+/// [`CheckInfo::targets`] (BUGFIX Track D 5) appends a field inside
+/// [`HelloAck`], which changes the wire shape: the version is `3`.
+pub const PROTO_VERSION: u16 = 3;
 /// Largest encoded message accepted in either direction, in bytes.
 ///
 /// The largest legitimate payload is a configuration file, and 1 MiB is far
@@ -542,6 +545,9 @@ pub struct CheckInfo {
     pub module: ModuleId,
     /// Absolute path of the validator, for display in `detent doctor`.
     pub program: String,
+    /// The targets whose candidates it judges: the engine runs it only when
+    /// one of them is written.
+    pub targets: Vec<TargetId>,
 }
 
 /// One service binding as advertised in [`HelloAck`].
@@ -1168,6 +1174,7 @@ mod tests {
                 id: CheckId(0),
                 module: ModuleId(0),
                 program: "/usr/sbin/chronyd".to_owned(),
+                targets: vec![TargetId(0)],
             }],
             bindings: vec![BindingInfo {
                 id: BindingId(0),

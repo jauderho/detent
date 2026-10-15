@@ -256,6 +256,7 @@ static CHECKS: &[ExternalCheck] = &[ExternalCheck {
         ArgTemplate::TempFile,
     ],
     expects: CheckExpectation::ExitZero,
+    applies_to: &[],
 }];
 
 /// The services a change to these files affects. systemd names it

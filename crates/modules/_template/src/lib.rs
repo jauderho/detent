@@ -195,6 +195,7 @@ static CHECKS: &[ExternalCheck] = &[ExternalCheck {
     program: PathSpec::new("/usr/sbin/TEMPLATE"),
     args: &[ArgTemplate::Literal("--test"), ArgTemplate::TempFile],
     expects: CheckExpectation::ExitZero,
+    applies_to: &[],
 }];
 
 /// TODO(descriptor): the services a change to these files affects. Give every

@@ -5,6 +5,22 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-15 - External checks judge only their own file (BUGFIX Track D 5)
+
+The D3 run showed every declared validator run on every candidate: `unbound-checkconf` on `resolved.conf`, the Kea checks on a dnsmasq file, and all four network validators for any network apply, so an apply failed unless every backend's tool was installed and accepted a file in another format.
+
+**Change.** `ExternalCheck::applies_to` (new, not serialized, so the API schema is unchanged): the targets whose candidates a check judges; empty means every target of the module (all single-file modules). resolver: `unbound-checkconf` judges `unbound.conf`; dhcp: `dnsmasq --test`, `kea-dhcp4 -t`, `kea-dhcp6 -t` judge their own file; network: `netplan generate`, `networkctl status`, `nmcli general`, `ifup -n` judge the netplan, networkd, NetworkManager and ifupdown file. The allow-list resolves them to target ids (`CheckEntry::targets`, `CheckInfo::targets` in `HelloAck`; `PROTO_VERSION` 3). The engine runs only the checks of the file it writes; the monitor's `revalidate` runs only the checks that judge the target being written. A check's candidate goes beside the first file it judges (`Allowlist::check_candidate_dir`, used by the monitor and the runner alike), so the distro's AppArmor profile of the validator still lets it read the candidate (`unbound-checkconf` reads beside `unbound.conf`, not beside `resolved.conf`). `Allowlist::candidate_dir` now picks the primary file target, as the engine does.
+
+**Policy.** Fail closed stays. THREAT_MODEL MOD-4 and owner decision H5 (2026-10-06) say an apply refuses when a declared validator cannot run, so a validator of the written file that is missing or fails still fails the apply. Validators of other backends no longer run at all, so they cannot block it.
+
+**`networkctl status` under `serve`.** Cause found by running it in a transient unit with each property of `packaging/systemd/detent.service`, removing one at a time (Ubuntu container, networkd running): with all properties it exits 1 with `Failed to get boot ID: No such file or directory` / `Failed to add boot matches`; only without `ProcSubset=pid` does it pass. `networkctl status` prints the tail of networkd's journal, and the journal match needs `/proc/sys/kernel/random/boot_id`, which `ProcSubset=pid` hides. The CLI is not under the unit, so `plan` passed. Fix: the check runs `networkctl status --lines=0` (no journal tail; passes with every property). The unit is not changed.
+
+**`ifup -n -a`** read the file on disk, not the candidate; it now runs `ifup -n -a -i <candidate>` (passes under the unit's properties, Debian 13 container).
+
+**Not changed.** `netplan generate --root-dir <candidate file>` reads `<root>/etc/netplan/*.yaml`, so with a file as root it finds nothing and passes without judging the candidate; it needs a staged directory tree (open).
+
+**Tests.** `a_check_runs_only_when_the_file_it_judges_is_written` (`detent-ops/tests/engine.rs`, real monitor with a failing validator that judges only the other file) failed before the fix with `assertion left == right failed: [CheckReport { program: "/nonexistent/detent-ops-check", ran: true, passed: false, ... }] left: 1 right: 0`. `a_check_judges_its_own_files_and_its_candidate_goes_beside_the_first` (`allowlist.rs`), `a_check_judges_every_target_or_only_the_ones_it_names` (core), `unbound_checkconf_judges_only_unbound_conf`, the dhcp and network descriptor tests. `the_candidate_dir_is_the_parent_of_the_primary_file_target` now expects `/etc/network` for a module whose detected target is a directory (the engine passes directories by since item 7).
+
 ## 2026-10-15 - Edits go to the file of their backend (BUGFIX Track D 7)
 
 The D3 run showed one target per module: a resolver `unbound` edit landed in `resolved.conf`, a dhcp Kea edit was refused when dnsmasq was installed (`core-edit-unsupported`), and network always wrote `/etc/network/interfaces`, because no probe filled the keys its `backend_detect` reads.

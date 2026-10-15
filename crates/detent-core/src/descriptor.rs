@@ -214,6 +214,25 @@ pub struct ExternalCheck {
     pub args: &'static [ArgTemplate],
     /// The success condition.
     pub expects: CheckExpectation,
+    /// The targets whose candidates this check judges; empty: every target
+    /// of the module. A module with one backend per target binds each check
+    /// to its backend's file, so `unbound-checkconf` never judges a
+    /// `resolved.conf` candidate, and the check runs only when that file is
+    /// written.
+    ///
+    /// Not serialized, for the same reason as
+    /// [`ModuleDescriptor::reload_unit_files`].
+    #[serde(skip)]
+    #[cfg_attr(feature = "openapi", schema(ignore = true))]
+    pub applies_to: &'static [PathSpec],
+}
+
+impl ExternalCheck {
+    /// Whether this check judges a candidate for the target at `path`.
+    #[must_use]
+    pub fn judges(&self, path: &str) -> bool {
+        self.applies_to.is_empty() || self.applies_to.iter().any(|spec| spec.as_str() == path)
+    }
 }
 
 /// One mount unit for an entry that an apply added or changed.
@@ -546,13 +565,32 @@ mod tests {
                 ArgTemplate::TempFile,
             ],
             expects: CheckExpectation::ExitZero,
+            applies_to: &[],
         },
         ExternalCheck {
             program: PathSpec::new("/usr/bin/testparm"),
             args: &[ArgTemplate::Literal("-s")],
             expects: CheckExpectation::StdoutContains("Loaded services"),
+            applies_to: &[PathSpec::new("/etc/chrony/chrony.conf")],
         },
     ];
+
+    #[test]
+    fn a_check_judges_every_target_or_only_the_ones_it_names() {
+        let judged: Vec<(bool, bool)> = CHECKS
+            .iter()
+            .map(|check| {
+                (
+                    check.judges("/etc/chrony/chrony.conf"),
+                    check.judges("/etc/chrony/conf.d"),
+                )
+            })
+            .collect();
+        assert_eq!(judged, [(true, true), (true, false)]);
+        // Behaviour for the monitor, not metadata: the API schema keeps it out.
+        let json = serde_json::to_value(CHECKS).unwrap_or_default();
+        assert!(!json.to_string().contains("applies_to"), "{json}");
+    }
 
     static DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
         id: "chrony",

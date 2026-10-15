@@ -1721,16 +1721,19 @@ static CHECKS: &[ExternalCheck] = &[
             ArgTemplate::TempFile,
         ],
         expects: CheckExpectation::ExitZero,
+        applies_to: &[DNSMASQ_CONF],
     },
     ExternalCheck {
         program: PathSpec::new("/usr/sbin/kea-dhcp4"),
         args: &[ArgTemplate::Literal("-t"), ArgTemplate::TempFile],
         expects: CheckExpectation::ExitZero,
+        applies_to: &[KEA4_CONF],
     },
     ExternalCheck {
         program: PathSpec::new("/usr/sbin/kea-dhcp6"),
         args: &[ArgTemplate::Literal("-t"), ArgTemplate::TempFile],
         expects: CheckExpectation::ExitZero,
+        applies_to: &[KEA6_CONF],
     },
 ];
 
@@ -3214,6 +3217,20 @@ mod tests {
         assert_eq!(detected(&with(Os::MacOs, "dnsmasq")), [] as [&str; 0]);
         assert_eq!(detected(&with(Os::MacOs, "kea")), [] as [&str; 0]);
         assert_eq!(descriptor.checks.len(), 3);
+        // Each validator judges only its own backend's file.
+        let judged: Vec<Vec<&str>> = descriptor
+            .checks
+            .iter()
+            .map(|check| check.applies_to.iter().map(|path| path.as_str()).collect())
+            .collect();
+        assert_eq!(
+            judged,
+            [
+                vec!["/etc/dnsmasq.conf"],
+                vec!["/etc/kea/kea-dhcp4.conf"],
+                vec!["/etc/kea/kea-dhcp6.conf"]
+            ]
+        );
         assert_eq!(descriptor.services.len(), 3);
         assert!(descriptor.commit_confirm);
         assert_eq!(descriptor.security_notes.len(), 1);

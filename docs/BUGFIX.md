@@ -352,7 +352,9 @@ deferred by the owner.
    four distros. Fix idea: the CLI creates the audit files as the worker
    account, or `serve` repairs the owner at start. Test: root CLI apply, then
    serve, then API apply must give 200.
-5. **External checks are per module, not per target.** An apply fails closed
+5. ~~**External checks are per module, not per target.**~~ Done 2026-10-15
+   (`PROGRESS.md`): checks judge only their own file; fail closed kept (H5);
+   the `networkctl` cause was `ProcSubset=pid`. An apply fails closed
    when any declared validator does not run or fails (`ops-check-failed`),
    so a module with checks for several backends cannot apply unless every
    backend's tool is present and judges every candidate:

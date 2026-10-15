@@ -1178,6 +1178,7 @@ mod tests {
                 detent_core::descriptor::ArgTemplate::TempFile,
             ],
             expects: detent_core::descriptor::CheckExpectation::ExitZero,
+            applies_to: &[],
         }];
 
     /// STAGE3 H6: under the real monitor confinement, a validator run
@@ -1774,6 +1775,7 @@ mod tests {
                 detent_core::descriptor::ArgTemplate::TempFile,
             ],
             expects: detent_core::descriptor::CheckExpectation::ExitZero,
+            applies_to: &[],
         }];
 
     type Json = serde_json::Value;

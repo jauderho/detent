@@ -18,9 +18,9 @@
 //! The runner is the more privileged process, so it trusts the monitor no
 //! more than it must. It takes only ids into its own copy of the allow-list
 //! and the file name of a candidate: never a path, a program or an argument.
-//! It works out the candidate's directory itself, from the check's module
-//! ([`Allowlist::candidate_dir`]: beside the module's primary target, or the
-//! staging directory when the module has no file target), and beside a
+//! It works out the candidate's directory itself, from the check
+//! ([`Allowlist::check_candidate_dir`]: beside the file the check judges, or
+//! the staging directory when the module has no file target), and beside a
 //! target it accepts only a [`CANDIDATE_PREFIX`] file, in a directory that
 //! passes the monitor's own trust check (owned by root or the runner's euid,
 //! no group or other write bit, not a symlink). A compromised monitor
@@ -179,12 +179,12 @@ fn answer(
                 return RunnerResponse::Failed("unknown check".to_owned());
             };
             // The same directory the monitor wrote to, worked out here
-            // from the check's module, not taken from the monitor. Beside
+            // from the check, not taken from the monitor. Beside
             // real configuration only a candidate-named file in a directory
             // that passes the monitor's own trust check is accepted. When
             // that directory was read-only for the monitor, the candidate
             // is in staging instead, under the same name rules.
-            let path = match allow.candidate_dir(entry.module, profile) {
+            let path = match allow.check_candidate_dir(check, profile) {
                 Some(dir)
                     if candidate.starts_with(CANDIDATE_PREFIX)
                         && require_trusted_dir(
@@ -519,6 +519,7 @@ mod tests {
         program: PathSpec::new("/bin/true"),
         args: &[ArgTemplate::TempFile],
         expects: CheckExpectation::ExitZero,
+        applies_to: &[],
     }];
     static SERVICES: &[ServiceBinding] = &[ServiceBinding {
         units: UnitNames {
@@ -558,6 +559,7 @@ mod tests {
         program: PathSpec::new("/bin/true"),
         args: &[ArgTemplate::TempFile],
         expects: CheckExpectation::ExitZero,
+        applies_to: &[],
     };
 
     /// Echoes the candidate path; a candidate whose contents name a hook
@@ -664,6 +666,7 @@ mod tests {
         program: PathSpec::new("/bin/true"),
         args: &[ArgTemplate::TempFile],
         expects: CheckExpectation::ExitZero,
+        applies_to: &[],
     }];
 
     /// The id of [`FILED_CHECKS`]' check in the fixture's allow-list.

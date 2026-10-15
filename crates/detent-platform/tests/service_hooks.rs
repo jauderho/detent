@@ -114,6 +114,7 @@ fn build_descriptor(target_path: &Path) -> &'static ModuleDescriptor {
         program: PathSpec::new("/usr/sbin/chronyd"),
         args,
         expects: CheckExpectation::ExitZero,
+        applies_to: &[],
     }])
     .as_slice();
     leak(ModuleDescriptor {

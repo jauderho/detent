@@ -1472,6 +1472,16 @@ fn ifupdown_backend_detect(profile: &HostProfile) -> bool {
         && profile.service_version(SERVICE_IFUPDOWN).is_some()
 }
 
+/// The networkd file detent edits.
+const NETWORKD_FILE: PathSpec = PathSpec::new("/etc/systemd/network/10-detent.network");
+/// The `NetworkManager` keyfile detent edits.
+const NM_FILE: PathSpec =
+    PathSpec::new("/etc/NetworkManager/system-connections/detent.nmconnection");
+/// The ifupdown file detent edits.
+const IFUPDOWN_FILE: PathSpec = PathSpec::new("/etc/network/interfaces");
+/// The netplan file detent edits.
+const NETPLAN_FILE: PathSpec = PathSpec::new("/etc/netplan/90-detent.yaml");
+
 static TARGETS: &[Target] = &[
     Target {
         path: PathSpec::new("/etc/systemd/network"),
@@ -1488,7 +1498,7 @@ static TARGETS: &[Target] = &[
         backend_detect: nm_backend_detect,
     },
     Target {
-        path: PathSpec::new("/etc/network/interfaces"),
+        path: IFUPDOWN_FILE,
         kind: TargetKind::File,
         mode: 0o644,
         owner: Owner::Root,
@@ -1513,21 +1523,21 @@ static TARGETS: &[Target] = &[
     // directories of the targets above keep their ordinals. Apply never
     // creates a target: the administrator creates the file first.
     Target {
-        path: PathSpec::new("/etc/systemd/network/10-detent.network"),
+        path: NETWORKD_FILE,
         kind: TargetKind::File,
         mode: 0o644,
         owner: Owner::Root,
         backend_detect: networkd_backend_detect,
     },
     Target {
-        path: PathSpec::new("/etc/NetworkManager/system-connections/detent.nmconnection"),
+        path: NM_FILE,
         kind: TargetKind::File,
         mode: 0o600,
         owner: Owner::Root,
         backend_detect: nm_backend_detect,
     },
     Target {
-        path: PathSpec::new("/etc/netplan/90-detent.yaml"),
+        path: NETPLAN_FILE,
         kind: TargetKind::File,
         mode: 0o600,
         owner: Owner::Root,
@@ -1544,21 +1554,37 @@ static CHECKS: &[ExternalCheck] = &[
             ArgTemplate::TempFile,
         ],
         expects: CheckExpectation::ExitZero,
+        applies_to: &[NETPLAN_FILE],
     },
+    // `--lines=0`: no journal tail. Reading it needs the boot id from
+    // `/proc/sys`, which the packaged unit's `ProcSubset=pid` hides, so
+    // `networkctl status` failed under `serve` and passed in the CLI.
     ExternalCheck {
         program: PathSpec::new("/usr/bin/networkctl"),
-        args: &[ArgTemplate::Literal("status")],
+        args: &[
+            ArgTemplate::Literal("status"),
+            ArgTemplate::Literal("--lines=0"),
+        ],
         expects: CheckExpectation::ExitZero,
+        applies_to: &[NETWORKD_FILE],
     },
     ExternalCheck {
         program: PathSpec::new("/usr/bin/nmcli"),
         args: &[ArgTemplate::Literal("general")],
         expects: CheckExpectation::ExitZero,
+        applies_to: &[NM_FILE],
     },
     ExternalCheck {
         program: PathSpec::new("/sbin/ifup"),
-        args: &[ArgTemplate::Literal("-n"), ArgTemplate::Literal("-a")],
+        // `-i`: read the candidate, not the file on disk.
+        args: &[
+            ArgTemplate::Literal("-n"),
+            ArgTemplate::Literal("-a"),
+            ArgTemplate::Literal("-i"),
+            ArgTemplate::TempFile,
+        ],
         expects: CheckExpectation::ExitZero,
+        applies_to: &[IFUPDOWN_FILE],
     },
 ];
 
@@ -2689,6 +2715,32 @@ mod tests {
             .unwrap_or_else(|| panic!("nm target missing"));
         assert_eq!(nm.mode, 0o700);
         assert_eq!(descriptor.checks.len(), 4);
+        // Each validator judges only its own backend's file.
+        let judged: Vec<(&str, Vec<&str>)> = descriptor
+            .checks
+            .iter()
+            .map(|check| {
+                (
+                    check.program.as_str(),
+                    check.applies_to.iter().map(|path| path.as_str()).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            judged,
+            [
+                ("/usr/sbin/netplan", vec!["/etc/netplan/90-detent.yaml"]),
+                (
+                    "/usr/bin/networkctl",
+                    vec!["/etc/systemd/network/10-detent.network"]
+                ),
+                (
+                    "/usr/bin/nmcli",
+                    vec!["/etc/NetworkManager/system-connections/detent.nmconnection"]
+                ),
+                ("/sbin/ifup", vec!["/etc/network/interfaces"]),
+            ]
+        );
         assert_eq!(descriptor.services.len(), 3);
         for svc in descriptor.services {
             assert_eq!(svc.units.bsdrc, [] as [&str; 0]);

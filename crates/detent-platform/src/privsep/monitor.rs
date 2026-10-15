@@ -838,7 +838,7 @@ impl<'a> Monitor<'a> {
             }
             Err(err) => return Response::Error(atomic_to_proto(&err)),
         };
-        if let Err(response) = self.revalidate(entry.module, &previous, bytes) {
+        if let Err(response) = self.revalidate(entry.module, &entry.path, &previous, bytes) {
             return response;
         }
         let marker = self.in_place_marker();
@@ -879,8 +879,16 @@ impl<'a> Monitor<'a> {
         })
     }
 
-    /// Re-run module and external validators before installing candidate bytes.
-    fn revalidate(&self, module: ModuleId, previous: &[u8], bytes: &[u8]) -> Result<(), Response> {
+    /// Re-run module and external validators before installing candidate
+    /// bytes at `target`: the module's parser and validator, and the
+    /// external checks that judge that file.
+    fn revalidate(
+        &self,
+        module: ModuleId,
+        target: &Path,
+        previous: &[u8],
+        bytes: &[u8],
+    ) -> Result<(), Response> {
         let Some(descriptor) = self.allow.module(module) else {
             return Err(unknown(IdKind::Module, u32::from(module.get())));
         };
@@ -909,24 +917,26 @@ impl<'a> Monitor<'a> {
         if !self.hooks.checks.configured() {
             return Ok(());
         }
-        if descriptor.checks.is_empty() {
-            return Ok(());
-        }
-        let (candidate, candidate_path) = self
-            .create_module_candidate(module)
-            .map_err(Response::Error)?;
-        let _remove = RemoveOnDrop(&candidate_path);
-        write_all_and_sync(&candidate, bytes).map_err(|err| {
-            Response::Error(ProtoError::Io(format!(
-                "cannot write the candidate file: {}",
-                err.kind()
-            )))
-        })?;
-        for check in descriptor.checks {
+        let target = target.to_string_lossy();
+        for entry in self
+            .allow
+            .checks_of(module)
+            .filter(|entry| entry.check.judges(&target))
+        {
+            let (candidate, candidate_path) = self
+                .create_check_candidate(entry.id)
+                .map_err(Response::Error)?;
+            let _remove = RemoveOnDrop(&candidate_path);
+            write_all_and_sync(&candidate, bytes).map_err(|err| {
+                Response::Error(ProtoError::Io(format!(
+                    "cannot write the candidate file: {}",
+                    err.kind()
+                )))
+            })?;
             let outcome = self
                 .hooks
                 .checks
-                .run_check(check, &candidate_path)
+                .run_check(entry.check, &candidate_path)
                 .map_err(|err| Response::Error(err.into()))?;
             if !outcome.passed {
                 return Err(Response::Error(ProtoError::Io(
@@ -974,9 +984,9 @@ impl<'a> Monitor<'a> {
         super::exec_deny::adds_exec_directive(module, previous, candidate)
     }
 
-    /// Create the candidate file for `module`'s validators, in the one
-    /// place both the write path and [`Request::RunCheck`] use: beside the
-    /// module's primary target ([`Allowlist::candidate_dir`]), where the
+    /// Create the candidate file for validator `check`, in the one place
+    /// both the write path and [`Request::RunCheck`] use: beside the file
+    /// the check judges ([`Allowlist::check_candidate_dir`]), where the
     /// distro's `AppArmor` profile for the validator allows it to read, or
     /// monitor staging when the module has no file target. The directory
     /// comes from the allow-list, never from the request. A target directory
@@ -987,14 +997,14 @@ impl<'a> Monitor<'a> {
     /// lists only the target file in `ReadWritePaths=`) or no write
     /// permission — falls back to monitor staging. The runner looks in both
     /// places itself.
-    fn create_module_candidate(
+    fn create_check_candidate(
         &self,
-        module: ModuleId,
+        check: CheckId,
     ) -> Result<(std::fs::File, PathBuf), ProtoError> {
         let cannot = |err: std::io::Error| {
             ProtoError::Io(format!("cannot create a candidate file: {}", err.kind()))
         };
-        let Some(dir) = self.allow.candidate_dir(module, &self.host_profile) else {
+        let Some(dir) = self.allow.check_candidate_dir(check, &self.host_profile) else {
             return create_candidate(&ensure_staging_dir(&self.staging_dir)?).map_err(cannot);
         };
         require_trusted_dir(dir, "candidate directory", DirOwner::EuidOrRoot)?;
@@ -1015,7 +1025,7 @@ impl<'a> Monitor<'a> {
         let Some(entry) = self.allow.check(id) else {
             return unknown(IdKind::Check, u32::from(id.get()));
         };
-        let (candidate, candidate_path) = match self.create_module_candidate(entry.module) {
+        let (candidate, candidate_path) = match self.create_check_candidate(id) {
             Ok(created) => created,
             Err(err) => return Response::Error(err),
         };
@@ -2146,6 +2156,7 @@ mod tests {
             program: PathSpec::new("/nonexistent/detent-monitor-test-check"),
             args,
             expects: CheckExpectation::ExitZero,
+            applies_to: &[],
         }])
         .as_slice();
         leak(ModuleDescriptor {
