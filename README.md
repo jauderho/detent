@@ -136,6 +136,8 @@ these events:
 - `event=CredentialRejected`: a token or session cookie that did not resolve
   (at most one line per client address per minute; `suppressed=` counts the
   rest).
+- `event=TokenRateLimited`: an API token went over its request budget (one
+  line when it starts; none again until the budget has refilled).
 
 ```bash
 journalctl -u detent --since -1h --grep 'detent audit.*event=(LockedOut|ScopeDenied)'
@@ -180,6 +182,15 @@ API tokens for scripting, read-only unless `--write`:
 ```bash
 sudo -u detent detent token create ci-readonly
 sudo -u detent detent token list
+```
+
+Each token may make 60 requests at once, then 120 a minute; over that it gets
+`429` with `Retry-After`. Change this in `detent.toml` (neither may be zero):
+
+```toml
+[auth]
+token_burst = 60
+token_rate_per_minute = 120
 ```
 
 Ask the running server to renew its ACME certificate now, with a write token

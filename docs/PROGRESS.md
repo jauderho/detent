@@ -5,6 +5,20 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-14 - Request budget per API token (ASVS 8.1.4, 11.1.4)
+
+New `crates/detent-web/src/auth/tokenlimit.rs`. `Caller::resolve` charges one request to the token id after `TokenStore::authenticate` succeeds. Over the budget the answer is `429`, `web-auth-rate-limited`, `Retry-After` in whole seconds rounded up (the existing `AuthError::RateLimited`, so no new message id), before any handler or scope check. Unknown or expired tokens are not charged and keep their `401`. Session callers have no budget.
+
+**Config.** `[auth] token_burst` (default 60) and `token_rate_per_minute` (default 120). `Config::validate` refuses zero for each (`web-config-zero-value`). Documented in `README.md` and `docs/API.md`.
+
+**Bucket.** A token bucket stored as the instant it is full again (generic cell rate form): one request costs `60 s / rate`; a request is refused when the debt would pass `burst` requests. Integer `Duration` math only, clock injected as `Instant`.
+
+**Audit.** New `AuthEvent::TokenRateLimited` (`token_rate_limited`), subject `token:<id>`, kind `token`, result `denied`, client address when known. One record when an episode starts; none again until the bucket has refilled to the full burst, so a client that keeps sending writes one record. README "Alerting" lists `event=TokenRateLimited`.
+
+**Memory.** The table holds at most `MAX_TOKENS + 8` (72) entries. When it is full, full buckets are dropped first (a missing bucket is a full bucket, so nothing is lost), then the bucket closest to full. There is no periodic sweep: `session::spawn_sweeper` was left alone, and the bound holds without it.
+
+**Not done.** No `429` added to each route in `docs/openapi.json`; `docs/API.md` states it. PENTEST 8.1.4 and 11.1.4 Pass, gap 19 struck, WEB-13 updated; counts recomputed from the rows by script (188 Pass, 4 Gap, 13 Accepted risk, 41 N/A).
+
 ## 2026-10-14 - D3: Phase 7 and Phase 8 acceptance run in containers
 
 Owner decision 2026-10-14: no VMs; run the acceptance in containers on the test host. `spikes/d3-containers.sh` builds one podman container per distro (Debian 13, Ubuntu 26.04, Fedora 44, Arch) with systemd as PID 1, a private loopback-only network, all capabilities except `CAP_SYS_TIME`; `spikes/d3-inside.sh` runs get, validate, plan and apply per module (CLI for chrony, samba, nfs; the API with `confirm_secs` for resolver, mounts, dhcp, network), checks the written file and the service, and runs one bad network change with a 60 s window. Results and method: [`spikes/d3-containers.md`](spikes/d3-containers.md). Build under test: `0.1.1` at `59fb2eb`, cross-built; nothing compiled on the test host; no code changed.

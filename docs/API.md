@@ -25,7 +25,13 @@ silently upgrade the other's authority:
 - **A bearer token** (`Authorization: Bearer <token>`), issued out of band
   (`detent token create`) with a scope and an optional expiry. A token
   establishes no session — there is nothing for `/api/v1/auth/session` to
-  describe and nothing for `/api/v1/auth/logout` to end.
+  describe and nothing for `/api/v1/auth/logout` to end. Each token has a
+  request budget: `auth.token_burst` requests at once (default 60), then
+  `auth.token_rate_per_minute` (default 120). A request over the budget
+  answers `429` with `message_id: "web-auth-rate-limited"` and `Retry-After`
+  in seconds, before the handler runs. The first refusal writes one
+  `token_rate_limited` record to the auth log; the next one is written only
+  after the budget has refilled. Session callers have no such budget.
 
 `GET /api/v1/auth/session` returns the signed-in caller's scopes, remaining
 time, and the CSRF token described below. Every route under `/api/v1` needs a
