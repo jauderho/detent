@@ -43,6 +43,7 @@ pub mod sessions;
 pub mod stepup;
 pub mod token;
 pub mod tokenlimit;
+pub mod tokens;
 pub mod totp;
 pub mod users;
 
@@ -175,6 +176,17 @@ pub enum AuthError {
     /// The token store already holds as many tokens as it will.
     #[error("no more api tokens can be issued")]
     TokenLimit,
+    /// A token label is not 1 to [`token::MAX_LABEL_LEN`] printable ASCII
+    /// characters.
+    #[error("that is not a usable api token label")]
+    TokenLabelInvalid,
+    /// A token expiry is zero, or too far ahead to be a Unix time.
+    #[error("that is not a usable api token expiry")]
+    TokenExpiryInvalid,
+    /// `auth.totp_required` is set and the session did not present a second
+    /// factor, so it may not mint an API token.
+    #[error("this host requires totp before an api token can be issued")]
+    TokenTotpRequired,
     /// A TOTP secret was not valid base32.
     #[error("that totp secret is not valid base32")]
     TotpSecretInvalid,
@@ -255,6 +267,9 @@ impl AuthError {
             Self::UnknownToken => MessageId::new("web-auth-token-unknown"),
             Self::UnknownSession => MessageId::new("web-auth-session-unknown"),
             Self::TokenLimit => MessageId::new("web-auth-token-limit"),
+            Self::TokenLabelInvalid => MessageId::new("web-auth-token-label-invalid"),
+            Self::TokenExpiryInvalid => MessageId::new("web-auth-token-expiry-invalid"),
+            Self::TokenTotpRequired => MessageId::new("web-auth-token-totp-required"),
             Self::TotpSecretInvalid => MessageId::new("web-auth-totp-secret-invalid"),
             Self::TotpEnrolled => MessageId::new("web-auth-totp-enrolled"),
             Self::TotpNotEnrolled => MessageId::new("web-auth-totp-not-enrolled"),
@@ -281,9 +296,10 @@ impl AuthError {
             }
             Self::RateLimited { .. } => S::TOO_MANY_REQUESTS,
             Self::SessionLimit | Self::Busy => S::SERVICE_UNAVAILABLE,
-            Self::CsrfRejected | Self::PasswordChangeRequired | Self::StepUpRequired => {
-                S::FORBIDDEN
-            }
+            Self::CsrfRejected
+            | Self::PasswordChangeRequired
+            | Self::StepUpRequired
+            | Self::TokenTotpRequired => S::FORBIDDEN,
             Self::UserExists
             | Self::TokenLimit
             | Self::TotpEnrolled
@@ -296,6 +312,8 @@ impl AuthError {
             | Self::PasswordTooLong
             | Self::PasswordUnchanged
             | Self::AmbiguousCredentials
+            | Self::TokenLabelInvalid
+            | Self::TokenExpiryInvalid
             | Self::TotpSecretInvalid
             | Self::StoreMalformed { .. } => S::BAD_REQUEST,
             Self::Entropy(_)
@@ -416,6 +434,9 @@ mod tests {
             AuthError::UnknownToken,
             AuthError::UnknownSession,
             AuthError::TokenLimit,
+            AuthError::TokenLabelInvalid,
+            AuthError::TokenExpiryInvalid,
+            AuthError::TokenTotpRequired,
             AuthError::TotpSecretInvalid,
             AuthError::TotpEnrolled,
             AuthError::TotpNotEnrolled,

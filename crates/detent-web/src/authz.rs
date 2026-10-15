@@ -37,6 +37,7 @@ pub const DENIED_SCOPE_ID: &str = "web-denied-scope";
 
 /// One capability a caller may hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Scope {
     /// Read anything: descriptors, models, diffs, service status, the audit

@@ -90,9 +90,11 @@ pub enum AuthEvent {
     /// It counts toward the login lockout. A replayed code is
     /// [`Self::TotpReplayed`] instead.
     StepUpFailed,
-    /// An API token was minted.
+    /// An API token was minted: on the command line (kind `local_user`) or
+    /// by a stepped-up session (kind `session`, with the user as `actor`).
     TokenIssued,
-    /// An API token was revoked.
+    /// An API token was revoked, on the command line or from a session, as
+    /// for [`Self::TokenIssued`].
     TokenRevoked,
     /// An account was created on the command line.
     UserCreated,
@@ -145,6 +147,11 @@ pub struct AuthRecord {
     /// counted but not logged. Present only when there were some.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suppressed: Option<u32>,
+    /// Who made the change, when that is not the subject: the user whose
+    /// session issued or revoked an API token (subject `token:<id>`).
+    /// Present only then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
 }
 
 impl AuthRecord {
@@ -162,6 +169,7 @@ impl AuthRecord {
             result,
             detail: None,
             suppressed: None,
+            actor: None,
         }
     }
 
@@ -169,6 +177,13 @@ impl AuthRecord {
     #[must_use]
     pub const fn with_suppressed(mut self, count: u32) -> Self {
         self.suppressed = Some(count);
+        self
+    }
+
+    /// Name the user who made the change, when the subject is not that user.
+    #[must_use]
+    pub fn with_actor(mut self, actor: impl Into<String>) -> Self {
+        self.actor = Some(actor.into());
         self
     }
 
@@ -219,6 +234,7 @@ pub fn emit(sink: &dyn AuthAudit, record: &AuthRecord) {
         result = ?record.result,
         error_id = ?record.detail,
         suppressed = ?record.suppressed,
+        actor = ?record.actor,
         "detent audit"
     );
     sink.record(record);

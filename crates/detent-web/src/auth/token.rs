@@ -139,6 +139,7 @@ impl fmt::Debug for TokenRecord {
 
 /// What a listing may show.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(utoipa::ToSchema))]
 pub struct TokenView {
     /// Public identifier.
     pub id: String,
@@ -727,6 +728,31 @@ mod tests {
         }
         let labels: Vec<_> = fresh.list().into_iter().map(|v| v.label).collect();
         assert_eq!(labels, vec!["ci".to_owned()]);
+        Ok(())
+    }
+
+    /// The console's long-lived store mints after the command line minted
+    /// and revoked through its own store: the write starts from the file,
+    /// so the command line's token stays and its revocation holds.
+    #[test]
+    fn a_stale_store_write_keeps_what_another_store_wrote_meanwhile() -> R {
+        let root = tempfile::tempdir()?;
+        let console = TokenStore::load(root.path())?;
+        let (old, old_view) = console.issue("old", Scope::Read, None)?;
+        let cli = TokenStore::load(root.path())?;
+        let (laptop, _laptop_view) = cli.issue("laptop", Scope::Write, None)?;
+        cli.revoke(&old_view.id)?;
+        // `console` has not read the file since its own write.
+        let (ci, _ci_view) = console.issue("ci", Scope::Read, None)?;
+
+        let fresh = TokenStore::load(root.path())?;
+        let labels: Vec<_> = fresh.list().into_iter().map(|v| v.label).collect();
+        assert_eq!(labels, vec!["laptop".to_owned(), "ci".to_owned()]);
+        for store in [&console, &fresh] {
+            assert!(store.authenticate(laptop.expose(), 0).is_ok());
+            assert!(store.authenticate(ci.expose(), 0).is_ok());
+            assert!(store.authenticate(old.expose(), 0).is_err());
+        }
         Ok(())
     }
 

@@ -218,6 +218,65 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/auth/tokens`.
+         * @description # Errors
+         *
+         *     401 for no session or a bearer token, 403 for a session that owes a
+         *     password change, 500 when `tokens.json` cannot be read.
+         */
+        get: operations["auth_tokens"];
+        put?: never;
+        /**
+         * `POST /api/v1/auth/tokens`.
+         * @description # Errors
+         *
+         *     400 for a malformed body, an unusable label or expiry; 401 for no
+         *     session or a bearer token; 403 for a failed CSRF check, a session
+         *     without `write`, a session that owes a password change, a session
+         *     without a fresh step-up, or a session without a second factor on a host
+         *     that requires one; 409 when the host holds the most tokens it may; 500
+         *     when the token file cannot be written.
+         */
+        post: operations["auth_token_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/tokens/{id}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/auth/tokens/{id}/revoke`.
+         * @description # Errors
+         *
+         *     401 for no session or a bearer token, 403 for a failed CSRF check, a
+         *     session without `write`, a session that owes a password change or one
+         *     without a fresh step-up, 404 when no token has that id, 500 when the
+         *     token file cannot be written.
+         */
+        post: operations["auth_token_revoke"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/totp": {
         parameters: {
             query?: never;
@@ -1048,6 +1107,11 @@ export interface components {
          * @enum {string}
          */
         InitSystem: "systemd" | "open_rc" | "launchd" | "none";
+        /** @description What `POST /api/v1/auth/tokens` answers: the token, once, and its entry. */
+        IssuedToken: components["schemas"]["TokenView"] & {
+            /** @description The bearer token. This is the only time it is shown. */
+            token: string;
+        };
         /** @description The body of `POST /api/v1/auth/login`. */
         LoginRequest: {
             /** @description The password, in the clear over TLS 1.3 and nowhere else. */
@@ -1285,6 +1349,11 @@ export interface components {
             restored: number;
         };
         /**
+         * @description One capability a caller may hold.
+         * @enum {string}
+         */
+        Scope: "read" | "write";
+        /**
          * @description What may be done to a service after a config change.
          * @enum {string}
          */
@@ -1475,6 +1544,35 @@ export interface components {
          * @enum {string}
          */
         TargetKind: "file" | "drop_in_dir" | "directory";
+        /** @description The body of `POST /api/v1/auth/tokens`. */
+        TokenRequest: {
+            /**
+             * Format: int64
+             * @description Seconds from now until the token stops working; absent for a token
+             *     that does not expire. At least 1.
+             */
+            expires_in_secs?: number | null;
+            /** @description What to call the token: 1 to 64 printable ASCII characters. */
+            label: string;
+            /** @description `read`, or `write` (which includes `read`). */
+            scope: components["schemas"]["Scope"];
+        };
+        /** @description What a listing may show. */
+        TokenView: {
+            /** @description When it was issued. */
+            created: string;
+            /**
+             * Format: int64
+             * @description Unix seconds after which it stops working.
+             */
+            expires_at?: number | null;
+            /** @description Public identifier. */
+            id: string;
+            /** @description What the operator called it. */
+            label: string;
+            /** @description Scope names, `["read"]` or `["read", "write"]`. */
+            scopes: string[];
+        };
         /** @description The body of `POST /api/v1/auth/totp/confirm`. */
         TotpConfirmRequest: {
             /** @description A current six-digit code from the new key. */
@@ -2000,6 +2098,179 @@ export interface operations {
             };
             /** @description No session of this user has that handle */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    auth_tokens: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every API token on this host, without its value */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenView"][];
+                };
+            };
+            /** @description No session; a bearer token is refused */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The session must change its password first */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The token file cannot be read */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    auth_token_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TokenRequest"];
+            };
+        };
+        responses: {
+            /** @description The token was issued. `token` is shown here once and never again */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssuedToken"];
+                };
+            };
+            /** @description The body is not the expected shape, or the label or the expiry is not usable */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No session; a bearer token is refused */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The CSRF check failed; the session lacks `write`, must change its password, needs a step-up, or did not present a second factor on a host that requires one */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The host already holds the most tokens it may */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The token file cannot be read or written */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    auth_token_revoke: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The id from `GET /api/v1/auth/tokens` */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The token is revoked and stops working at once */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No session; a bearer token is refused */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The CSRF check failed; the session lacks `write`, must change its password, or needs a step-up */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No token has that id */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The token file cannot be read or written */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };

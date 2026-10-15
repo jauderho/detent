@@ -741,6 +741,14 @@ mod tests {
         let state = &fixture.state;
         let app = routes::routes().with_state(state.clone());
         for route in routes::table().iter().filter(|route| route.mutating) {
+            // `/auth/tokens` lists on GET and mints on POST. Its GET is a
+            // separate, non-mutating table entry, which the test above checks.
+            if routes::table()
+                .iter()
+                .any(|other| other.path == route.path && other.method == Method::GET)
+            {
+                continue;
+            }
             let response = app
                 .clone()
                 .oneshot(

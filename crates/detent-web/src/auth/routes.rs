@@ -14,6 +14,7 @@
 //!   GET|POST /auth/totp* ─▶ [`super::enrolment`] (second factor on and off)
 //!   GET|POST /auth/sessions* ─▶ [`super::sessions`] (list and end own sessions)
 //!   POST /auth/reauth ─▶ [`super::stepup`] (password again before a risky write)
+//!   GET|POST /auth/tokens* ─▶ [`super::tokens`] (list, mint and revoke API tokens)
 //! ```
 //!
 //! Phase 4c owns the rest of `/api/v1`; this module registers the routes
@@ -113,6 +114,12 @@ pub const SESSIONS_REVOKE_OTHERS_PATH: &str = "/api/v1/auth/sessions/revoke-othe
 /// an update or a certificate renewal.
 pub const REAUTH_PATH: &str = "/api/v1/auth/reauth";
 
+/// Where a signed-in caller lists the API tokens (GET) and mints one (POST).
+pub const TOKENS_PATH: &str = "/api/v1/auth/tokens";
+
+/// Where it revokes one by its id.
+pub const TOKEN_REVOKE_PATH: &str = "/api/v1/auth/tokens/{id}/revoke";
+
 /// Fluent id of a request body that is not the shape the endpoint expects.
 pub const MALFORMED_BODY_ID: &str = "web-request-malformed";
 
@@ -154,7 +161,7 @@ pub struct Route {
 /// Every route this module registers.
 #[must_use]
 pub fn table() -> &'static [Route] {
-    static TABLE: [Route; 13] = [
+    static TABLE: [Route; 16] = [
         Route {
             method: Method::POST,
             path: LOGIN_PATH,
@@ -220,6 +227,21 @@ pub fn table() -> &'static [Route] {
             path: REAUTH_PATH,
             mutating: true,
         },
+        Route {
+            method: Method::GET,
+            path: TOKENS_PATH,
+            mutating: false,
+        },
+        Route {
+            method: Method::POST,
+            path: TOKENS_PATH,
+            mutating: true,
+        },
+        Route {
+            method: Method::POST,
+            path: TOKEN_REVOKE_PATH,
+            mutating: true,
+        },
     ];
     &TABLE
 }
@@ -244,6 +266,11 @@ pub fn routes() -> axum::Router<AppState> {
             post(super::sessions::revoke_others),
         )
         .route(REAUTH_PATH, post(super::stepup::reauth))
+        .route(
+            TOKENS_PATH,
+            get(super::tokens::list).post(super::tokens::create),
+        )
+        .route(TOKEN_REVOKE_PATH, post(super::tokens::revoke))
 }
 
 // ---------------------------------------------------------------------------
@@ -809,7 +836,7 @@ mod tests {
     // -- the table -----------------------------------------------------------
 
     #[test]
-    fn the_table_and_the_router_describe_the_same_thirteen_routes() {
+    fn the_table_and_the_router_describe_the_same_sixteen_routes() {
         let paths: Vec<&str> = table().iter().map(|route| route.path).collect();
         assert_eq!(
             paths,
@@ -827,11 +854,14 @@ mod tests {
                 super::SESSION_REVOKE_PATH,
                 super::SESSIONS_REVOKE_OTHERS_PATH,
                 super::REAUTH_PATH,
+                super::TOKENS_PATH,
+                super::TOKENS_PATH,
+                super::TOKEN_REVOKE_PATH,
             ]
         );
         assert_eq!(
             table().iter().filter(|route| route.mutating).count(),
-            9,
+            11,
             "{:?}",
             table()
         );
