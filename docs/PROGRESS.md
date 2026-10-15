@@ -5,6 +5,18 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-14 - Active session list and revoke (ASVS 3.3.4)
+
+Owner decision 2026-10-14: build for v1. A signed-in user lists and ends its own sessions. Routes in `crates/detent-web/src/auth/sessions.rs`; API in `docs/API.md` "Active sessions".
+
+**API.** `GET /api/v1/auth/sessions` answers the live sessions of the caller's subject, newest first: `handle`, `created_unix_s`, `last_seen_unix_s` (Unix seconds, as backups use), `expires_in_secs`, `totp_satisfied`, `current`. `POST /api/v1/auth/sessions/{handle}/revoke` answers 204 and clears the cookie when the handle is the current session. `POST /api/v1/auth/sessions/revoke-others` answers `{ ended }`. An unknown handle, an ended session and a handle of another user all answer `404 web-auth-session-unknown` (new `AuthError::UnknownSession`). The list takes `Caller`, the two POSTs `WriteCaller` (CSRF guard; a session that owes a password change gets 403); a bearer token gets 401. Each ended session writes one `session_revoked` auth-log record; a 404 writes nothing.
+
+**Design.** The handle is a new `Session` field: 16 random bytes as hex, drawn apart from the id (not a hash prefix) and replaced in `rotate`. Handles are compared in constant time. The times come from the session `Instant`s, converted to Unix seconds at request time, so a clock step moves them. The SPA panel (`web/src/routes/SessionsPanel.tsx`, on the settings page) has no end control for the current session: sign out does that.
+
+**Tests.** Store: `every_session_gets_its_own_random_handle_unrelated_to_its_id`, `rotation_replaces_the_handle_and_the_old_one_ends_nothing`, `the_list_holds_only_the_subjects_live_sessions_and_marks_the_current_one`, `a_handle_of_another_subject_ends_nothing`, `revoking_the_others_keeps_the_current_session_and_other_subjects`, and `nothing_here_prints_a_secret` now covers the list. Routes (`auth/sessions_tests.rs`): list content and no secret, end one (audited), the same 404 for unknown and foreign handles, end current clears the cookie, end others counts, CSRF required, token and no credential get 401, restricted session gets 403. SPA: `SessionsPanel.test.tsx`; e2e: keyboard end flow and an axe scan with the dialog open. A mutation that drops the subject check in `revoke_handle` fails two tests.
+
+Docs: PENTEST 3.3.4 Pass, gap 13 struck, counts recomputed from the rows by script (187 Pass, 5 Gap, 13 Accepted risk, 41 N/A); TM-G9 keeps only step-up re-authentication; BUGFIX §4 line marked.
+
 ## 2026-10-14 - Request budget per API token (ASVS 8.1.4, 11.1.4)
 
 New `crates/detent-web/src/auth/tokenlimit.rs`. `Caller::resolve` charges one request to the token id after `TokenStore::authenticate` succeeds. Over the budget the answer is `429`, `web-auth-rate-limited`, `Retry-After` in whole seconds rounded up (the existing `AuthError::RateLimited`, so no new message id), before any handler or scope check. Unknown or expired tokens are not charged and keep their `401`. Session callers have no budget.
