@@ -77,6 +77,17 @@ pub fn exit_for(error: &OpsError) -> Exit {
     }
 }
 
+/// The exit code for an operation that ran: [`Exit::Failed`] for a
+/// `validate` whose diagnostics hold an error, as `plan` and `apply` fail on
+/// the same model; [`Exit::Ok`] otherwise.
+#[must_use]
+pub fn exit_for_outcome(outcome: &OpOutcome) -> Exit {
+    match *outcome {
+        OpOutcome::Validated(ref diagnostics) if diagnostics.has_errors() => Exit::Failed,
+        _ => Exit::Ok,
+    }
+}
+
 /// Everything the error renderer knows that the error itself does not carry.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ErrorContext<'a> {
