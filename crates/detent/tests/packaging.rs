@@ -42,6 +42,35 @@ fn every_module_path_in_read_write_paths_is_optional() {
     );
 }
 
+/// `ProtectSystem=strict` makes `/etc` read-only, so a module target that no
+/// `ReadWritePaths=` entry covers cannot be written under the unit (D3 found
+/// `/etc/systemd/resolved.conf`: `openat: read-only filesystem`). A file entry
+/// is enough: when the temp file beside the target is refused, the monitor
+/// writes the file in place (`fs::atomic`) and puts the validator candidate in
+/// staging.
+#[test]
+fn every_module_target_is_in_read_write_paths() {
+    let paths = read_write_paths();
+    let allowed: Vec<&str> = paths
+        .iter()
+        .map(|path| path.trim_start_matches('-'))
+        .collect();
+    let missing: Vec<String> = detent_modules::modules()
+        .iter()
+        .flat_map(|module| module.descriptor().targets)
+        .map(|target| target.path.as_str().to_owned())
+        .filter(|target| {
+            !allowed
+                .iter()
+                .any(|entry| std::path::Path::new(target).starts_with(entry))
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "not writable under the unit: {missing:?}"
+    );
+}
+
 /// systemd removes `RuntimeDirectory=` on stop and makes it again on start;
 /// `tmpfiles.d` runs only at boot or install. A `/run` path the unit needs
 /// must therefore be one of its runtime directories, or `Restart=always`
