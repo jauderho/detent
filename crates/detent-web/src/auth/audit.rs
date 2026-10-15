@@ -105,6 +105,10 @@ pub enum AuthEvent {
     /// (`POST /api/v1/system/cert/renew`). The operations engine cannot
     /// answer `CertRenew`, so the web front end records it here.
     CertRenewRequested,
+    /// An API token went over its request budget (`auth.token_burst`,
+    /// `auth.token_rate_per_minute`). One record when it starts; none again
+    /// until the token's budget has refilled.
+    TokenRateLimited,
 }
 
 /// One line of the auth log.

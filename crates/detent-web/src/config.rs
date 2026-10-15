@@ -15,8 +15,8 @@
 //!   instead of leaving TOTP off while the operator believes it is on.
 //!
 //! [`Config::validate`] then rejects the values the type system cannot: a
-//! connection cap of zero, a timeout of zero, and Argon2 parameters below the
-//! OWASP floor.
+//! connection cap of zero, a timeout of zero, a token request budget of zero,
+//! and Argon2 parameters below the OWASP floor.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -261,7 +261,7 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// [`ConfigError::ZeroValue`] for a zero cap or timeout,
+    /// [`ConfigError::ZeroValue`] for a zero cap, timeout or token budget,
     /// [`ConfigError::WeakArgon2`] for an explicit memory cost below
     /// [`MIN_ARGON2_M_KIB`].
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -283,6 +283,16 @@ impl Config {
         if self.auth.absolute_timeout_secs == 0 {
             return Err(ConfigError::ZeroValue {
                 field: "auth.absolute_timeout_secs",
+            });
+        }
+        if self.auth.token_burst == 0 {
+            return Err(ConfigError::ZeroValue {
+                field: "auth.token_burst",
+            });
+        }
+        if self.auth.token_rate_per_minute == 0 {
+            return Err(ConfigError::ZeroValue {
+                field: "auth.token_rate_per_minute",
             });
         }
         self.auth.argon2.validate()
@@ -470,6 +480,10 @@ pub struct AuthConfig {
     pub absolute_timeout_secs: u64,
     /// Consecutive failures before lockout and backoff. Default 5.
     pub max_failures: u32,
+    /// Requests one API token may make at once. Default 60.
+    pub token_burst: u32,
+    /// Requests a minute one API token may make after its burst. Default 120.
+    pub token_rate_per_minute: u32,
     /// Require a TOTP second factor. Default false. `detent user totp enable` or the console
     /// settings page enrols a key.
     pub totp_required: bool,
@@ -482,6 +496,8 @@ impl Default for AuthConfig {
             idle_timeout_secs: 900,
             absolute_timeout_secs: 28800,
             max_failures: 5,
+            token_burst: 60,
+            token_rate_per_minute: 120,
             totp_required: false,
         }
     }
@@ -617,6 +633,8 @@ mod tests {
         assert_eq!(config.auth.idle_timeout_secs, 900);
         assert_eq!(config.auth.absolute_timeout_secs, 28800);
         assert_eq!(config.auth.max_failures, 5);
+        assert_eq!(config.auth.token_burst, 60);
+        assert_eq!(config.auth.token_rate_per_minute, 120);
         assert!(!config.auth.totp_required);
         assert_eq!(config.update.min_age_days, 2);
         assert!(!config.update.auto_install);
@@ -669,6 +687,8 @@ mod tests {
             idle_timeout_secs = 60
             absolute_timeout_secs = 120
             max_failures = 2
+            token_burst = 10
+            token_rate_per_minute = 30
             totp_required = true
 
             [auth.argon2]
@@ -720,6 +740,8 @@ mod tests {
             ]
         );
         assert_eq!(config.auth.argon2.m_kib, Some(65536));
+        assert_eq!(config.auth.token_burst, 10);
+        assert_eq!(config.auth.token_rate_per_minute, 30);
         assert_eq!(config.update.min_age_days, 9);
         assert!(config.update.auto_install);
         assert_eq!(config.modules.enabled, Some(vec!["hosts".to_owned()]));
@@ -892,6 +914,11 @@ mod tests {
             (
                 "[auth]\nabsolute_timeout_secs = 0\n",
                 "auth.absolute_timeout_secs",
+            ),
+            ("[auth]\ntoken_burst = 0\n", "auth.token_burst"),
+            (
+                "[auth]\ntoken_rate_per_minute = 0\n",
+                "auth.token_rate_per_minute",
             ),
             ("[auth.argon2]\nt = 0\n", "auth.argon2.t"),
             ("[auth.argon2]\np = 0\n", "auth.argon2.p"),

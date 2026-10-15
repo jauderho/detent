@@ -36,6 +36,7 @@ use crate::auth::password::Hasher;
 use crate::auth::ratelimit::RateLimiter;
 use crate::auth::session::SessionStore;
 use crate::auth::token::TokenStore;
+use crate::auth::tokenlimit::{Admission, TokenLimiter};
 use crate::auth::users::UserStore;
 use crate::config::{AuthConfig, Config};
 use crate::csrf::Origin;
@@ -62,6 +63,8 @@ pub struct AuthState {
     pub hasher: Hasher,
     /// Login throttling, per address and per user.
     pub limiter: std::sync::Arc<RateLimiter>,
+    /// The request budget of each API token.
+    pub token_limiter: TokenLimiter,
     /// Bounds expensive password work on the blocking pool.
     pub(crate) argon2_permits: std::sync::Arc<Semaphore>,
     /// Where auth events go.
@@ -95,6 +98,7 @@ impl AuthState {
             tokens,
             hasher: Hasher::new(auth.argon2, ram_mib)?,
             limiter,
+            token_limiter: TokenLimiter::new(auth.token_burst, auth.token_rate_per_minute),
             argon2_permits: std::sync::Arc::new(Semaphore::new(MAX_CONCURRENT_ARGON2)),
             audit: Box::new(FileAuthAudit::under_state_root(state_root)),
             rejections: Coalescer::new(),
@@ -142,6 +146,44 @@ impl AuthState {
     /// Write one auth event to `tracing` and to the sink.
     pub fn record(&self, record: &AuthRecord) {
         emit(self.audit.as_ref(), record);
+    }
+
+    /// Charge one request to the API token `id` (ASVS 8.1.4, 11.1.4).
+    ///
+    /// The first refusal of an episode is audited as
+    /// [`AuthEvent::TokenRateLimited`] with the token's subject; later ones
+    /// are not, until the token's budget has refilled.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::RateLimited`] when the token is over its budget.
+    pub fn admit_token(
+        &self,
+        id: &str,
+        client_ip: Option<IpAddr>,
+        now: Instant,
+    ) -> Result<(), AuthError> {
+        let Admission::Limited {
+            retry_after_secs,
+            first,
+        } = self.token_limiter.check(id, now)
+        else {
+            return Ok(());
+        };
+        if first {
+            let mut record = AuthRecord::new(
+                AuthEvent::TokenRateLimited,
+                format!("{}{id}", crate::auth::extract::TOKEN_SUBJECT_PREFIX),
+                AuditResult::Denied,
+            )
+            .with_kind(IdentityKind::Token)
+            .with_detail(MessageId::new("web-auth-rate-limited"));
+            if let Some(ip) = client_ip {
+                record = record.with_client_ip(ip);
+            }
+            self.record(&record);
+        }
+        Err(AuthError::RateLimited { retry_after_secs })
     }
 
     /// Record a bearer token or session cookie that did not resolve, unless

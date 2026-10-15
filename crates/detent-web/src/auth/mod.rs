@@ -40,6 +40,7 @@ pub mod routes;
 pub mod secret;
 pub mod session;
 pub mod token;
+pub mod tokenlimit;
 pub mod totp;
 pub mod users;
 

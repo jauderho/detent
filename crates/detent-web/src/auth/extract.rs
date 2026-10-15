@@ -7,6 +7,7 @@
 //!
 //!   cookie only ──▶ SessionStore::lookup ──▶ Identity(Session, "alice")
 //!   token only  ──▶ TokenStore::authenticate ─▶ Identity(Token, "token:<id>")
+//!                     └─▶ over its request budget ─▶ 429 rate-limited
 //!   neither / bad ─────────────────────────────▶ 401 unauthenticated
 //!
 //!   Caller ──▶ WriteCaller (the same, with `write` already checked)
@@ -195,6 +196,23 @@ impl Caller {
         now: Instant,
         now_unix: i64,
     ) -> Result<Self, AuthError> {
+        Self::resolve_from(state, headers, None, now, now_unix)
+    }
+
+    /// [`Caller::resolve`], with the client address for the audit record of
+    /// a token over its request budget.
+    ///
+    /// # Errors
+    ///
+    /// As [`Caller::resolve`], and [`AuthError::RateLimited`] when a bearer
+    /// token that authenticated is over its request budget.
+    fn resolve_from(
+        state: &AppState,
+        headers: &HeaderMap,
+        client_ip: Option<IpAddr>,
+        now: Instant,
+        now_unix: i64,
+    ) -> Result<Self, AuthError> {
         match (cookie_id(headers), bearer(headers)) {
             (Some(_cookie), Some(_token)) => Err(AuthError::AmbiguousCredentials),
             (Some(id), None) => {
@@ -222,6 +240,9 @@ impl Caller {
                         AuthError::UnknownToken => AuthError::Unauthenticated,
                         other => other,
                     })?;
+                // Only a token that authenticated is charged: an unknown one
+                // has no id to key a budget by, and is refused above.
+                state.auth.admit_token(&holder.id, client_ip, now)?;
                 Ok(Self {
                     identity: Identity::new(
                         format!("{TOKEN_SUBJECT_PREFIX}{}", holder.id),
@@ -244,11 +265,12 @@ impl Caller {
     /// is a probe of a public route, the second a client mistake.
     fn resolve_request(state: &AppState, parts: &Parts) -> Result<Self, AuthError> {
         let now = Instant::now();
-        let resolved = Self::resolve(state, &parts.headers, now, unix_now());
+        let ip = ClientIp::of(parts).0;
+        let resolved = Self::resolve_from(state, &parts.headers, Some(ip), now, unix_now());
         if matches!(resolved, Err(AuthError::Unauthenticated))
             && let Some(kind) = presented_kind(&parts.headers)
         {
-            state.auth.record_rejected(ClientIp::of(parts).0, kind, now);
+            state.auth.record_rejected(ip, kind, now);
         }
         resolved
     }
@@ -882,6 +904,162 @@ mod tests {
         let now = unix_now();
         assert!(now > 1_577_836_800, "{now}");
         assert!(now < 4_102_444_800, "{now}");
+    }
+
+    /// The default `auth.token_burst`.
+    const BURST: u32 = 60;
+
+    /// The events of one kind the fixture's audit sink holds.
+    fn rate_limited_records(fixture: &TestState) -> Vec<crate::auth::audit::AuthRecord> {
+        fixture
+            .audit
+            .records()
+            .into_iter()
+            .filter(|record| record.event == crate::auth::audit::AuthEvent::TokenRateLimited)
+            .collect()
+    }
+
+    #[test]
+    fn a_token_over_its_budget_is_429_and_audited_once_per_episode() -> R {
+        let fixture = test_state()?;
+        let (token, view) = fixture.state.auth.tokens.issue("ci", Scope::Read, None)?;
+        let headers = with_bearer(token.expose());
+        let start = Instant::now();
+        let at = |secs: u64| {
+            start
+                .checked_add(Duration::from_secs(secs))
+                .unwrap_or(start)
+        };
+        for _ in 0..BURST {
+            Caller::resolve(&fixture.state, &headers, start, unix_now())?;
+        }
+        for _ in 0_u32..5 {
+            match Caller::resolve(&fixture.state, &headers, start, unix_now()) {
+                Err(err @ AuthError::RateLimited { retry_after_secs }) => {
+                    assert_eq!(retry_after_secs, 1);
+                    assert_eq!(err.status(), StatusCode::TOO_MANY_REQUESTS);
+                    assert_eq!(err.message_id().as_str(), "web-auth-rate-limited");
+                }
+                other => return Err(format!("expected 429, got {other:?}").into()),
+            }
+        }
+        let records = rate_limited_records(&fixture);
+        let [record] = records.as_slice() else {
+            return Err(format!("expected one record, got {records:?}").into());
+        };
+        assert_eq!(record.subject, format!("token:{}", view.id));
+        assert_eq!(record.kind, IdentityKind::Token);
+        assert_eq!(record.result, detent_ops::audit::AuditResult::Denied);
+        assert_eq!(record.detail.as_deref(), Some("web-auth-rate-limited"));
+        let rendered = format!("{records:?} {}", serde_json::to_string(&records)?);
+        assert!(!rendered.contains(token.expose()), "{rendered}");
+
+        // Thirty seconds refill the burst at 120 a minute: the episode is
+        // over, and the next one is audited again.
+        for _ in 0..BURST {
+            Caller::resolve(&fixture.state, &headers, at(30), unix_now())?;
+        }
+        assert!(matches!(
+            Caller::resolve(&fixture.state, &headers, at(30), unix_now()),
+            Err(AuthError::RateLimited { .. })
+        ));
+        assert_eq!(rate_limited_records(&fixture).len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn one_token_over_its_budget_does_not_limit_another() -> R {
+        let fixture = test_state()?;
+        let (first, _view) = fixture.state.auth.tokens.issue("ci", Scope::Read, None)?;
+        let (second, _view) = fixture
+            .state
+            .auth
+            .tokens
+            .issue("laptop", Scope::Read, None)?;
+        let start = Instant::now();
+        for _ in 0..BURST {
+            Caller::resolve(&fixture.state, &with_bearer(first.expose()), start, 0)?;
+        }
+        assert!(matches!(
+            Caller::resolve(&fixture.state, &with_bearer(first.expose()), start, 0),
+            Err(AuthError::RateLimited { .. })
+        ));
+        for _ in 0..BURST {
+            Caller::resolve(&fixture.state, &with_bearer(second.expose()), start, 0)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_session_caller_has_no_token_budget() -> R {
+        let fixture = test_state()?;
+        let start = Instant::now();
+        let (id, _session) =
+            fixture
+                .state
+                .auth
+                .sessions
+                .create("alice", Scopes::read_write(), false, start)?;
+        let headers = with_cookie(id.expose());
+        for _ in 0..BURST.saturating_mul(4) {
+            Caller::resolve(&fixture.state, &headers, start, 0)?;
+        }
+        assert_eq!(fixture.state.auth.token_limiter.tracked(), 0);
+        assert_eq!(rate_limited_records(&fixture).len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn an_unknown_token_is_not_budgeted() -> R {
+        let fixture = test_state()?;
+        let unknown = with_bearer(&"0".repeat(64));
+        let start = Instant::now();
+        for _ in 0..BURST.saturating_mul(2) {
+            assert!(matches!(
+                Caller::resolve(&fixture.state, &unknown, start, 0),
+                Err(AuthError::Unauthenticated)
+            ));
+        }
+        assert_eq!(fixture.state.auth.token_limiter.tracked(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_extractor_answers_429_with_retry_after_and_audits_the_client() -> R {
+        use axum::response::IntoResponse as _;
+
+        let fixture = test_state()?;
+        let (token, _view) = fixture.state.auth.tokens.issue("ci", Scope::Write, None)?;
+        let mut refused = None;
+        for _ in 0..=BURST {
+            let mut parts = parts_from([198, 51, 100, 7], Some(bearer_header(token.expose())))?;
+            refused = WriteCaller::from_request_parts(&mut parts, &fixture.state)
+                .await
+                .err();
+        }
+        let refused = refused.ok_or("the request over the burst was admitted")?;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        let response = refused.into_response();
+        let retry = response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .ok_or("no Retry-After")?
+            .to_str()?
+            .parse::<u64>()?;
+        assert_eq!(retry, 1, "Retry-After {retry}");
+        let records = rate_limited_records(&fixture);
+        let [record] = records.as_slice() else {
+            return Err(format!("expected one record, got {records:?}").into());
+        };
+        assert_eq!(record.client_ip.as_deref(), Some("198.51.100.7"));
+        // A refusal for the budget is not also a rejected credential.
+        assert!(
+            !fixture
+                .audit
+                .events()
+                .contains(&crate::auth::audit::AuthEvent::CredentialRejected)
+        );
+        Ok(())
     }
 
     #[test]
