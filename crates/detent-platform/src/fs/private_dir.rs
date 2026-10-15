@@ -306,6 +306,38 @@ mod tests {
         Ok(())
     }
 
+    /// Root gives a file with one link the owner it is asked for; any other
+    /// process is refused and the owner stays.
+    #[test]
+    fn a_file_with_one_link_gets_the_owner_only_from_root() -> R {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("log.jsonl");
+        std::fs::write(&path, b"")?;
+        let before = owner_of(&path)?;
+        let other = FileOwner {
+            uid: NOBODY_UID,
+            gid: NOBODY_UID,
+        };
+        match open_append_as(&path, 0o600, other) {
+            Ok(_) => {
+                assert!(geteuid().is_root());
+                assert_eq!(owner_of(&path)?, other);
+            }
+            Err(err) => {
+                assert!(!geteuid().is_root(), "{err}");
+                assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+                assert_eq!(owner_of(&path)?, before);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_path_without_a_file_name_is_refused() {
+        let err = ensure_private_as_parent(Path::new("/")).err();
+        assert_eq!(err.map(|err| err.kind()), Some(io::ErrorKind::InvalidInput));
+    }
+
     /// A hard link can name a file elsewhere; it never gets a new owner.
     #[test]
     fn a_file_with_two_links_is_not_given_another_owner() -> R {

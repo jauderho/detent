@@ -954,36 +954,31 @@ mod tests {
         if !crate::privsep::spawn::is_root() {
             return Ok(());
         }
-        in_forked_child(|| {
-            let dir = std::env::temp_dir()
-                .join(format!("detent-sandbox-audit-owner-{}", std::process::id()));
-            let state = dir.join("state");
-            let log = state.join("audit").join("detent-audit.jsonl");
-            if std::fs::create_dir_all(&state).is_err()
-                || std::os::unix::fs::chown(&state, Some(WORKER_ID), Some(WORKER_ID)).is_err()
-            {
-                return false;
-            }
-            let Ok(allow) = fixture_allowlist(&dir) else {
-                return false;
-            };
-            // The worker under `serve`, in a child: a dropped uid stays dropped.
-            let serve = || {
-                in_forked_child(|| {
-                    crate::sandbox::drop_bounding_set();
-                    crate::privsep::sys::drop_to(WORKER_ID, WORKER_ID).is_ok()
-                        && confine(Role::Worker, &Policy::worker(&allow)).is_ok()
-                        && append(&log)
-                })
-                .is_ok()
-            };
-            // A root command line before `serve`, then `serve`, then both again.
-            append(&log)
-                && serve()
-                && append(&log)
-                && serve()
-                && std::fs::read(&log).is_ok_and(|bytes| bytes == b"record\n".repeat(4))
-        })
+        let dir =
+            std::env::temp_dir().join(format!("detent-sandbox-audit-owner-{}", std::process::id()));
+        let state = dir.join("state");
+        let log = state.join("audit").join("detent-audit.jsonl");
+        std::fs::create_dir_all(&state)?;
+        std::os::unix::fs::chown(&state, Some(WORKER_ID), Some(WORKER_ID))?;
+        let allow = fixture_allowlist(&dir)?;
+        // The worker under `serve`, in a child: a dropped uid stays dropped.
+        let serve = || {
+            in_forked_child(|| {
+                crate::sandbox::drop_bounding_set();
+                crate::privsep::sys::drop_to(WORKER_ID, WORKER_ID).is_ok()
+                    && confine(Role::Worker, &Policy::worker(&allow)).is_ok()
+                    && append(&log)
+            })
+        };
+        // A root command line (this process) before `serve`, then `serve`,
+        // then both again.
+        assert!(append(&log));
+        serve()?;
+        assert!(append(&log));
+        serve()?;
+        assert_eq!(std::fs::read(&log)?, b"record\n".repeat(4));
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
     }
 
     /// Under the real worker confinement, `write_atomic` replaces a file the
