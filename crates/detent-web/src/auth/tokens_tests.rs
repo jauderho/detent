@@ -337,8 +337,9 @@ async fn the_value_is_in_no_debug_output_and_no_audit_record() -> R {
         view,
     };
     let rendered = format!("{issued:?} {:?}", state.auth.tokens);
-    assert!(rendered.contains(&id), "{rendered}");
-    assert!(!rendered.contains(&token), "{rendered}");
+    // No message: a failure here would print the value it found.
+    assert!(rendered.contains(&id));
+    assert!(!rendered.contains(&token));
 
     // The tracing line of each record is built from these same fields.
     let records = serde_json::to_string(&fixture.audit.records())?;
