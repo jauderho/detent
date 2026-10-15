@@ -64,6 +64,7 @@ function render(rules: Parameters<typeof stubFetchByUrl>[0]) {
   const stub = stubFetchByUrl([
     ...rules,
     ['GET /api/v1/auth/totp', () => jsonResponse({ enrolled: false, required: false })],
+    ['GET /api/v1/auth/tokens', () => jsonResponse([])],
     ['GET /api/v1/auth/session', () => jsonResponse(SESSION)],
   ])
   renderWithProviders(<AppRoutes />, { fetch: stub.fetch, route: ROUTES.settings })
@@ -215,7 +216,10 @@ describe('SessionsPanel', () => {
   })
 
   it('says it is reading while the list is on its way', async () => {
-    const stub = stubFetchByUrl([['GET /api/v1/auth/session', () => jsonResponse(SESSION)]])
+    const stub = stubFetchByUrl([
+      ['GET /api/v1/auth/tokens', () => jsonResponse([])],
+      ['GET /api/v1/auth/session', () => jsonResponse(SESSION)],
+    ])
     // The list never answers, so the panel stays in its reading state.
     const fetch = (input: string | URL | Request, init?: RequestInit) =>
       String(input).endsWith('/api/v1/auth/sessions')

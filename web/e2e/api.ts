@@ -201,6 +201,20 @@ const SESSIONS = [
   },
 ]
 
+/** The API tokens of the host, as `GET /auth/tokens` lists them. */
+const TOKENS = [
+  {
+    id: '0123456789abcdef',
+    label: 'backup job',
+    scopes: ['read'],
+    created: '2026-10-10T08:00:00Z',
+    expires_at: null,
+  },
+]
+
+/** The value `POST /auth/tokens` answers once. A fixture, not a credential. */
+const NEW_TOKEN_VALUE = 'e2e0'.repeat(16)
+
 /**
  * Routes `**\/api/v1/**` to the fixtures above and returns the call log.
  *
@@ -217,6 +231,7 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<Re
   let pendingCommit: typeof APPLY_REPORT.commit = null
   let totpEnrolled = false
   let sessions = [...SESSIONS]
+  let tokens = [...TOKENS]
   let steppedUp = options.stepUp !== true
 
   const json = (route: Route, body: unknown, status = 200) =>
@@ -279,6 +294,27 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<Re
     if (path.startsWith('/api/v1/auth/sessions/') && path.endsWith('/revoke')) {
       const handle = path.split('/').at(-2)
       sessions = sessions.filter((each) => each.handle !== handle)
+      return route.fulfill({ status: 204, body: '' })
+    }
+    if (path.endsWith('/auth/tokens')) {
+      if (method === 'GET') return json(route, tokens)
+      if (!steppedUp) {
+        return json(route, { code: 'forbidden', message_id: 'web-auth-step-up-required' }, 403)
+      }
+      const request = body as { label: string; scope: string; expires_in_secs?: number }
+      const view = {
+        id: 'fedcba9876543210',
+        label: request.label,
+        scopes: request.scope === 'write' ? ['read', 'write'] : ['read'],
+        created: '2026-10-14T08:00:00Z',
+        expires_at: null,
+      }
+      tokens = [...tokens, view]
+      return json(route, { ...view, token: NEW_TOKEN_VALUE }, 201)
+    }
+    if (path.startsWith('/api/v1/auth/tokens/') && path.endsWith('/revoke')) {
+      const id = path.split('/').at(-2)
+      tokens = tokens.filter((each) => each.id !== id)
       return route.fulfill({ status: 204, body: '' })
     }
     if (path.endsWith('/auth/reauth')) {

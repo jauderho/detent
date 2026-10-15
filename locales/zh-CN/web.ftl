@@ -221,6 +221,42 @@ sessions-confirm-cancel = 取消
 sessions-ended-one = 会话已结束。
 sessions-ended-others = 已结束的其他会话：{$count}
 
+## Settings: API tokens
+tokens-panel-label = api 令牌
+tokens-intro = 令牌让脚本无需会话即可使用 api。它可以只读，或读写。
+tokens-loading = 正在读取 api 令牌。
+tokens-caption = 此主机上的 api 令牌
+tokens-empty = 还没有 api 令牌。
+tokens-col-label = 标签
+tokens-col-scope = 范围
+tokens-col-created = 创建时间
+tokens-col-expires = 过期
+tokens-col-actions = 操作
+tokens-scope-read = 只读
+tokens-scope-write = 读写
+tokens-expires-never = 永不
+tokens-expired = 已过期
+tokens-revoke = 吊销
+tokens-revoke-label = 吊销令牌 {$label}
+tokens-create-form-label = 创建 api 令牌
+tokens-label-label = 标签
+tokens-label-description = 1 到 64 个可打印字符。
+tokens-scope-label = 范围
+tokens-expiry-label = 多少天后过期
+tokens-expiry-description = 留空则令牌永不过期。
+tokens-create-submit = 创建令牌
+tokens-create-submitting = 正在创建
+tokens-secret-region = 新的 api 令牌
+tokens-secret-label = 令牌 {$label}
+tokens-secret-note = 只显示一次。请立即复制：主机只保存哈希，无法再次显示。
+tokens-secret-copy = 复制
+tokens-secret-copied = 已复制。
+tokens-secret-done = 完成
+tokens-revoked-notice = 令牌已吊销。
+tokens-confirm-title = 吊销此令牌？
+tokens-confirm-body = 令牌 {$label} 会立即失效。
+tokens-confirm-cancel = 取消
+
 ## Step-up: the password again before a change to the host
 step-up-title = 重新输入密码
 step-up-intro = 此更改需要重新输入密码。之后五分钟内不会再次要求。

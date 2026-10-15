@@ -221,6 +221,42 @@ sessions-confirm-cancel = বাতিল
 sessions-ended-one = সেশন শেষ হয়েছে।
 sessions-ended-others = শেষ করা অন্য সেশন: {$count}
 
+## Settings: API tokens
+tokens-panel-label = api টোকেন
+tokens-intro = টোকেন দিয়ে একটি স্ক্রিপ্ট সেশন ছাড়াই api ব্যবহার করতে পারে। এটি পড়া, অথবা পড়া ও লেখার অনুমতি দেয়।
+tokens-loading = api টোকেন পড়া হচ্ছে।
+tokens-caption = এই হোস্টের api টোকেন
+tokens-empty = এখনও কোনো api টোকেন নেই।
+tokens-col-label = লেবেল
+tokens-col-scope = পরিসর
+tokens-col-created = তৈরি
+tokens-col-expires = মেয়াদ শেষ
+tokens-col-actions = কাজ
+tokens-scope-read = পড়া
+tokens-scope-write = পড়া ও লেখা
+tokens-expires-never = কখনও না
+tokens-expired = মেয়াদ শেষ হয়েছে
+tokens-revoke = বাতিল করুন
+tokens-revoke-label = টোকেন {$label} বাতিল করুন
+tokens-create-form-label = একটি api টোকেন তৈরি করুন
+tokens-label-label = লেবেল
+tokens-label-description = ১ থেকে ৬৪টি মুদ্রণযোগ্য অক্ষর।
+tokens-scope-label = পরিসর
+tokens-expiry-label = মেয়াদ শেষ (দিন পরে)
+tokens-expiry-description = মেয়াদহীন টোকেনের জন্য খালি রাখুন।
+tokens-create-submit = টোকেন তৈরি করুন
+tokens-create-submitting = তৈরি হচ্ছে
+tokens-secret-region = নতুন api টোকেন
+tokens-secret-label = টোকেন {$label}
+tokens-secret-note = শুধু একবার দেখানো হয়। এখনই কপি করুন: হোস্ট শুধু একটি হ্যাশ রাখে এবং আবার দেখাতে পারে না।
+tokens-secret-copy = কপি করুন
+tokens-secret-copied = কপি হয়েছে।
+tokens-secret-done = সম্পন্ন
+tokens-revoked-notice = টোকেন বাতিল করা হয়েছে।
+tokens-confirm-title = এই টোকেন বাতিল করবেন?
+tokens-confirm-body = টোকেন {$label} সঙ্গে সঙ্গে কাজ করা বন্ধ করে।
+tokens-confirm-cancel = বাতিল
+
 ## Step-up: the password again before a change to the host
 step-up-title = আপনার পাসওয়ার্ড আবার দিন
 step-up-intro = এই পরিবর্তনের জন্য আপনার পাসওয়ার্ড আবার লাগবে। এরপর পাঁচ মিনিট আর চাওয়া হবে না।

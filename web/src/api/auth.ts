@@ -195,3 +195,37 @@ export function revokeSession(client: ApiClient, handle: string): Promise<ApiRes
 export function revokeOtherSessions(client: ApiClient): Promise<ApiResult<RevokedSessions>> {
   return client.post('/api/v1/auth/sessions/revoke-others', {})
 }
+
+export type TokenView = components['schemas']['TokenView']
+export type TokenRequest = components['schemas']['TokenRequest']
+export type IssuedToken = components['schemas']['IssuedToken']
+
+/**
+ * Query key for the API token list. Outside the `auth` prefix on purpose:
+ * a new sign-in reads it again.
+ */
+export const TOKENS_QUERY_KEY = ['account', 'tokens'] as const
+
+/** `GET /api/v1/auth/tokens`. Every token on the host, never its value. */
+export function fetchTokens(
+  client: ApiClient,
+  signal?: AbortSignal,
+): Promise<ApiResult<TokenView[]>> {
+  return client.get('/api/v1/auth/tokens', signal === undefined ? {} : { signal })
+}
+
+/**
+ * `POST /api/v1/auth/tokens`. Needs a step-up. The answer carries the token
+ * value; this is the only time the host sends it.
+ */
+export function createToken(
+  client: ApiClient,
+  request: TokenRequest,
+): Promise<ApiResult<IssuedToken>> {
+  return client.post('/api/v1/auth/tokens', { body: request })
+}
+
+/** `POST /api/v1/auth/tokens/{id}/revoke`. Needs a step-up. Answers `204`. */
+export function revokeToken(client: ApiClient, id: string): Promise<ApiResult<undefined>> {
+  return client.post('/api/v1/auth/tokens/{id}/revoke', { path: { id } })
+}

@@ -221,6 +221,42 @@ sessions-confirm-cancel = रद्द करें
 sessions-ended-one = सत्र समाप्त हो गया।
 sessions-ended-others = समाप्त किए गए अन्य सत्र: {$count}
 
+## Settings: API tokens
+tokens-panel-label = api टोकन
+tokens-intro = टोकन किसी स्क्रिप्ट को बिना सत्र के api इस्तेमाल करने देता है। यह पढ़ने, या पढ़ने और लिखने की अनुमति देता है।
+tokens-loading = api टोकन पढ़े जा रहे हैं।
+tokens-caption = इस होस्ट के api टोकन
+tokens-empty = अभी कोई api टोकन नहीं है।
+tokens-col-label = लेबल
+tokens-col-scope = दायरा
+tokens-col-created = बनाया गया
+tokens-col-expires = समाप्ति
+tokens-col-actions = क्रियाएँ
+tokens-scope-read = पढ़ना
+tokens-scope-write = पढ़ना और लिखना
+tokens-expires-never = कभी नहीं
+tokens-expired = समाप्त
+tokens-revoke = रद्द करें
+tokens-revoke-label = टोकन {$label} रद्द करें
+tokens-create-form-label = api टोकन बनाएँ
+tokens-label-label = लेबल
+tokens-label-description = 1 से 64 छापने योग्य वर्ण।
+tokens-scope-label = दायरा
+tokens-expiry-label = समाप्ति (दिनों में)
+tokens-expiry-description = बिना समाप्ति वाले टोकन के लिए खाली छोड़ें।
+tokens-create-submit = टोकन बनाएँ
+tokens-create-submitting = बनाया जा रहा है
+tokens-secret-region = नया api टोकन
+tokens-secret-label = टोकन {$label}
+tokens-secret-note = केवल एक बार दिखाया जाता है। इसे अभी कॉपी करें: होस्ट केवल हैश रखता है और इसे फिर नहीं दिखा सकता।
+tokens-secret-copy = कॉपी करें
+tokens-secret-copied = कॉपी हो गया।
+tokens-secret-done = हो गया
+tokens-revoked-notice = टोकन रद्द कर दिया गया है।
+tokens-confirm-title = यह टोकन रद्द करें?
+tokens-confirm-body = टोकन {$label} तुरंत काम करना बंद कर देता है।
+tokens-confirm-cancel = रद्द
+
 ## Step-up: the password again before a change to the host
 step-up-title = अपना पासवर्ड फिर से दर्ज करें
 step-up-intro = इस बदलाव के लिए आपका पासवर्ड फिर से चाहिए। उसके बाद पाँच मिनट तक यह फिर नहीं पूछा जाएगा।

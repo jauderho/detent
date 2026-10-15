@@ -88,6 +88,30 @@ test.describe('accessibility', () => {
     expect(describeViolations(results)).toBe('')
   })
 
+  test('the api token panel with a new token shown is clean', async ({ page }) => {
+    await stubApi(page)
+    await signIn(page)
+    await page.getByRole('link', { name: 'settings' }).click()
+    const form = page.getByRole('form', { name: 'create an api token' })
+    await form.getByLabel('label').fill('deploy bot')
+    await form.getByRole('button', { name: 'create token' }).click()
+    await page.getByRole('textbox', { name: /^token / }).waitFor()
+
+    const results = await scan(page)
+    expect(describeViolations(results)).toBe('')
+  })
+
+  test('the api token revoke confirmation is clean', async ({ page }) => {
+    await stubApi(page)
+    await signIn(page)
+    await page.getByRole('link', { name: 'settings' }).click()
+    await page.getByRole('button', { name: /revoke the token .*backup job/ }).click()
+    await page.getByRole('dialog', { name: 'revoke this token?' }).waitFor()
+
+    const results = await scan(page)
+    expect(describeViolations(results)).toBe('')
+  })
+
   test('the session list with its confirmation open is clean', async ({ page }) => {
     await stubApi(page)
     await signIn(page)

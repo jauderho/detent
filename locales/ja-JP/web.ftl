@@ -221,6 +221,42 @@ sessions-confirm-cancel = キャンセル
 sessions-ended-one = セッションを終了しました。
 sessions-ended-others = 終了した他のセッション: {$count}
 
+## Settings: API tokens
+tokens-panel-label = API トークン
+tokens-intro = トークンがあると、スクリプトはセッションなしで API を使えます。読み取り、または読み取りと書き込みを許可します。
+tokens-loading = API トークンを読み込んでいます。
+tokens-caption = このホストの API トークン
+tokens-empty = API トークンはまだありません。
+tokens-col-label = ラベル
+tokens-col-scope = スコープ
+tokens-col-created = 作成日時
+tokens-col-expires = 有効期限
+tokens-col-actions = 操作
+tokens-scope-read = 読み取り
+tokens-scope-write = 読み取りと書き込み
+tokens-expires-never = なし
+tokens-expired = 期限切れ
+tokens-revoke = 失効
+tokens-revoke-label = トークン {$label} を失効させる
+tokens-create-form-label = API トークンを作成
+tokens-label-label = ラベル
+tokens-label-description = 1〜64 文字の印字可能文字。
+tokens-scope-label = スコープ
+tokens-expiry-label = 有効期限（日数）
+tokens-expiry-description = 期限のないトークンにするには空のままにします。
+tokens-create-submit = トークンを作成
+tokens-create-submitting = 作成中
+tokens-secret-region = 新しい API トークン
+tokens-secret-label = トークン {$label}
+tokens-secret-note = 表示は一度だけです。今すぐコピーしてください。ホストはハッシュのみを保持し、再表示できません。
+tokens-secret-copy = コピー
+tokens-secret-copied = コピーしました。
+tokens-secret-done = 完了
+tokens-revoked-notice = トークンを失効させました。
+tokens-confirm-title = このトークンを失効させますか？
+tokens-confirm-body = トークン {$label} はすぐに使えなくなります。
+tokens-confirm-cancel = キャンセル
+
 ## Step-up: the password again before a change to the host
 step-up-title = パスワードを再入力
 step-up-intro = この変更にはパスワードの再入力が必要です。その後5分間は再入力を求めません。

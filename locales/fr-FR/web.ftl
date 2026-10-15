@@ -221,6 +221,42 @@ sessions-confirm-cancel = annuler
 sessions-ended-one = la session est fermée.
 sessions-ended-others = autres sessions fermées : {$count}
 
+## Settings: API tokens
+tokens-panel-label = jetons api
+tokens-intro = un jeton permet à un script d'utiliser l'api sans session. il donne la lecture, ou la lecture et l'écriture.
+tokens-loading = lecture des jetons api.
+tokens-caption = jetons api de cet hôte
+tokens-empty = aucun jeton api pour le moment.
+tokens-col-label = libellé
+tokens-col-scope = portée
+tokens-col-created = créé
+tokens-col-expires = expire
+tokens-col-actions = actions
+tokens-scope-read = lecture
+tokens-scope-write = lecture et écriture
+tokens-expires-never = jamais
+tokens-expired = expiré
+tokens-revoke = révoquer
+tokens-revoke-label = révoquer le jeton {$label}
+tokens-create-form-label = créer un jeton api
+tokens-label-label = libellé
+tokens-label-description = de 1 à 64 caractères imprimables.
+tokens-scope-label = portée
+tokens-expiry-label = expire après (jours)
+tokens-expiry-description = laissez vide pour un jeton qui n'expire pas.
+tokens-create-submit = créer le jeton
+tokens-create-submitting = création
+tokens-secret-region = nouveau jeton api
+tokens-secret-label = jeton {$label}
+tokens-secret-note = affiché une seule fois. copiez-le maintenant : l'hôte ne garde qu'un hachage et ne peut plus l'afficher.
+tokens-secret-copy = copier
+tokens-secret-copied = copié.
+tokens-secret-done = terminé
+tokens-revoked-notice = le jeton est révoqué.
+tokens-confirm-title = révoquer ce jeton ?
+tokens-confirm-body = le jeton {$label} cesse de fonctionner immédiatement.
+tokens-confirm-cancel = annuler
+
 ## Step-up: the password again before a change to the host
 step-up-title = saisissez à nouveau votre mot de passe
 step-up-intro = cette modification demande à nouveau votre mot de passe. il n'est ensuite plus demandé pendant cinq minutes.

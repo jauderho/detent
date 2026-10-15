@@ -65,8 +65,8 @@ type JsonContent<T> = T extends { content: { 'application/json': infer B } } ? B
 type ResponsesOf<O> = O extends { responses: infer R } ? R : never
 
 /**
- * What a successful call resolves to: the `200` body, or `undefined` for the
- * one endpoint (`logout`) whose success is a bodiless `204`.
+ * What a successful call resolves to: the `200` or `201` body, or
+ * `undefined` for an endpoint whose success is a bodiless `204`.
  *
  * `undefined` rather than `void`: this is a data position, not a return type,
  * and `void` in one reads as "ignore me" while the value here is genuinely
@@ -75,9 +75,11 @@ type ResponsesOf<O> = O extends { responses: infer R } ? R : never
 type OkData<O> =
   ResponsesOf<O> extends { 200: infer Ok }
     ? JsonContent<Ok>
-    : ResponsesOf<O> extends { 204: unknown }
-      ? undefined
-      : never
+    : ResponsesOf<O> extends { 201: infer Created }
+      ? JsonContent<Created>
+      : ResponsesOf<O> extends { 204: unknown }
+        ? undefined
+        : never
 
 /**
  * `never` when the operation documents no body. openapi-typescript writes

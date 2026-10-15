@@ -221,6 +221,42 @@ sessions-confirm-cancel = отмена
 sessions-ended-one = сеанс завершён.
 sessions-ended-others = завершено других сеансов: {$count}
 
+## Settings: API tokens
+tokens-panel-label = api-токены
+tokens-intro = токен позволяет скрипту работать с api без сеанса. он даёт чтение или чтение и запись.
+tokens-loading = чтение api-токенов.
+tokens-caption = api-токены этого хоста
+tokens-empty = api-токенов пока нет.
+tokens-col-label = метка
+tokens-col-scope = область
+tokens-col-created = создан
+tokens-col-expires = истекает
+tokens-col-actions = действия
+tokens-scope-read = чтение
+tokens-scope-write = чтение и запись
+tokens-expires-never = никогда
+tokens-expired = истёк
+tokens-revoke = отозвать
+tokens-revoke-label = отозвать токен {$label}
+tokens-create-form-label = создать api-токен
+tokens-label-label = метка
+tokens-label-description = от 1 до 64 печатных символов.
+tokens-scope-label = область
+tokens-expiry-label = истекает через (дней)
+tokens-expiry-description = оставьте пустым для бессрочного токена.
+tokens-create-submit = создать токен
+tokens-create-submitting = создание
+tokens-secret-region = новый api-токен
+tokens-secret-label = токен {$label}
+tokens-secret-note = показан один раз. скопируйте его сейчас: хост хранит только хеш и не может показать его снова.
+tokens-secret-copy = копировать
+tokens-secret-copied = скопировано.
+tokens-secret-done = готово
+tokens-revoked-notice = токен отозван.
+tokens-confirm-title = отозвать этот токен?
+tokens-confirm-body = токен {$label} сразу перестаёт работать.
+tokens-confirm-cancel = отмена
+
 ## Step-up: the password again before a change to the host
 step-up-title = введите пароль ещё раз
 step-up-intro = для этого изменения нужен пароль ещё раз. после этого он не запрашивается пять минут.

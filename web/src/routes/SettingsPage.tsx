@@ -1,10 +1,12 @@
 /**
- * Settings for the signed-in account: the second factor and the active
- * sessions. User and token management have no endpoints yet (docs/API.md).
+ * Settings for the signed-in account: the second factor, the active
+ * sessions and the API tokens of the host. User management has no endpoints
+ * yet (docs/API.md).
  */
 
 import { useLocalization } from '@fluent/react'
 import { SessionsPanel } from './SessionsPanel'
+import { TokensPanel } from './TokensPanel'
 import { TotpPanel } from './TotpPanel'
 
 const PAGE_STYLE = { paddingTop: 24, paddingBottom: 24 } as const
@@ -29,6 +31,7 @@ export function SettingsPage() {
       <div style={PANELS_STYLE}>
         <TotpPanel />
         <SessionsPanel />
+        <TokensPanel />
       </div>
     </section>
   )

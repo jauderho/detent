@@ -221,6 +221,42 @@ sessions-confirm-cancel = abbrechen
 sessions-ended-one = die Sitzung ist beendet.
 sessions-ended-others = andere Sitzungen beendet: {$count}
 
+## Settings: API tokens
+tokens-panel-label = API-Token
+tokens-intro = ein Token lässt ein Skript die API ohne Sitzung nutzen. es darf lesen, oder lesen und schreiben.
+tokens-loading = API-Token werden gelesen.
+tokens-caption = API-Token auf diesem Host
+tokens-empty = noch keine API-Token.
+tokens-col-label = Name
+tokens-col-scope = Umfang
+tokens-col-created = erstellt
+tokens-col-expires = läuft ab
+tokens-col-actions = Aktionen
+tokens-scope-read = lesen
+tokens-scope-write = lesen und schreiben
+tokens-expires-never = nie
+tokens-expired = abgelaufen
+tokens-revoke = widerrufen
+tokens-revoke-label = das Token {$label} widerrufen
+tokens-create-form-label = ein API-Token erstellen
+tokens-label-label = Name
+tokens-label-description = 1 bis 64 druckbare Zeichen.
+tokens-scope-label = Umfang
+tokens-expiry-label = läuft ab nach (Tagen)
+tokens-expiry-description = leer lassen für ein Token, das nicht abläuft.
+tokens-create-submit = Token erstellen
+tokens-create-submitting = wird erstellt
+tokens-secret-region = neues API-Token
+tokens-secret-label = Token {$label}
+tokens-secret-note = nur einmal gezeigt. kopiere es jetzt: der Host behält nur einen Hash und kann es nicht wieder zeigen.
+tokens-secret-copy = kopieren
+tokens-secret-copied = kopiert.
+tokens-secret-done = fertig
+tokens-revoked-notice = das Token ist widerrufen.
+tokens-confirm-title = dieses Token widerrufen?
+tokens-confirm-body = das Token {$label} funktioniert sofort nicht mehr.
+tokens-confirm-cancel = abbrechen
+
 ## Step-up: the password again before a change to the host
 step-up-title = Passwort erneut eingeben
 step-up-intro = diese Änderung braucht Ihr Passwort erneut. danach wird es fünf Minuten lang nicht wieder abgefragt.

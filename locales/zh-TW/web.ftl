@@ -221,6 +221,42 @@ sessions-confirm-cancel = 取消
 sessions-ended-one = 工作階段已結束。
 sessions-ended-others = 已結束的其他工作階段：{$count}
 
+## Settings: API tokens
+tokens-panel-label = api 權杖
+tokens-intro = 權杖讓指令碼無需工作階段即可使用 api。它可以唯讀，或讀寫。
+tokens-loading = 正在讀取 api 權杖。
+tokens-caption = 此主機上的 api 權杖
+tokens-empty = 還沒有 api 權杖。
+tokens-col-label = 標籤
+tokens-col-scope = 範圍
+tokens-col-created = 建立時間
+tokens-col-expires = 到期
+tokens-col-actions = 動作
+tokens-scope-read = 唯讀
+tokens-scope-write = 讀寫
+tokens-expires-never = 永不
+tokens-expired = 已到期
+tokens-revoke = 撤銷
+tokens-revoke-label = 撤銷權杖 {$label}
+tokens-create-form-label = 建立 api 權杖
+tokens-label-label = 標籤
+tokens-label-description = 1 到 64 個可列印字元。
+tokens-scope-label = 範圍
+tokens-expiry-label = 幾天後到期
+tokens-expiry-description = 留空則權杖永不到期。
+tokens-create-submit = 建立權杖
+tokens-create-submitting = 正在建立
+tokens-secret-region = 新的 api 權杖
+tokens-secret-label = 權杖 {$label}
+tokens-secret-note = 只顯示一次。請立即複製：主機只保存雜湊，無法再次顯示。
+tokens-secret-copy = 複製
+tokens-secret-copied = 已複製。
+tokens-secret-done = 完成
+tokens-revoked-notice = 權杖已撤銷。
+tokens-confirm-title = 撤銷此權杖？
+tokens-confirm-body = 權杖 {$label} 會立即失效。
+tokens-confirm-cancel = 取消
+
 ## Step-up: the password again before a change to the host
 step-up-title = 重新輸入密碼
 step-up-intro = 此變更需要重新輸入密碼。之後五分鐘內不會再次要求。

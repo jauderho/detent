@@ -77,6 +77,62 @@ test.describe('active sessions', () => {
   })
 })
 
+test.describe('api tokens', () => {
+  test('a token is created, shown once, and revoked', async ({ page }) => {
+    const calls = await stubApi(page, { stepUp: true })
+    await signIn(page)
+    await page.getByRole('link', { name: 'settings' }).click()
+
+    const form = page.getByRole('form', { name: 'create an api token' })
+    await form.getByLabel('label').fill('deploy bot')
+    await form.getByLabel('scope').selectOption('write')
+    await form.getByLabel('expires after (days)').fill('7')
+    await form.getByRole('button', { name: 'create token' }).focus()
+    await page.keyboard.press('Enter')
+
+    // The host wants a step-up first; a keyboard alone gets through it.
+    const stepUp = page.getByRole('dialog', { name: 'enter your password again' })
+    await expect(stepUp).toBeVisible()
+    await stepUp.getByLabel('current password').focus()
+    await page.keyboard.type('correct horse battery staple')
+    await page.keyboard.press('Enter')
+    await expect(stepUp).toBeHidden()
+
+    const value = 'e2e0'.repeat(16)
+    const field = page.getByRole('textbox', { name: /^token / })
+    await expect(field).toHaveValue(value)
+    await expect(field).toBeFocused()
+    await expect(page.getByText(/shown once/)).toBeVisible()
+    const creates = calls.filter((call) => call.method === 'POST' && call.url.endsWith('/tokens'))
+    expect(creates).toHaveLength(2)
+    expect(creates[1]?.body).toEqual({
+      label: 'deploy bot',
+      scope: 'write',
+      expires_in_secs: 7 * 86_400,
+    })
+
+    // Closed, the value is gone from the page; the list never had it.
+    await page.getByRole('button', { name: 'done' }).click()
+    await expect(field).toBeHidden()
+    await expect(page.getByText(value)).toHaveCount(0)
+
+    const table = page.getByRole('table', { name: 'api tokens on this host' })
+    const revoke = table.getByRole('button', { name: /revoke the token .*deploy bot/ })
+    await revoke.focus()
+    await page.keyboard.press('Enter')
+    const dialog = page.getByRole('dialog', { name: 'revoke this token?' })
+    await expect(dialog).toBeVisible()
+    await dialog.getByRole('button', { name: 'revoke', exact: true }).focus()
+    await page.keyboard.press('Enter')
+
+    await expect(page.getByText('the token is revoked.')).toBeVisible()
+    await expect(revoke).toBeHidden()
+    expect(
+      calls.some((call) => call.method === 'POST' && call.url.endsWith('/fedcba9876543210/revoke')),
+    ).toBe(true)
+  })
+})
+
 test.describe('host text survives the stylesheet', () => {
   /**
    * The console sets `text-transform: lowercase` on the body. That is right for
