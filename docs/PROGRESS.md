@@ -5,6 +5,14 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-15 - ifupdown edits keep `source` lines (BUGFIX Track D 10)
+
+The D3 run on Debian 13 showed `plan` replace `source /etc/network/interfaces.d/*` with the new stanza: the classifier read `source` and `source-directory` as directives, so the minimal edit aligned the rendered stanza over them.
+
+**Change.** `source` and `source-directory` lines are now `Unknown` (kept verbatim, like comments and stanzas such as `allow-hotplug` and `mapping`). `detect_flavor` still counts them toward ifupdown, so a file with only a `source` line still gets an ifupdown stanza. An unchanged `lo` with no address now renders as `iface lo inet loopback`; before, any whole-model edit rewrote the stock loopback stanza to `inet static` with no address, which `ifup` refuses.
+
+**Test.** `an_ifupdown_edit_keeps_source_lines_comments_and_unknown_stanzas` (network) failed before the fix with `"source /etc/network/interfaces.d/*\n" lost:`, and after the `source` fix alone with `"auto lo\niface lo inet loopback\n" lost:`.
+
 ## 2026-10-15 - External checks judge only their own file (BUGFIX Track D 5)
 
 The D3 run showed every declared validator run on every candidate: `unbound-checkconf` on `resolved.conf`, the Kea checks on a dnsmasq file, and all four network validators for any network apply, so an apply failed unless every backend's tool was installed and accepted a file in another format.
