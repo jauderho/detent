@@ -422,11 +422,11 @@ fn classify(raw: &str) -> LineKind {
         }
         return LineKind::Unknown;
     }
-    // ifupdown stanzas
+    // ifupdown stanzas. `source` and `source-directory` are not modeled:
+    // they stay `Unknown`, so an edit never drops them (BUGFIX Track D 10).
     if parse_ifupdown_auto(raw).is_some()
         || parse_ifupdown_iface(raw).is_some()
         || parse_ifupdown_option(raw).is_some()
-        || is_ifupdown_source(raw)
     {
         return LineKind::Directive;
     }
@@ -980,10 +980,16 @@ fn detect_flavor(doc: &Document) -> BackendFlavor {
     let mut ifupdown = 0usize;
     let mut netplan = 0usize;
     for line in doc.lines() {
+        let raw = line.raw();
+        // A `source` line is no directive, but only ifupdown has it: a file
+        // that holds nothing else is an ifupdown file.
+        if is_ifupdown_source(raw) {
+            ifupdown += 1;
+            continue;
+        }
         if line.kind() != LineKind::Directive {
             continue;
         }
-        let raw = line.raw();
         if let Some(s) = parse_section(raw) {
             if is_networkd_section(&s) {
                 networkd += 1;
@@ -999,7 +1005,6 @@ fn detect_flavor(doc: &Document) -> BackendFlavor {
         } else if parse_ifupdown_auto(raw).is_some()
             || parse_ifupdown_iface(raw).is_some()
             || parse_ifupdown_option(raw).is_some()
-            || is_ifupdown_source(raw)
         {
             ifupdown += 1;
         } else if parse_netplan_kv(raw).is_some() || parse_netplan_list_item(raw).is_some() {
@@ -1246,8 +1251,12 @@ fn render_nm(iface: &Interface) -> Result<Vec<String>, EditError> {
 fn render_ifupdown(iface: &Interface) -> Result<Vec<String>, EditError> {
     let mut out = Vec::new();
     out.push(format!("auto {}", iface.name));
+    // `lo` with no address is the stock `inet loopback` stanza; `inet static`
+    // with no address makes ifup fail.
     let method = if iface.dhcp_v4 && iface.addresses.is_empty() {
         "dhcp"
+    } else if iface.name == "lo" && iface.addresses.is_empty() {
+        "loopback"
     } else {
         "static"
     };
@@ -4217,6 +4226,74 @@ mod tests {
             .unwrap_or_else(|| panic!("eth2 missing"));
         assert_eq!(eth2.routes, [] as [crate::Route; 0]);
         assert!(eth2.bridge.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn an_ifupdown_edit_keeps_source_lines_comments_and_unknown_stanzas() -> Result<(), String> {
+        // The stock Debian file, as the D3 container had it, plus what an
+        // administrator adds by hand.
+        let src = "# interfaces(5) file used by ifup(8) and ifdown(8)\n\
+                   source /etc/network/interfaces.d/*\n\
+                   source-directory /etc/network/extra.d\n\
+                   \n\
+                   allow-hotplug eth1\n\
+                   mapping eth2\n\
+                   \n\
+                   auto lo\n\
+                   iface lo inet loopback\n";
+        let mut doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
+        let mut model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        model.interfaces.push(super::Interface {
+            name: "mgmt0".to_owned(),
+            dhcp_v4: false,
+            dhcp_v6: false,
+            addresses: vec!["192.0.2.1/24".to_owned()],
+            gateway_v4: None,
+            gateway_v6: None,
+            dns: Vec::new(),
+            routes: Vec::new(),
+            vlan: None,
+            bridge: None,
+        });
+        NetworkModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let out = NetworkModule::render(&doc);
+        for kept in [
+            "# interfaces(5) file used by ifup(8) and ifdown(8)\n",
+            "source /etc/network/interfaces.d/*\n",
+            "source-directory /etc/network/extra.d\n",
+            "allow-hotplug eth1\n",
+            "mapping eth2\n",
+            "auto lo\niface lo inet loopback\n",
+        ] {
+            assert!(out.contains(kept), "{kept:?} lost:\n{out}");
+        }
+        assert!(
+            out.contains("auto mgmt0\niface mgmt0 inet static\n\taddress 192.0.2.1/24"),
+            "{out}"
+        );
+        assert_eq!(
+            NetworkModule::to_model(&doc).map_err(|e| e.to_string())?,
+            model
+        );
+        // The D3 case: a file that holds only the `source` line keeps it.
+        let mut doc = NetworkModule::parse("source /etc/network/interfaces.d/*\n")
+            .map_err(|e| e.to_string())?;
+        let one = super::Model {
+            interfaces: model
+                .interfaces
+                .iter()
+                .filter(|iface| iface.name == "mgmt0")
+                .cloned()
+                .collect(),
+        };
+        NetworkModule::apply(&mut doc, &one).map_err(|e| e.to_string())?;
+        let out = NetworkModule::render(&doc);
+        assert!(
+            out.starts_with("source /etc/network/interfaces.d/*\n"),
+            "{out}"
+        );
+        assert!(out.contains("iface mgmt0 inet static\n"), "{out}");
         Ok(())
     }
 
