@@ -90,35 +90,106 @@ pub struct Detected {
     pub facts: HostFacts,
 }
 
-/// `(service_versions key, candidate absolute paths, version-flag args)` for
-/// each service version probe. The first existing path is used.
-const SERVICE_PROBES: &[(&str, &[&str], &[&str])] = &[
-    (
-        "chrony",
-        &["/usr/sbin/chronyd", "/usr/bin/chronyd"],
-        &["--version"],
-    ),
-    ("samba", &["/usr/sbin/smbd", "/usr/bin/smbd"], &["-V"]),
-    (
-        "unbound",
-        &["/usr/sbin/unbound", "/usr/bin/unbound"],
-        &["-V"],
-    ),
-    (
-        "dnsmasq",
-        &["/usr/sbin/dnsmasq", "/usr/bin/dnsmasq"],
-        &["--version"],
-    ),
-    (
-        "kea",
-        &["/usr/sbin/kea-dhcp4", "/usr/bin/kea-dhcp4"],
-        &["-v"],
-    ),
-    (
-        "systemd-resolved",
-        &["/usr/bin/resolvectl", "/bin/resolvectl"],
-        &["--version"],
-    ),
+/// When an installed service counts as present. A network stack is
+/// installed on many hosts that do not use it (Debian ships `networkctl`
+/// with systemd, an image may carry `NetworkManager` stopped), so a module
+/// that picks its backend from the probes needs the stack in use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InUse {
+    /// Installed is enough.
+    Installed,
+    /// The systemd unit is active (`systemctl is-active <unit>`). On a host
+    /// without systemd the installed program is enough.
+    Unit(&'static str),
+    /// A file whose name ends in the suffix is in the directory.
+    ConfigIn(&'static str, &'static str),
+}
+
+/// One service version probe.
+#[derive(Debug, Clone, Copy)]
+struct ServiceProbe {
+    /// The `service_versions` key.
+    key: &'static str,
+    /// Candidate absolute paths of the program; the first existing one runs.
+    paths: &'static [&'static str],
+    /// The version flag. `None`: the program prints no version (netplan),
+    /// so an installed and used one is filed as [`UNKNOWN_VERSION`] and
+    /// nothing runs.
+    args: Option<&'static [&'static str]>,
+    /// When the installed service counts.
+    in_use: InUse,
+}
+
+/// The version filed for a service that is present but prints no version.
+pub const UNKNOWN_VERSION: &str = "unknown";
+
+/// Candidate paths of `systemctl`, for [`InUse::Unit`].
+const SYSTEMCTL: &[&str] = &["/usr/bin/systemctl", "/bin/systemctl"];
+
+/// Every service version probe. The first existing path is used.
+const SERVICE_PROBES: &[ServiceProbe] = &[
+    ServiceProbe {
+        key: "chrony",
+        paths: &["/usr/sbin/chronyd", "/usr/bin/chronyd"],
+        args: Some(&["--version"]),
+        in_use: InUse::Installed,
+    },
+    ServiceProbe {
+        key: "samba",
+        paths: &["/usr/sbin/smbd", "/usr/bin/smbd"],
+        args: Some(&["-V"]),
+        in_use: InUse::Installed,
+    },
+    ServiceProbe {
+        key: "unbound",
+        paths: &["/usr/sbin/unbound", "/usr/bin/unbound"],
+        args: Some(&["-V"]),
+        in_use: InUse::Installed,
+    },
+    ServiceProbe {
+        key: "dnsmasq",
+        paths: &["/usr/sbin/dnsmasq", "/usr/bin/dnsmasq"],
+        args: Some(&["--version"]),
+        in_use: InUse::Installed,
+    },
+    ServiceProbe {
+        key: "kea",
+        paths: &["/usr/sbin/kea-dhcp4", "/usr/bin/kea-dhcp4"],
+        args: Some(&["-v"]),
+        in_use: InUse::Installed,
+    },
+    ServiceProbe {
+        key: "systemd-resolved",
+        paths: &["/usr/bin/resolvectl", "/bin/resolvectl"],
+        args: Some(&["--version"]),
+        in_use: InUse::Installed,
+    },
+    // The network stacks (BUGFIX Track D 7): the `network` module picks its
+    // file from these, with the precedence of `detect_network_backend`.
+    ServiceProbe {
+        key: "NetworkManager",
+        paths: &["/usr/sbin/NetworkManager", "/usr/bin/NetworkManager"],
+        args: Some(&["--version"]),
+        in_use: InUse::Unit("NetworkManager.service"),
+    },
+    ServiceProbe {
+        key: "systemd-networkd",
+        paths: &["/usr/bin/networkctl", "/bin/networkctl"],
+        args: Some(&["--version"]),
+        in_use: InUse::Unit("systemd-networkd.service"),
+    },
+    ServiceProbe {
+        key: "netplan",
+        paths: &["/usr/sbin/netplan", "/usr/bin/netplan"],
+        args: None,
+        in_use: InUse::ConfigIn("/etc/netplan", ".yaml"),
+    },
+    ServiceProbe {
+        key: "ifupdown",
+        paths: &["/usr/sbin/ifup", "/sbin/ifup"],
+        args: Some(&["--version"]),
+        in_use: InUse::Unit("networking.service"),
+    },
 ];
 
 /// Detect the host profile and facts using the given filesystem and prober.
@@ -146,7 +217,7 @@ pub fn detect(fs: &dyn HostFs, prober: &dyn Prober) -> Detected {
         ),
         Os::Other => (InitSystem::None, String::new(), 0, HostFacts::default()),
     };
-    let service_versions = detect_service_versions(fs, prober);
+    let service_versions = detect_service_versions(fs, prober, init);
 
     Detected {
         profile: HostProfile {
@@ -177,20 +248,50 @@ fn compile_time_os() -> Os {
 }
 
 /// Probe installed service versions: only binaries that exist (per `fs`)
-/// at one of their known absolute paths are run.
-fn detect_service_versions(fs: &dyn HostFs, prober: &dyn Prober) -> BTreeMap<String, String> {
+/// at one of their known absolute paths, and that are in use ([`InUse`]),
+/// are run.
+fn detect_service_versions(
+    fs: &dyn HostFs,
+    prober: &dyn Prober,
+    init: InitSystem,
+) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
-    for (key, paths, args) in SERVICE_PROBES {
-        let Some(path) = paths.iter().find(|p| fs.exists(p)) else {
+    for probe in SERVICE_PROBES {
+        let Some(path) = probe.paths.iter().find(|p| fs.exists(p)) else {
             continue;
         };
-        if let Ok(output) = prober.run(path, args)
-            && let Some(v) = version::first_version_token(&output)
-        {
-            out.insert((*key).to_string(), v);
+        if !in_use(fs, prober, init, probe.in_use) {
+            continue;
+        }
+        let version = match probe.args {
+            Some(args) => prober
+                .run(path, args)
+                .ok()
+                .and_then(|output| version::first_version_token(&output)),
+            None => Some(UNKNOWN_VERSION.to_owned()),
+        };
+        if let Some(version) = version {
+            out.insert(probe.key.to_string(), version);
         }
     }
     out
+}
+
+/// Whether an installed service is in use on this host.
+fn in_use(fs: &dyn HostFs, prober: &dyn Prober, init: InitSystem, rule: InUse) -> bool {
+    match rule {
+        InUse::Installed => true,
+        InUse::Unit(unit) => {
+            if init != InitSystem::Systemd {
+                return true;
+            }
+            SYSTEMCTL
+                .iter()
+                .find(|p| fs.exists(p))
+                .is_some_and(|systemctl| prober.run(systemctl, &["is-active", unit]).is_ok())
+        }
+        InUse::ConfigIn(dir, suffix) => fs.list_dir(dir).iter().any(|name| name.ends_with(suffix)),
+    }
 }
 
 #[cfg(test)]
@@ -207,7 +308,7 @@ mod tests {
             &["--version"],
             Ok("chronyd (chrony) version 4.5 (+CMDMON +NTP)"),
         );
-        let versions = detect_service_versions(&fs, &prober);
+        let versions = detect_service_versions(&fs, &prober, InitSystem::Systemd);
         assert_eq!(versions.get("chrony").map(String::as_str), Some("4.5"));
         assert_eq!(versions.len(), 1);
     }
@@ -216,7 +317,7 @@ mod tests {
     fn detect_service_versions_skips_missing_binaries() {
         let fs = FakeFs::new();
         let prober = FakeProber::new();
-        assert!(detect_service_versions(&fs, &prober).is_empty());
+        assert!(detect_service_versions(&fs, &prober, InitSystem::Systemd).is_empty());
     }
 
     #[test]
@@ -233,7 +334,7 @@ mod tests {
             )
             .with("/usr/sbin/smbd", &["-V"], Ok("no version here"))
             .with("/usr/sbin/unbound", &["-V"], Ok("unbound 1.19.3"));
-        let versions = detect_service_versions(&fs, &prober);
+        let versions = detect_service_versions(&fs, &prober, InitSystem::Systemd);
         assert_eq!(versions.len(), 1);
         assert_eq!(versions.get("unbound").map(String::as_str), Some("1.19.3"));
     }
@@ -244,8 +345,103 @@ mod tests {
             .with_file("/usr/sbin/chronyd", "")
             .with_file("/usr/bin/chronyd", "");
         let prober = FakeProber::new().with("/usr/sbin/chronyd", &["--version"], Ok("4.6"));
-        let versions = detect_service_versions(&fs, &prober);
+        let versions = detect_service_versions(&fs, &prober, InitSystem::Systemd);
         assert_eq!(versions.get("chrony").map(String::as_str), Some("4.6"));
+    }
+
+    /// The D3 Debian container: `NetworkManager`, ifupdown and `networkctl`
+    /// all installed; which stacks count depends on their units.
+    fn network_host() -> (FakeFs, FakeProber) {
+        let fs = FakeFs::new()
+            .with_file("/usr/bin/systemctl", "")
+            .with_file("/usr/sbin/NetworkManager", "")
+            .with_file("/usr/bin/networkctl", "")
+            .with_file("/usr/sbin/ifup", "")
+            .with_file("/usr/sbin/netplan", "");
+        let prober = FakeProber::new()
+            .with("/usr/sbin/NetworkManager", &["--version"], Ok("1.52.0\n"))
+            .with(
+                "/usr/bin/networkctl",
+                &["--version"],
+                Ok("systemd 257 (257.9-1)\n"),
+            )
+            .with(
+                "/usr/sbin/ifup",
+                &["--version"],
+                Ok("ifup version 0.8.44\n"),
+            );
+        (fs, prober)
+    }
+
+    #[test]
+    fn a_network_stack_counts_only_while_its_unit_is_active() {
+        let (fs, prober) = network_host();
+        // No unit is active: no stack, however much is installed.
+        assert!(detect_service_versions(&fs, &prober, InitSystem::Systemd).is_empty());
+        let prober = prober.with(
+            "/usr/bin/systemctl",
+            &["is-active", "networking.service"],
+            Ok("active\n"),
+        );
+        let versions = detect_service_versions(&fs, &prober, InitSystem::Systemd);
+        assert_eq!(
+            versions.into_iter().collect::<Vec<_>>(),
+            [("ifupdown".to_owned(), "0.8.44".to_owned())]
+        );
+        let prober = prober
+            .with(
+                "/usr/bin/systemctl",
+                &["is-active", "NetworkManager.service"],
+                Ok("active\n"),
+            )
+            .with(
+                "/usr/bin/systemctl",
+                &["is-active", "systemd-networkd.service"],
+                Err(ProbeError::NonZero("exit status: 3".to_owned())),
+            );
+        let versions = detect_service_versions(&fs, &prober, InitSystem::Systemd);
+        assert_eq!(
+            versions.get("NetworkManager").map(String::as_str),
+            Some("1.52.0")
+        );
+        assert_eq!(versions.get("ifupdown").map(String::as_str), Some("0.8.44"));
+        assert!(!versions.contains_key("systemd-networkd"));
+    }
+
+    #[test]
+    fn without_systemd_an_installed_stack_counts_and_without_systemctl_none_does() {
+        let (fs, prober) = network_host();
+        let versions = detect_service_versions(&fs, &prober, InitSystem::OpenRc);
+        assert_eq!(
+            versions.get("NetworkManager").map(String::as_str),
+            Some("1.52.0")
+        );
+        assert_eq!(
+            versions.get("systemd-networkd").map(String::as_str),
+            Some("257.9")
+        );
+        assert_eq!(versions.get("ifupdown").map(String::as_str), Some("0.8.44"));
+        // systemd without `systemctl`: a unit cannot be asked, so it is not active.
+        let bare = FakeFs::new().with_file("/usr/sbin/ifup", "");
+        assert!(detect_service_versions(&bare, &prober, InitSystem::Systemd).is_empty());
+    }
+
+    #[test]
+    fn netplan_counts_with_a_yaml_file_and_has_no_version() {
+        let (fs, prober) = network_host();
+        assert!(
+            !detect_service_versions(&fs, &prober, InitSystem::Systemd).contains_key("netplan")
+        );
+        let fs = fs
+            .with_file("/etc/netplan/50-cloud-init.yaml", "network: {}\n")
+            .with_file("/etc/netplan/README", "");
+        let versions = detect_service_versions(&fs, &prober, InitSystem::Systemd);
+        assert_eq!(
+            versions.get("netplan").map(String::as_str),
+            Some(UNKNOWN_VERSION)
+        );
+        let fs = FakeFs::new().with_file("/etc/netplan/01.yaml", "");
+        assert!(detect_service_versions(&fs, &prober, InitSystem::Systemd).is_empty());
     }
 
     #[test]

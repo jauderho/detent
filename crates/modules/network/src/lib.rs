@@ -1427,38 +1427,49 @@ fn render_model_lines(flavor: BackendFlavor, model: &Model) -> Result<Vec<String
 
 // -------------------------------------------------------------------- descriptor
 
-/// systemd-networkd is the right backend when a `.network` directory or
-/// `netif` state exists. Mirrors `detent-platform`'s
-/// `detect_network_backend` precedence for the networkd tier.
-fn networkd_backend_detect(profile: &HostProfile) -> bool {
-    // Match the resolver pattern: check `HostProfile` service versions or OS.
-    // `systemd-networkd` is probed via `networkctl` version; fall back to Linux.
-    profile.os == Os::Linux
-        && (profile.service_version("systemd-networkd").is_some()
-            || profile.service_version("networkd").is_some()
-            || profile.service_version("systemd").is_some()
-            || profile.service_versions.is_empty())
+/// The service version key the platform files `NetworkManager` under when it
+/// is installed and its unit is active.
+const SERVICE_NM: &str = "NetworkManager";
+/// The key for systemd-networkd: `networkctl` installed and
+/// `systemd-networkd.service` active.
+const SERVICE_NETWORKD: &str = "systemd-networkd";
+/// The key for netplan: `netplan` installed and a `*.yaml` in `/etc/netplan`.
+const SERVICE_NETPLAN: &str = "netplan";
+/// The key for ifupdown: `ifup` installed and `networking.service` active.
+const SERVICE_IFUPDOWN: &str = "ifupdown";
+
+/// netplan owns the network when it is present: it renders its YAML down to
+/// networkd or `NetworkManager`, so their files are not the ones to edit
+/// (the precedence of `detent-platform`'s `detect_network_backend`).
+fn netplan_backend_detect(profile: &HostProfile) -> bool {
+    profile.os == Os::Linux && profile.service_version(SERVICE_NETPLAN).is_some()
 }
 
 /// `NetworkManager` keyfiles are the right backend when `NetworkManager`
-/// is detected.
+/// runs and netplan does not render for it.
 fn nm_backend_detect(profile: &HostProfile) -> bool {
-    profile.service_version("NetworkManager").is_some()
-        || profile.service_version("network-manager").is_some()
+    !netplan_backend_detect(profile)
+        && profile.os == Os::Linux
+        && profile.service_version(SERVICE_NM).is_some()
 }
 
-/// ifupdown is the right backend for the classic `/etc/network/interfaces`.
+/// systemd-networkd is the right backend when it runs and neither netplan
+/// nor `NetworkManager` owns the network.
+fn networkd_backend_detect(profile: &HostProfile) -> bool {
+    !netplan_backend_detect(profile)
+        && !nm_backend_detect(profile)
+        && profile.os == Os::Linux
+        && profile.service_version(SERVICE_NETWORKD).is_some()
+}
+
+/// ifupdown's `/etc/network/interfaces` is the right backend when ifupdown
+/// is in use and no other stack owns the network.
 fn ifupdown_backend_detect(profile: &HostProfile) -> bool {
-    profile.os == Os::Linux && profile.service_version("ifupdown").is_some()
-        || (profile.os == Os::Linux
-            && profile.service_version("NetworkManager").is_none()
-            && profile.service_version("systemd-networkd").is_none())
-}
-
-/// netplan is the right backend when netplan YAML is present (authoritative
-/// over networkd/`NetworkManager` per `detent-platform` precedence).
-fn netplan_backend_detect(profile: &HostProfile) -> bool {
-    profile.service_version("netplan").is_some() || profile.service_version("netplan.io").is_some()
+    !netplan_backend_detect(profile)
+        && !nm_backend_detect(profile)
+        && !networkd_backend_detect(profile)
+        && profile.os == Os::Linux
+        && profile.service_version(SERVICE_IFUPDOWN).is_some()
 }
 
 static TARGETS: &[Target] = &[
@@ -1493,6 +1504,31 @@ static TARGETS: &[Target] = &[
     Target {
         path: PathSpec::new("/etc/netplan"),
         kind: TargetKind::DropInDir,
+        mode: 0o600,
+        owner: Owner::Root,
+        backend_detect: netplan_backend_detect,
+    },
+    // The backends above that keep their configuration in a directory get
+    // one file there that detent edits. Appended last so the backup
+    // directories of the targets above keep their ordinals. Apply never
+    // creates a target: the administrator creates the file first.
+    Target {
+        path: PathSpec::new("/etc/systemd/network/10-detent.network"),
+        kind: TargetKind::File,
+        mode: 0o644,
+        owner: Owner::Root,
+        backend_detect: networkd_backend_detect,
+    },
+    Target {
+        path: PathSpec::new("/etc/NetworkManager/system-connections/detent.nmconnection"),
+        kind: TargetKind::File,
+        mode: 0o600,
+        owner: Owner::Root,
+        backend_detect: nm_backend_detect,
+    },
+    Target {
+        path: PathSpec::new("/etc/netplan/90-detent.yaml"),
+        kind: TargetKind::File,
         mode: 0o600,
         owner: Owner::Root,
         backend_detect: netplan_backend_detect,
@@ -2606,8 +2642,34 @@ mod tests {
             descriptor.commit_confirm,
             "network is commit_confirm per ADR-012"
         );
-        assert_eq!(descriptor.targets.len(), 5);
+        assert_eq!(descriptor.targets.len(), 8);
         let paths: Vec<&str> = descriptor.targets.iter().map(|t| t.path.as_str()).collect();
+        // One file per backend; the directory targets keep their ordinals.
+        assert_eq!(
+            paths.get(5..),
+            Some(
+                &[
+                    "/etc/systemd/network/10-detent.network",
+                    "/etc/NetworkManager/system-connections/detent.nmconnection",
+                    "/etc/netplan/90-detent.yaml",
+                ][..]
+            )
+        );
+        for (path, mode) in [
+            ("/etc/systemd/network/10-detent.network", 0o644),
+            (
+                "/etc/NetworkManager/system-connections/detent.nmconnection",
+                0o600,
+            ),
+            ("/etc/netplan/90-detent.yaml", 0o600),
+        ] {
+            assert!(
+                descriptor.targets.iter().any(|t| t.path.as_str() == path
+                    && t.mode == mode
+                    && t.kind == detent_core::descriptor::TargetKind::File),
+                "{path}"
+            );
+        }
         assert!(paths.contains(&"/etc/systemd/network"));
         assert!(paths.contains(&"/etc/NetworkManager/system-connections"));
         assert!(paths.contains(&"/etc/network/interfaces"));
@@ -4101,38 +4163,65 @@ mod tests {
     }
 
     #[test]
-    fn backend_detect_matches_service_presence() {
+    fn backend_detect_follows_the_probed_network_stack_with_its_precedence() {
         use super::{
             ifupdown_backend_detect, netplan_backend_detect, networkd_backend_detect,
             nm_backend_detect,
         };
-        // No services at all: networkd is the fallback on Linux.
-        assert!(networkd_backend_detect(&profile(Os::Linux)));
-        let mut systemd = profile(Os::Linux);
-        systemd
-            .service_versions
-            .insert("systemd-networkd".into(), "255".into());
-        assert!(networkd_backend_detect(&systemd));
-        let mut nm = profile(Os::Linux);
-        nm.service_versions
-            .insert("NetworkManager".into(), "1.0".into());
-        assert!(nm_backend_detect(&nm));
-        assert!(!nm_backend_detect(&profile(Os::Linux)));
-        let mut ifup = profile(Os::Linux);
-        ifup.service_versions
-            .insert("ifupdown".into(), "1.0".into());
-        assert!(ifupdown_backend_detect(&ifup));
-        assert!(!ifupdown_backend_detect(&nm));
-        assert!(ifupdown_backend_detect(&profile(Os::Linux)));
-        let mut netplan = profile(Os::Linux);
-        netplan
-            .service_versions
-            .insert("netplan.io".into(), "1.0".into());
-        assert!(netplan_backend_detect(&netplan));
-        assert!(!netplan_backend_detect(&profile(Os::Linux)));
-        // Non-Linux hosts get nothing but netplan (service presence only).
-        assert!(!networkd_backend_detect(&profile(Os::MacOs)));
-        assert!(!ifupdown_backend_detect(&profile(Os::MacOs)));
+        let host = |os: Os, stacks: &[&str]| {
+            let mut host = profile(os);
+            // Services that are no network stack never pick one.
+            host.service_versions.insert("chrony".into(), "4.6".into());
+            for stack in stacks {
+                host.service_versions.insert((*stack).into(), "1.0".into());
+            }
+            host
+        };
+        let chosen = |host: &HostProfile| -> Vec<&str> {
+            NetworkModule::descriptor()
+                .targets
+                .iter()
+                .filter(|target| target.kind == detent_core::descriptor::TargetKind::File)
+                .filter(|target| (target.backend_detect)(host))
+                .map(|target| target.path.as_str())
+                .collect()
+        };
+        // The D3 containers: Debian ifupdown, Debian and Fedora
+        // NetworkManager, Ubuntu netplan over networkd, Arch networkd.
+        assert_eq!(
+            chosen(&host(Os::Linux, &["ifupdown"])),
+            ["/etc/network/interfaces"]
+        );
+        assert_eq!(
+            chosen(&host(Os::Linux, &["ifupdown", "NetworkManager"])),
+            ["/etc/NetworkManager/system-connections/detent.nmconnection"]
+        );
+        assert_eq!(
+            chosen(&host(Os::Linux, &["netplan", "systemd-networkd"])),
+            ["/etc/netplan/90-detent.yaml"]
+        );
+        assert_eq!(
+            chosen(&host(Os::Linux, &["systemd-networkd"])),
+            ["/etc/systemd/network/10-detent.network"]
+        );
+        assert_eq!(
+            chosen(&host(Os::Linux, &["systemd-networkd", "ifupdown"])),
+            ["/etc/systemd/network/10-detent.network"]
+        );
+        assert_eq!(
+            chosen(&host(Os::Linux, &["netplan", "NetworkManager"])),
+            ["/etc/netplan/90-detent.yaml"]
+        );
+        // No stack in use: nothing is detected.
+        assert_eq!(chosen(&host(Os::Linux, &[])), [] as [&str; 0]);
+        // Not Linux: nothing, whatever is installed.
+        let all = ["netplan", "NetworkManager", "systemd-networkd", "ifupdown"];
+        let mac = host(Os::MacOs, &all);
+        assert!(!netplan_backend_detect(&mac));
+        assert!(!nm_backend_detect(&mac));
+        assert!(!networkd_backend_detect(&mac));
+        assert!(!ifupdown_backend_detect(&mac));
+        assert_eq!(chosen(&mac), [] as [&str; 0]);
     }
 
     #[test]

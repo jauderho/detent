@@ -5,7 +5,7 @@
 //! Generics stay inside the module crate. `detent-ops`, `detent-web` and `detent-ffi`
 //! only ever see `dyn DynModule`, which speaks JSON.
 
-use crate::descriptor::{HostProfile, ModuleDescriptor, ValidationCtx};
+use crate::descriptor::{HostProfile, ModuleDescriptor, PathSpec, ValidationCtx};
 use crate::diag::{Diagnostics, MessageId};
 use crate::doc::Span;
 use crate::version::since_gate;
@@ -199,6 +199,23 @@ pub trait ConfigModule: Send + Sync + 'static {
     /// Secure, host-appropriate defaults.
     fn defaults(profile: &HostProfile) -> Self::Model;
 
+    /// The target a model edits, for a module whose model has one section
+    /// per backend file (resolver: `resolv`, `resolved`, `unbound`).
+    ///
+    /// `Ok(None)` (the default): the model belongs to no one file, and the
+    /// operations layer picks the target by `backend_detect`. A module that
+    /// overrides this returns the path of the target its non-empty section
+    /// belongs to, so an edit of one backend never lands in another
+    /// backend's file.
+    ///
+    /// # Errors
+    ///
+    /// [`EditError::Unsupported`] when the model holds sections of more than
+    /// one target: one apply writes one file.
+    fn model_target(_model: &Self::Model) -> Result<Option<PathSpec>, EditError> {
+        Ok(None)
+    }
+
     /// JSON Pointers (RFC 6901) to fields that hold secrets.
     ///
     /// Empty by default; a module that stores a `password`, `psk` or similar
@@ -263,6 +280,17 @@ pub trait DynModule: Send + Sync {
     /// JSON Pointers to secret-bearing model fields.
     fn secret_pointers(&self) -> &'static [&'static str] {
         &[]
+    }
+
+    /// The target `model_json` edits ([`ConfigModule::model_target`]).
+    /// `Ok(None)` by default: pick the target by `backend_detect`.
+    ///
+    /// # Errors
+    ///
+    /// [`DynError::Model`] when the JSON is not shaped like the model, and
+    /// [`DynError::Edit`] when the model spans more than one target.
+    fn model_target_json(&self, _model_json: &Value) -> Result<Option<PathSpec>, DynError> {
+        Ok(None)
     }
 
     /// The JSON Schema of the module's model, including `x-detent` hints.
@@ -344,6 +372,11 @@ impl<M: ConfigModule> DynModule for Dyn<M> {
 
     fn schema_json(&self) -> Value {
         M::schema()
+    }
+
+    fn model_target_json(&self, model_json: &Value) -> Result<Option<PathSpec>, DynError> {
+        let model = model_from_json::<M>(model_json)?;
+        Ok(M::model_target(&model)?)
     }
 
     fn parse_to_model_json(&self, src: &str) -> Result<Value, DynError> {

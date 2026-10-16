@@ -5,6 +5,20 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-15 - Edits go to the file of their backend (BUGFIX Track D 7)
+
+The D3 run showed one target per module: a resolver `unbound` edit landed in `resolved.conf`, a dhcp Kea edit was refused when dnsmasq was installed (`core-edit-unsupported`), and network always wrote `/etc/network/interfaces`, because no probe filled the keys its `backend_detect` reads.
+
+**Target per model.** New provided method `ConfigModule::model_target` (and `DynModule::model_target_json`, default `Ok(None)`): the file a model's non-empty section belongs to. resolver: `resolv`, `resolved`, `unbound` name their file; dhcp: `dnsmasq`, `kea_v4`, `kea_v6`. A model with sections of two files is refused with `core-edit-unsupported` (one apply writes one file). `detent-ops` `wiring` takes that target for plan and apply; otherwise the first detected target, else the first one.
+
+**File targets only.** `wiring` never chooses a directory target. Before, a detected directory (networkd) made `get` answer `"model":null` and `plan` `target is not a regular file`. network gets one file per directory backend, appended so the backup ordinals of the old targets stay: `/etc/systemd/network/10-detent.network`, `/etc/NetworkManager/system-connections/detent.nmconnection` (0600), `/etc/netplan/90-detent.yaml` (0600). Apply still never creates a target (L-OPS17): the administrator creates the file.
+
+**Probes.** `SERVICE_PROBES` (`detent-platform` `host/mod.rs`) is now a table with an in-use rule. New keys: `NetworkManager` (`NetworkManager --version`, `NetworkManager.service` active), `systemd-networkd` (`networkctl --version`, `systemd-networkd.service` active), `netplan` (installed and a `*.yaml` in `/etc/netplan`; netplan prints no version, so the value is `unknown`), `ifupdown` (`ifup --version`, `networking.service` active). The unit check is `systemctl is-active <unit>` through the existing prober, before any fork; without systemd the installed program counts. No new privilege. network detection follows `detect_network_backend`'s precedence: netplan, then `NetworkManager`, then networkd, then ifupdown; nothing in use detects nothing. dhcp detects dnsmasq and Kea from their probes instead of "Linux". resolver's `NetworkManager` key is now filled, so its `nm_backend_detect` works as written.
+
+**Tests.** `a_model_section_edits_its_own_file_not_the_detected_one` and `a_detected_directory_target_is_passed_by_for_the_file` (`detent-ops/tests/engine.rs`) failed before the engine change with `left: ".../target.conf" right: ".../target.decoy"` and `left: None right: Some(Object {"text": String("v1\n")})`. `each_section_names_its_own_file` (resolver, dhcp), `backend_detect_follows_the_probed_network_stack_with_its_precedence` (replaces `backend_detect_matches_service_presence`, which asserted the old fallback: networkd and ifupdown both detected on a host with no probe), `a_network_stack_counts_only_while_its_unit_is_active`, `without_systemd_an_installed_stack_counts_and_without_systemctl_none_does`, `netplan_counts_with_a_yaml_file_and_has_no_version` (`host/mod.rs`).
+
+**Not done here.** Checks and service bindings are still per module (items 5 and 11, next PRs). A missing file still gives `"model":null` in `get` (item 8, another change). The UI shows the detected backend's file only; another backend's settings are reached by a model with only that section.
+
 ## 2026-10-15 - D3 faults: audit log owner (D4) and resolved.conf in the unit (D6)
 
 **D4 cause.** `FileAudit` created `<state_root>/audit` and `detent-audit.jsonl` with the uid of the writer. A root CLI apply before `serve` made both root-owned (`0700`/`0600`), so the worker (uid `detent`) got `EACCES` and every API apply answered `ops-audit-unavailable`. The reverse order was broken too: `ensure_private` refuses a directory the process does not own, so a root CLI write after `serve` failed on the `detent`-owned directory.

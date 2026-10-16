@@ -122,7 +122,14 @@ from silently applying to no field.
 ### 3.4 Descriptor, `upstream.toml`, fixtures
 
 Targets are `&'static` path templates — a request can select a module, never the
-file it writes. Give each init system its alternatives (`chronyd.service` **and**
+file it writes. The engine reads and writes only `TargetKind::File` targets; a
+backend that keeps its configuration in a directory needs one file target there
+(network: `/etc/netplan/90-detent.yaml`). `backend_detect` reads
+`HostProfile::service_versions`, so a backend can only be detected through a key
+a probe in `detent-platform` (`host/mod.rs` `SERVICE_PROBES`) fills. A model with
+one section per backend file (resolver, dhcp) overrides
+`ConfigModule::model_target` to name the file its non-empty section belongs to;
+the default (`Ok(None)`) lets detection pick. Give each init system its alternatives (`chronyd.service` **and**
 `chrony.service`), and set `commit_confirm: true` only for a module that can lock
 the admin out (ADR-012). Fixtures are real upstream files under
 `fixtures/<id>/<version>/`, plus an `edge/` directory for the hand-made

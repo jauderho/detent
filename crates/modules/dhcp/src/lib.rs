@@ -1656,42 +1656,56 @@ fn check_kea_injection(config: &KeaConfig) -> Result<(), EditError> {
 
 // ------------------------------------------------------------------- descriptor
 
-/// Whether this backend is the right one for `profile`: every target of this
-/// module lives under `/etc` on Linux only (ADR-013).
-fn linux_only(profile: &HostProfile) -> bool {
-    profile.os == Os::Linux
+/// Whether dnsmasq is the backend for `profile`: every target of this
+/// module lives under `/etc` on Linux only (ADR-013), and the dnsmasq
+/// version probe found the daemon.
+fn dnsmasq_detect(profile: &HostProfile) -> bool {
+    profile.os == Os::Linux && profile.service_version("dnsmasq").is_some()
+}
+
+/// Whether Kea is the backend for `profile`: Linux, and the Kea version
+/// probe (`kea-dhcp4 -v`) found the daemon.
+fn kea_detect(profile: &HostProfile) -> bool {
+    profile.os == Os::Linux && profile.service_version("kea").is_some()
 }
 
 /// The files this module owns. Paths are `&'static` templates and are **never**
 /// user-supplied (PLAN §2.3).
+/// `/etc/dnsmasq.conf`, the target of the `dnsmasq` section.
+const DNSMASQ_CONF: PathSpec = PathSpec::new("/etc/dnsmasq.conf");
+/// `/etc/kea/kea-dhcp4.conf`, the target of the `kea_v4` section.
+const KEA4_CONF: PathSpec = PathSpec::new("/etc/kea/kea-dhcp4.conf");
+/// `/etc/kea/kea-dhcp6.conf`, the target of the `kea_v6` section.
+const KEA6_CONF: PathSpec = PathSpec::new("/etc/kea/kea-dhcp6.conf");
+
 static TARGETS: &[Target] = &[
     Target {
-        path: PathSpec::new("/etc/dnsmasq.conf"),
+        path: DNSMASQ_CONF,
         kind: TargetKind::File,
         mode: 0o644,
         owner: Owner::Root,
-        backend_detect: linux_only,
+        backend_detect: dnsmasq_detect,
     },
     Target {
         path: PathSpec::new("/etc/dnsmasq.d"),
         kind: TargetKind::DropInDir,
         mode: 0o755,
         owner: Owner::Root,
-        backend_detect: linux_only,
+        backend_detect: dnsmasq_detect,
     },
     Target {
-        path: PathSpec::new("/etc/kea/kea-dhcp4.conf"),
+        path: KEA4_CONF,
         kind: TargetKind::File,
         mode: 0o644,
         owner: Owner::Root,
-        backend_detect: linux_only,
+        backend_detect: kea_detect,
     },
     Target {
-        path: PathSpec::new("/etc/kea/kea-dhcp6.conf"),
+        path: KEA6_CONF,
         kind: TargetKind::File,
         mode: 0o644,
         owner: Owner::Root,
-        backend_detect: linux_only,
+        backend_detect: kea_detect,
     },
 ];
 
@@ -2027,6 +2041,31 @@ impl ConfigModule for DhcpModule {
 
     fn descriptor() -> &'static ModuleDescriptor {
         &DESCRIPTOR
+    }
+
+    /// Each section belongs to one file: a Kea edit goes to the Kea file
+    /// even when dnsmasq is installed too. A model with no section picks the
+    /// target by detection.
+    fn model_target(model: &Self::Model) -> Result<Option<PathSpec>, EditError> {
+        let sections = [
+            (!model.dnsmasq.is_empty(), DNSMASQ_CONF),
+            (model.kea_v4 != KeaConfig::default(), KEA4_CONF),
+            (model.kea_v6 != KeaConfig::default(), KEA6_CONF),
+        ];
+        let used: Vec<PathSpec> = sections
+            .iter()
+            .filter(|(used, _)| *used)
+            .map(|(_, path)| *path)
+            .collect();
+        match used.as_slice() {
+            [] => Ok(None),
+            [one] => Ok(Some(*one)),
+            _ => Err(EditError::Unsupported {
+                message: "the model holds settings for more than one DHCP file; \
+                          apply one section at a time"
+                    .to_owned(),
+            }),
+        }
     }
 
     /// Total: input that sniffs as JSONC, parses cleanly and carries `Dhcp4`/
@@ -3012,14 +3051,80 @@ mod tests {
         let descriptor = DhcpModule::descriptor();
         assert_eq!(descriptor.id, DhcpModule::ID);
         assert_eq!(descriptor.targets.len(), 4);
-        for target in descriptor.targets {
-            assert!((target.backend_detect)(&profile(Os::Linux, "h")));
-            assert!(!(target.backend_detect)(&profile(Os::MacOs, "h")));
-        }
+        let with = |os: Os, service: &str| {
+            let mut host = profile(os, "h");
+            host.service_versions
+                .insert(service.to_owned(), "1.0".to_owned());
+            host
+        };
+        let detected = |host: &HostProfile| -> Vec<&str> {
+            descriptor
+                .targets
+                .iter()
+                .filter(|target| (target.backend_detect)(host))
+                .map(|target| target.path.as_str())
+                .collect()
+        };
+        assert_eq!(
+            detected(&with(Os::Linux, "dnsmasq")),
+            ["/etc/dnsmasq.conf", "/etc/dnsmasq.d"]
+        );
+        assert_eq!(
+            detected(&with(Os::Linux, "kea")),
+            ["/etc/kea/kea-dhcp4.conf", "/etc/kea/kea-dhcp6.conf"]
+        );
+        assert_eq!(detected(&profile(Os::Linux, "h")), [] as [&str; 0]);
+        assert_eq!(detected(&with(Os::MacOs, "dnsmasq")), [] as [&str; 0]);
+        assert_eq!(detected(&with(Os::MacOs, "kea")), [] as [&str; 0]);
         assert_eq!(descriptor.checks.len(), 3);
         assert_eq!(descriptor.services.len(), 3);
         assert!(descriptor.commit_confirm);
         assert_eq!(descriptor.security_notes.len(), 1);
+    }
+
+    #[test]
+    fn each_section_names_its_own_file() -> Result<(), String> {
+        let target = |model: &Model| DhcpModule::model_target(model).map_err(|e| e.to_string());
+        assert_eq!(target(&Model::default())?, None);
+        let dnsmasq = Model {
+            dnsmasq: vec![DnsmasqSetting {
+                key: "domain-needed".to_owned(),
+                value: None,
+            }],
+            ..Model::default()
+        };
+        assert_eq!(
+            target(&dnsmasq)?.map(detent_core::descriptor::PathSpec::as_str),
+            Some("/etc/dnsmasq.conf")
+        );
+        let kea4 = Model {
+            kea_v4: KeaConfig {
+                valid_lifetime: Some(3600),
+                ..KeaConfig::default()
+            },
+            ..Model::default()
+        };
+        assert_eq!(
+            target(&kea4)?.map(detent_core::descriptor::PathSpec::as_str),
+            Some("/etc/kea/kea-dhcp4.conf")
+        );
+        let kea6 = Model {
+            kea_v6: kea4.kea_v4.clone(),
+            ..Model::default()
+        };
+        assert_eq!(
+            target(&kea6)?.map(detent_core::descriptor::PathSpec::as_str),
+            Some("/etc/kea/kea-dhcp6.conf")
+        );
+        let both = Model {
+            kea_v4: kea4.kea_v4.clone(),
+            ..dnsmasq
+        };
+        assert!(matches!(
+            DhcpModule::model_target(&both),
+            Err(EditError::Unsupported { .. })
+        ));
+        Ok(())
     }
 
     // ----------------------------------------------------------------- schema
