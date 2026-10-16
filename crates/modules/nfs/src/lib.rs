@@ -365,6 +365,8 @@ static NFS_SERVICES: &[ServiceBinding] = &[ServiceBinding {
         bsdrc: &["nfsd"],
     },
     actions: &[ServiceAction::Reload, ServiceAction::Restart],
+    applies_to: &[],
+    reload: &[],
 }];
 
 static NFS_DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {

@@ -152,6 +152,9 @@ pub struct BindingEntry {
     pub module: ModuleId,
     /// The static binding declaration.
     pub binding: &'static ServiceBinding,
+    /// The module's targets whose writes the service reads
+    /// ([`ServiceBinding::applies_to`]), in id order.
+    pub targets: Vec<TargetId>,
 }
 
 /// The monitor's complete view of what it is allowed to do.
@@ -205,14 +208,17 @@ impl Allowlist {
                 )?;
                 targets.push(entry);
             }
-            for check in descriptor.checks {
-                let judged = targets
+            let own = |keep: &dyn Fn(&str) -> bool| -> Vec<TargetId> {
+                targets
                     .get(first_target..)
                     .unwrap_or_default()
                     .iter()
-                    .filter(|entry: &&TargetEntry| check.judges(&entry.path.to_string_lossy()))
+                    .filter(|entry: &&TargetEntry| keep(&entry.path.to_string_lossy()))
                     .map(|entry| entry.id)
-                    .collect();
+                    .collect()
+            };
+            for check in descriptor.checks {
+                let judged = own(&|path| check.judges(path));
                 checks.push(CheckEntry {
                     id: CheckId(narrow_u16(checks.len(), "check")?),
                     module,
@@ -225,6 +231,7 @@ impl Allowlist {
                     id: BindingId(narrow_u16(bindings.len(), "binding")?),
                     module,
                     binding,
+                    targets: own(&|path| binding.serves(path)),
                 });
             }
         }
@@ -466,6 +473,7 @@ impl Allowlist {
                         .copied()
                         .map(ServiceAction::from)
                         .collect(),
+                    targets: entry.targets.clone(),
                 })
                 .collect(),
         }
@@ -596,6 +604,8 @@ mod tests {
             bsdrc: &[],
         },
         actions: &[CoreServiceAction::Restart, CoreServiceAction::Reload],
+        applies_to: &[],
+        reload: &[],
     }];
 
     static HOSTS: ModuleDescriptor = ModuleDescriptor {
@@ -652,6 +662,8 @@ mod tests {
             bsdrc: &[],
         },
         actions: &[],
+        applies_to: &[],
+        reload: &[],
     };
 
     fn build(root: &Path) -> Result<Allowlist, AllowlistError> {
@@ -948,6 +960,28 @@ mod tests {
                 stage_as: None,
             },
         ],
+        services: &[
+            ServiceBinding {
+                units: UnitNames {
+                    systemd: &["second.service"],
+                    openrc: &[],
+                    bsdrc: &[],
+                },
+                actions: &[CoreServiceAction::Restart],
+                applies_to: &[PathSpec::new("/etc/second/second.conf")],
+                reload: &[],
+            },
+            ServiceBinding {
+                units: UnitNames {
+                    systemd: &["any.service"],
+                    openrc: &[],
+                    bsdrc: &[],
+                },
+                actions: &[CoreServiceAction::Restart],
+                applies_to: &[],
+                reload: &[],
+            },
+        ],
         ..module(
             "two",
             &[
@@ -1012,6 +1046,25 @@ mod tests {
         );
         assert_eq!(list.check_candidate_dir(CheckId(99), &profile), None);
         assert_eq!(list.checks_of(ModuleId(99)).count(), 0);
+        // A service reads the files it names, or every target.
+        let served: Vec<(String, Vec<u16>)> = ack
+            .bindings
+            .iter()
+            .filter(|binding| binding.module == two)
+            .map(|binding| {
+                (
+                    binding.unit.clone(),
+                    binding.targets.iter().map(|t| t.get()).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            served,
+            [
+                ("second.service".to_owned(), vec![2]),
+                ("any.service".to_owned(), vec![1, 2, 3]),
+            ]
+        );
         Ok(())
     }
 

@@ -528,11 +528,11 @@ impl OpsEngine {
         let module = find_module(&self.modules, id)?;
         let descriptor = module.descriptor();
         // A module the monitor does not know is not "no service". A module
-        // that declares no service has no binding.
+        // that declares no service has no binding. The service is the one
+        // of the detected file, as for a service action.
         module_id(&self.client, module)?;
-        let binding = self
-            .client
-            .binding_id(descriptor.id)
+        let (binding, _) = wiring(&self.client, descriptor, &self.host.profile, None)?
+            .binding
             .ok_or_else(|| OpsError::NoService {
                 module: descriptor.id.to_owned(),
             })?;
@@ -936,7 +936,7 @@ fn module_id(
 /// Resolve, in one read-only pass over the handshake tables, everything a
 /// module operation needs: which target to read and write, which validators to
 /// run (only those that judge that target), and which service binding to act
-/// on.
+/// on (the first that reads that target).
 ///
 /// Only a file target can be read and written. The target is `model_target`
 /// when the model names one ([`DynModule::model_target_json`]: the file of
@@ -1004,7 +1004,7 @@ fn wiring(
     let binding = client
         .bindings()?
         .iter()
-        .find(|binding| binding.module == module)
+        .find(|binding| binding.module == module && binding.targets.contains(&chosen.id))
         .map(|binding| {
             (
                 binding.id,

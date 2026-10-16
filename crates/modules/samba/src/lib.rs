@@ -345,6 +345,8 @@ static SERVICES: &[ServiceBinding] = &[ServiceBinding {
         bsdrc: &["samba_server"],
     },
     actions: &[ServiceAction::Reload, ServiceAction::Restart],
+    applies_to: &[],
+    reload: &[],
 }];
 
 /// Keep every value here in sync with `upstream.toml`; the unit test below

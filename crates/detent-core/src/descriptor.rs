@@ -175,6 +175,43 @@ pub struct ServiceBinding {
     pub units: UnitNames,
     /// Actions this module may request, most preferred first.
     pub actions: &'static [ServiceAction],
+    /// The targets whose writes this service reads; empty: every target of
+    /// the module. A module with one backend per target binds each service
+    /// to its backend's file, so an ifupdown edit acts on
+    /// `networking.service`, not on `systemd-networkd.service`.
+    ///
+    /// Not serialized, for the same reason as
+    /// [`ModuleDescriptor::reload_unit_files`].
+    #[serde(skip)]
+    #[cfg_attr(feature = "openapi", schema(ignore = true))]
+    pub applies_to: &'static [PathSpec],
+    /// Commands that do [`ServiceAction::Reload`], run in order in place of
+    /// the init system's reload of the unit; empty: the init system reloads
+    /// it. Each argv is fixed here; nothing in it comes from a request.
+    ///
+    /// Not serialized, for the same reason as
+    /// [`ModuleDescriptor::reload_unit_files`].
+    #[serde(skip)]
+    #[cfg_attr(feature = "openapi", schema(ignore = true))]
+    pub reload: &'static [ReloadCommand],
+}
+
+impl ServiceBinding {
+    /// Whether a write to the target at `path` acts on this service.
+    #[must_use]
+    pub fn serves(&self, path: &str) -> bool {
+        self.applies_to.is_empty() || self.applies_to.iter().any(|spec| spec.as_str() == path)
+    }
+}
+
+/// One command of a [`ServiceBinding::reload`]: an absolute program and its
+/// fixed arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReloadCommand {
+    /// Absolute path of the program.
+    pub program: PathSpec,
+    /// Its argument list.
+    pub args: &'static [&'static str],
 }
 
 /// One argument of an [`ExternalCheck`] command line.
@@ -605,6 +642,35 @@ mod tests {
         assert!(!json.to_string().contains("applies_to"), "{json}");
     }
 
+    #[test]
+    fn a_service_reads_every_target_or_only_the_ones_it_names() {
+        static EVERY: ServiceBinding = ServiceBinding {
+            units: UnitNames {
+                systemd: &["a.service"],
+                openrc: &[],
+                bsdrc: &[],
+            },
+            actions: &[ServiceAction::Reload],
+            applies_to: &[],
+            reload: &[super::ReloadCommand {
+                program: PathSpec::new("/usr/bin/true"),
+                args: &["x"],
+            }],
+        };
+        static ONE: ServiceBinding = ServiceBinding {
+            applies_to: &[PathSpec::new("/etc/a.conf")],
+            ..EVERY
+        };
+        assert!(EVERY.serves("/etc/b.conf"));
+        assert!(ONE.serves("/etc/a.conf") && !ONE.serves("/etc/b.conf"));
+        // Behaviour for the monitor, not metadata: the API schema keeps it out.
+        let json = serde_json::to_value(ONE).unwrap_or_default();
+        assert!(
+            json.get("applies_to").is_none() && json.get("reload").is_none(),
+            "{json}"
+        );
+    }
+
     static DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
         id: "chrony",
         display_name_id: MessageId::new("chrony-name"),
@@ -628,6 +694,8 @@ mod tests {
                 ServiceAction::Start,
                 ServiceAction::Stop,
             ],
+            applies_to: &[],
+            reload: &[],
         }],
         checks: CHECKS,
         commit_confirm: false,

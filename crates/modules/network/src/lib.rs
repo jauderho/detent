@@ -67,8 +67,8 @@
 use detent_core::align::{Step, align, replace_all};
 use detent_core::descriptor::{
     ArgTemplate, CheckExpectation, ExternalCheck, FieldHints, HostProfile, ModuleDescriptor, Os,
-    Owner, PathSpec, SecurityImpact, ServiceAction, ServiceBinding, Target, TargetKind, UiGroup,
-    UnitNames, Upstream, ValidationCtx, apply_hints,
+    Owner, PathSpec, ReloadCommand, SecurityImpact, ServiceAction, ServiceBinding, Target,
+    TargetKind, UiGroup, UnitNames, Upstream, ValidationCtx, apply_hints,
 };
 use detent_core::diag::{Diagnostic, Diagnostics, FieldPath, MessageId, Severity};
 use detent_core::doc::{Document, EntryPlan, LineKind};
@@ -1603,14 +1603,42 @@ static CHECKS: &[ExternalCheck] = &[
     },
 ];
 
+/// `NetworkManager` reads a keyfile only when asked, and a restart keeps the
+/// addresses of the old profile: load the file, then activate it again.
+/// `filename` selects the profile by its file, so no argument comes from
+/// the file's contents.
+static NM_RELOAD: &[ReloadCommand] = &[
+    ReloadCommand {
+        program: PathSpec::new("/usr/bin/nmcli"),
+        args: &["connection", "load", NM_FILE.as_str()],
+    },
+    ReloadCommand {
+        program: PathSpec::new("/usr/bin/nmcli"),
+        args: &[
+            "--wait",
+            "20",
+            "connection",
+            "up",
+            "filename",
+            NM_FILE.as_str(),
+        ],
+    },
+];
+
+/// One service per backend, each for its own file, so the service action
+/// and its replay after a rollback act on the stack that reads the file.
 static SERVICES: &[ServiceBinding] = &[
+    // netplan renders for networkd: the daemon-reload (`reload_unit_files`)
+    // runs its generator, then networkd reloads.
     ServiceBinding {
         units: UnitNames {
             systemd: &["systemd-networkd.service"],
             openrc: &["networking", "network"],
             bsdrc: &[],
         },
-        actions: &[ServiceAction::Restart, ServiceAction::Reload],
+        actions: &[ServiceAction::Reload, ServiceAction::Restart],
+        applies_to: &[NETWORKD_FILE, NETPLAN_FILE],
+        reload: &[],
     },
     ServiceBinding {
         units: UnitNames {
@@ -1619,7 +1647,11 @@ static SERVICES: &[ServiceBinding] = &[
             bsdrc: &[],
         },
         actions: &[ServiceAction::Reload, ServiceAction::Restart],
+        applies_to: &[NM_FILE],
+        reload: NM_RELOAD,
     },
+    // Restart first: Debian's `networking.service` declares no reload, and
+    // a restart takes the old address down with the old file.
     ServiceBinding {
         units: UnitNames {
             systemd: &["networking.service"],
@@ -1627,6 +1659,8 @@ static SERVICES: &[ServiceBinding] = &[
             bsdrc: &[],
         },
         actions: &[ServiceAction::Restart, ServiceAction::Reload],
+        applies_to: &[IFUPDOWN_FILE],
+        reload: &[],
     },
 ];
 
@@ -1649,7 +1683,8 @@ static DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     services: SERVICES,
     checks: CHECKS,
     commit_confirm: true,
-    reload_unit_files: false,
+    // netplan's generator writes networkd's files on a daemon-reload.
+    reload_unit_files: true,
     added_mounts: None,
     security_notes: &[MessageId::new("network-note-precedence")],
 };
@@ -4227,6 +4262,64 @@ mod tests {
         assert_eq!(eth2.routes, [] as [crate::Route; 0]);
         assert!(eth2.bridge.is_none());
         Ok(())
+    }
+
+    #[test]
+    fn each_file_acts_on_the_service_of_its_backend() {
+        let services = &NetworkModule::descriptor().services;
+        let unit = |path: super::PathSpec| {
+            services
+                .iter()
+                .find(|binding| binding.serves(path.as_str()))
+                .and_then(|binding| binding.units.systemd.first().copied())
+        };
+        assert_eq!(
+            [
+                super::NETWORKD_FILE,
+                super::NETPLAN_FILE,
+                super::NM_FILE,
+                super::IFUPDOWN_FILE
+            ]
+            .map(unit),
+            [
+                Some("systemd-networkd.service"),
+                Some("systemd-networkd.service"),
+                Some("NetworkManager.service"),
+                Some("networking.service"),
+            ]
+        );
+        // Only NetworkManager reloads by its own commands, and they name its
+        // file, nothing from the file's contents.
+        let reloads: Vec<Vec<&str>> = services
+            .iter()
+            .flat_map(|binding| binding.reload.iter())
+            .map(|command| {
+                std::iter::once(command.program.as_str())
+                    .chain(command.args.iter().copied())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            reloads,
+            [
+                vec![
+                    "/usr/bin/nmcli",
+                    "connection",
+                    "load",
+                    "/etc/NetworkManager/system-connections/detent.nmconnection"
+                ],
+                vec![
+                    "/usr/bin/nmcli",
+                    "--wait",
+                    "20",
+                    "connection",
+                    "up",
+                    "filename",
+                    "/etc/NetworkManager/system-connections/detent.nmconnection"
+                ],
+            ]
+        );
+        assert!(NetworkModule::descriptor().reload_unit_files);
     }
 
     #[test]

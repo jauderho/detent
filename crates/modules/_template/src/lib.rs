@@ -211,6 +211,8 @@ static SERVICES: &[ServiceBinding] = &[ServiceBinding {
         bsdrc: &["TEMPLATE"],
     },
     actions: &[ServiceAction::Reload, ServiceAction::Restart],
+    applies_to: &[],
+    reload: &[],
 }];
 
 /// TODO(descriptor): keep every value here in sync with `upstream.toml`; the unit

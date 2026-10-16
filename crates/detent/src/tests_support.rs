@@ -131,6 +131,8 @@ pub fn descriptor(path: &Path) -> &'static ModuleDescriptor {
             bsdrc: &["fake"],
         },
         actions: &[CoreServiceAction::Restart],
+        applies_to: &[],
+        reload: &[],
     }];
     static CHECKS: &[ExternalCheck] = &[];
 

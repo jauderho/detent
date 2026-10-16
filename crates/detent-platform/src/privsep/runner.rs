@@ -529,6 +529,8 @@ mod tests {
             bsdrc: &[],
         },
         actions: &[CoreServiceAction::Restart],
+        applies_to: &[],
+        reload: &[],
     }];
     /// Its only target is a drop-in directory, so its candidates are staged.
     static MODULE: ModuleDescriptor = ModuleDescriptor {
@@ -908,6 +910,8 @@ mod tests {
                 bsdrc: &[],
             },
             actions: &[CoreServiceAction::Restart],
+            applies_to: &[],
+            reload: &[],
         };
         with_runner(&fx, |client| {
             assert!(matches!(

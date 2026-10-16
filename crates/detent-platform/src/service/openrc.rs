@@ -13,11 +13,12 @@
 //! module was developed and unit-tested against a fake process runner on
 //! macOS; it has not been exercised against a real `rc-service` binary.
 
-use detent_core::descriptor::{ServiceAction, UnitNames};
+use detent_core::descriptor::{ReloadCommand, ServiceAction, UnitNames};
 
 use super::exec::{self, ACTION_TIMEOUT, ProcessRunner, RealProcessRunner, STATUS_TIMEOUT};
 use super::{
-    ActionOutcome, AltCache, ServiceError, ServiceManager, ServiceStatus, State, validate_unit_name,
+    ActionOutcome, AltCache, ServiceError, ServiceManager, ServiceStatus, State,
+    run_reload_commands, validate_unit_name,
 };
 
 /// Absolute paths that dispatch `OpenRC` service commands, most common
@@ -142,6 +143,10 @@ impl ServiceManager for OpenRcManager {
             active,
             detail,
         })
+    }
+
+    fn reload_by(&self, commands: &[ReloadCommand]) -> Result<ActionOutcome, ServiceError> {
+        run_reload_commands(self.runner.as_ref(), commands)
     }
 
     fn reload_unit_files(&self) -> Result<String, ServiceError> {

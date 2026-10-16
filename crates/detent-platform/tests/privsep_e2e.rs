@@ -101,6 +101,8 @@ fn build_descriptor(target_path: &Path) -> &'static ModuleDescriptor {
             bsdrc: &[],
         },
         actions,
+        applies_to: &[],
+        reload: &[],
     }])
     .as_slice();
     let args: &'static [ArgTemplate] =

@@ -1751,6 +1751,8 @@ static SERVICES: &[ServiceBinding] = &[
             bsdrc: &[],
         },
         actions: &[ServiceAction::Reload, ServiceAction::Restart],
+        applies_to: &[],
+        reload: &[],
     },
     ServiceBinding {
         units: UnitNames {
@@ -1759,6 +1761,8 @@ static SERVICES: &[ServiceBinding] = &[
             bsdrc: &[],
         },
         actions: &[ServiceAction::Restart],
+        applies_to: &[],
+        reload: &[],
     },
     ServiceBinding {
         units: UnitNames {
@@ -1767,6 +1771,8 @@ static SERVICES: &[ServiceBinding] = &[
             bsdrc: &[],
         },
         actions: &[ServiceAction::Restart],
+        applies_to: &[],
+        reload: &[],
     },
 ];
 

@@ -1166,6 +1166,8 @@ async fn system_apply_starts_the_update_or_reports_one_running() -> R {
                         bsdrc: &[],
                     },
                     actions: &[],
+                    applies_to: &[],
+                    reload: &[],
                 },
                 detent_core::descriptor::ServiceAction::Restart,
             )

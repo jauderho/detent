@@ -874,6 +874,8 @@ static RESOLVER_SERVICES: &[detent_core::descriptor::ServiceBinding] = &[
             bsdrc: &[],
         },
         actions: &[detent_core::descriptor::ServiceAction::Restart],
+        applies_to: &[],
+        reload: &[],
     },
     detent_core::descriptor::ServiceBinding {
         units: detent_core::descriptor::UnitNames {
@@ -885,6 +887,8 @@ static RESOLVER_SERVICES: &[detent_core::descriptor::ServiceBinding] = &[
             detent_core::descriptor::ServiceAction::Reload,
             detent_core::descriptor::ServiceAction::Restart,
         ],
+        applies_to: &[],
+        reload: &[],
     },
 ];
 
