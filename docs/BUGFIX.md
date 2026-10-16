@@ -422,12 +422,12 @@ deferred by the owner.
    exits 0 while `plan` and `apply` exit 1. A host with the stock file cannot
    edit any setting. Decide: allow the stock include lines, or make `validate`
    exit non-zero.
-10. **network ifupdown rewrite drops the `source` line.** On Debian 13, `plan`
+10. ~~**network ifupdown rewrite drops the `source` line.** On Debian 13, `plan`
     of a one-interface model shows `-source /etc/network/interfaces.d/*`
     replaced by `+auto mgmt0`, `+iface mgmt0 inet static`, `+	address
     192.0.2.1/24`. The include of `interfaces.d` is lost, so a stanza kept
     there stops applying. Test: a file with `source` plus a model edit must
-    keep the `source` line.
+    keep the `source` line.~~ Done 2026-10-15 (`PROGRESS.md`).
 11. **network service action and rollback use the wrong unit.** The first
     service binding is `systemd-networkd.service`, whatever stack owns the
     file. Debian ifupdown: apply with `service_action: reload` leaves `mgmt0`
