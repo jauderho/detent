@@ -49,7 +49,9 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::SystemTime;
 
-use detent_core::descriptor::{InitSystem, ServiceAction, ServiceBinding, UnitNames};
+use detent_core::descriptor::{
+    InitSystem, ReloadCommand, ServiceAction, ServiceBinding, UnitNames,
+};
 
 pub use launchd::LaunchdManager;
 pub use openrc::OpenRcManager;
@@ -276,7 +278,8 @@ impl From<UnitStatus> for ServiceStatus {
 /// The result of a [`ServiceManager::act`] call.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ActionOutcome {
-    /// The unit name actually resolved and acted on.
+    /// The unit name actually resolved and acted on; empty for a reload by
+    /// commands ([`ServiceManager::reload_by`]), which names no unit.
     pub unit: String,
     /// The action that was applied.
     pub action: ServiceAction,
@@ -352,6 +355,23 @@ pub trait ServiceManager: Send + Sync {
     /// on backends (launchd) that do not implement mutation.
     fn act(&self, units: &UnitNames, action: ServiceAction) -> Result<ActionOutcome, ServiceError>;
 
+    /// Reloads a service by its binding's own commands
+    /// ([`ServiceBinding::reload`]): runs each in order and stops at the
+    /// first that fails. As for [`ServiceManager::act`], a command that ran
+    /// and failed is an outcome with `succeeded: false`, not an error.
+    ///
+    /// # Errors
+    ///
+    /// [`ServiceError::Unavailable`] when a program is not installed,
+    /// [`ServiceError::Failed`] when one could not be started, and
+    /// [`ServiceError::Unsupported`] on backends (launchd) that do not
+    /// implement mutation.
+    fn reload_by(&self, _commands: &[ReloadCommand]) -> Result<ActionOutcome, ServiceError> {
+        Err(ServiceError::Unsupported(
+            "this service manager cannot run reload commands".to_owned(),
+        ))
+    }
+
     /// Asks the init system to re-read its unit files, for a module whose
     /// descriptor sets `reload_unit_files` (`mounts`: `/etc/fstab`).
     ///
@@ -425,6 +445,59 @@ pub trait ServiceManager: Send + Sync {
     }
 }
 
+/// Runs a binding's reload `commands` through `runner`
+/// ([`ServiceManager::reload_by`]). Each program is an absolute path fixed
+/// in a module descriptor and each argument a literal, under the same
+/// discipline as every other command (`exec`).
+fn run_reload_commands(
+    runner: &dyn exec::ProcessRunner,
+    commands: &[ReloadCommand],
+) -> Result<ActionOutcome, ServiceError> {
+    let mut done = Vec::with_capacity(commands.len());
+    for command in commands {
+        let program = command.program.as_str();
+        if !program.starts_with('/') || !runner.exists(program) {
+            return Err(ServiceError::Unavailable(format!(
+                "{program} was not found on this host"
+            )));
+        }
+        let args: Vec<String> = command.args.iter().map(|arg| (*arg).to_owned()).collect();
+        let line = std::iter::once(program)
+            .chain(command.args.iter().copied())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let output = runner
+            .run(program, &args, exec::ACTION_TIMEOUT)
+            .map_err(|err| ServiceError::Failed(err.to_string()))?;
+        if output.timed_out || output.status != Some(0) {
+            let detail = if output.timed_out {
+                format!("{line} timed out")
+            } else {
+                format!(
+                    "{line} exited {:?}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            };
+            return Ok(ActionOutcome {
+                unit: String::new(),
+                action: ServiceAction::Reload,
+                succeeded: false,
+                active: false,
+                detail,
+            });
+        }
+        done.push(line);
+    }
+    Ok(ActionOutcome {
+        unit: String::new(),
+        action: ServiceAction::Reload,
+        succeeded: true,
+        active: true,
+        detail: format!("{} succeeded", done.join("; ")),
+    })
+}
+
 /// A [`ServiceManager`] for hosts with no supported init system.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NullManager;
@@ -491,7 +564,11 @@ impl ServiceControl for ServiceControlAdapter {
         binding: &ServiceBinding,
         action: ServiceAction,
     ) -> Result<ServiceOutcome, HookError> {
-        let outcome = self.0.act(&binding.units, action)?;
+        let outcome = if action == ServiceAction::Reload && !binding.reload.is_empty() {
+            self.0.reload_by(binding.reload)?
+        } else {
+            self.0.act(&binding.units, action)?
+        };
         Ok(ServiceOutcome {
             binding: BindingId(0),
             active: outcome.active,
@@ -726,6 +803,38 @@ mod tests {
     }
 
     #[test]
+    fn a_binding_with_reload_commands_reloads_by_them_and_acts_otherwise() {
+        use crate::privsep::monitor::{HookError, ServiceControl};
+        use detent_core::descriptor::{PathSpec, ReloadCommand};
+        static RELOAD: &[ReloadCommand] = &[ReloadCommand {
+            program: PathSpec::new("/usr/bin/nmcli"),
+            args: &["connection", "reload"],
+        }];
+        let binding = ServiceBinding {
+            units: UnitNames {
+                systemd: &["NetworkManager.service"],
+                openrc: &[],
+                bsdrc: &[],
+            },
+            actions: &[ServiceAction::Reload, ServiceAction::Restart],
+            applies_to: &[],
+            reload: RELOAD,
+        };
+        // `AlwaysActive` acts on any unit but has no `reload_by`: a reload
+        // that reaches the manager's default answers unsupported.
+        let adapter = ServiceControlAdapter(Box::new(AlwaysActive));
+        assert!(matches!(
+            adapter.service(&binding, ServiceAction::Reload),
+            Err(HookError::Unavailable(message)) if message.contains("reload commands")
+        ));
+        assert!(
+            adapter
+                .service(&binding, ServiceAction::Restart)
+                .is_ok_and(|outcome| outcome.detail == "delegated")
+        );
+    }
+
+    #[test]
     fn service_control_adapter_delegates_to_the_wrapped_manager() {
         use crate::privsep::monitor::ServiceControl;
         let binding = ServiceBinding {
@@ -735,6 +844,8 @@ mod tests {
                 bsdrc: &[],
             },
             actions: &[ServiceAction::Restart],
+            applies_to: &[],
+            reload: &[],
         };
         let adapter = ServiceControlAdapter(Box::new(AlwaysActive));
         let result = adapter.service(&binding, ServiceAction::Restart);
@@ -789,6 +900,8 @@ mod tests {
                 bsdrc: &[],
             },
             actions: &[ServiceAction::Restart],
+            applies_to: &[],
+            reload: &[],
         }
     }
 
@@ -961,6 +1074,8 @@ mod tests {
                 bsdrc: &[],
             },
             actions: &[ServiceAction::Restart],
+            applies_to: &[],
+            reload: &[],
         };
         let adapter = ServiceControlAdapter(Box::new(NullManager));
         assert!(adapter.service(&binding, ServiceAction::Restart).is_err());

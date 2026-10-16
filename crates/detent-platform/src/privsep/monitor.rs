@@ -2148,6 +2148,8 @@ mod tests {
                 bsdrc: &[],
             },
             actions,
+            applies_to: &[],
+            reload: &[],
         }])
         .as_slice();
         let args: &'static [ArgTemplate] =
