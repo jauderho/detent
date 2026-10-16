@@ -42,8 +42,9 @@ use detent_platform::privsep::monitor::{
     CheckRunner, ExitReason, HookError, Hooks, Monitor, MonitorError, ServiceControl,
 };
 use detent_platform::privsep::proto::{
-    BackupId, CheckId, CheckOutcome, CommitId, MountOutcome, MountState, ProtoError, Request,
-    Response, ServiceAction as WireServiceAction, ServiceOutcome, TargetId, UnitState, UnitStatus,
+    BackupId, BindingId, CheckId, CheckOutcome, CommitId, MountOutcome, MountState, PendingService,
+    ProtoError, Request, Response, ServiceAction as WireServiceAction, ServiceOutcome, TargetId,
+    UnitState, UnitStatus,
 };
 use detent_platform::privsep::transport::Channel;
 use detent_platform::privsep::worker::{Client, ClientError};
@@ -211,6 +212,9 @@ struct Shape {
     commit_confirm: bool,
     /// Declare a service binding (restart only).
     service: bool,
+    /// With `Targets::DecoyThenReal`, declare one binding per file instead:
+    /// `fake.service` for the real file, then `decoy.service` for the decoy.
+    per_target_services: bool,
     /// Declare one external check.
     check: Check,
     /// Which targets to declare.
@@ -247,7 +251,28 @@ fn build_descriptor(id: &'static str, target: &Path, shape: Shape) -> &'static M
     }
     let targets: &'static [Target] = leak(list).as_slice();
 
-    let services: &'static [ServiceBinding] = if shape.service {
+    let decoy_path = || {
+        PathSpec::new(leak_str(
+            target.with_extension("decoy").display().to_string(),
+        ))
+    };
+    let services: &'static [ServiceBinding] = if shape.per_target_services {
+        let binding = |unit: &'static str, file: PathSpec| ServiceBinding {
+            units: UnitNames {
+                systemd: leak(vec![unit]).as_slice(),
+                openrc: &[],
+                bsdrc: &[],
+            },
+            actions: &[CoreServiceAction::Restart],
+            applies_to: leak(vec![file]).as_slice(),
+            reload: &[],
+        };
+        leak(vec![
+            binding("fake.service", real.path),
+            binding("decoy.service", decoy_path()),
+        ])
+        .as_slice()
+    } else if shape.service {
         leak(vec![ServiceBinding {
             units: UnitNames {
                 systemd: &["fake.service"],
@@ -255,6 +280,8 @@ fn build_descriptor(id: &'static str, target: &Path, shape: Shape) -> &'static M
                 bsdrc: &["fake"],
             },
             actions: leak(vec![CoreServiceAction::Restart]).as_slice(),
+            applies_to: &[],
+            reload: &[],
         }])
         .as_slice()
     } else {
@@ -263,10 +290,7 @@ fn build_descriptor(id: &'static str, target: &Path, shape: Shape) -> &'static M
 
     let applies_to: &'static [PathSpec] = match shape.check {
         Check::None | Check::Every => &[],
-        Check::Decoy => leak(vec![PathSpec::new(leak_str(
-            target.with_extension("decoy").display().to_string(),
-        ))])
-        .as_slice(),
+        Check::Decoy => leak(vec![decoy_path()]).as_slice(),
     };
     let checks: &'static [ExternalCheck] = match shape.check {
         Check::None => &[],
@@ -1018,6 +1042,97 @@ fn a_model_section_edits_its_own_file_not_the_detected_one() -> TestResult {
     ));
     assert_eq!(fx.contents()?, "real\n");
     assert_eq!(std::fs::read_to_string(&decoy)?, "edited\n");
+    fx.finish()
+}
+
+#[test]
+fn a_write_acts_on_the_service_of_the_file_it_writes() -> TestResult {
+    let mut fx = harness(
+        b"real\n",
+        Setup {
+            shape: Shape {
+                commit_confirm: true,
+                targets: Targets::DecoyThenReal,
+                per_target_services: true,
+                ..Shape::default()
+            },
+            hooks: true,
+            record: true,
+            ..Setup::default()
+        },
+    )?;
+    let decoy = fx.target.with_extension("decoy");
+    std::fs::write(&decoy, b"decoy\n")?;
+    let model = json!({"text": "edited\n", "target": decoy.display().to_string()});
+    let OpOutcome::Planned(plan) = fx.run(Operation::Plan {
+        id: MODULE.to_owned(),
+        model: model.clone(),
+    })?
+    else {
+        return Err("Plan must answer with a plan report".into());
+    };
+    let units: Vec<&str> = plan
+        .affected_services
+        .iter()
+        .map(|service| service.unit.as_str())
+        .collect();
+    assert_eq!(units, ["decoy.service"]);
+    let OpOutcome::Applied(report) = fx.run(Operation::Apply {
+        id: MODULE.to_owned(),
+        model,
+        expected_hash: None,
+        service_action: Some(ServiceCommand::Restart),
+        confirm: None,
+    })?
+    else {
+        return Err("Apply must answer with an apply report".into());
+    };
+    assert_eq!(
+        report.service.map(|service| service.unit),
+        Some("decoy.service".to_owned())
+    );
+    // The rollback replays the action on the same service.
+    let armed: Vec<Option<PendingService>> = fx
+        .requests()
+        .into_iter()
+        .filter_map(|request| match request {
+            Request::StartConfirmTimer { service, .. } => Some(service),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        armed,
+        [Some(PendingService {
+            binding: BindingId(1),
+            action: WireServiceAction::Restart,
+        })]
+    );
+    // An action and a status read with no model take the service of the
+    // detected file.
+    let OpOutcome::Serviced(serviced) = fx.run(Operation::ServiceAction {
+        id: MODULE.to_owned(),
+        action: ServiceCommand::Restart,
+    })?
+    else {
+        return Err("ServiceAction must answer with a service report".into());
+    };
+    assert_eq!(serviced.unit, "fake.service");
+    let OpOutcome::Status(status) = fx.run(Operation::ServiceStatus {
+        id: MODULE.to_owned(),
+    })?
+    else {
+        return Err("ServiceStatus must answer with a status".into());
+    };
+    assert_eq!(status.unit, "fake.service");
+    let bindings: Vec<BindingId> = fx
+        .requests()
+        .into_iter()
+        .filter_map(|request| match request {
+            Request::Service { binding, .. } => Some(binding),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bindings, [BindingId(1), BindingId(0), BindingId(0)]);
     fx.finish()
 }
 

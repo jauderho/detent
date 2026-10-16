@@ -5,6 +5,20 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-15 - The service of the written file acts and replays (BUGFIX Track D 11)
+
+The D3 run showed every network service action, and its replay after a rollback, act on `systemd-networkd.service`, the module's first binding, whatever stack read the file: Debian ifupdown kept the bad address after the rollback, and Fedora (no networkd) failed with `no known unit name resolved`.
+
+**Change.** `ServiceBinding::applies_to` (not serialized): the targets whose writes a service reads; empty: every target. The allow-list resolves it (`BindingInfo::targets` in `HelloAck`; `PROTO_VERSION` 4). The engine takes the first binding that reads the chosen file, for plan (`affected_services`), apply, the commit-confirm `PendingService` that the monitor replays after a rollback, a service action and a status read. network: `networking.service` (restart first; Debian's unit has no reload) for `/etc/network/interfaces`; `NetworkManager.service` for `detent.nmconnection`; `systemd-networkd.service` (reload first) for `10-detent.network` and `90-detent.yaml`.
+
+**Reload commands.** `ServiceBinding::reload` (not serialized): fixed commands that do `Reload` in place of the init system's reload. The runner runs them from its own allow-list for a binding id and a declared action, as before; nothing in the argv comes from a request or from the file. Only `NetworkManager` uses it: a restart keeps the old profile's address (proven in a Fedora container), so a reload runs `/usr/bin/nmcli connection load /etc/NetworkManager/system-connections/detent.nmconnection`, then `/usr/bin/nmcli --wait 20 connection up filename /etc/NetworkManager/system-connections/detent.nmconnection` (NM 1.56; the address follows the file in both directions). `ServiceManager::reload_by` (systemd and `OpenRC`; launchd: unsupported): stops at the first command that fails and reports it as an outcome, as a failed `systemctl` action is.
+
+**netplan.** network now declares `reload_unit_files`: the daemon-reload after a write, and after a rollback before the replay, runs netplan's systemd generator, which writes networkd's files in `/run`; the networkd reload then reads them. `netplan apply` is not used: it writes `/run` itself, which the unit's `ProtectSystem=strict` refuses.
+
+**No widening.** No seccomp, Landlock, capability or unit change. The polkit rule loses `reload` for `NetworkManager.service` (no longer used). Capability-user mode: `nmcli` runs as `detent`, and `NetworkManager`'s own polkit actions are not granted, so an NM reload fails there (open; a restart still works).
+
+**Tests.** `a_write_acts_on_the_service_of_the_file_it_writes` (`detent-ops/tests/engine.rs`) failed before the engine change with `left: ["fake.service"] right: ["decoy.service"]`. `each_file_acts_on_the_service_of_its_backend` (network), `a_service_reads_every_target_or_only_the_ones_it_names` (core), the binding rows of `a_check_judges_its_own_files_and_its_candidate_goes_beside_the_first` (`allowlist.rs`), `a_binding_with_reload_commands_reloads_by_them_and_acts_otherwise` (`service/mod.rs`), `a_reload_by_commands_runs_each_exact_argv_in_order`, `a_reload_by_commands_stops_at_the_first_that_fails`, `a_reload_by_commands_needs_every_program_and_runs_nothing_without` (`tests/service_manager.rs`); `the_polkit_rule_grants_each_module_unit_its_binding_verbs` leaves out `reload` of a binding with its own commands.
+
 ## 2026-10-15 - ifupdown edits keep `source` lines (BUGFIX Track D 10)
 
 The D3 run on Debian 13 showed `plan` replace `source /etc/network/interfaces.d/*` with the new stanza: the classifier read `source` and `source-directory` as directives, so the minimal edit aligned the rendered stanza over them.

@@ -1263,6 +1263,8 @@ mod tests {
                 bsdrc: &[],
             },
             actions: &[detent_core::descriptor::ServiceAction::Restart],
+            applies_to: &[],
+            reload: &[],
         }];
 
     /// A unit's state is read by the runner, never by the worker or the

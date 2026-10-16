@@ -353,10 +353,16 @@ fn module_unit_verbs() -> std::collections::BTreeMap<String, Vec<String>> {
         for binding in module.descriptor().services {
             for unit in binding.units.systemd {
                 let verbs = map.entry((*unit).to_owned()).or_default();
+                // A binding that reloads by its own commands never runs
+                // `systemctl reload`.
                 verbs.extend(
                     binding
                         .actions
                         .iter()
+                        .filter(|action| {
+                            **action != detent_core::descriptor::ServiceAction::Reload
+                                || binding.reload.is_empty()
+                        })
                         .map(|action| verb(*action).to_owned()),
                 );
                 verbs.sort();

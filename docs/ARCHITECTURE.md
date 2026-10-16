@@ -243,6 +243,9 @@ confined monitor does not start programs itself.
   or other write bit, not a symlink). A module with no file target uses the staging
   directory.
 - A `Service` action must be declared by the binding; `Status` is refused.
+  A `Reload` of a binding that declares `ServiceBinding::reload` runs those
+  commands in order (fixed argv from the descriptor) instead of the init
+  system's reload.
 - `StartUpdate { tag }` (E16): the runner checks the tag again
   (`is_release_tag`), lists the instances of the template unit
   `detent-update@.service` that are active or have a job (`systemctl
@@ -310,6 +313,16 @@ client ─▶ worker: /api/v1 handler ─▶ Operation::Apply ─▶ OpsEngine (
   (`detent-ops/tests/engine.rs`),
   `a_check_judges_its_own_files_and_its_candidate_goes_beside_the_first`
   (`allowlist.rs`).
+- The service action, its replay after a rollback, and the status read act on
+  the first binding that reads the chosen file (`ServiceBinding::applies_to`,
+  empty: every target; `BindingInfo::targets` in `HelloAck`, `PROTO_VERSION`
+  4). network: `networking.service` for `/etc/network/interfaces`,
+  `NetworkManager.service` (reload: `nmcli connection load` and
+  `nmcli --wait 20 connection up filename` on `detent.nmconnection`),
+  `systemd-networkd.service` for `10-detent.network` and `90-detent.yaml`;
+  the module declares `reload_unit_files`, so netplan's generator runs before
+  networkd reloads. Proof: `a_write_acts_on_the_service_of_the_file_it_writes`
+  (`detent-ops/tests/engine.rs`).
 - The deny-list (step 5b) compares normalised name/value instances as a
   multiset: a directive already in the file may stay unchanged; a new one, or
   a changed value, is refused. It is best effort; see §10.

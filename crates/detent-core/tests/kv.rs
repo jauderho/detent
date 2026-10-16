@@ -84,6 +84,8 @@ static KV_DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
             bsdrc: &["kv"],
         },
         actions: &[ServiceAction::Reload],
+        applies_to: &[],
+        reload: &[],
     }],
     checks: &[ExternalCheck {
         program: PathSpec::new("/usr/bin/true"),

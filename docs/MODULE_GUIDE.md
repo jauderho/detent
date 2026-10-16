@@ -129,7 +129,13 @@ backend that keeps its configuration in a directory needs one file target there
 a probe in `detent-platform` (`host/mod.rs` `SERVICE_PROBES`) fills. A model with
 one section per backend file (resolver, dhcp) overrides
 `ConfigModule::model_target` to name the file its non-empty section belongs to;
-the default (`Ok(None)`) lets detection pick. Give each init system its alternatives (`chronyd.service` **and**
+the default (`Ok(None)`) lets detection pick. A module with one backend per file
+binds each check (`ExternalCheck::applies_to`) and each service
+(`ServiceBinding::applies_to`) to the files of its backend; empty means every
+target. A service that the init system cannot reload correctly lists its own
+commands in `ServiceBinding::reload` (fixed argv, nothing from a request or the
+file; network's `NetworkManager` runs `nmcli connection load` and `nmcli
+connection up filename` on its file). Give each init system its alternatives (`chronyd.service` **and**
 `chrony.service`), and set `commit_confirm: true` only for a module that can lock
 the admin out (ADR-012). Fixtures are real upstream files under
 `fixtures/<id>/<version>/`, plus an `edge/` directory for the hand-made

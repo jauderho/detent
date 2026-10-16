@@ -70,7 +70,10 @@ use detent_core::descriptor::{ServiceAction as CoreServiceAction, TargetKind};
 ///
 /// [`CheckInfo::targets`] (BUGFIX Track D 5) appends a field inside
 /// [`HelloAck`], which changes the wire shape: the version is `3`.
-pub const PROTO_VERSION: u16 = 3;
+///
+/// [`BindingInfo::targets`] (BUGFIX Track D 11) does the same: the version
+/// is `4`.
+pub const PROTO_VERSION: u16 = 4;
 /// Largest encoded message accepted in either direction, in bytes.
 ///
 /// The largest legitimate payload is a configuration file, and 1 MiB is far
@@ -562,6 +565,9 @@ pub struct BindingInfo {
     pub unit: String,
     /// Actions the module declared, in preference order.
     pub actions: Vec<ServiceAction>,
+    /// The targets whose writes the service reads: the engine acts on it
+    /// only after a write to one of them.
+    pub targets: Vec<TargetId>,
 }
 
 /// One module as advertised in [`HelloAck`].
@@ -1181,6 +1187,7 @@ mod tests {
                 module: ModuleId(0),
                 unit: "chronyd.service".to_owned(),
                 actions: vec![ServiceAction::Restart, ServiceAction::Reload],
+                targets: vec![TargetId(0)],
             }],
         })
     }

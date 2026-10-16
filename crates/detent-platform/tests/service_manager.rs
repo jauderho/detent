@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use detent_core::descriptor::{ServiceAction, UnitNames};
+use detent_core::descriptor::{PathSpec, ReloadCommand, ServiceAction, UnitNames};
 use detent_platform::service::exec::{
     ACTION_TIMEOUT, ProcessError, ProcessOutput, ProcessRunner, STATUS_TIMEOUT,
 };
@@ -317,6 +317,114 @@ fn other_init_systems_have_no_unit_files_to_reload_and_run_nothing() -> TestResu
         ); 0]
     );
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Reload by a binding's own commands (BUGFIX Track D 11)
+// ---------------------------------------------------------------------------
+
+static RELOAD: &[ReloadCommand] = &[
+    ReloadCommand {
+        program: PathSpec::new("/usr/bin/nmcli"),
+        args: &["connection", "load", "/etc/x.nmconnection"],
+    },
+    ReloadCommand {
+        program: PathSpec::new("/usr/bin/nmcli"),
+        args: &["connection", "up", "filename", "/etc/x.nmconnection"],
+    },
+];
+
+fn reload_calls() -> Vec<(String, Vec<String>, Duration)> {
+    RELOAD
+        .iter()
+        .map(|command| {
+            (
+                command.program.as_str().to_owned(),
+                owned(command.args),
+                ACTION_TIMEOUT,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_reload_by_commands_runs_each_exact_argv_in_order() -> TestResult {
+    for manager in ["systemd", "openrc"] {
+        let fake = Arc::new(FakeRunner::new().existing(&["/usr/bin/nmcli"]));
+        let runner = Box::new(SharedFake(Arc::clone(&fake)));
+        let outcome = if manager == "systemd" {
+            SystemdManager::with_runner(runner).reload_by(RELOAD)?
+        } else {
+            OpenRcManager::with_runner(runner).reload_by(RELOAD)?
+        };
+        assert!(
+            outcome.succeeded && outcome.active,
+            "{manager}: {outcome:?}"
+        );
+        assert_eq!(outcome.action, ServiceAction::Reload);
+        assert_eq!(
+            outcome.detail,
+            "/usr/bin/nmcli connection load /etc/x.nmconnection; \
+             /usr/bin/nmcli connection up filename /etc/x.nmconnection succeeded"
+        );
+        assert_eq!(fake.calls(), reload_calls(), "{manager}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_reload_by_commands_stops_at_the_first_that_fails() -> TestResult {
+    let fake = Arc::new(
+        FakeRunner::new()
+            .existing(&["/usr/bin/nmcli"])
+            .respond(output_fail(4)),
+    );
+    let manager = SystemdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
+    let outcome = manager.reload_by(RELOAD)?;
+    assert!(!outcome.succeeded && !outcome.active);
+    assert_eq!(
+        outcome.detail,
+        "/usr/bin/nmcli connection load /etc/x.nmconnection exited Some(4): boom"
+    );
+    assert_eq!(fake.calls().len(), 1);
+    let fake = Arc::new(
+        FakeRunner::new()
+            .existing(&["/usr/bin/nmcli"])
+            .respond(output_ok(""))
+            .respond(output_timeout()),
+    );
+    let manager = SystemdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
+    let outcome = manager.reload_by(RELOAD)?;
+    assert!(!outcome.succeeded);
+    assert!(outcome.detail.ends_with("timed out"), "{}", outcome.detail);
+    Ok(())
+}
+
+#[test]
+fn a_reload_by_commands_needs_every_program_and_runs_nothing_without() {
+    let fake = Arc::new(FakeRunner::new());
+    let manager = SystemdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
+    assert!(matches!(
+        manager.reload_by(RELOAD),
+        Err(ServiceError::Unavailable(message)) if message.contains("/usr/bin/nmcli")
+    ));
+    // A program that is no absolute path is never run, even if present.
+    let fake = Arc::new(FakeRunner::new().existing(&["nmcli"]));
+    let manager = SystemdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
+    let relative = [ReloadCommand {
+        program: PathSpec::new("nmcli"),
+        args: &[],
+    }];
+    assert!(matches!(
+        manager.reload_by(&relative),
+        Err(ServiceError::Unavailable(_))
+    ));
+    assert_eq!(fake.calls().len(), 0);
+    let launchd = LaunchdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
+    assert!(matches!(
+        launchd.reload_by(RELOAD),
+        Err(ServiceError::Unsupported(_))
+    ));
 }
 
 // ---------------------------------------------------------------------------

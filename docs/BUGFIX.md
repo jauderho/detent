@@ -428,7 +428,7 @@ deferred by the owner.
     192.0.2.1/24`. The include of `interfaces.d` is lost, so a stanza kept
     there stops applying. Test: a file with `source` plus a model edit must
     keep the `source` line.~~ Done 2026-10-15 (`PROGRESS.md`).
-11. **network service action and rollback use the wrong unit.** The first
+11. ~~**network service action and rollback use the wrong unit.** The first
     service binding is `systemd-networkd.service`, whatever stack owns the
     file. Debian ifupdown: apply with `service_action: reload` leaves `mgmt0`
     unconfigured; after the 60 s rollback the file is back but the link keeps
@@ -437,7 +437,7 @@ deferred by the owner.
     `unavailable: no known unit name resolved on this host (tried
     ["systemd-networkd.service"])`. Fix idea: choose the binding from the
     backend that owns the written file, and for ifupdown/NM/netplan use that
-    backend's apply command.
+    backend's apply command.~~ Done 2026-10-15 (`PROGRESS.md`).
 12. **`kea-dhcp4 -t` cannot open any file as root in the container.** `kea-dhcp4
     -t /etc/kea/kea-dhcp4.conf` as root: `Syntax check failed with: Unable to
     open file /etc/kea/kea-dhcp4.conf`; as `_kea` it passes. Kea 2.6.3

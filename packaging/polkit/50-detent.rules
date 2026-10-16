@@ -7,7 +7,9 @@
 //
 //   1. org.freedesktop.systemd1.manage-units for the units that tier-1
 //      modules bind services to, each with only the verbs its module binding
-//      allows (ServiceBinding.actions in the module descriptors).
+//      allows (ServiceBinding.actions in the module descriptors). A binding
+//      that reloads by its own commands (ServiceBinding.reload: network's
+//      NetworkManager runs nmcli) gets no "reload" verb.
 //   2. org.freedesktop.systemd1.manage-units "start" and "stop" of
 //      .mount/.automount units the fstab generator backs with a fragment
 //      file, for `[mounts] activate_new_entries` (Track D 1, D1 mount
@@ -66,7 +68,7 @@ polkit.addRule(function (action, subject) {
 
   // Unit -> verbs, from the module descriptors' service bindings.
   var UNIT_VERBS = {
-    "NetworkManager.service": ["reload", "restart"],
+    "NetworkManager.service": ["restart"],
     "chrony.service": ["reload", "restart"],
     "chronyd.service": ["reload", "restart"],
     "dnsmasq.service": ["reload", "restart"],

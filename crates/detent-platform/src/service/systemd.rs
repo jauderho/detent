@@ -10,13 +10,13 @@
 
 use std::collections::HashMap;
 
-use detent_core::descriptor::{ServiceAction, UnitNames};
+use detent_core::descriptor::{ReloadCommand, ServiceAction, UnitNames};
 
 use super::exec::{self, ACTION_TIMEOUT, ProcessRunner, RealProcessRunner, STATUS_TIMEOUT};
 use super::{
     ActionOutcome, AltCache, MOUNT_WAIT, MountUnitState, ServiceError, ServiceManager,
-    ServiceStatus, State, UPDATE_UNIT, UpdateStart, update_unit_name, validate_mount_unit_name,
-    validate_unit_name,
+    ServiceStatus, State, UPDATE_UNIT, UpdateStart, run_reload_commands, update_unit_name,
+    validate_mount_unit_name, validate_unit_name,
 };
 
 /// Absolute paths `systemctl` may live at, most common first.
@@ -304,6 +304,10 @@ impl ServiceManager for SystemdManager {
             active,
             detail,
         })
+    }
+
+    fn reload_by(&self, commands: &[ReloadCommand]) -> Result<ActionOutcome, ServiceError> {
+        run_reload_commands(self.runner.as_ref(), commands)
     }
 
     fn reload_unit_files(&self) -> Result<String, ServiceError> {
