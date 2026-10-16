@@ -192,6 +192,19 @@ enum Targets {
     DirectoryThenReal,
 }
 
+/// Which external check the descriptor under test declares.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Check {
+    /// None.
+    #[default]
+    None,
+    /// One that judges every target.
+    Every,
+    /// With `Targets::DecoyThenReal`, one that judges only the decoy file,
+    /// as `unbound-checkconf` judges only `unbound.conf`.
+    Decoy,
+}
+
 /// How the descriptor under test is shaped.
 #[derive(Debug, Clone, Copy, Default)]
 struct Shape {
@@ -199,7 +212,7 @@ struct Shape {
     /// Declare a service binding (restart only).
     service: bool,
     /// Declare one external check.
-    check: bool,
+    check: Check,
     /// Which targets to declare.
     targets: Targets,
 }
@@ -248,15 +261,22 @@ fn build_descriptor(id: &'static str, target: &Path, shape: Shape) -> &'static M
         &[]
     };
 
-    let checks: &'static [ExternalCheck] = if shape.check {
-        leak(vec![ExternalCheck {
+    let applies_to: &'static [PathSpec] = match shape.check {
+        Check::None | Check::Every => &[],
+        Check::Decoy => leak(vec![PathSpec::new(leak_str(
+            target.with_extension("decoy").display().to_string(),
+        ))])
+        .as_slice(),
+    };
+    let checks: &'static [ExternalCheck] = match shape.check {
+        Check::None => &[],
+        Check::Every | Check::Decoy => leak(vec![ExternalCheck {
             program: PathSpec::new("/nonexistent/detent-ops-check"),
             args: leak(vec![ArgTemplate::Literal("-p"), ArgTemplate::TempFile]).as_slice(),
             expects: CheckExpectation::ExitZero,
+            applies_to,
         }])
-        .as_slice()
-    } else {
-        &[]
+        .as_slice(),
     };
 
     leak(ModuleDescriptor {
@@ -1059,7 +1079,7 @@ fn plan_diffs_the_candidate_and_writes_nothing() -> TestResult {
         Setup {
             shape: Shape {
                 service: true,
-                check: true,
+                check: Check::Every,
                 targets: Targets::DecoyThenReal,
                 ..Shape::default()
             },
@@ -1137,7 +1157,7 @@ fn plan_runs_the_upstream_validator_through_the_monitor() -> TestResult {
         b"a\n",
         Setup {
             shape: Shape {
-                check: true,
+                check: Check::Every,
                 ..Shape::default()
             },
             hooks: true,
@@ -1205,7 +1225,7 @@ fn decoy_first_descriptor(
         "fake",
         target,
         Shape {
-            check: true,
+            check: Check::Every,
             ..Shape::default()
         },
     );
@@ -1365,7 +1385,7 @@ fn checked_harness(mode: CheckMode) -> Result<Harness, Box<dyn std::error::Error
         b"a\n",
         Setup {
             shape: Shape {
-                check: true,
+                check: Check::Every,
                 ..Shape::default()
             },
             hooks: true,
@@ -1395,6 +1415,56 @@ fn plan_does_not_run_checks_for_a_model_with_errors() -> TestResult {
     // The same harness does run the check for a valid model.
     fx.run(plan("b\n"))?;
     assert_eq!(fx.check_runs(), 1);
+    fx.finish()
+}
+
+#[test]
+fn a_check_runs_only_when_the_file_it_judges_is_written() -> TestResult {
+    let mut fx = harness(
+        b"real\n",
+        Setup {
+            shape: Shape {
+                check: Check::Decoy,
+                targets: Targets::DecoyThenReal,
+                ..Shape::default()
+            },
+            hooks: true,
+            checks: CheckMode::Fail,
+            ..Setup::default()
+        },
+    )?;
+    let decoy = fx.target.with_extension("decoy");
+    std::fs::write(&decoy, b"decoy\n")?;
+    // The real file: the decoy's validator neither runs in the plan nor in
+    // the monitor's revalidation, so the apply passes.
+    let OpOutcome::Planned(report) = fx.run(plan("edited\n"))? else {
+        return Err("Plan must answer with a plan report".into());
+    };
+    assert_eq!(report.checks.len(), 0, "{:?}", report.checks);
+    let applied = fx.run(Operation::Apply {
+        id: MODULE.to_owned(),
+        model: json!({"text": "edited\n"}),
+        expected_hash: None,
+        service_action: None,
+        confirm: None,
+    });
+    assert!(matches!(applied, Ok(OpOutcome::Applied(_))), "{applied:?}");
+    assert_eq!(fx.check_runs(), 0);
+    assert_eq!(fx.contents()?, "edited\n");
+    // The decoy: its validator runs and refuses, nothing is written.
+    let refused = fx.run(Operation::Apply {
+        id: MODULE.to_owned(),
+        model: json!({"text": "edited\n", "target": decoy.display().to_string()}),
+        expected_hash: None,
+        service_action: None,
+        confirm: None,
+    });
+    assert!(
+        matches!(refused, Err(OpsError::CheckFailed { .. })),
+        "{refused:?}"
+    );
+    assert_eq!(fx.check_runs(), 1);
+    assert_eq!(std::fs::read_to_string(&decoy)?, "decoy\n");
     fx.finish()
 }
 
@@ -1613,7 +1683,7 @@ fn apply_refuses_a_candidate_a_declared_check_rejects() -> TestResult {
         b"v1\n",
         Setup {
             shape: Shape {
-                check: true,
+                check: Check::Every,
                 ..Shape::default()
             },
             ..Setup::default()
@@ -1657,7 +1727,7 @@ fn apply_refuses_when_an_external_check_fails() -> TestResult {
         b"v1\n",
         Setup {
             shape: Shape {
-                check: true,
+                check: Check::Every,
                 ..Shape::default()
             },
             hooks: true,
@@ -1694,7 +1764,7 @@ fn apply_reports_the_checks_that_passed() -> TestResult {
         b"v1\n",
         Setup {
             shape: Shape {
-                check: true,
+                check: Check::Every,
                 ..Shape::default()
             },
             hooks: true,

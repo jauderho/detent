@@ -888,15 +888,16 @@ static RESOLVER_SERVICES: &[detent_core::descriptor::ServiceBinding] = &[
     },
 ];
 
-/// `unbound-checkconf` validates an unbound.conf candidate. resolv.conf has no
-/// upstream validator binary and resolved.conf is checked by systemd itself at
-/// load time, so no check is declared for those candidates; the check runner
-/// reports, rather than fails, a validator that cannot run.
+/// `unbound-checkconf` validates an unbound.conf candidate, and only that
+/// file (`applies_to`). resolv.conf has no upstream validator binary and
+/// resolved.conf is checked by systemd itself at load time, so no check is
+/// declared for those candidates.
 static RESOLVER_CHECKS: &[detent_core::descriptor::ExternalCheck] =
     &[detent_core::descriptor::ExternalCheck {
         program: PathSpec::new("/usr/sbin/unbound-checkconf"),
         args: &[detent_core::descriptor::ArgTemplate::TempFile],
         expects: detent_core::descriptor::CheckExpectation::ExitZero,
+        applies_to: &[UNBOUND_CONF],
     }];
 
 /// Keeps `upstream.toml` and the descriptor from drifting. `upstream-watch`
@@ -2666,6 +2667,17 @@ mod tests {
             Err(EditError::Unsupported { .. })
         ));
         Ok(())
+    }
+
+    #[test]
+    fn unbound_checkconf_judges_only_unbound_conf() {
+        let checks = ResolverModule::descriptor().checks;
+        assert_eq!(checks.len(), 1);
+        for check in checks {
+            assert!(check.judges("/etc/unbound/unbound.conf"));
+            assert!(!check.judges("/etc/systemd/resolved.conf"));
+            assert!(!check.judges("/etc/resolv.conf"));
+        }
     }
 
     #[test]

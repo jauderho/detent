@@ -89,6 +89,7 @@ static KV_DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
         program: PathSpec::new("/usr/bin/true"),
         args: &[ArgTemplate::Literal("--check"), ArgTemplate::TempFile],
         expects: CheckExpectation::ExitZero,
+        applies_to: &[],
     }],
     commit_confirm: false,
     reload_unit_files: false,

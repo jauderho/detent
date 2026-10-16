@@ -486,7 +486,7 @@ impl OpsEngine {
         })
     }
 
-    /// Run every validator the module declared. A validator that cannot run
+    /// Run every validator that judges the target. A validator that cannot run
     /// (not installed, no check runner wired up) is reported, not fatal: a
     /// plan preview is more useful than an error.
     fn run_checks(&mut self, wiring: &Wiring, candidate: &[u8]) -> Vec<CheckReport> {
@@ -924,7 +924,8 @@ fn module_id(
 
 /// Resolve, in one read-only pass over the handshake tables, everything a
 /// module operation needs: which target to read and write, which validators to
-/// run, and which service binding to act on.
+/// run (only those that judge that target), and which service binding to act
+/// on.
 ///
 /// Only a file target can be read and written. The target is `model_target`
 /// when the model names one ([`DynModule::model_target_json`]: the file of
@@ -974,7 +975,7 @@ fn wiring(
         .map(|ack| ack.checks.as_slice())
         .unwrap_or_default()
         .iter()
-        .filter(|check| check.module == module)
+        .filter(|check| check.module == module && check.targets.contains(&chosen.id))
         .map(|check| (check.id, check.program.clone()))
         .collect();
 

@@ -138,6 +138,9 @@ pub struct CheckEntry {
     pub module: ModuleId,
     /// The static check declaration.
     pub check: &'static ExternalCheck,
+    /// The module's targets whose candidates the check judges
+    /// ([`ExternalCheck::applies_to`]), in id order.
+    pub targets: Vec<TargetId>,
 }
 
 /// One service binding, resolved.
@@ -190,6 +193,7 @@ impl Allowlist {
             }
             let module_backups = backup_dir_for(&config.state_root, descriptor.id);
 
+            let first_target = targets.len();
             for (ordinal, target) in descriptor.targets.iter().enumerate() {
                 let entry = resolve_target(
                     TargetId(narrow_u16(targets.len(), "target")?),
@@ -202,10 +206,18 @@ impl Allowlist {
                 targets.push(entry);
             }
             for check in descriptor.checks {
+                let judged = targets
+                    .get(first_target..)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|entry: &&TargetEntry| check.judges(&entry.path.to_string_lossy()))
+                    .map(|entry| entry.id)
+                    .collect();
                 checks.push(CheckEntry {
                     id: CheckId(narrow_u16(checks.len(), "check")?),
                     module,
                     check,
+                    targets: judged,
                 });
             }
             for binding in descriptor.services {
@@ -322,20 +334,24 @@ impl Allowlist {
     }
 
     /// The directory an external-check candidate for `module` is written to:
-    /// the parent of the module's primary target when that target is a file,
-    /// `None` otherwise (the caller then uses monitor staging). The monitor
+    /// the parent of the module's primary file target, `None` when the
+    /// module has no file target (the caller then uses monitor staging). The monitor
     /// also uses staging when this directory is read-only for it, and the
     /// runner then finds the candidate there.
     ///
     /// The primary target is the one the operations engine reads and renders
-    /// (`detent_ops` `wiring`): the first of the module's declared targets
-    /// whose `backend_detect` accepts `profile`, else its first target. The
+    /// (`detent_ops` `wiring`): the first of the module's declared file
+    /// targets whose `backend_detect` accepts `profile`, else its first file
+    /// target. The
     /// monitor and the runner both call this, so neither takes the directory
     /// from the other.
     #[must_use]
     pub fn candidate_dir(&self, module: ModuleId, profile: &HostProfile) -> Option<&Path> {
         let descriptor = self.module(module)?;
-        let targets: Vec<&TargetEntry> = self.targets_of(module).collect();
+        let targets: Vec<&TargetEntry> = self
+            .targets_of(module)
+            .filter(|entry| entry.kind == PathKind::File)
+            .collect();
         let primary = descriptor
             .targets
             .iter()
@@ -347,10 +363,33 @@ impl Allowlist {
                     .copied()
             })
             .or_else(|| targets.first().copied())?;
-        if primary.kind != PathKind::File {
-            return None;
-        }
         primary.path.parent()
+    }
+
+    /// The directory a candidate for check `id` is written to: beside the
+    /// first file target the check judges, or, for a check that judges
+    /// every target of its module, [`Self::candidate_dir`]. `None` for an
+    /// unknown id or a module with no file target (the caller then uses
+    /// monitor staging). The monitor and the runner both call this, so
+    /// neither takes the directory from the other.
+    #[must_use]
+    pub fn check_candidate_dir(&self, id: CheckId, profile: &HostProfile) -> Option<&Path> {
+        let entry = self.check(id)?;
+        if entry.check.applies_to.is_empty() {
+            return self.candidate_dir(entry.module, profile);
+        }
+        entry
+            .targets
+            .iter()
+            .filter_map(|target| self.target(*target))
+            .find(|target| target.kind == PathKind::File)?
+            .path
+            .parent()
+    }
+
+    /// Every check of `module`, in id order.
+    pub fn checks_of(&self, module: ModuleId) -> impl Iterator<Item = &CheckEntry> {
+        self.checks.iter().filter(move |c| c.module == module)
     }
 
     /// Number of targets in the table.
@@ -403,6 +442,7 @@ impl Allowlist {
                     id: entry.id,
                     module: entry.module,
                     program: entry.check.program.as_str().to_owned(),
+                    targets: entry.targets.clone(),
                 })
                 .collect(),
             bindings: self
@@ -538,6 +578,7 @@ mod tests {
         program: PathSpec::new("/usr/sbin/chronyd"),
         args: &[ArgTemplate::Literal("-p"), ArgTemplate::TempFile],
         expects: CheckExpectation::ExitZero,
+        applies_to: &[],
     }];
 
     static CHRONY_SERVICES: &[ServiceBinding] = &[ServiceBinding {
@@ -848,7 +889,8 @@ mod tests {
         ],
     );
 
-    /// The detected target is a drop-in directory, not a file.
+    /// The detected target is a drop-in directory, not a file: only a file
+    /// is read and written, so the file beside it is primary.
     static DROP_IN_PRIMARY: ModuleDescriptor = module(
         "drop-in",
         &[
@@ -864,6 +906,102 @@ mod tests {
     );
 
     static NO_TARGETS: ModuleDescriptor = module("bare", &[]);
+
+    /// Two backends in two directories, one check each, and one check that
+    /// judges every target.
+    static TWO_BACKENDS: ModuleDescriptor = ModuleDescriptor {
+        checks: &[
+            ExternalCheck {
+                program: PathSpec::new("/usr/sbin/second-check"),
+                args: &[],
+                expects: detent_core::descriptor::CheckExpectation::ExitZero,
+                applies_to: &[PathSpec::new("/etc/second/second.conf")],
+            },
+            ExternalCheck {
+                program: PathSpec::new("/usr/sbin/first-check"),
+                args: &[],
+                expects: detent_core::descriptor::CheckExpectation::ExitZero,
+                applies_to: &[PathSpec::new("/etc/first/first.conf")],
+            },
+            ExternalCheck {
+                program: PathSpec::new("/usr/sbin/any-check"),
+                args: &[],
+                expects: detent_core::descriptor::CheckExpectation::ExitZero,
+                applies_to: &[],
+            },
+            ExternalCheck {
+                program: PathSpec::new("/usr/sbin/dir-check"),
+                args: &[],
+                expects: detent_core::descriptor::CheckExpectation::ExitZero,
+                applies_to: &[PathSpec::new("/etc/systemd/network")],
+            },
+        ],
+        ..module(
+            "two",
+            &[
+                file("/etc/first/first.conf", always),
+                file("/etc/second/second.conf", never),
+                Target {
+                    path: PathSpec::new("/etc/systemd/network"),
+                    kind: TargetKind::DropInDir,
+                    mode: 0o755,
+                    owner: Owner::Root,
+                    backend_detect: never,
+                },
+            ],
+        )
+    };
+
+    #[test]
+    fn a_check_judges_its_own_files_and_its_candidate_goes_beside_the_first()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let list = Allowlist::from_modules(
+            &[&HOSTS, &TWO_BACKENDS],
+            &Config::with_state_root("/tmp/detent-test"),
+        )?;
+        let profile = HostProfile::default_for_tests();
+        let ack = list.hello_ack();
+        let two = list.module_id("two").ok_or("module two")?;
+        let ids: Vec<(String, Vec<u16>)> = ack
+            .checks
+            .iter()
+            .filter(|check| check.module == two)
+            .map(|check| {
+                (
+                    check.program.clone(),
+                    check.targets.iter().map(|t| t.get()).collect(),
+                )
+            })
+            .collect();
+        // HOSTS has one target (id 0); module two's targets are ids 1 to 3.
+        assert_eq!(
+            ids,
+            [
+                ("/usr/sbin/second-check".to_owned(), vec![2]),
+                ("/usr/sbin/first-check".to_owned(), vec![1]),
+                ("/usr/sbin/any-check".to_owned(), vec![1, 2, 3]),
+                ("/usr/sbin/dir-check".to_owned(), vec![3]),
+            ]
+        );
+        let dirs: Vec<Option<&Path>> = list
+            .checks_of(two)
+            .map(|check| list.check_candidate_dir(check.id, &profile))
+            .collect();
+        assert_eq!(
+            dirs,
+            [
+                Some(Path::new("/etc/second")),
+                Some(Path::new("/etc/first")),
+                // Every target: the module's primary file.
+                Some(Path::new("/etc/first")),
+                // Only a directory: no file to write a candidate beside.
+                None,
+            ]
+        );
+        assert_eq!(list.check_candidate_dir(CheckId(99), &profile), None);
+        assert_eq!(list.checks_of(ModuleId(99)).count(), 0);
+        Ok(())
+    }
 
     #[test]
     fn the_candidate_dir_is_the_parent_of_the_primary_file_target()
@@ -888,7 +1026,7 @@ mod tests {
         assert_eq!(dir("chrony"), Some(Path::new("/etc/chrony")));
         assert_eq!(dir("second"), Some(Path::new("/etc/second")));
         assert_eq!(dir("none"), Some(Path::new("/etc/first")));
-        assert_eq!(dir("drop-in"), None);
+        assert_eq!(dir("drop-in"), Some(Path::new("/etc/network")));
         assert_eq!(dir("bare"), None);
         assert_eq!(list.candidate_dir(ModuleId(99), &profile), None);
         Ok(())
