@@ -704,49 +704,53 @@ mod tests {
         false
     }
 
+    /// `chrony.conf` where Debian keeps it.
+    const DEBIAN_CONF: Target = Target {
+        path: PathSpec::new("/etc/chrony/chrony.conf"),
+        kind: TargetKind::File,
+        mode: 0o644,
+        owner: Owner::Root,
+        backend_detect: is_linux,
+    };
+
+    /// A directory.
+    const CONF_D: Target = Target {
+        path: PathSpec::new("/etc/chrony/conf.d"),
+        kind: TargetKind::DropInDir,
+        mode: 0o755,
+        owner: Owner::Root,
+        backend_detect: is_linux,
+    };
+
+    /// A file with another name.
+    const KEYS: Target = Target {
+        path: PathSpec::new("/etc/chrony.keys"),
+        kind: TargetKind::File,
+        mode: 0o640,
+        owner: Owner::Root,
+        backend_detect: is_linux,
+    };
+
     /// One file at two paths, an undetected third path, a file with another
     /// name and a directory.
     static RELOCATABLE: &[Target] = &[
-        Target {
-            path: PathSpec::new("/etc/chrony/chrony.conf"),
-            kind: TargetKind::File,
-            mode: 0o644,
-            owner: Owner::Root,
-            backend_detect: is_linux,
-        },
-        Target {
-            path: PathSpec::new("/etc/chrony/conf.d"),
-            kind: TargetKind::DropInDir,
-            mode: 0o755,
-            owner: Owner::Root,
-            backend_detect: is_linux,
-        },
+        DEBIAN_CONF,
+        CONF_D,
         Target {
             path: PathSpec::new("/opt/chrony.conf"),
-            kind: TargetKind::File,
-            mode: 0o644,
-            owner: Owner::Root,
             backend_detect: never,
+            ..DEBIAN_CONF
         },
         Target {
             path: PathSpec::new("/etc/chrony.conf"),
-            kind: TargetKind::File,
-            mode: 0o644,
-            owner: Owner::Root,
-            backend_detect: is_linux,
+            ..DEBIAN_CONF
         },
-        Target {
-            path: PathSpec::new("/etc/chrony.keys"),
-            kind: TargetKind::File,
-            mode: 0o640,
-            owner: Owner::Root,
-            backend_detect: is_linux,
-        },
+        KEYS,
     ];
 
     /// Which of `RELOCATABLE` stands in for `chosen` when only `present`
     /// exist, and every path `exists` was asked about.
-    fn relocate(chosen: usize, present: &[&str]) -> (&'static str, Vec<String>) {
+    fn relocate(chosen: &'static Target, present: &[&str]) -> (&'static str, Vec<String>) {
         let descriptor = ModuleDescriptor {
             targets: RELOCATABLE,
             ..DESCRIPTOR
@@ -756,10 +760,7 @@ mod tests {
             os: Os::Linux,
             ..HostProfile::default()
         };
-        let Some(target) = RELOCATABLE.get(chosen) else {
-            return ("", Vec::new());
-        };
-        let found = descriptor.relocated(target, &linux, |path| {
+        let found = descriptor.relocated(chosen, &linux, |path| {
             asked.borrow_mut().push(path.to_owned());
             present.contains(&path)
         });
@@ -769,7 +770,10 @@ mod tests {
     #[test]
     fn a_file_that_exists_is_kept() {
         assert_eq!(
-            relocate(0, &["/etc/chrony/chrony.conf", "/etc/chrony.conf"]),
+            relocate(
+                &DEBIAN_CONF,
+                &["/etc/chrony/chrony.conf", "/etc/chrony.conf"]
+            ),
             (
                 "/etc/chrony/chrony.conf",
                 vec!["/etc/chrony/chrony.conf".to_owned()]
@@ -779,24 +783,27 @@ mod tests {
 
     #[test]
     fn a_missing_file_is_replaced_by_the_same_file_where_it_exists() {
-        assert_eq!(relocate(0, &["/etc/chrony.conf"]).0, "/etc/chrony.conf");
+        assert_eq!(
+            relocate(&DEBIAN_CONF, &["/etc/chrony.conf"]).0,
+            "/etc/chrony.conf"
+        );
     }
 
     #[test]
     fn a_missing_file_with_no_alternative_present_is_kept() {
-        assert_eq!(relocate(0, &[]).0, "/etc/chrony/chrony.conf");
+        assert_eq!(relocate(&DEBIAN_CONF, &[]).0, "/etc/chrony/chrony.conf");
         // An alternative the profile does not detect is never taken, and
         // another file name is never an alternative.
         assert_eq!(
-            relocate(0, &["/opt/chrony.conf", "/etc/chrony.keys"]).0,
+            relocate(&DEBIAN_CONF, &["/opt/chrony.conf", "/etc/chrony.keys"]).0,
             "/etc/chrony/chrony.conf"
         );
     }
 
     #[test]
     fn a_target_with_no_alternative_never_asks_about_the_disk() {
-        assert_eq!(relocate(4, &[]), ("/etc/chrony.keys", Vec::new()));
-        assert_eq!(relocate(1, &[]), ("/etc/chrony/conf.d", Vec::new()));
+        assert_eq!(relocate(&KEYS, &[]), ("/etc/chrony.keys", Vec::new()));
+        assert_eq!(relocate(&CONF_D, &[]), ("/etc/chrony/conf.d", Vec::new()));
     }
 
     #[test]
