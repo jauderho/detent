@@ -329,7 +329,9 @@ impl Allowlist {
     ///
     /// The primary target is the one the operations engine reads and renders
     /// (`detent_ops` `wiring`): the first of the module's declared targets
-    /// whose `backend_detect` accepts `profile`, else its first target. The
+    /// whose `backend_detect` accepts `profile` (taken where it exists when
+    /// the module declares the file at more than one path,
+    /// `ModuleDescriptor::relocated`), else its first target. The
     /// monitor and the runner both call this, so neither takes the directory
     /// from the other.
     #[must_use]
@@ -340,7 +342,13 @@ impl Allowlist {
             .targets
             .iter()
             .filter(|target| (target.backend_detect)(profile))
-            .find_map(|target| {
+            .find(|target| {
+                targets
+                    .iter()
+                    .any(|entry| entry.path.as_os_str() == target.path.as_str())
+            })
+            .map(|target| descriptor.relocated(target, profile, |path| Path::new(path).exists()))
+            .and_then(|target| {
                 targets
                     .iter()
                     .find(|entry| entry.path.as_os_str() == target.path.as_str())

@@ -401,7 +401,13 @@ deferred by the owner.
      `plan` answered `monitor refused the request: i/o error: target is not
      a regular file`). NetworkManager keyfile, netplan and networkd
      drop-in writing were therefore never reached.
-8. **A missing target file is a silent null model.** `detent config <m> get`
+8. **A missing target file is a silent null model.** chrony part done
+   2026-10-15: chrony declares `/etc/chrony/chrony.conf` and
+   `/etc/chrony.conf` and manages the first that exists
+   (`ModuleDescriptor::relocated`); `get` of any module whose file is missing
+   now gives the warning `ops-target-missing`. **Open:** resolver and
+   network (their target selection is being rewritten under item 7).
+   `detent config <m> get`
    exits 0 with `"model":null,"current_hash":null,"diagnostics":[]` when none
    of the module's fixed paths exists: chrony reads only
    `/etc/chrony/chrony.conf` (Fedora and Arch use `/etc/chrony.conf`);
@@ -410,7 +416,7 @@ deferred by the owner.
    `/etc/network/interfaces` (absent on Ubuntu, Fedora, Arch). `plan` says
    `the managed file does not exist; create it ...`. Fix idea: follow the
    PLAN file lists per distro, or report a clear error in `get`.
-9. **Stock distro configs are refused.** chrony: `error: `sourcedir` loads
+9. ~~**Stock distro configs are refused.** chrony: `error: `sourcedir` loads
    external files or runs an external program; this module refuses directives
    that cross its configured file boundary.` for the stock Debian 13, Ubuntu
    26.04 and Fedora 44 files (`sourcedir`, `confdir`); dnsmasq on Fedora:
@@ -418,7 +424,11 @@ deferred by the owner.
    (`apply` answers `422 ops-invalid-model`). `validate` prints the error and
    exits 0 while `plan` and `apply` exit 1. A host with the stock file cannot
    edit any setting. Decide: allow the stock include lines, or make `validate`
-   exit non-zero.
+   exit non-zero.~~ Done 2026-10-15 (owner
+   decision: allow the stock include lines). The exact stock lines give a
+   warning (`chrony-stock-include`, `dhcp-stock-include`), every other include
+   stays an error, and `validate` exits 1 on an error diagnostic. Lists and
+   sources: `docs/spikes/m-chrony.md`, `docs/spikes/m-dhcp.md`.
 10. **network ifupdown rewrite drops the `source` line.** On Debian 13, `plan`
     of a one-interface model shows `-source /etc/network/interfaces.d/*`
     replaced by `+auto mgmt0`, `+iface mgmt0 inet static`, `+	address
@@ -808,6 +818,11 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   `[~]`.
 - Final step before v1.0.0 (owner, 2026-10-14): run the `security-review`
   skill over the full diff (PLAN Phase 12).
+- D9 (owner, 2026-10-15): allow the include lines of the stock distribution
+  files only, exact key and value per directive, kept byte for byte and not
+  followed, with a warning that the included files are not managed; every
+  other include stays an error; `validate` exits non-zero on an error. Done
+  2026-10-15 (`PROGRESS.md`).
 
 ---
 

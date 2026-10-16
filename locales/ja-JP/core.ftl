@@ -22,6 +22,7 @@ chrony-missing-rtcsync = rtcsync が設定されていません。ハードウ�
 chrony-rec-nts = プール {$pool} が nts オプションなしで使われています。時刻を偽装されないよう、nts 対応のソースを選んでください。
 chrony-cmdport-open = cmdport は {$port} です。chronyc がネットワーク経由でこのホストに接続する必要がない限り、cmdport 0 に設定してください。
 chrony-external-directive = `{$key}` は外部ファイルを読み込むか外部プログラムを実行します。このモジュールは、設定されたファイル境界を越えるディレクティブを拒否します。
+chrony-stock-include = `{$key} {$value}` はこのディストリビューション標準のインクルード行です。そのまま保持されますが、detent はインクルードされるファイルを読み込まず、管理もしません。
 
 ## dhcp module — display name, security notes, schema tooltips
 dhcp-name = dhcp
@@ -47,6 +48,7 @@ dhcp-invalid-key = `{$key}` は有効な dnsmasq オプション名ではあり�
 dhcp-malformed-cidr = `{$value}` は有効な CIDR プレフィックスではありません。例: `192.168.1.0/24`。
 dhcp-malformed-pool = `{$value}` は有効なプールではありません。`192.168.1.100 - 192.168.1.200` のような範囲か、CIDR プレフィックスを使用してください。
 dhcp-external-directive = `{$key}` は外部ファイルを読み込むかコマンドを実行します。このモジュールは、設定されたファイル境界を越えるディレクティブを作成も変更もしません。
+dhcp-stock-include = `{$key}={$value}` はこのディストリビューション標準のインクルード行です。そのまま保持されますが、detent はインクルードされるファイルを読み込まず、管理もしません。
 dhcp-authoritative-set = `dhcp-authoritative` は dnsmasq をそのセグメントで唯一の DHCP サーバーにします。ほかに DHCP サーバーがない場合にのみ設定してください。
 dhcp-kea-interfaces-empty = {$server} にはインターフェースが設定されておらず、すべてのインターフェースで待ち受けます。インターフェースを明示してください。
 dhcp-rec-rebind = domain-needed と bogus-priv の両方は設定されていません。これらはリバインド攻撃と、プライベートアドレスに対するアップストリームへの A クエリを防ぎます。

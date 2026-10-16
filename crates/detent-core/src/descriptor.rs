@@ -81,6 +81,46 @@ pub struct Target {
     pub backend_detect: BackendDetect,
 }
 
+impl ModuleDescriptor {
+    /// `chosen`, or the target that stands in for it on this host.
+    ///
+    /// Distributions keep some files at different paths: chrony reads
+    /// `/etc/chrony/chrony.conf` on Debian and Ubuntu, `/etc/chrony.conf` on
+    /// Fedora and Arch. A module declares each path as a [`TargetKind::File`]
+    /// target with the same file name, most common first. When `chosen` is
+    /// such a file and `exists` says it is absent, the answer is the first
+    /// other declared file target with the same file name that `profile`
+    /// detects and that exists; else `chosen`. So the module has exactly one
+    /// file on a host. `exists` is called only when such an alternative is
+    /// declared; no module with one file per name is affected.
+    #[must_use]
+    pub fn relocated(
+        &self,
+        chosen: &'static Target,
+        profile: &HostProfile,
+        exists: impl Fn(&str) -> bool,
+    ) -> &'static Target {
+        let file_name = |target: &Target| target.path.as_str().rsplit('/').next();
+        let mut alternatives = self
+            .targets
+            .iter()
+            .filter(|target| {
+                chosen.kind == TargetKind::File
+                    && target.kind == TargetKind::File
+                    && target.path != chosen.path
+                    && file_name(target) == file_name(chosen)
+                    && (target.backend_detect)(profile)
+            })
+            .peekable();
+        if alternatives.peek().is_none() || exists(chosen.path.as_str()) {
+            return chosen;
+        }
+        alternatives
+            .find(|target| exists(target.path.as_str()))
+            .unwrap_or(chosen)
+    }
+}
+
 /// The upstream project whose configuration format a module tracks.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -658,6 +698,112 @@ mod tests {
             DESCRIPTOR.targets.first().map(|t| t.path),
             Some(PathSpec::new("/etc/chrony/chrony.conf"))
         );
+    }
+
+    fn never(_: &HostProfile) -> bool {
+        false
+    }
+
+    /// `chrony.conf` where Debian keeps it.
+    const DEBIAN_CONF: Target = Target {
+        path: PathSpec::new("/etc/chrony/chrony.conf"),
+        kind: TargetKind::File,
+        mode: 0o644,
+        owner: Owner::Root,
+        backend_detect: is_linux,
+    };
+
+    /// A directory.
+    const CONF_D: Target = Target {
+        path: PathSpec::new("/etc/chrony/conf.d"),
+        kind: TargetKind::DropInDir,
+        mode: 0o755,
+        owner: Owner::Root,
+        backend_detect: is_linux,
+    };
+
+    /// A file with another name.
+    const KEYS: Target = Target {
+        path: PathSpec::new("/etc/chrony.keys"),
+        kind: TargetKind::File,
+        mode: 0o640,
+        owner: Owner::Root,
+        backend_detect: is_linux,
+    };
+
+    /// One file at two paths, an undetected third path, a file with another
+    /// name and a directory.
+    static RELOCATABLE: &[Target] = &[
+        DEBIAN_CONF,
+        CONF_D,
+        Target {
+            path: PathSpec::new("/opt/chrony.conf"),
+            backend_detect: never,
+            ..DEBIAN_CONF
+        },
+        Target {
+            path: PathSpec::new("/etc/chrony.conf"),
+            ..DEBIAN_CONF
+        },
+        KEYS,
+    ];
+
+    /// Which of `RELOCATABLE` stands in for `chosen` when only `present`
+    /// exist, and every path `exists` was asked about.
+    fn relocate(chosen: &'static Target, present: &[&str]) -> (&'static str, Vec<String>) {
+        let descriptor = ModuleDescriptor {
+            targets: RELOCATABLE,
+            ..DESCRIPTOR
+        };
+        let asked = std::cell::RefCell::new(Vec::new());
+        let linux = HostProfile {
+            os: Os::Linux,
+            ..HostProfile::default()
+        };
+        let found = descriptor.relocated(chosen, &linux, |path| {
+            asked.borrow_mut().push(path.to_owned());
+            present.contains(&path)
+        });
+        (found.path.as_str(), asked.into_inner())
+    }
+
+    #[test]
+    fn a_file_that_exists_is_kept() {
+        assert_eq!(
+            relocate(
+                &DEBIAN_CONF,
+                &["/etc/chrony/chrony.conf", "/etc/chrony.conf"]
+            ),
+            (
+                "/etc/chrony/chrony.conf",
+                vec!["/etc/chrony/chrony.conf".to_owned()]
+            )
+        );
+    }
+
+    #[test]
+    fn a_missing_file_is_replaced_by_the_same_file_where_it_exists() {
+        assert_eq!(
+            relocate(&DEBIAN_CONF, &["/etc/chrony.conf"]).0,
+            "/etc/chrony.conf"
+        );
+    }
+
+    #[test]
+    fn a_missing_file_with_no_alternative_present_is_kept() {
+        assert_eq!(relocate(&DEBIAN_CONF, &[]).0, "/etc/chrony/chrony.conf");
+        // An alternative the profile does not detect is never taken, and
+        // another file name is never an alternative.
+        assert_eq!(
+            relocate(&DEBIAN_CONF, &["/opt/chrony.conf", "/etc/chrony.keys"]).0,
+            "/etc/chrony/chrony.conf"
+        );
+    }
+
+    #[test]
+    fn a_target_with_no_alternative_never_asks_about_the_disk() {
+        assert_eq!(relocate(&KEYS, &[]), ("/etc/chrony.keys", Vec::new()));
+        assert_eq!(relocate(&CONF_D, &[]), ("/etc/chrony/conf.d", Vec::new()));
     }
 
     #[test]

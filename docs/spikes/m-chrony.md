@@ -12,6 +12,29 @@ back its real configuration files with the real service.
 
 `chrony.conf`, `sources.d/`, `conf.d/`.
 
+`chrony.conf` is at `/etc/chrony/chrony.conf` on Debian and Ubuntu and at
+`/etc/chrony.conf` on Fedora and Arch. The module manages the first of the two
+that exists, `/etc/chrony/chrony.conf` when neither does (BUGFIX D8). When the
+file is missing, `get` gives the warning `ops-target-missing`.
+
+## Include lines
+
+Only these stock lines are allowed (owner decision 2026-10-15, BUGFIX D9),
+with exactly this key and value. Each gives the warning `chrony-stock-include`:
+the line stays in the file byte for byte, and detent does not read or manage
+the files it includes. Every other `include`, `includedir`, `confdir`,
+`sourcedir` or `script` line is an error, as before.
+
+| Line | Stock in |
+|---|---|
+| `sourcedir /run/chrony-dhcp` | Debian 13 (chrony 4.6.1-3+deb13u2), Ubuntu 26.04 (4.8-2ubuntu1), Fedora 44 (4.8-5.fc44) |
+| `sourcedir /etc/chrony/sources.d` | Debian 13, Ubuntu 26.04 |
+| `confdir /etc/chrony/conf.d` | Debian 13, Ubuntu 26.04 |
+
+Arch (chrony 4.9-1) has no include line. The stock files are in
+`fixtures/chrony/distro/`. The monitor still refuses a candidate that adds
+such a line or changes one (`exec_deny.rs`).
+
 ## External check
 
 `chronyd -p -f <candidate>`.

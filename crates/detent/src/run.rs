@@ -29,7 +29,7 @@
 //! no trace of its own either.
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 
 use detent_core::descriptor::{HostProfile, ModuleDescriptor};
@@ -55,7 +55,7 @@ use serde_json::Value;
 
 use crate::cli::{AuditAction, AuditArgs, BackupAction, Cli, Command, CommitAction, ConfigAction};
 use crate::i18n::Messages;
-use crate::output::{ErrorContext, Exit, Renderer};
+use crate::output::{ErrorContext, Exit, Renderer, exit_for_outcome};
 
 /// The default configuration file (PLAN §2.10).
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/detent/detent.toml";
@@ -557,7 +557,7 @@ fn operate(
     let exit = match session.execute(operation, cli.dryrun) {
         Ok(Executed::Ran(outcome)) => {
             renderer.outcome(streams.out, streams.notes, &outcome)?;
-            Exit::Ok
+            exit_for_outcome(&outcome)
         }
         Ok(Executed::WouldRun(report)) => {
             renderer.dry_run(streams.out, streams.notes, &report)?;
@@ -576,7 +576,8 @@ fn operate(
 }
 
 /// The file a module manages on this host: the first target its own detector
-/// accepts, falling back to the first declared one — the same rule
+/// accepts, taken where it exists when the module declares it at more than
+/// one path, falling back to the first declared one — the same rule
 /// `detent_ops`'s engine applies when it resolves wiring.
 #[must_use]
 pub fn target_path(
@@ -589,6 +590,7 @@ pub fn target_path(
         .targets
         .iter()
         .find(|target| (target.backend_detect)(profile))
+        .map(|target| descriptor.relocated(target, profile, |path| Path::new(path).exists()))
         .or_else(|| descriptor.targets.first())
         .map(|target| target.path.as_str())
 }
@@ -4105,6 +4107,79 @@ mod tests {
 
         assert_eq!(std::fs::read("/etc/hosts")?, before);
         assert_eq!(std::fs::metadata("/etc/hosts")?.modified()?, mtime);
+        Ok(())
+    }
+
+    /// D9: `validate` exits 1 when a diagnostic is an error, as `plan` and
+    /// `apply` do, and still prints the diagnostics in the same shape (text
+    /// and JSON). A model without an error still exits 0. Skipped when the
+    /// `hosts` module is not compiled in.
+    #[test]
+    fn validate_exits_non_zero_on_an_error_diagnostic_and_keeps_its_output() -> R {
+        let registry = detent_modules::modules();
+        if !registry.iter().any(|entry| entry.id() == "hosts") {
+            return Ok(());
+        }
+        let dir = tempfile::TempDir::new()?;
+        let state = dir.path().join("state").display().to_string();
+        let invalid = br#"{"entries":[{"ip":"192.0.2.1","hostnames":[],"comment":null}]}"#;
+        let valid = br#"{"entries":[{"ip":"127.0.0.1","hostnames":["localhost"],"comment":null},{"ip":"::1","hostnames":["localhost"],"comment":null}]}"#;
+        for (json, model, expected) in [
+            (false, &invalid[..], Exit::Failed),
+            (true, &invalid[..], Exit::Failed),
+            (false, &valid[..], Exit::Ok),
+            (true, &valid[..], Exit::Ok),
+        ] {
+            let mut argv = vec![
+                "detent",
+                "config",
+                "hosts",
+                "validate",
+                "--state-root",
+                &state,
+            ];
+            if json {
+                argv.push("--json");
+            }
+            let cli = parse(&argv)?;
+            let mut input = model;
+            let mut out = Vec::new();
+            let mut notes = Vec::new();
+            let exit = run(
+                &cli,
+                &mut Streams {
+                    input: &mut input,
+                    out: &mut out,
+                    notes: &mut notes,
+                },
+            );
+            assert_eq!(
+                exit,
+                expected,
+                "{argv:?}: {}",
+                String::from_utf8_lossy(&notes)
+            );
+            if json {
+                let parsed: serde_json::Value = serde_json::from_slice(&out)?;
+                let ids: Vec<&str> = parsed
+                    .pointer("/validated")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.pointer("/id").and_then(|id| id.as_str()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                assert_eq!(
+                    ids.contains(&"hosts-no-hostnames"),
+                    expected == Exit::Failed,
+                    "{parsed}"
+                );
+            } else {
+                assert!(!out.is_empty(), "{argv:?} printed nothing");
+            }
+        }
         Ok(())
     }
 

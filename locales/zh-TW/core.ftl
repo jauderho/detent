@@ -22,6 +22,7 @@ chrony-missing-rtcsync = 未設定 rtcsync；硬體時鐘相對於系統時鐘�
 chrony-rec-nts = 集區 {$pool} 在未使用 nts 選項的情況下被使用；建議使用支援 nts 的時間來源，以免時間遭到偽造。
 chrony-cmdport-open = cmdport 為 {$port}；除非 chronyc 必須透過網路連線到此主機，否則請設定 cmdport 0。
 chrony-external-directive = `{$key}` 會載入外部檔案或執行外部程式；此模組會拒絕跨出其設定檔案邊界的指令。
+chrony-stock-include = `{$key} {$value}` 是此發行版內建的引入行；它會原樣保留，但 detent 不會讀取或管理它所引入的檔案。
 
 ## dhcp module — display name, security notes, schema tooltips
 dhcp-name = dhcp
@@ -47,6 +48,7 @@ dhcp-invalid-key = `{$key}` 不是有效的 dnsmasq 選項名稱；它必須是�
 dhcp-malformed-cidr = `{$value}` 不是有效的 CIDR 前置碼，例如 `192.168.1.0/24`。
 dhcp-malformed-pool = `{$value}` 不是有效的位址集區；請使用 `192.168.1.100 - 192.168.1.200` 這樣的範圍，或 CIDR 前置碼。
 dhcp-external-directive = `{$key}` 會載入外部檔案或執行指令；此模組不會建立或修改跨出其設定檔案邊界的指令。
+dhcp-stock-include = `{$key}={$value}` 是此發行版內建的引入行；它會原樣保留，但 detent 不會讀取或管理它所引入的檔案。
 dhcp-authoritative-set = `dhcp-authoritative` 會讓 dnsmasq 成為該網段中唯一的 DHCP 伺服器；僅在不存在其他 DHCP 伺服器時才設定它。
 dhcp-kea-interfaces-empty = {$server} 未設定任何介面，將在所有介面上監聽；請明確指定介面。
 dhcp-rec-rebind = domain-needed 和 bogus-priv 並未同時設定；它們用於過濾 DNS 重新繫結攻擊，以及送往上游的私有位址 A 記錄查詢。
