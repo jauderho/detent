@@ -898,6 +898,7 @@ static RESOLVER_CHECKS: &[detent_core::descriptor::ExternalCheck] =
         args: &[detent_core::descriptor::ArgTemplate::TempFile],
         expects: detent_core::descriptor::CheckExpectation::ExitZero,
         applies_to: &[UNBOUND_CONF],
+        stage_as: None,
     }];
 
 /// Keeps `upstream.toml` and the descriptor from drifting. `upstream-watch`

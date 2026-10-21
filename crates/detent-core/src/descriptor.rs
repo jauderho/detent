@@ -225,6 +225,17 @@ pub struct ExternalCheck {
     #[serde(skip)]
     #[cfg_attr(feature = "openapi", schema(ignore = true))]
     pub applies_to: &'static [PathSpec],
+    /// For a validator that reads a directory tree, not a file: the relative
+    /// path (e.g. `etc/netplan/90-detent.yaml`) a copy of the candidate is
+    /// put at under a fresh directory beside the candidate. That directory
+    /// then replaces [`ArgTemplate::TempFile`], and is removed after the
+    /// check. `None`: `TempFile` is the candidate file itself.
+    ///
+    /// Not serialized, for the same reason as
+    /// [`ModuleDescriptor::reload_unit_files`].
+    #[serde(skip)]
+    #[cfg_attr(feature = "openapi", schema(ignore = true))]
+    pub stage_as: Option<&'static str>,
 }
 
 impl ExternalCheck {
@@ -566,12 +577,14 @@ mod tests {
             ],
             expects: CheckExpectation::ExitZero,
             applies_to: &[],
+            stage_as: None,
         },
         ExternalCheck {
             program: PathSpec::new("/usr/bin/testparm"),
             args: &[ArgTemplate::Literal("-s")],
             expects: CheckExpectation::StdoutContains("Loaded services"),
             applies_to: &[PathSpec::new("/etc/chrony/chrony.conf")],
+            stage_as: None,
         },
     ];
 

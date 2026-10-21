@@ -241,7 +241,9 @@ confined monitor does not start programs itself.
   with `.detent-candidate-`, and the directory must pass the monitor's own
   check (`require_trusted_dir`: owned by root or the runner's euid, no group
   or other write bit, not a symlink). A module with no file target uses the staging
-  directory.
+  directory. A check with `ExternalCheck::stage_as` (netplan) gets a copy of
+  the candidate under a fresh directory beside it, and that directory as its
+  argument; the runner removes it after the run.
 - A `Service` action must be declared by the binding; `Status` is refused.
 - `StartUpdate { tag }` (E16): the runner checks the tag again
   (`is_release_tag`), lists the instances of the template unit

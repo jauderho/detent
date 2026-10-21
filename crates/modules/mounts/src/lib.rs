@@ -342,6 +342,7 @@ static CHECKS: &[ExternalCheck] = &[ExternalCheck {
     ],
     expects: CheckExpectation::ExitZero,
     applies_to: &[],
+    stage_as: None,
 }];
 
 /// The services a change to these files affects. There is no daemon unit to

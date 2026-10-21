@@ -1555,6 +1555,9 @@ static CHECKS: &[ExternalCheck] = &[
         ],
         expects: CheckExpectation::ExitZero,
         applies_to: &[NETPLAN_FILE],
+        // `--root-dir` reads `<root>/etc/netplan/*.yaml`: the candidate is
+        // staged there, so a file it cannot parse fails the check.
+        stage_as: Some("etc/netplan/90-detent.yaml"),
     },
     // `--lines=0`: no journal tail. Reading it needs the boot id from
     // `/proc/sys`, which the packaged unit's `ProcSubset=pid` hides, so
@@ -1567,12 +1570,14 @@ static CHECKS: &[ExternalCheck] = &[
         ],
         expects: CheckExpectation::ExitZero,
         applies_to: &[NETWORKD_FILE],
+        stage_as: None,
     },
     ExternalCheck {
         program: PathSpec::new("/usr/bin/nmcli"),
         args: &[ArgTemplate::Literal("general")],
         expects: CheckExpectation::ExitZero,
         applies_to: &[NM_FILE],
+        stage_as: None,
     },
     ExternalCheck {
         program: PathSpec::new("/sbin/ifup"),
@@ -1585,6 +1590,7 @@ static CHECKS: &[ExternalCheck] = &[
         ],
         expects: CheckExpectation::ExitZero,
         applies_to: &[IFUPDOWN_FILE],
+        stage_as: None,
     },
 ];
 

@@ -196,6 +196,7 @@ static CHECKS: &[ExternalCheck] = &[ExternalCheck {
     args: &[ArgTemplate::Literal("--test"), ArgTemplate::TempFile],
     expects: CheckExpectation::ExitZero,
     applies_to: &[],
+    stage_as: None,
 }];
 
 /// TODO(descriptor): the services a change to these files affects. Give every

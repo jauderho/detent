@@ -586,6 +586,7 @@ mod tests {
         args: &[ArgTemplate::Literal("-p"), ArgTemplate::TempFile],
         expects: CheckExpectation::ExitZero,
         applies_to: &[],
+        stage_as: None,
     }];
 
     static CHRONY_SERVICES: &[ServiceBinding] = &[ServiceBinding {
@@ -923,24 +924,28 @@ mod tests {
                 args: &[],
                 expects: detent_core::descriptor::CheckExpectation::ExitZero,
                 applies_to: &[PathSpec::new("/etc/second/second.conf")],
+                stage_as: None,
             },
             ExternalCheck {
                 program: PathSpec::new("/usr/sbin/first-check"),
                 args: &[],
                 expects: detent_core::descriptor::CheckExpectation::ExitZero,
                 applies_to: &[PathSpec::new("/etc/first/first.conf")],
+                stage_as: None,
             },
             ExternalCheck {
                 program: PathSpec::new("/usr/sbin/any-check"),
                 args: &[],
                 expects: detent_core::descriptor::CheckExpectation::ExitZero,
                 applies_to: &[],
+                stage_as: None,
             },
             ExternalCheck {
                 program: PathSpec::new("/usr/sbin/dir-check"),
                 args: &[],
                 expects: detent_core::descriptor::CheckExpectation::ExitZero,
                 applies_to: &[PathSpec::new("/etc/systemd/network")],
+                stage_as: None,
             },
         ],
         ..module(

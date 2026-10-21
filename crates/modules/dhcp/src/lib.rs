@@ -1722,18 +1722,21 @@ static CHECKS: &[ExternalCheck] = &[
         ],
         expects: CheckExpectation::ExitZero,
         applies_to: &[DNSMASQ_CONF],
+        stage_as: None,
     },
     ExternalCheck {
         program: PathSpec::new("/usr/sbin/kea-dhcp4"),
         args: &[ArgTemplate::Literal("-t"), ArgTemplate::TempFile],
         expects: CheckExpectation::ExitZero,
         applies_to: &[KEA4_CONF],
+        stage_as: None,
     },
     ExternalCheck {
         program: PathSpec::new("/usr/sbin/kea-dhcp6"),
         args: &[ArgTemplate::Literal("-t"), ArgTemplate::TempFile],
         expects: CheckExpectation::ExitZero,
         applies_to: &[KEA6_CONF],
+        stage_as: None,
     },
 ];
 

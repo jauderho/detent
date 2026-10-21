@@ -520,6 +520,7 @@ mod tests {
         args: &[ArgTemplate::TempFile],
         expects: CheckExpectation::ExitZero,
         applies_to: &[],
+        stage_as: None,
     }];
     static SERVICES: &[ServiceBinding] = &[ServiceBinding {
         units: UnitNames {
@@ -560,6 +561,7 @@ mod tests {
         args: &[ArgTemplate::TempFile],
         expects: CheckExpectation::ExitZero,
         applies_to: &[],
+        stage_as: None,
     };
 
     /// Echoes the candidate path; a candidate whose contents name a hook
@@ -667,6 +669,7 @@ mod tests {
         args: &[ArgTemplate::TempFile],
         expects: CheckExpectation::ExitZero,
         applies_to: &[],
+        stage_as: None,
     }];
 
     /// The id of [`FILED_CHECKS`]' check in the fixture's allow-list.

@@ -2,7 +2,8 @@
 //! ([`ExternalCheckRunner`]), implementing the monitor's [`CheckRunner`] hook
 //! (PLAN §2.3, §2.4).
 
-use std::path::Path;
+use std::os::unix::fs::DirBuilderExt;
+use std::path::{Component, Path, PathBuf};
 
 use detent_core::descriptor::{ArgTemplate, CheckExpectation, ExternalCheck};
 
@@ -71,20 +72,24 @@ impl CheckRunner for ExternalCheckRunner {
                 "check program is not an absolute path".to_owned(),
             ));
         }
-        let candidate_str = candidate
+        let staged = match check.stage_as {
+            Some(relative) => Some(StagedRoot::new(candidate, relative)?),
+            None => None,
+        };
+        let input = staged.as_ref().map_or(candidate, |root| root.0.as_path());
+        let input_str = input
             .to_str()
             .ok_or_else(|| HookError::Failed("candidate path is not valid UTF-8".to_owned()))?;
         let mut args = Vec::with_capacity(check.args.len());
         for arg in check.args {
             args.push(match arg {
                 ArgTemplate::Literal(literal) => (*literal).to_owned(),
-                ArgTemplate::TempFile => candidate_str.to_owned(),
+                ArgTemplate::TempFile => input_str.to_owned(),
             });
         }
-        let output = self
-            .runner
-            .run(program, &args, CHECK_TIMEOUT)
-            .map_err(|err| HookError::Failed(err.to_string()))?;
+        let output = self.runner.run(program, &args, CHECK_TIMEOUT);
+        drop(staged);
+        let output = output.map_err(|err| HookError::Failed(err.to_string()))?;
         if output.timed_out {
             return Ok(CheckOutcome {
                 check: CheckId(0),
@@ -106,6 +111,52 @@ impl CheckRunner for ExternalCheckRunner {
             exit_code: output.status,
             detail: build_detail(&output.stdout, &output.stderr),
         })
+    }
+}
+
+/// A fresh directory beside the candidate that holds a copy of it at an
+/// [`ExternalCheck::stage_as`] path, for a validator that reads a tree
+/// (`netplan generate --root-dir`). It stays inside the candidate's own
+/// directory, so nothing outside what the check may already write is
+/// touched. Removed on drop.
+struct StagedRoot(PathBuf);
+
+impl StagedRoot {
+    fn new(candidate: &Path, relative: &str) -> Result<Self, HookError> {
+        let failed = |what: &str| HookError::Failed(format!("cannot stage the candidate: {what}"));
+        let rel = Path::new(relative);
+        if !rel
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+        {
+            return Err(failed("the stage path is not a plain relative path"));
+        }
+        let (Some(dir), Some(name)) = (candidate.parent(), candidate.file_name()) else {
+            return Err(failed("the candidate has no directory"));
+        };
+        let mut root_name = std::ffi::OsString::from(".detent-root");
+        root_name.push(name);
+        let root = dir.join(root_name);
+        // `create_dir` fails on anything already there, a symlink included.
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .map_err(|err| failed(&err.to_string()))?;
+        let staged = Self(root);
+        let target = staged.0.join(rel);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| failed(&err.to_string()))?;
+        }
+        std::fs::copy(candidate, &target).map_err(|err| failed(&err.to_string()))?;
+        Ok(staged)
+    }
+}
+
+impl Drop for StagedRoot {
+    fn drop(&mut self) {
+        if let Err(err) = std::fs::remove_dir_all(&self.0) {
+            tracing::warn!(root = %self.0.display(), %err, "a staged check root was not removed");
+        }
     }
 }
 
@@ -241,6 +292,7 @@ mod tests {
             args: &[ArgTemplate::Literal("-s")],
             expects: CheckExpectation::StdoutContains("Loaded services"),
             applies_to: &[],
+            stage_as: None,
         };
         // Matching stdout but non-zero exit must NOT pass.
         let fake =

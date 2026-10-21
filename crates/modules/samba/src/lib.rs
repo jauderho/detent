@@ -328,6 +328,7 @@ static CHECKS: &[ExternalCheck] = &[ExternalCheck {
     args: &[ArgTemplate::Literal("-s"), ArgTemplate::TempFile],
     expects: CheckExpectation::ExitZero,
     applies_to: &[],
+    stage_as: None,
 }];
 
 /// The services a change to these files affects. systemd names the classic
@@ -1756,6 +1757,7 @@ mod tests {
                 args: &[ArgTemplate::Literal("-s"), ArgTemplate::TempFile],
                 expects: CheckExpectation::ExitZero,
                 applies_to: &[],
+                stage_as: None,
             }] as &[ExternalCheck]
         );
         assert!(!descriptor.commit_confirm);

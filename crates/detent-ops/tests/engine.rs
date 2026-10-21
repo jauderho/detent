@@ -289,6 +289,7 @@ fn build_descriptor(id: &'static str, target: &Path, shape: Shape) -> &'static M
             args: leak(vec![ArgTemplate::Literal("-p"), ArgTemplate::TempFile]).as_slice(),
             expects: CheckExpectation::ExitZero,
             applies_to,
+            stage_as: None,
         }])
         .as_slice(),
     };

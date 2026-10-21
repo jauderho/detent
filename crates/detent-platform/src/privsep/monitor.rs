@@ -2157,6 +2157,7 @@ mod tests {
             args,
             expects: CheckExpectation::ExitZero,
             applies_to: &[],
+            stage_as: None,
         }])
         .as_slice();
         leak(ModuleDescriptor {

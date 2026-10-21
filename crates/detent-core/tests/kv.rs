@@ -90,6 +90,7 @@ static KV_DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
         args: &[ArgTemplate::Literal("--check"), ArgTemplate::TempFile],
         expects: CheckExpectation::ExitZero,
         applies_to: &[],
+        stage_as: None,
     }],
     commit_confirm: false,
     reload_unit_files: false,
