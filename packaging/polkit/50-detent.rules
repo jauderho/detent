@@ -43,6 +43,15 @@
 //      fragment file"). The rule checks that the file exists before it
 //      grants; install.sh also installs the template before this rule and
 //      removes this rule first.
+//   5. org.freedesktop.NetworkManager.network-control, for the network
+//      module's NetworkManager reload (ServiceBinding.reload): the runner
+//      restarts NetworkManager.service (item 1) and runs `nmcli connection
+//      up filename` on detent's own keyfile. NetworkManager gives the action
+//      no details, so the grant cannot name that profile: the detent user
+//      may activate and deactivate any connection. It can already write the
+//      keyfile itself, so this gives no more control of the network than it
+//      has. `nmcli connection load` is not used: NetworkManager allows it
+//      only to root, whatever polkit says.
 //
 // Installed to /etc/polkit-1/rules.d/50-detent.rules by
 // `install.sh --mode capability-user` only. JavaScript rules need polkit
@@ -53,6 +62,9 @@ polkit.addRule(function (action, subject) {
     return polkit.Result.NOT_HANDLED;
   }
 
+  if (action.id == "org.freedesktop.NetworkManager.network-control") {
+    return polkit.Result.YES;
+  }
   if (action.id == "org.freedesktop.systemd1.reload-daemon") {
     return polkit.Result.YES;
   }

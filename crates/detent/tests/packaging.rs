@@ -401,12 +401,13 @@ fn the_polkit_rule_grants_no_unit_that_no_module_binds() {
     assert_eq!(polkit_unit_verbs(), module_unit_verbs());
 }
 
-/// The rule names only the two systemd actions detent needs. Of the update
+/// The rule names only the two systemd actions and the one `NetworkManager`
+/// action detent needs (network's `nmcli connection up`). Of the update
 /// unit it names only instances of the template (never the bare
 /// `detent-update.service`), with only the `start` verb, and only while the
 /// template file `install.sh` installs exists.
 #[test]
-fn the_polkit_rule_handles_only_two_actions_and_only_the_update_template() {
+fn the_polkit_rule_handles_only_three_actions_and_only_the_update_template() {
     let code = polkit_code();
     let actions: Vec<String> = code
         .lines()
@@ -416,6 +417,7 @@ fn the_polkit_rule_handles_only_two_actions_and_only_the_update_template() {
     assert_eq!(
         actions,
         [
+            "org.freedesktop.NetworkManager.network-control",
             "org.freedesktop.systemd1.reload-daemon",
             "org.freedesktop.systemd1.manage-units"
         ]
@@ -489,7 +491,9 @@ console.log(JSON.stringify(spawned[0] || null));
 /// present (1 or 0)|expected`. The "present" field is the result of every
 /// `polkit.spawn` `test -f`: the update template for an update instance, the
 /// fstab generator fragment for a mount unit. Actions: `M` manage-units, `F`
-/// manage-unit-files, `R` reload-daemon.
+/// manage-unit-files, `R` reload-daemon; `NetworkManager`: `S`
+/// settings.modify.system, `C` network-control, `O` settings.modify.own,
+/// `E` enable-disable-network.
 const RULE_CASES: &[&str] = &[
     "detent|M|detent-update@v1.2.0-rc.1.service|start|1|yes",
     "detent|M|detent-update@v1.2.0-rc.1.service|start|0|no",
@@ -535,6 +539,14 @@ const RULE_CASES: &[&str] = &[
     "detent|M|etc.mount|start|1|no",
     "detent|M|var-lib.mount|stop|1|no",
     "detent|R|||1|yes",
+    // network's NetworkManager reload (a restart, then `nmcli connection
+    // up`): network-control, for detent only. Not settings changes.
+    "detent|C|||1|yes",
+    "detent|S|||1|no",
+    "nobody|S|||1|no",
+    "nobody|C|||1|no",
+    "detent|O|||1|no",
+    "detent|E|||1|no",
 ];
 
 /// Runs the rule on `cases` (as [`RULE_CASES`]) with `runtime`: one
@@ -552,6 +564,10 @@ fn rule_decisions(
         let action = match *action {
             "M" => "org.freedesktop.systemd1.manage-units",
             "F" => "org.freedesktop.systemd1.manage-unit-files",
+            "S" => "org.freedesktop.NetworkManager.settings.modify.system",
+            "C" => "org.freedesktop.NetworkManager.network-control",
+            "O" => "org.freedesktop.NetworkManager.settings.modify.own",
+            "E" => "org.freedesktop.NetworkManager.enable-disable-network",
             _ => "org.freedesktop.systemd1.reload-daemon",
         };
         let present = *present == "1";

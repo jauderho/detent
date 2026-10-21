@@ -319,8 +319,9 @@ client ─▶ worker: /api/v1 handler ─▶ Operation::Apply ─▶ OpsEngine (
   the first binding that reads the chosen file (`ServiceBinding::applies_to`,
   empty: every target; `BindingInfo::targets` in `HelloAck`, `PROTO_VERSION`
   4). network: `networking.service` for `/etc/network/interfaces`,
-  `NetworkManager.service` (reload: `nmcli connection load` and
-  `nmcli --wait 20 connection up filename` on `detent.nmconnection`),
+  `NetworkManager.service` (reload: `systemctl restart
+  NetworkManager.service`, then `nmcli --wait 20 connection up filename` on
+  `detent.nmconnection`),
   `systemd-networkd.service` for `10-detent.network` and `90-detent.yaml`;
   the module declares `reload_unit_files`, so netplan's generator runs before
   networkd reloads. Proof: `a_write_acts_on_the_service_of_the_file_it_writes`

@@ -1603,14 +1603,16 @@ static CHECKS: &[ExternalCheck] = &[
     },
 ];
 
-/// `NetworkManager` reads a keyfile only when asked, and a restart keeps the
-/// addresses of the old profile: load the file, then activate it again.
-/// `filename` selects the profile by its file, so no argument comes from
-/// the file's contents.
+/// `NetworkManager` reads a changed keyfile on a restart, but keeps the old
+/// profile's addresses until the profile is activated again. `nmcli
+/// connection load` would read just the file, but `NetworkManager` allows it
+/// only to root, so capability-user mode could not run it; a restart goes
+/// through the polkit rule. `filename` selects the profile by its file, so
+/// no argument comes from the file's contents.
 static NM_RELOAD: &[ReloadCommand] = &[
     ReloadCommand {
-        program: PathSpec::new("/usr/bin/nmcli"),
-        args: &["connection", "load", NM_FILE.as_str()],
+        program: PathSpec::new("/usr/bin/systemctl"),
+        args: &["restart", "NetworkManager.service"],
     },
     ReloadCommand {
         program: PathSpec::new("/usr/bin/nmcli"),
@@ -4302,12 +4304,7 @@ mod tests {
         assert_eq!(
             reloads,
             [
-                vec![
-                    "/usr/bin/nmcli",
-                    "connection",
-                    "load",
-                    "/etc/NetworkManager/system-connections/detent.nmconnection"
-                ],
+                vec!["/usr/bin/systemctl", "restart", "NetworkManager.service"],
                 vec![
                     "/usr/bin/nmcli",
                     "--wait",

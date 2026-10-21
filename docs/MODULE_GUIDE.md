@@ -134,8 +134,8 @@ binds each check (`ExternalCheck::applies_to`) and each service
 (`ServiceBinding::applies_to`) to the files of its backend; empty means every
 target. A service that the init system cannot reload correctly lists its own
 commands in `ServiceBinding::reload` (fixed argv, nothing from a request or the
-file; network's `NetworkManager` runs `nmcli connection load` and `nmcli
-connection up filename` on its file). Give each init system its alternatives (`chronyd.service` **and**
+file; network's `NetworkManager` restarts `NetworkManager.service`, then runs
+`nmcli connection up filename` on its file). Give each init system its alternatives (`chronyd.service` **and**
 `chrony.service`), and set `commit_confirm: true` only for a module that can lock
 the admin out (ADR-012). Fixtures are real upstream files under
 `fixtures/<id>/<version>/`, plus an `edge/` directory for the hand-made
