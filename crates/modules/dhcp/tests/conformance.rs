@@ -26,8 +26,8 @@
 //!   active lines, one of them the stock `conf-dir` include (BUGFIX D9).
 //! * `fixtures/dhcp/edge/` — hand-made adversarial cases: CRLF, no trailing
 //!   newline (dnsmasq and JSONC flavors), tabs and odd spacing around `=`,
-//!   garbage lines that must stay `Unknown`, and a Kea file exercising every
-//!   JSONC comment style.
+//!   garbage lines that must stay `Unknown`, a Kea file exercising every
+//!   JSONC comment style, and a Kea file with trailing commas.
 //!
 //! `module_conformance!` includes only tracked-version + edge fixtures; the
 //! huge `dnsmasq.conf.example` is exercised through the explicit
@@ -65,6 +65,10 @@ const JSONC_NO_NEWLINE: &str =
     include_str!("../../../../fixtures/dhcp/edge/no-trailing-newline.jsonc");
 /// A Kea `Dhcp4` file exercising every JSONC comment style.
 const JSONC_COMMENTS: &str = include_str!("../../../../fixtures/dhcp/edge/jsonc-comments.conf");
+/// A Kea `Dhcp4` file with trailing commas in objects and arrays, laid out
+/// like the stock Debian and Ubuntu `kea-dhcp4.conf`.
+const JSONC_TRAILING_COMMA: &str =
+    include_str!("../../../../fixtures/dhcp/edge/jsonc-trailing-comma.conf");
 
 /// `model_strategy` must generate **valid** models only — values this
 /// module's `apply` would refuse make invariants 3 and 4 vacuous, because
@@ -246,7 +250,8 @@ detent_core::module_conformance!(
         NO_NEWLINE,
         TABS,
         JSONC_NO_NEWLINE,
-        JSONC_COMMENTS
+        JSONC_COMMENTS,
+        JSONC_TRAILING_COMMA
     ],
     model_strategy = model_strategy(),
     injection_probes = [
@@ -285,6 +290,7 @@ fn fixtures_round_trip_losslessly() {
         TABS,
         JSONC_NO_NEWLINE,
         JSONC_COMMENTS,
+        JSONC_TRAILING_COMMA,
     ] {
         let doc = DhcpModule::parse(fixture);
         assert_eq!(
@@ -441,6 +447,12 @@ fn edge_fixtures_parse_to_their_exact_models() {
     assert_eq!(model.kea_v6.valid_lifetime, Some(4000));
     assert_eq!(model.kea_v6.subnets.len(), 1);
     let model = model_of(JSONC_COMMENTS);
+    assert_eq!(model.kea_v4.interfaces, vec!["eth0".to_owned()]);
+    assert_eq!(model.kea_v4.valid_lifetime, Some(3600));
+    assert_eq!(model.kea_v4.subnets.len(), 1);
+    // Trailing commas are Kea, not dnsmasq.
+    let model = model_of(JSONC_TRAILING_COMMA);
+    assert_eq!(model.dnsmasq, Vec::new());
     assert_eq!(model.kea_v4.interfaces, vec!["eth0".to_owned()]);
     assert_eq!(model.kea_v4.valid_lifetime, Some(3600));
     assert_eq!(model.kea_v4.subnets.len(), 1);
