@@ -5,6 +5,10 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-21 - D3 rerun of the owner decisions (Track D 12 to 17)
+
+Containers on the test host, build of the #87 to #91 stack (`docs/spikes/d3-containers.md`, "Second rerun 2026-10-21"). netplan with the NetworkManager renderer now goes live through `detent.nmconnection` and a missed confirm restores the file and the link. The stock Debian and Ubuntu Kea file parses as Kea, and `kea-dhcp4 -t` runs as `_kea` and passes. On Fedora the resolver writes `resolved.conf.d/90-detent.conf` once the operator creates it empty. Still open: netplan with the networkd renderer is not testable in a container (no udevd), and the Ubuntu image needed `network-manager` for the NetworkManager flow (added to `spikes/d3-containers.sh`).
+
 ## 2026-10-21 - netplan that renders for NetworkManager leaves the network to it (BUGFIX Track D 17)
 
 With `renderer: NetworkManager` (the Ubuntu desktop layout) the network module still wrote `90-detent.yaml` and reloaded networkd, so the edit never went live, and `netplan apply` would need a wider unit (D11).

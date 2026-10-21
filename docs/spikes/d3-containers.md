@@ -9,6 +9,74 @@ x86_64-unknown-linux-musl`, default features, built off the test host).
 Nothing in `crates/` changed. Every fault below is recorded as a BUGFIX item
 (Track D 4 to 12) with the exact output. No fault was fixed here.
 
+## Second rerun 2026-10-21: owner decisions (Track D 12 to 17)
+
+Build under test: the head of the stack #87 to #91 on `8e66a92`, built off the
+test host as before. Sections: Ubuntu `prep,dhcp,network`, Debian
+`prep,dhcp,network`, Fedora `prep,resolver,network`, Arch `prep,resolver`.
+Script changes: the resolver seed creates an empty
+`/etc/systemd/resolved.conf.d/90-detent.conf` where `/etc` has no
+`resolved.conf` (no vendor copy) and puts `resolve` (the `[Resolve]` header)
+in the model when the file has none; the `netplan-nm` flavour creates
+`detent.nmconnection`, not `90-detent.yaml`; the Ubuntu image adds
+`network-manager` (the first pass had none, so `netplan-nm` could not reach
+`NetworkManager`; the Ubuntu network rows below are from the second pass,
+`--only prep,network`).
+
+| Module | Debian 13 | Ubuntu 26.04 | Fedora 44 | Arch |
+|---|---|---|---|---|
+| host (install, `order`, veth) | 4 / 0 / 0 | 4 / 0 / 0 | 4 / 0 / 0 | 4 / 0 / 0 |
+| resolver | not run | not run | 11 / 1 / 0 | 11 / 0 / 0 |
+| dhcp | 15 / 1 / 0 | 15 / 1 / 0 | not run | not run |
+| network | 31 / 0 / 0 | 28 / 5 / 0 | 11 / 0 / 1 | not run |
+
+Missed confirm (bad address, 60 s window, nobody confirms):
+
+| Container, stack | Service action | Bad address live | File restored | Link restored |
+|---|---|---|---|---|
+| Debian, ifupdown | `networking.service` restart | yes | yes, 61 s | yes, no manual step |
+| Debian, NetworkManager | NM restart, `nmcli connection up filename` | yes | yes, 62 s | yes |
+| Debian, networkd | `systemd-networkd.service` reload | yes | yes, 61 s | yes |
+| Ubuntu, networkd | `systemd-networkd.service` reload | yes | yes, 62 s | yes |
+| Ubuntu, netplan (networkd renderer) | daemon-reload, networkd reload | not testable | yes, 61 s | not testable |
+| Ubuntu, netplan (NetworkManager renderer) | NM restart, `nmcli connection up filename` on `detent.nmconnection` | yes | yes, 60 s | yes, no manual step |
+| Fedora, NetworkManager | NM restart, `nmcli connection up filename` | yes | yes, 62 s | yes |
+
+Notes:
+
+- netplan with the NetworkManager renderer (D17): `detent host` reports
+  `network backend network_manager`, `plan` targets
+  `/etc/NetworkManager/system-connections/detent.nmconnection` and names
+  `NetworkManager.service`, and the netplan file is not written. The edit
+  goes live, and a missed confirm restores the file and the link.
+- netplan with the networkd renderer: as before, not testable in a container
+  (`netplan-configure.service` fails with no udevd, `mgmt0` stays
+  `unmanaged`). The 5 FAIL rows are this flow.
+- dhcp (D12, D13): the stock Debian and Ubuntu `kea-dhcp4.conf` now parses as
+  Kea; `plan` and the API apply run `kea-dhcp4 -t` on a candidate in
+  `/etc/kea` as `_kea` (`ran: true, passed: true`; Kea warns `Extraneous
+  comma` about the stock file), write the subnet and restart
+  `kea-dhcp4-server.service`. The one FAIL row is the script's own
+  `kea-dhcp4 -t` as root, outside detent, kept to show the AppArmor refusal
+  is still there.
+- resolver (D16): on Fedora `get` first answers a null model (no file), as
+  for every missing target; with the empty drop-in created, `plan`, apply,
+  the rollback (byte-identical) and the unbound edit pass, and the setting
+  lands in `/etc/systemd/resolved.conf.d/90-detent.conf`. The FAIL row is that
+  first `get`. Arch has a `resolved.conf` in `/etc`, so it is unchanged.
+
+Test host changes for this rerun: `podman` was installed with
+`apt-get install podman`, which added 24 packages (aardvark-dns, buildah,
+catatonit, conmon, containers-storage, criu, crun, fuse-overlayfs,
+golang-github-containers-common, golang-github-containers-image, gvproxy,
+libcompel1, libcriu2, libnet9, libslirp0, libsubid5, libyajl2, netavark,
+passt, podman, python3-protobuf, python3-pycriu, slirp4netns, uidmap). After
+the run: `podman rm -af`, `podman system reset -f`, `apt-get purge` of those
+24 packages (`apt-get autoremove --purge` then removed nothing), and
+`/var/lib/containers`, `/etc/containers`, `/run/containers` and every staging
+file removed. No detent binary or unit is left, `/var/lib/detent` holds only
+`monitor.lock`, and the `detent` account is kept.
+
 ## Rerun 2026-10-21: resolver, dhcp and network after Track D 5, 7, 10, 11
 
 Build under test: the head of the stack #61, #63, #64, #65 on `58de034`
