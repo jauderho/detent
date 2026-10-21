@@ -291,6 +291,20 @@ pub struct ExternalCheck {
     #[serde(skip)]
     #[cfg_attr(feature = "openapi", schema(ignore = true))]
     pub stage_as: Option<&'static str>,
+    /// Run the validator as the owner of the candidate's directory, read when
+    /// the check runs, with no capability: for a daemon whose configuration
+    /// directory only its own user reads (Kea: `/etc/kea` is `_kea` `0750`
+    /// on Debian and Ubuntu, and the distro's `AppArmor` profile gives root
+    /// no `dac_override`). Only a root runner can change user; a root-owned
+    /// directory, or a runner that is not root, runs the check as before.
+    /// The candidate directory may then be owned by that user, who can
+    /// already replace the judged file. Not with `stage_as`.
+    ///
+    /// Not serialized, for the same reason as
+    /// [`ModuleDescriptor::reload_unit_files`].
+    #[serde(skip)]
+    #[cfg_attr(feature = "openapi", schema(ignore = true))]
+    pub run_as_dir_owner: bool,
 }
 
 impl ExternalCheck {
@@ -633,6 +647,7 @@ mod tests {
             expects: CheckExpectation::ExitZero,
             applies_to: &[],
             stage_as: None,
+            run_as_dir_owner: false,
         },
         ExternalCheck {
             program: PathSpec::new("/usr/bin/testparm"),
@@ -640,6 +655,7 @@ mod tests {
             expects: CheckExpectation::StdoutContains("Loaded services"),
             applies_to: &[PathSpec::new("/etc/chrony/chrony.conf")],
             stage_as: None,
+            run_as_dir_owner: false,
         },
     ];
 

@@ -924,7 +924,7 @@ impl<'a> Monitor<'a> {
             .filter(|entry| entry.check.judges(&target))
         {
             let (candidate, candidate_path) = self
-                .create_check_candidate(entry.id)
+                .create_check_candidate(entry.id, entry.check)
                 .map_err(Response::Error)?;
             let _remove = RemoveOnDrop(&candidate_path);
             write_all_and_sync(&candidate, bytes).map_err(|err| {
@@ -991,7 +991,8 @@ impl<'a> Monitor<'a> {
     /// monitor staging when the module has no file target. The directory
     /// comes from the allow-list, never from the request. A target directory
     /// that fails [`require_trusted_dir`] (owner root or the monitor's euid,
-    /// so capability-user mode works) is refused, with no fallback. A trusted
+    /// so capability-user mode works; any owner for a check that runs as
+    /// that owner) is refused, with no fallback. A trusted
     /// target directory the monitor cannot write — a read-only file system
     /// (the packaged unit's `ProtectSystem=strict` makes `/etc` read-only and
     /// lists only the target file in `ReadWritePaths=`) or no write
@@ -1000,6 +1001,7 @@ impl<'a> Monitor<'a> {
     fn create_check_candidate(
         &self,
         check: CheckId,
+        spec: &detent_core::descriptor::ExternalCheck,
     ) -> Result<(std::fs::File, PathBuf), ProtoError> {
         let cannot = |err: std::io::Error| {
             ProtoError::Io(format!("cannot create a candidate file: {}", err.kind()))
@@ -1007,7 +1009,7 @@ impl<'a> Monitor<'a> {
         let Some(dir) = self.allow.check_candidate_dir(check, &self.host_profile) else {
             return create_candidate(&ensure_staging_dir(&self.staging_dir)?).map_err(cannot);
         };
-        require_trusted_dir(dir, "candidate directory", DirOwner::EuidOrRoot)?;
+        require_trusted_dir(dir, "candidate directory", DirOwner::of_candidate_dir(spec))?;
         match create_candidate(dir) {
             Err(err)
                 if matches!(
@@ -1025,7 +1027,7 @@ impl<'a> Monitor<'a> {
         let Some(entry) = self.allow.check(id) else {
             return unknown(IdKind::Check, u32::from(id.get()));
         };
-        let (candidate, candidate_path) = match self.create_check_candidate(id) {
+        let (candidate, candidate_path) = match self.create_check_candidate(id, entry.check) {
             Ok(created) => created,
             Err(err) => return Response::Error(err),
         };
@@ -1944,6 +1946,13 @@ pub(crate) enum DirOwner {
     /// This process's euid or root: a target's directory, which root owns
     /// even when the monitor runs as `detent` (capability-user mode).
     EuidOrRoot,
+    /// Any owner: the candidate directory of a check that runs as that
+    /// directory's owner ([`ExternalCheck::run_as_dir_owner`]). The owner can
+    /// already replace the file the check judges, so letting it touch the
+    /// candidate gives it nothing more.
+    ///
+    /// [`ExternalCheck::run_as_dir_owner`]: detent_core::descriptor::ExternalCheck::run_as_dir_owner
+    Any,
 }
 
 impl DirOwner {
@@ -1953,6 +1962,16 @@ impl DirOwner {
         match self {
             Self::Euid => uid == euid,
             Self::EuidOrRoot => uid == euid || uid == 0,
+            Self::Any => true,
+        }
+    }
+
+    /// The owners accepted for the candidate directory of `check`.
+    pub(crate) const fn of_candidate_dir(check: &detent_core::descriptor::ExternalCheck) -> Self {
+        if check.run_as_dir_owner {
+            Self::Any
+        } else {
+            Self::EuidOrRoot
         }
     }
 }
@@ -2160,6 +2179,7 @@ mod tests {
             expects: CheckExpectation::ExitZero,
             applies_to: &[],
             stage_as: None,
+            run_as_dir_owner: false,
         }])
         .as_slice();
         leak(ModuleDescriptor {
@@ -2701,6 +2721,19 @@ mod tests {
         assert!(DirOwner::Euid.accepts(0, 0));
         assert!(DirOwner::EuidOrRoot.accepts(0, 0));
         assert!(!DirOwner::EuidOrRoot.accepts(STRANGER_UID, 0));
+        // A check that runs as its directory's owner takes any owner.
+        assert!(DirOwner::Any.accepts(STRANGER_UID, euid));
+        let mut check = detent_core::descriptor::ExternalCheck {
+            program: detent_core::descriptor::PathSpec::new("/usr/sbin/kea-dhcp4"),
+            args: &[],
+            expects: detent_core::descriptor::CheckExpectation::ExitZero,
+            applies_to: &[],
+            stage_as: None,
+            run_as_dir_owner: false,
+        };
+        assert_eq!(DirOwner::of_candidate_dir(&check), DirOwner::EuidOrRoot);
+        check.run_as_dir_owner = true;
+        assert_eq!(DirOwner::of_candidate_dir(&check), DirOwner::Any);
     }
 
     #[test]

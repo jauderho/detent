@@ -1180,6 +1180,7 @@ mod tests {
             expects: detent_core::descriptor::CheckExpectation::ExitZero,
             applies_to: &[],
             stage_as: None,
+            run_as_dir_owner: false,
         }];
 
     /// STAGE3 H6: under the real monitor confinement, a validator run
@@ -1780,6 +1781,7 @@ mod tests {
             expects: detent_core::descriptor::CheckExpectation::ExitZero,
             applies_to: &[],
             stage_as: None,
+            run_as_dir_owner: false,
         }];
 
     type Json = serde_json::Value;

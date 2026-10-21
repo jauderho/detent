@@ -91,6 +91,27 @@ pub trait ProcessRunner: Send + Sync {
         args: &[String],
         timeout: Duration,
     ) -> Result<ProcessOutput, ProcessError>;
+
+    /// As [`ProcessRunner::run`], with the child's uid and gid set to `user`
+    /// and its supplementary groups cleared before `exec`. A root parent
+    /// changing to a non-root uid leaves the child no capability.
+    ///
+    /// # Errors
+    ///
+    /// [`ProcessError`] when the child could not be started; by default,
+    /// always: a runner must opt in to changing user.
+    fn run_as(
+        &self,
+        program: &'static str,
+        _args: &[String],
+        _timeout: Duration,
+        _user: (u32, u32),
+    ) -> Result<ProcessOutput, ProcessError> {
+        Err(ProcessError {
+            program: program.to_owned(),
+            message: "this runner cannot run a program as another user".to_owned(),
+        })
+    }
 }
 
 /// Picks the first candidate in `candidates` that [`ProcessRunner::exists`]
@@ -124,7 +145,17 @@ impl ProcessRunner for RealProcessRunner {
         args: &[String],
         timeout: Duration,
     ) -> Result<ProcessOutput, ProcessError> {
-        run_confined(program, args, timeout)
+        run_confined(program, args, timeout, None)
+    }
+
+    fn run_as(
+        &self,
+        program: &'static str,
+        args: &[String],
+        timeout: Duration,
+        user: (u32, u32),
+    ) -> Result<ProcessOutput, ProcessError> {
+        run_confined(program, args, timeout, Some(user))
     }
 }
 
@@ -132,8 +163,15 @@ fn run_confined(
     program: &'static str,
     args: &[String],
     timeout: Duration,
+    user: Option<(u32, u32)>,
 ) -> Result<ProcessOutput, ProcessError> {
     let mut command = Command::new(program);
+    if let Some((uid, gid)) = user {
+        // `std` clears the supplementary groups when the parent is root,
+        // then calls `setgid` and `setuid` in the child before `exec`.
+        std::os::unix::process::CommandExt::uid(&mut command, uid);
+        std::os::unix::process::CommandExt::gid(&mut command, gid);
+    }
     command
         .args(args)
         .env_clear()
@@ -244,5 +282,50 @@ mod tests {
     #[test]
     fn output_cap_is_64_kib() {
         assert_eq!(OUTPUT_CAP, 64 * 1024);
+    }
+
+    #[test]
+    fn real_runner_runs_a_program_as_the_given_user() -> Result<(), String> {
+        // Its own ids: changing to them needs no privilege.
+        let uid = rustix::process::getuid().as_raw();
+        let gid = rustix::process::getgid().as_raw();
+        let output = RealProcessRunner
+            .run_as(
+                "/usr/bin/id",
+                &["-u".to_owned()],
+                Duration::from_secs(10),
+                (uid, gid),
+            )
+            .map_err(|err| err.to_string())?;
+        assert_eq!(output.status, Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            uid.to_string()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_runner_without_run_as_refuses_to_change_user() {
+        struct Plain;
+        impl ProcessRunner for Plain {
+            fn exists(&self, _path: &'static str) -> bool {
+                true
+            }
+            fn run(
+                &self,
+                program: &'static str,
+                _args: &[String],
+                _timeout: Duration,
+            ) -> Result<super::ProcessOutput, super::ProcessError> {
+                Err(super::ProcessError {
+                    program: program.to_owned(),
+                    message: "not run".to_owned(),
+                })
+            }
+        }
+        assert!(Plain.run("/bin/true", &[], Duration::from_secs(1)).is_err());
+        let err = Plain.run_as("/bin/true", &[], Duration::from_secs(1), (1, 1));
+        assert!(err.is_err_and(|err| err.message.contains("another user")));
     }
 }

@@ -93,6 +93,7 @@ static KV_DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
         expects: CheckExpectation::ExitZero,
         applies_to: &[],
         stage_as: None,
+        run_as_dir_owner: false,
     }],
     commit_confirm: false,
     reload_unit_files: false,

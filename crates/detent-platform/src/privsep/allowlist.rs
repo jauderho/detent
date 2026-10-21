@@ -595,6 +595,7 @@ mod tests {
         expects: CheckExpectation::ExitZero,
         applies_to: &[],
         stage_as: None,
+        run_as_dir_owner: false,
     }];
 
     static CHRONY_SERVICES: &[ServiceBinding] = &[ServiceBinding {
@@ -937,6 +938,7 @@ mod tests {
                 expects: detent_core::descriptor::CheckExpectation::ExitZero,
                 applies_to: &[PathSpec::new("/etc/second/second.conf")],
                 stage_as: None,
+                run_as_dir_owner: false,
             },
             ExternalCheck {
                 program: PathSpec::new("/usr/sbin/first-check"),
@@ -944,6 +946,7 @@ mod tests {
                 expects: detent_core::descriptor::CheckExpectation::ExitZero,
                 applies_to: &[PathSpec::new("/etc/first/first.conf")],
                 stage_as: None,
+                run_as_dir_owner: false,
             },
             ExternalCheck {
                 program: PathSpec::new("/usr/sbin/any-check"),
@@ -951,6 +954,7 @@ mod tests {
                 expects: detent_core::descriptor::CheckExpectation::ExitZero,
                 applies_to: &[],
                 stage_as: None,
+                run_as_dir_owner: false,
             },
             ExternalCheck {
                 program: PathSpec::new("/usr/sbin/dir-check"),
@@ -958,6 +962,7 @@ mod tests {
                 expects: detent_core::descriptor::CheckExpectation::ExitZero,
                 applies_to: &[PathSpec::new("/etc/systemd/network")],
                 stage_as: None,
+                run_as_dir_owner: false,
             },
         ],
         services: &[

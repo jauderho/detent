@@ -244,6 +244,18 @@ confined monitor does not start programs itself.
   directory. A check with `ExternalCheck::stage_as` (netplan) gets a copy of
   the candidate under a fresh directory beside it, and that directory as its
   argument; the runner removes it after the run.
+- A check with `ExternalCheck::run_as_dir_owner` (Kea) runs as the owner of
+  the candidate's directory, read by the runner when the check runs (never
+  from a request): a root runner gives the candidate that directory's group
+  and mode `0640`, then starts the validator with that uid and gid and no
+  supplementary groups, so it holds no capability. A root-owned directory,
+  or a runner that is not root (capability-user mode: no `CAP_SETUID`), runs
+  the check as before. For such a check the candidate directory may have
+  any owner (still no group or other write bit, not a symlink): that owner
+  can already replace the file the check judges. Proof:
+  `a_root_runner_runs_the_check_as_the_directory_owner_and_lets_its_group_read`
+  (`service/checks.rs`), `real_runner_runs_a_program_as_the_given_user`
+  (`service/exec.rs`).
 - A `Service` action must be declared by the binding; `Status` is refused.
   A `Reload` of a binding that declares `ServiceBinding::reload` runs those
   commands in order (fixed argv from the descriptor) instead of the init

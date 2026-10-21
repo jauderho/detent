@@ -104,6 +104,7 @@ fn exit_zero_check_passes_on_a_zero_exit() -> TestResult {
         expects: CheckExpectation::ExitZero,
         applies_to: &[],
         stage_as: None,
+        run_as_dir_owner: false,
     };
     let fake = Arc::new(FakeRunner::default().with_response(output(0, "")));
     let runner = ExternalCheckRunner::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
@@ -123,6 +124,7 @@ fn exit_zero_check_fails_on_a_nonzero_exit() -> TestResult {
         expects: CheckExpectation::ExitZero,
         applies_to: &[],
         stage_as: None,
+        run_as_dir_owner: false,
     };
     let fake = Arc::new(FakeRunner::default().with_response(output(1, "parse error")));
     let runner = ExternalCheckRunner::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
@@ -142,6 +144,7 @@ fn a_timed_out_check_fails_without_an_exit_code() -> TestResult {
         expects: CheckExpectation::ExitZero,
         applies_to: &[],
         stage_as: None,
+        run_as_dir_owner: false,
     };
     let fake = Arc::new(FakeRunner::default().with_response(output_timeout()));
     let runner = ExternalCheckRunner::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
@@ -167,6 +170,7 @@ fn stdout_pattern_check_passes_on_a_substring_match() -> TestResult {
         expects: CheckExpectation::StdoutContains("Loaded services"),
         applies_to: &[],
         stage_as: None,
+        run_as_dir_owner: false,
     };
     let fake =
         Arc::new(FakeRunner::default().with_response(output(0, "Loaded services file OK\n")));
@@ -186,6 +190,7 @@ fn stdout_pattern_check_fails_when_the_substring_is_absent() -> TestResult {
         expects: CheckExpectation::StdoutContains("Loaded services"),
         applies_to: &[],
         stage_as: None,
+        run_as_dir_owner: false,
     };
     let fake = Arc::new(FakeRunner::default().with_response(output(0, "nothing relevant here")));
     let runner = ExternalCheckRunner::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
@@ -213,6 +218,7 @@ fn temp_file_is_substituted_at_the_declared_position() -> TestResult {
         expects: CheckExpectation::ExitZero,
         applies_to: &[],
         stage_as: None,
+        run_as_dir_owner: false,
     };
     let fake = Arc::new(FakeRunner::default().with_response(output(0, "")));
     let runner = ExternalCheckRunner::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
@@ -242,6 +248,7 @@ fn temp_file_may_appear_before_trailing_literals() -> TestResult {
         expects: CheckExpectation::ExitZero,
         applies_to: &[],
         stage_as: None,
+        run_as_dir_owner: false,
     };
     let fake = Arc::new(FakeRunner::default().with_response(output(0, "")));
     let runner = ExternalCheckRunner::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
@@ -269,6 +276,7 @@ fn a_relative_program_path_is_rejected_without_spawning() {
         expects: CheckExpectation::ExitZero,
         applies_to: &[],
         stage_as: None,
+        run_as_dir_owner: false,
     };
     let fake = Arc::new(FakeRunner::default());
     let runner = ExternalCheckRunner::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
@@ -304,6 +312,7 @@ fn real_true_and_false_smoke_test() -> TestResult {
         expects: CheckExpectation::ExitZero,
         applies_to: &[],
         stage_as: None,
+        run_as_dir_owner: false,
     };
     let failing = ExternalCheck {
         program: PathSpec::new(false_leaked),
@@ -311,6 +320,7 @@ fn real_true_and_false_smoke_test() -> TestResult {
         expects: CheckExpectation::ExitZero,
         applies_to: &[],
         stage_as: None,
+        run_as_dir_owner: false,
     };
     let runner = ExternalCheckRunner::new();
     let ok = runner
@@ -370,6 +380,7 @@ const NETPLAN_CHECK: ExternalCheck = ExternalCheck {
     expects: CheckExpectation::ExitZero,
     applies_to: &[],
     stage_as: Some(NETPLAN_STAGE),
+    run_as_dir_owner: false,
 };
 
 #[test]
@@ -420,6 +431,7 @@ fn a_tree_validator_never_runs_on_a_root_it_cannot_make() -> TestResult {
     assert!(runner.run_check(&NETPLAN_CHECK, Path::new("/")).is_err());
     let escaping = ExternalCheck {
         stage_as: Some("../escape.yaml"),
+        run_as_dir_owner: false,
         ..NETPLAN_CHECK
     };
     assert!(

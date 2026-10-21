@@ -258,6 +258,7 @@ static CHECKS: &[ExternalCheck] = &[ExternalCheck {
     expects: CheckExpectation::ExitZero,
     applies_to: &[],
     stage_as: None,
+    run_as_dir_owner: false,
 }];
 
 /// The services a change to these files affects. systemd names it
