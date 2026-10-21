@@ -1126,11 +1126,15 @@ net_prepare() {
       systemctl start systemd-networkd 2>&1 || true
       ;;
     netplan-nm)
-      mkdir -p /etc/netplan /etc/NetworkManager/conf.d
+      # netplan renders only for NetworkManager: detent edits NetworkManager's
+      # keyfile and leaves the netplan file alone.
+      mkdir -p /etc/netplan /etc/NetworkManager/conf.d /etc/NetworkManager/system-connections
       printf '[device-d3]\nmatch-device=interface-name:mgmt0\nmanaged=1\n' >/etc/NetworkManager/conf.d/10-d3.conf
       printf 'network:\n  version: 2\n  renderer: NetworkManager\n' >/etc/netplan/10-d3.yaml
-      printf 'network:\n  version: 2\n  renderer: NetworkManager\n' >/etc/netplan/90-detent.yaml
-      chmod 600 /etc/netplan/10-d3.yaml /etc/netplan/90-detent.yaml
+      chmod 600 /etc/netplan/10-d3.yaml
+      printf '[connection]\nid=mgmt0\ntype=ethernet\ninterface-name=mgmt0\n\n[ipv4]\nmethod=disabled\n\n[ipv6]\nmethod=disabled\n' \
+        >/etc/NetworkManager/system-connections/detent.nmconnection
+      chmod 600 /etc/NetworkManager/system-connections/detent.nmconnection
       systemctl stop systemd-networkd 2>/dev/null || true
       systemctl restart NetworkManager 2>&1 || true
       sleep 3

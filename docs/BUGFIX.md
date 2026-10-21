@@ -481,6 +481,11 @@ deferred by the owner.
     Owner decision 2026-10-21: write the drop-in
     `/etc/systemd/resolved.conf.d/90-detent.conf`; do not copy the vendor
     file.~~ Done 2026-10-21 (`PROGRESS.md`).
+17. ~~**netplan with the NetworkManager renderer is never put live.** The
+    network module wrote `90-detent.yaml` and reloaded networkd. Owner
+    decision 2026-10-21: when netplan renders for `NetworkManager`, treat
+    the host as a `NetworkManager` host and leave netplan's files alone.~~
+    Done 2026-10-21 (`PROGRESS.md`).
 
 ### Track E — Milestone M3 (release path)
 

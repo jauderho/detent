@@ -1449,7 +1449,9 @@ const SERVICE_NM: &str = "NetworkManager";
 /// The key for systemd-networkd: `networkctl` installed and
 /// `systemd-networkd.service` active.
 const SERVICE_NETWORKD: &str = "systemd-networkd";
-/// The key for netplan: `netplan` installed and a `*.yaml` in `/etc/netplan`.
+/// The key for netplan: `netplan` installed and a `*.yaml` in `/etc/netplan`
+/// that does not render only for `NetworkManager`. When it does, the platform
+/// files no `netplan` key, and `NetworkManager`'s keyfile is the file to edit.
 const SERVICE_NETPLAN: &str = "netplan";
 /// The key for ifupdown: `ifup` installed and `networking.service` active.
 const SERVICE_IFUPDOWN: &str = "ifupdown";

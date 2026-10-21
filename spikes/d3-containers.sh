@@ -170,7 +170,7 @@ EOF
 FROM docker.io/library/ubuntu:latest
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    systemd systemd-sysv systemd-resolved dbus polkitd netplan.io \
+    systemd systemd-sysv systemd-resolved dbus polkitd netplan.io network-manager \
     iproute2 iputils-ping curl jq ca-certificates chrony nfs-kernel-server samba \
     unbound dnsmasq kea-dhcp4-server kea-dhcp6-server util-linux mount procps \
     diffutils && apt-get clean

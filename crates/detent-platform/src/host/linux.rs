@@ -83,17 +83,51 @@ pub(super) fn detect_ram_mib(fs: &dyn HostFs) -> u64 {
     0
 }
 
+/// Whether netplan renders only for `NetworkManager`: there is at least one
+/// `renderer:` line in the `*.yaml` files of `/etc/netplan` (top level or per
+/// interface), and each says `NetworkManager`. A read-only line scan; the
+/// files are never written. netplan's default renderer is networkd, so no
+/// `renderer:` at all, a mixed set, or a file that cannot be read is not.
+pub(super) fn netplan_renders_only_for_network_manager(fs: &dyn HostFs) -> bool {
+    let mut seen = false;
+    for name in fs.list_dir("/etc/netplan") {
+        if std::path::Path::new(&name).extension() != Some(std::ffi::OsStr::new("yaml")) {
+            continue;
+        }
+        let Some(text) = fs.read_to_string(&format!("/etc/netplan/{name}")) else {
+            return false;
+        };
+        for renderer in text.lines().filter_map(renderer_of) {
+            if renderer != "NetworkManager" {
+                return false;
+            }
+            seen = true;
+        }
+    }
+    seen
+}
+
+/// The value of a netplan `renderer:` line, without quotes or a comment.
+fn renderer_of(line: &str) -> Option<&str> {
+    let value = line.trim_start().strip_prefix("renderer:")?;
+    let value = value.split_once('#').map_or(value, |(value, _)| value);
+    Some(value.trim().trim_matches(['"', '\'']))
+}
+
 /// Detect the network backend.
 ///
 /// Precedence (most to least specific): netplan renders down to
 /// networkd/`NetworkManager`, so its presence is authoritative regardless
-/// of what it rendered; `NetworkManager` next because distros that ship it
+/// of what it rendered, except when it renders only for `NetworkManager`
+/// ([`netplan_renders_only_for_network_manager`]): then detent edits
+/// `NetworkManager`'s own keyfile; `NetworkManager` next because distros that ship it
 /// (Fedora, desktop Ubuntu variants) treat it as the sole manager even when
 /// systemd-networkd units are also present; networkd next since it's
 /// systemd's own manager and takes over from ifupdown when enabled;
 /// ifupdown last as the oldest, most conservative option.
 pub(super) fn detect_network_backend(fs: &dyn HostFs) -> NetworkBackend {
-    if has_glob_match(fs, "/etc/netplan", ".yaml") {
+    if has_glob_match(fs, "/etc/netplan", ".yaml") && !netplan_renders_only_for_network_manager(fs)
+    {
         return NetworkBackend::Netplan;
     }
     if fs.exists("/etc/NetworkManager/NetworkManager.conf") || fs.exists("/run/NetworkManager") {
@@ -313,6 +347,22 @@ mod tests {
         let fs = FakeFs::new()
             .with_file("/etc/netplan/01-config.yaml", "")
             .with_file("/etc/NetworkManager/NetworkManager.conf", "");
+        assert_eq!(detect_network_backend(&fs), NetworkBackend::Netplan);
+    }
+
+    #[test]
+    fn network_backend_is_network_manager_when_netplan_renders_only_for_it() {
+        let fs = FakeFs::new()
+            .with_file(
+                "/etc/netplan/01-network-manager-all.yaml",
+                "network:\n  version: 2\n  renderer: NetworkManager\n",
+            )
+            .with_file("/etc/NetworkManager/NetworkManager.conf", "")
+            // netplan reads only `*.yaml`.
+            .with_file("/etc/netplan/README", "renderer: networkd\n");
+        assert_eq!(detect_network_backend(&fs), NetworkBackend::NetworkManager);
+        // A file it cannot read may name another renderer: netplan stays.
+        let fs = fs.with_link("/etc/netplan/99-unreadable.yaml", "/nonexistent");
         assert_eq!(detect_network_backend(&fs), NetworkBackend::Netplan);
     }
 

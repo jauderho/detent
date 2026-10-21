@@ -5,6 +5,22 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-21 - D3 rerun of the owner decisions (Track D 12 to 17)
+
+Containers on the test host, build of the #87 to #91 stack (`docs/spikes/d3-containers.md`, "Second rerun 2026-10-21"). netplan with the NetworkManager renderer now goes live through `detent.nmconnection` and a missed confirm restores the file and the link. The stock Debian and Ubuntu Kea file parses as Kea, and `kea-dhcp4 -t` runs as `_kea` and passes. On Fedora the resolver writes `resolved.conf.d/90-detent.conf` once the operator creates it empty. Still open: netplan with the networkd renderer is not testable in a container (no udevd), and the Ubuntu image needed `network-manager` for the NetworkManager flow (added to `spikes/d3-containers.sh`).
+
+## 2026-10-21 - netplan that renders for NetworkManager leaves the network to it (BUGFIX Track D 17)
+
+With `renderer: NetworkManager` (the Ubuntu desktop layout) the network module still wrote `90-detent.yaml` and reloaded networkd, so the edit never went live, and `netplan apply` would need a wider unit (D11).
+
+**Change.** Host detection reads the `*.yaml` files of `/etc/netplan` (a read-only line scan for `renderer:`, top level or per interface). When there is at least one and every one says `NetworkManager`, the `netplan` service key is not filed (`InUse::Netplan`) and `HostFacts::network_backend` is `NetworkManager`. The network module then picks `NetworkManager`'s keyfile, `/etc/NetworkManager/system-connections/detent.nmconnection`, with the `NetworkManager` reload commands (restart `NetworkManager.service`, then `nmcli connection up filename`). netplan's files are not written.
+
+**Kept as before.** A mixed set (one file `NetworkManager`, another `networkd`), `renderer: networkd`, no `renderer:` at all (netplan's default is networkd), or a `*.yaml` that cannot be read: netplan stays the backend, with `90-detent.yaml` and the networkd reload. A per-interface `renderer: NetworkManager` with no other `renderer:` counts as `NetworkManager`, although netplan would render the other interfaces with networkd.
+
+**No widening.** Detection reads files the probes already list; no unit, seccomp, Landlock or capability change. As with every target, the operator creates `detent.nmconnection`.
+
+**Tests.** `netplan_that_renders_only_for_network_manager_leaves_the_network_to_it` (`host/mod.rs`) failed before with `panicked at crates/detent-platform/src/host/mod.rs:464:13: 01-network-manager-all.yaml`; `network_backend_is_network_manager_when_netplan_renders_only_for_it` (`host/linux.rs`) failed with `left: Netplan right: NetworkManager`. `spikes/d3-inside.sh` flavour `netplan-nm` now creates `detent.nmconnection`, not `90-detent.yaml`.
+
 ## 2026-10-21 - The Kea checks run as the owner of `/etc/kea` (BUGFIX Track D 12)
 
 On Debian and Ubuntu `/etc/kea` is `_kea:_kea 0750`, and the distro's AppArmor profile for `kea-dhcp4` gives root no `dac_override`: `kea-dhcp4 -t` as root cannot open the file, as `_kea` it passes. The monitor also refused to put a candidate in a directory that root does not own (`require_trusted_dir`), so the Kea checks could not run there at all.
