@@ -20,7 +20,8 @@
 #   --only <list>       Comma list of sections to run, from: prep chrony
 #                        samba nfs resolver mounts dhcp network (default: all).
 #   --net <list>        Comma list of network flavours to try, from: ifupdown
-#                        nm networkd netplan (default: by distro).
+#                        nm networkd netplan netplan-nm (netplan with the
+#                        NetworkManager renderer) (default: by distro).
 #   --dryrun            Print the sections and checks that would run; change
 #                        nothing.
 #   --verbose, -v       Print step-level progress and every command output.
@@ -150,7 +151,7 @@ fi
 if [[ -z "${NETS}" ]]; then
   case "${DISTRO}" in
     debian) NETS="ifupdown,nm" ;;
-    ubuntu) NETS="netplan" ;;
+    ubuntu) NETS="netplan,netplan-nm" ;;
     fedora) NETS="nm" ;;
     arch) NETS="networkd" ;;
     *) NETS="networkd" ;;
@@ -462,12 +463,16 @@ api() {
 # COMMIT_ID ("" when none) and APPLY_OK (true/false).
 COMMIT_ID=""
 APPLY_OK=false
+# NO_HASH=true : send no expected_hash. `current_hash` is the hash of the
+# detected file; a model with only another file's section writes that file.
+NO_HASH=false
 api_apply() {
   local module="$1" filter="$2" secs="$3" service="$4" label="$5"
   api GET "/api/v1/modules/${module}"
   cp "${API_FILE}" "${WORK}/${module}.api-get.json"
-  jq -c --argjson secs "${secs}" --arg svc "${service}" \
-    "{model: (.model | ${filter}), expected_hash: .current_hash, confirm_secs: \$secs}
+  jq -c --argjson secs "${secs}" --arg svc "${service}" --argjson nohash "${NO_HASH}" \
+    "{model: (.model | ${filter}), confirm_secs: \$secs}
+     + (if \$nohash then {} else {expected_hash: .current_hash} end)
      + (if \$svc == \"\" then {} else {service_action: \$svc} end)" \
     "${WORK}/${module}.api-get.json" >"${WORK}/${module}.req.json"
   api POST "/api/v1/modules/${module}/apply" "${WORK}/${module}.req.json"
@@ -477,6 +482,20 @@ api_apply() {
   if [[ "${API_CODE}" == 2* ]]; then
     APPLY_OK=true
   fi
+}
+
+# first_action MODULE FILTER : plan the filtered model through the API; sets
+# FIRST_UNIT and FIRST_ACTION from the first affected service.
+first_action() {
+  local module="$1" filter="$2"
+  FIRST_UNIT=""
+  FIRST_ACTION=""
+  api GET "/api/v1/modules/${module}"
+  jq -c "{model: (.model | ${filter})}" "${API_FILE}" >"${WORK}/${module}.plan-req.json"
+  api POST "/api/v1/modules/${module}/plan" "${WORK}/${module}.plan-req.json"
+  cp "${API_FILE}" "${LOGD}/${module}-api-plan.json"
+  FIRST_UNIT="$(jq -r '.affected_services[0].unit // empty' "${API_FILE}" 2>/dev/null || true)"
+  FIRST_ACTION="$(jq -r '.affected_services[0].actions[0] // empty' "${API_FILE}" 2>/dev/null || true)"
 }
 
 api_detail() {
@@ -876,9 +895,13 @@ section_resolver() {
     fi
   fi
   unhide_all
-  # Unbound: where does the entry go?
+  # Unbound: where does the entry go? One apply edits one file, so the
+  # model holds only the unbound section; `get` shows only the detected
+  # file, so the section starts empty here.
+  NO_HASH=true
   resolver_apply apply-unbound \
-    '.unbound |= (. + ["server",{"hardening":{"key":"qname-minimisation","enabled":true}}])'
+    '.resolv = [] | .resolved = [] | .unbound |= (. + ["server",{"hardening":{"key":"qname-minimisation","enabled":true}}])'
+  NO_HASH=false
   local u
   u="$(grep -rl 'qname-minimisation' /etc/unbound /etc/systemd/resolved.conf /etc/systemd/resolved.conf.d 2>/dev/null | head -n 1 || true)"
   if [[ "${u}" == /etc/unbound/* ]]; then
@@ -975,14 +998,15 @@ section_dhcp() {
   fi
   settle_commit confirm dhcp
   unhide_all
-  # Kea: dnsmasq must be absent for the module to pick the Kea file.
-  hide /usr/sbin/dnsmasq
-  hide /usr/bin/dnsmasq
-  local kea_filter='.kea_v4 = {"interfaces":["mgmt0"],"subnets":[{"id":1,"subnet":"192.0.2.0/24","pools":[{"pool":"192.0.2.50 - 192.0.2.150"}],"routers":["192.0.2.1"],"domain-name-servers":["192.0.2.1"]}],"valid-lifetime":3600}'
+  # Kea: a model with only the kea_v4 section edits the Kea file, with
+  # dnsmasq still installed (BUGFIX Track D 7).
+  local kea_filter='.dnsmasq = [] | .kea_v4 = {"interfaces":["mgmt0"],"subnets":[{"id":1,"subnet":"192.0.2.0/24","pools":[{"pool":"192.0.2.50 - 192.0.2.150"}],"routers":["192.0.2.1"],"domain-name-servers":["192.0.2.1"]}],"valid-lifetime":3600}'
   jq -c "${kea_filter}" "${WORK}/dhcp.model.json" >"${WORK}/dhcp.kea.json"
   cli_validate dhcp "${WORK}/dhcp.kea.json" validate-kea
   cli_plan dhcp "${WORK}/dhcp.kea.json" plan-kea
+  NO_HASH=true
   apply_with_retry dhcp "${kea_filter}" 30 restart apply-kea
+  NO_HASH=false
   local kconf=/etc/kea/kea-dhcp4.conf kunit
   kunit="$(first_unit kea-dhcp4-server.service kea-dhcp4.service || true)"
   if [[ "${APPLY_OK}" == true ]]; then
@@ -1065,7 +1089,7 @@ net_reset() {
 net_prepare() {
   local flavour="$1"
   # Only one stack may own mgmt0: NetworkManager strips foreign addresses.
-  if [[ "${flavour}" != nm ]]; then
+  if [[ "${flavour}" != nm && "${flavour}" != netplan-nm ]]; then
     systemctl stop NetworkManager.service 2>/dev/null || true
   fi
   ip addr flush dev mgmt0
@@ -1081,20 +1105,40 @@ net_prepare() {
     nm)
       mkdir -p /etc/NetworkManager/conf.d /etc/NetworkManager/system-connections
       printf '[device-d3]\nmatch-device=interface-name:mgmt0\nmanaged=1\n' >/etc/NetworkManager/conf.d/10-d3.conf
+      # The file detent edits: the administrator creates it (apply never
+      # creates a target), here as a profile with no address.
+      printf '[connection]\nid=mgmt0\ntype=ethernet\ninterface-name=mgmt0\n\n[ipv4]\nmethod=disabled\n\n[ipv6]\nmethod=disabled\n' \
+        >/etc/NetworkManager/system-connections/detent.nmconnection
+      chmod 600 /etc/NetworkManager/system-connections/detent.nmconnection
       systemctl restart NetworkManager 2>&1 || true
       sleep 3
       ;;
     networkd)
       mkdir -p /etc/systemd/network
+      printf '[Match]\nName=mgmt0\n' >/etc/systemd/network/10-detent.network
       systemctl start systemd-networkd 2>&1 || true
       ;;
     netplan)
       mkdir -p /etc/netplan
-      printf 'network:\n  version: 2\n  renderer: networkd\n  ethernets: {}\n' >/etc/netplan/10-d3.yaml
-      chmod 600 /etc/netplan/10-d3.yaml
+      # No `ethernets: {}`: with that empty map in another file the netplan
+      # generator (daemon-reload) writes nothing (netplan 1.x, Ubuntu 26.04).
+      printf 'network:\n  version: 2\n  renderer: networkd\n' >/etc/netplan/10-d3.yaml
+      printf 'network:\n  version: 2\n' >/etc/netplan/90-detent.yaml
+      chmod 600 /etc/netplan/10-d3.yaml /etc/netplan/90-detent.yaml
       systemctl start systemd-networkd 2>&1 || true
       ;;
+    netplan-nm)
+      mkdir -p /etc/netplan /etc/NetworkManager/conf.d
+      printf '[device-d3]\nmatch-device=interface-name:mgmt0\nmanaged=1\n' >/etc/NetworkManager/conf.d/10-d3.conf
+      printf 'network:\n  version: 2\n  renderer: NetworkManager\n' >/etc/netplan/10-d3.yaml
+      printf 'network:\n  version: 2\n  renderer: NetworkManager\n' >/etc/netplan/90-detent.yaml
+      chmod 600 /etc/netplan/10-d3.yaml /etc/netplan/90-detent.yaml
+      systemctl stop systemd-networkd 2>/dev/null || true
+      systemctl restart NetworkManager 2>&1 || true
+      sleep 3
+      ;;
   esac
+  rec "network-${flavour}" seed INFO "the detent file of the backend, created by hand: $(find "${NET_DIRS[@]}" -name '*detent*' -type f 2>/dev/null | tr '\n' ' ')"
 }
 
 # backend_apply DIR : what an administrator runs to make the backend read the
@@ -1141,10 +1185,13 @@ network_flow() {
   ip addr flush dev mgmt0
   touch "${WORK}/net.stamp"
   sleep 1
+  cap "${tag}-host" "${DET}" host
+  rec "${tag}" host INFO "$(grep -E 'network backend|NetworkManager|networkd|netplan|ifupdown' "${CAPFILE}" | tr -s ' ' | tr '\n' ';' | cut -c1-200)"
   cli_get network || return 0
   rec "${tag}" get PASS "$(jq '.model.interfaces | length' "${WORK}/network.get.json") interfaces"
-  local good='.interfaces = [{"name":"mgmt0","addresses":["192.0.2.1/24"],"dhcp_v4":false,"dhcp_v6":false,"dns":[],"gateway_v4":null,"gateway_v6":null,"routes":[],"vlan":null,"bridge":null}]'
-  local bad='.interfaces = [{"name":"mgmt0","addresses":["198.51.100.1/24"],"dhcp_v4":false,"dhcp_v6":false,"dns":[],"gateway_v4":null,"gateway_v6":null,"routes":[],"vlan":null,"bridge":null}]'
+  # Replace mgmt0 only; keep the other interfaces (lo) the file has.
+  local good='.interfaces = ([.interfaces[] | select(.name != "mgmt0")] + [{"name":"mgmt0","addresses":["192.0.2.1/24"],"dhcp_v4":false,"dhcp_v6":false,"dns":[],"gateway_v4":null,"gateway_v6":null,"routes":[],"vlan":null,"bridge":null}] | sort_by(.name))'
+  local bad='.interfaces = ([.interfaces[] | select(.name != "mgmt0")] + [{"name":"mgmt0","addresses":["198.51.100.1/24"],"dhcp_v4":false,"dhcp_v6":false,"dns":[],"gateway_v4":null,"gateway_v6":null,"routes":[],"vlan":null,"bridge":null}] | sort_by(.name))'
   jq -c "${good}" "${WORK}/network.model.json" >"${WORK}/network.good.json"
   STDIN_FILE="${WORK}/network.good.json"
   cap "${tag}-validate" "${DET}" config network validate
@@ -1162,14 +1209,24 @@ network_flow() {
     return 0
   fi
   rec "${tag}" plan-validators INFO "not passing: $(validator_failures "${CAPFILE}" | tr '\n' ' ')"
+  # The service of the written file, and its first declared action.
+  local action
+  first_action network "${good}"
+  action="${FIRST_ACTION:-reload}"
+  rec "${tag}" service INFO "plan names ${FIRST_UNIT:-no unit}; the apply asks for its first action: ${action}"
   # Baseline.
-  apply_with_retry network "${good}" 40 reload apply-baseline
+  apply_with_retry network "${good}" 40 "${action}" apply-baseline
   if [[ "${APPLY_OK}" != true ]]; then
     return 0
   fi
   local files loc base_live=false
   files="$(net_files)"
   rec "${tag}" files-written INFO "${files}"
+  if [[ "${tag}" == *netplan* ]]; then
+    rec "${tag}" generated INFO "$(find /run/systemd/network /run/NetworkManager/system-connections -name '*netplan*' 2>/dev/null | tr '\n' ' ')"
+    rec "${tag}" link-state INFO "$(networkctl list --no-legend 2>&1 | grep mgmt0 | tr -s ' ')"
+    rec "${tag}" detent-log INFO "$(journalctl -u detent --no-pager 2>/dev/null | grep -i -E 'reload|service' | tail -n 3 | tr '\n' ' ' | cut -c1-300)"
+  fi
   loc="$(dirname "${files%% *}")/"
   sleep 3
   if peer_ping; then
@@ -1192,7 +1249,7 @@ network_flow() {
   good_hash="$(jq -r '.current_hash' "${API_FILE}")"
   # The deliberate misconfiguration: a wrong subnet cuts the veth path.
   local t0 t_back="" t_ok="" now
-  api_apply network "${bad}" 60 reload apply-misconfig
+  api_apply network "${bad}" 60 "${action}" apply-misconfig
   if [[ "${APPLY_OK}" == true ]]; then
     rec "${tag}" apply-misconfig PASS "bad address 198.51.100.1/24; commit ${COMMIT_ID}, 60 s window"
   else
@@ -1201,7 +1258,12 @@ network_flow() {
   fi
   t0="$(date +%s)"
   sleep 3
-  backend_apply "${loc}"
+  if peer_ping; then
+    rec "${tag}" misconfig-live INFO "detent's service action left the old address live: $(mgmt_addr)"
+    backend_apply "${loc}"
+  else
+    rec "${tag}" misconfig-live INFO "detent's service action put the bad config live: $(mgmt_addr)"
+  fi
   if peer_ping; then
     rec "${tag}" misconfig-effect FAIL "peer0 still reaches 192.0.2.1 under the bad config: $(mgmt_addr)"
   elif [[ "${base_live}" == true ]]; then
@@ -1260,15 +1322,19 @@ section_network() {
   # The module chooses its target from the probed services; hide the probed
   # ones that are not network services and see which target it then picks.
   log "network (probes hidden)"
-  net_reset
-  net_prepare networkd
-  local probe
-  for probe in chronyd smbd unbound dnsmasq kea-dhcp4 resolvectl; do
-    hide "/usr/sbin/${probe}"
-    hide "/usr/bin/${probe}"
-  done
-  network_flow "network-probes-hidden"
-  unhide_all
+  if unit_exists systemd-networkd.service; then
+    net_reset
+    net_prepare networkd
+    local probe
+    for probe in chronyd smbd unbound dnsmasq kea-dhcp4 resolvectl; do
+      hide "/usr/sbin/${probe}"
+      hide "/usr/bin/${probe}"
+    done
+    network_flow "network-probes-hidden"
+    unhide_all
+  else
+    rec network-probes-hidden flow NT "this image has no systemd-networkd"
+  fi
   # The CLI refuses a commit-confirm module (Phase 8: --confirm 60s).
   STDIN_FILE="${WORK}/network.good.json"
   cap network-cli-apply "${DET}" config network apply --confirm 60s

@@ -9,6 +9,75 @@ x86_64-unknown-linux-musl`, default features, built off the test host).
 Nothing in `crates/` changed. Every fault below is recorded as a BUGFIX item
 (Track D 4 to 12) with the exact output. No fault was fixed here.
 
+## Rerun 2026-10-21: resolver, dhcp and network after Track D 5, 7, 10, 11
+
+Build under test: the head of the stack #61, #63, #64, #65 on `58de034`
+(`cargo zigbuild --locked --release -p detent --target
+x86_64-unknown-linux-musl`, built off the test host). Same containers and
+method as below (`--only prep,resolver,dhcp,network`). Script changes: the
+administrator's file of each network backend is created first (apply never
+creates a target), the model keeps every other interface (`lo`), the service
+action is the first one the plan names, a model with one section per file is
+sent without `expected_hash` (the hash of `GET` is the detected file's), and
+an Ubuntu netplan flow with `renderer: NetworkManager` was added.
+
+| Module | Debian 13 | Ubuntu 26.04 | Fedora 44 | Arch |
+|---|---|---|---|---|
+| host (install, `order`, veth) | 4 / 0 / 0 | 4 / 0 / 0 | 4 / 0 / 0 | 4 / 0 / 0 |
+| resolver | 11 / 1 / 0 | 11 / 1 / 0 | 11 / 1 / 0 | 11 / 0 / 0 |
+| dhcp | 10 / 4 / 0 | 10 / 4 / 0 | 16 / 0 / 0 | 16 / 0 / 0 |
+| network | 31 / 0 / 0 | 26 / 8 / 0 (see below) | 11 / 0 / 1 | 21 / 0 / 0 |
+
+Missed confirm (a bad address applied with a 60 s window that nobody
+confirms), per stack:
+
+| Container, stack | Service action | Bad address live | File restored | Link restored |
+|---|---|---|---|---|
+| Debian, ifupdown | `networking.service` restart | yes | yes, 61 s | yes, no manual step |
+| Debian, NetworkManager | NM restart, `nmcli connection up filename` | yes | yes, 62 s | yes |
+| Debian, networkd | `systemd-networkd.service` reload | yes | yes, 62 s | yes |
+| Ubuntu, networkd | `systemd-networkd.service` reload | yes | yes, 61 s | yes |
+| Ubuntu, netplan (networkd renderer) | daemon-reload, networkd reload | not testable | yes, 61 s | not testable |
+| Ubuntu, netplan (NetworkManager renderer) | as above | no | yes, 61 s | no |
+| Fedora, NetworkManager | NM restart, `nmcli connection up filename` | yes | yes, 61 s | yes |
+| Arch, networkd | `systemd-networkd.service` reload | yes | yes, 61 s | yes |
+
+Notes:
+
+- netplan: netplan 1.x makes its files in `netplan-configure.service`, which
+  the daemon-reload starts. In the container it fails (`udevadm control
+  --reload`: `Failed to send reload request: No such file or directory`, no
+  udevd in a container), so no networkd file is made and `mgmt0` stays
+  `unmanaged`; `netplan apply` fails the same way. Not a detent fault, and not
+  testable in a container. With the NetworkManager renderer the edit never
+  goes live: the binding reloads networkd only (owner request to use
+  `netplan apply`: not done, it needs `ProtectKernelTunables=no` and
+  `CAP_NET_ADMIN` in the unit; see PROGRESS). Also, the module writes
+  `ethernets:` above an existing `renderer: NetworkManager` line, and the
+  generator then gave `mgmt0` to networkd (`10-netplan-mgmt0.network`): the
+  key order of a netplan edit can change the renderer (open).
+- resolver: `unbound` edits land in `unbound.conf` and keep its
+  `include-toplevel` line. On Debian and Ubuntu `unbound-checkconf` fails on
+  the candidate because the image has no `/var/lib/unbound/root.key`
+  (environment). Fedora has no `/etc/systemd/resolved.conf` (L-OPS17: apply
+  does not create it; the script copied the vendor file).
+- dhcp: Kea edits go to the Kea file with dnsmasq installed and restart the
+  Kea unit (`kea-dhcp4.service` on Fedora and Arch). On Debian and Ubuntu the
+  stock `kea-dhcp4.conf` has a trailing comma (accepted by Kea), so the module
+  parses it as a dnsmasq file and refuses the Kea edit (`core-edit-unsupported`,
+  new fault, open). `kea-dhcp4 -t` as root fails there (D12): `/etc/kea` is
+  `_kea:_kea 0750`, and the host's AppArmor profile for `/usr/sbin/kea-dhcp4`
+  (enforced in the container too) gives root no `dac_override`; as `_kea` it
+  passes.
+
+Test host changes for the rerun: `podman` and its packages (the same ten as
+below) were used again and then removed the same way (`podman system reset`,
+`apt-get purge`, `/var/lib/containers`, `/etc/containers`, `/run/containers`
+and every staging file removed). After it `podman` is absent, no listed
+package is installed, `apt-get autoremove -s` removes nothing, no detent
+binary, unit, `/etc/detent` or `/run/detent` is left, `/var/lib/detent` holds
+only `monitor.lock`, and the `detent` account is kept.
+
 ## Method
 
 - Tool: rootful `podman` 5.8, installed for this run and removed after it
