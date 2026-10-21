@@ -379,6 +379,13 @@ fn parse_netplan_kv(raw: &str) -> Option<(usize, String, String)> {
     Some((indent, key.to_owned(), value.to_owned()))
 }
 
+/// Whether a netplan line opens a block whose lines an edit keeps together:
+/// `network:`, a collection such as `ethernets:`, or an interface. A new block
+/// goes after every line of the block before it.
+fn opens_netplan_block(raw: &str) -> bool {
+    parse_netplan_kv(raw).is_some_and(|(indent, _, value)| indent <= 4 && value.is_empty())
+}
+
 /// Parse a netplan block-list item `- ...` (with indent).
 fn parse_netplan_list_item(raw: &str) -> Option<(usize, String)> {
     let indent = indent_of(raw);
@@ -2317,8 +2324,9 @@ impl ConfigModule for NetworkModule {
             return result;
         }
         // Other flavors: directives are aligned with the rendering
-        // ([`Document::edit_entries`]); a new INI section header goes at the
-        // end of the section before it.
+        // ([`Document::edit_entries`]); a new INI section header, or a new
+        // netplan block, goes at the end of the section before it, so the
+        // lines detent does not model (`renderer:`) keep their place.
         let before = doc.clone();
         let planned: Vec<String> = new_lines
             .into_iter()
@@ -2328,7 +2336,13 @@ impl ConfigModule for NetworkModule {
             &planned,
             |raw| Some(raw.to_owned()),
             |raw| Ok(raw.clone()),
-            |raw| parse_section(raw).is_some(),
+            |raw| {
+                if flavor == BackendFlavor::Netplan {
+                    opens_netplan_block(raw)
+                } else {
+                    parse_section(raw).is_some()
+                }
+            },
         );
         // An unknown line between rewritten directives (an unknown section
         // header, say) can change what they mean; refuse, leaving the
@@ -4317,6 +4331,73 @@ mod tests {
             ]
         );
         assert!(NetworkModule::descriptor().reload_unit_files);
+    }
+
+    #[test]
+    fn a_netplan_edit_keeps_the_renderer_line_in_place() -> Result<(), String> {
+        // The stock Ubuntu layout: `renderer:` after `version:` and no
+        // `ethernets:`. The new block goes below `renderer:`, which stays
+        // where it was, and a later block goes below the earlier one.
+        let src = "# Let NetworkManager manage all devices on this system\n\
+                   network:\n  version: 2\n  renderer: NetworkManager\n";
+        let mut doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
+        let mgmt0 = super::Interface {
+            name: "mgmt0".to_owned(),
+            dhcp_v4: false,
+            dhcp_v6: false,
+            addresses: vec!["192.0.2.1/24".to_owned()],
+            gateway_v4: None,
+            gateway_v6: None,
+            dns: Vec::new(),
+            routes: Vec::new(),
+            vlan: None,
+            bridge: None,
+        };
+        let mut model = super::Model {
+            interfaces: vec![mgmt0.clone()],
+        };
+        NetworkModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let ethernets = "  ethernets:\n    mgmt0:\n      dhcp4: false\n      dhcp6: false\n      \
+                         addresses:\n        - 192.0.2.1/24\n";
+        assert_eq!(NetworkModule::render(&doc), format!("{src}{ethernets}"));
+        model.interfaces.push(super::Interface {
+            name: "vlan10".to_owned(),
+            vlan: Some(super::Vlan {
+                id: 10,
+                link: "mgmt0".to_owned(),
+            }),
+            addresses: vec!["198.51.100.1/24".to_owned()],
+            ..mgmt0
+        });
+        NetworkModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let out = NetworkModule::render(&doc);
+        assert!(
+            out.starts_with(&format!("{src}{ethernets}  vlans:\n")),
+            "{out}"
+        );
+        assert_eq!(
+            NetworkModule::to_model(&doc).map_err(|e| e.to_string())?,
+            model
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_new_netplan_interface_goes_after_the_lines_of_the_one_before() -> Result<(), String> {
+        // `mtu:` and `set-name:` are not modeled; they belong to eth0 and
+        // must not move under the new interface.
+        let src = "network:\n  version: 2\n  ethernets:\n    eth0:\n      dhcp4: true\n      \
+                   dhcp6: false\n      mtu: 9000\n      set-name: eth0\n";
+        let mut doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
+        let mut model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        let mut eth1 = model.interfaces.first().cloned().ok_or("no eth0")?;
+        eth1.name = "eth1".to_owned();
+        model.interfaces.push(eth1);
+        NetworkModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let out = NetworkModule::render(&doc);
+        assert!(out.starts_with(src), "{out}");
+        assert!(out.contains("    eth1:\n"), "{out}");
+        Ok(())
     }
 
     #[test]
