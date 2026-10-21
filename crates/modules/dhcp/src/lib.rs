@@ -32,7 +32,9 @@
 //! owns the trivia chunks around it: `colon` is trivia + `:` + trivia, `post`
 //! the trivia between the value and the comma, `comma` the comma itself, and
 //! `tail` the trivia between the comma and the next member. Comments are just
-//! trivia — they need no node of their own and survive untouched.
+//! trivia — they need no node of their own and survive untouched. A trailing
+//! comma before `}` or `]`, which Kea accepts, stays on the last member or
+//! item, with the trivia after it in that member's `tail`.
 //!
 //! The model sees only a fixed set of *managed* keys (top-level
 //! `interfaces-config`, `valid-lifetime` and `subnet4`/`subnet6`; inside a
@@ -863,9 +865,9 @@ impl JsoncParser<'_> {
         }
         let mut open = String::from("{");
         open.push_str(&self.trivia()?);
-        // An empty object closes here; after a member the loop only reaches a
-        // key, because a trailing comma is not JSONC and falls through to the
-        // `parse_string_lit` error.
+        // An empty object closes here. A comma after a member may close the
+        // object too: Kea accepts that trailing comma, so the member keeps it
+        // and the trivia after it, and `close` is the bare `}`.
         if self.eat(b'}') {
             return Ok(Obj {
                 open,
@@ -894,6 +896,10 @@ impl JsoncParser<'_> {
                     comma: ",".to_owned(),
                     tail,
                 });
+                if self.eat(b'}') {
+                    close = "}".to_owned();
+                    break;
+                }
             } else {
                 if !self.eat(b'}') {
                     return Err(());
@@ -2644,7 +2650,9 @@ mod tests {
             "{",
             "{\"a\"}",
             "{\"a\":}",
-            "{\"a\":1,}",
+            "{\"a\":1,,}",
+            "{,}",
+            "[,]",
             "{\"a\":1 \"b\":2}",
             "[1,",
             "{\"a\":\"unterminated}",
@@ -3825,21 +3833,64 @@ mod tests {
     }
 
     #[test]
+    fn kea_trailing_commas_parse_as_kea_and_survive_an_edit() -> Result<(), String> {
+        // Kea accepts a comma before `}` and `]`; the stock Debian and Ubuntu
+        // kea-dhcp4.conf has one before a comment and the close.
+        let src = "{ \"Dhcp4\": { \"interfaces-config\": { \"interfaces\": [ \"eth0\", ], },\n  \"subnet4\": [],\n  // \"maxsize\": 1,\n}, }\n";
+        let mut doc = DhcpModule::parse(src).map_err(|e| e.to_string())?;
+        assert!(matches!(doc, DhcpDoc::Kea { .. }), "{doc:?}");
+        assert_eq!(DhcpModule::render(&doc), src);
+        DhcpModule::apply(&mut doc, &kea4(&["eth0"], Some(3600), Vec::new()))
+            .map_err(|e| e.to_string())?;
+        let rendered = DhcpModule::render(&doc);
+        let again = DhcpModule::parse(&rendered).map_err(|e| e.to_string())?;
+        assert_eq!(
+            DhcpModule::to_model(&again).map_err(|e| e.to_string())?,
+            kea4(&["eth0"], Some(3600), Vec::new()),
+            "{rendered}"
+        );
+        assert!(rendered.contains("// \"maxsize\": 1,"), "{rendered}");
+        Ok(())
+    }
+
+    #[test]
     fn kea_edit_whose_render_no_longer_parses_is_refused() -> Result<(), String> {
-        // `remove_member` fixes no commas: removing the *last* member of the
-        // flavor object leaves the previous member's comma behind, the
-        // rendered element no longer re-parses, and the whole edit is
-        // refused instead of writing a broken file.
-        let mut doc =
-            DhcpModule::parse("{ \"Dhcp4\": { \"subnet4\": [], \"valid-lifetime\": 3600 } }")
-                .map_err(|e| e.to_string())?;
-        let model = kea4(&[], None, Vec::new());
+        // A Kea element whose rendered text no longer re-parses refuses the
+        // whole edit instead of writing a broken file. The parser yields no
+        // such tree, so the test breaks an unmanaged member by hand: no `:`.
+        let mut doc = DhcpModule::parse("{ \"Dhcp4\": { \"subnet4\": [], \"x\": 1 } }")
+            .map_err(|e| e.to_string())?;
+        if let DhcpDoc::Kea { root, .. } = &mut doc
+            && let Some(dhcp4) = root.root.member_mut_by_key("Dhcp4")
+            && let Some(obj) = dhcp4.value.as_obj_mut()
+            && let Some(x) = obj.member_mut_by_key("x")
+        {
+            x.colon = String::new();
+        }
+        let model = kea4(&[], Some(3600), Vec::new());
         let err = DhcpModule::apply(&mut doc, &model)
             .err()
             .ok_or("expected the edit to be refused")?;
         assert!(
             matches!(err, EditError::Unsupported { .. }),
             "expected the re-parse failure to be refused, got {err:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn removing_the_last_kea_member_leaves_a_trailing_comma_kea_accepts() -> Result<(), String> {
+        // `remove_member` fixes no commas: removing the last member of the
+        // flavor object leaves the previous member's comma behind. Kea
+        // accepts that trailing comma, so the edit goes through.
+        let mut doc =
+            DhcpModule::parse("{ \"Dhcp4\": { \"subnet4\": [], \"valid-lifetime\": 3600 } }")
+                .map_err(|e| e.to_string())?;
+        let model = kea4(&[], None, Vec::new());
+        DhcpModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        assert_eq!(
+            DhcpModule::render(&doc),
+            "{ \"Dhcp4\": { \"subnet4\": [],  } }"
         );
         Ok(())
     }

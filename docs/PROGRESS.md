@@ -5,6 +5,16 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-21 - Kea files with trailing commas stay Kea (BUGFIX Track D 13)
+
+The D3 rerun showed the stock Debian and Ubuntu `kea-dhcp4.conf` read as dnsmasq: it has a comma before a `}` (`"pattern": "%-5p %m\n",`, then comments, then `}`), which Kea accepts and the JSONC parser refused.
+
+**Change.** An object member may now end with a comma before `}`, as an array item already could before `]`. The member keeps the comma and the trivia after it, and `close` is the bare `}`, so `render(parse(s)) == s` still holds. A comma with no member before it (`{,}`, `[,]`, `{"a":1,,}`) is still refused. An edit that adds a member after a trailing comma puts it after the kept trivia.
+
+**Changed tests.** Two tests held the old grammar: `jsonc_parse_rejects_malformed_grammar` refused `{"a":1,}` (now `{"a":1,,}`, `{,}` and `[,]`), and `kea_edit_whose_render_no_longer_parses_is_refused` used a removal that left a trailing comma. That removal now succeeds (`removing_the_last_kea_member_leaves_a_trailing_comma_kea_accepts`); the refusal test breaks a member by hand, because the parser no longer yields a tree that fails to re-parse.
+
+**Tests.** `kea_trailing_commas_parse_as_kea_and_survive_an_edit` failed before the fix with `panicked at crates/modules/dhcp/src/lib.rs:3833:9: Dnsmasq(Document { lines: [Line { kind: Unknown, ...`. New edge fixture `fixtures/dhcp/edge/jsonc-trailing-comma.conf` (in the conformance fixtures, the lossless round trip and the exact-model test) and a seed for each dhcp fuzz target; `fuzz_dhcp_parse`, `fuzz_dhcp_roundtrip` and `fuzz_dhcp_edit` ran 60 s each with no failure.
+
 ## 2026-10-15 - The service of the written file acts and replays (BUGFIX Track D 11)
 
 The D3 run showed every network service action, and its replay after a rollback, act on `systemd-networkd.service`, the module's first binding, whatever stack read the file: Debian ifupdown kept the bad address after the rollback, and Fedora (no networkd) failed with `no known unit name resolved`.

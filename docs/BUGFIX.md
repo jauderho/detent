@@ -457,6 +457,11 @@ deferred by the owner.
     stop cleanly: privsep channel failed`; once, a CLI start after a stop
     during an open window logged `recovered unconfirmed commit 1; restored 1
     targets with 1 failures.` (not reproduced).
+13. ~~**Kea trailing comma reads as dnsmasq.** The stock Debian and Ubuntu
+    `kea-dhcp4.conf` has a comma before a `}` (after `"pattern"`, then
+    comments). Kea accepts it; the JSONC parser refused it, so the file was
+    taken as dnsmasq and every Kea edit failed. Owner decision 2026-10-21:
+    accept trailing commas without loss.~~ Done 2026-10-21 (`PROGRESS.md`).
 
 ### Track E — Milestone M3 (release path)
 
