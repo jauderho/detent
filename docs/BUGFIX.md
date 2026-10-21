@@ -462,6 +462,17 @@ deferred by the owner.
     comments). Kea accepts it; the JSONC parser refused it, so the file was
     taken as dnsmasq and every Kea edit failed. Owner decision 2026-10-21:
     accept trailing commas without loss.~~ Done 2026-10-21 (`PROGRESS.md`).
+14. ~~**A netplan edit writes `ethernets:` above `renderer:`.** The stock
+    Ubuntu layout (`network:`, `version: 2`, `renderer: NetworkManager`)
+    got the new block between `version:` and `renderer:`. Owner decision
+    2026-10-21: keep key order; never move `renderer`.~~ Done 2026-10-21
+    (`PROGRESS.md`).
+15. **A netplan edit drops an unmodeled key with no value.** In an interface
+    with `match:` and `macaddress: ...` under it, an edit removes the
+    `match:` line and keeps `macaddress:`, which then reads as a key of the
+    interface. The classifier takes any key with an empty value as an
+    interface name (a directive), so the edit deletes it. Found 2026-10-21
+    while testing item 14; not fixed.
 
 ### Track E — Milestone M3 (release path)
 

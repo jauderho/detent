@@ -5,6 +5,16 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-21 - netplan edits keep `renderer:` in place (BUGFIX Track D 14)
+
+The D3 rerun showed an edit of the stock Ubuntu layout (`network:`, `version: 2`, `renderer: NetworkManager`) put `ethernets:` between `version:` and `renderer:`. `renderer:` is not modeled (an `Unknown` line), and a new line went right after the previous kept line.
+
+**Change.** For netplan, the minimal edit treats `network:`, a collection (`ethernets:`, `vlans:`, `bridges:`) and an interface (a key with no value at indent 4 or less) as the opener of a block, as it treats an INI section header: a new block goes after every line of the block before it, over no blank or comment that leads into the next. Lines detent does not model keep their place and order.
+
+**Tests.** `a_netplan_edit_keeps_the_renderer_line_in_place` failed before the fix with `panicked at crates/modules/network/src/lib.rs:4347:9: assertion `left == right` failed` (`left: "...\n  version: 2\n  ethernets:\n ... \n  renderer: NetworkManager\n"`). `a_new_netplan_interface_goes_after_the_lines_of_the_one_before` (unmodeled `mtu:` and `set-name:` stay with `eth0`) also failed before. A seed with the stock layout for each network fuzz target; `fuzz_network_parse`, `fuzz_network_roundtrip` and `fuzz_network_edit` ran 60 s each with no failure.
+
+**Found, not fixed (BUGFIX Track D 15).** A key with no value that detent does not model (`match:`) reads as an interface name, so an edit deletes that line and keeps its children.
+
 ## 2026-10-21 - Kea files with trailing commas stay Kea (BUGFIX Track D 13)
 
 The D3 rerun showed the stock Debian and Ubuntu `kea-dhcp4.conf` read as dnsmasq: it has a comma before a `}` (`"pattern": "%-5p %m\n",`, then comments, then `}`), which Kea accepts and the JSONC parser refused.
