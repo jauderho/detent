@@ -190,7 +190,7 @@ fn answer(
                         && require_trusted_dir(
                             dir,
                             "candidate directory",
-                            DirOwner::EuidOrRoot,
+                            DirOwner::of_candidate_dir(entry.check),
                         )
                         .is_ok() =>
                 {
@@ -521,6 +521,7 @@ mod tests {
         expects: CheckExpectation::ExitZero,
         applies_to: &[],
         stage_as: None,
+        run_as_dir_owner: false,
     }];
     static SERVICES: &[ServiceBinding] = &[ServiceBinding {
         units: UnitNames {
@@ -564,6 +565,7 @@ mod tests {
         expects: CheckExpectation::ExitZero,
         applies_to: &[],
         stage_as: None,
+        run_as_dir_owner: false,
     };
 
     /// Echoes the candidate path; a candidate whose contents name a hook
@@ -672,6 +674,7 @@ mod tests {
         expects: CheckExpectation::ExitZero,
         applies_to: &[],
         stage_as: None,
+        run_as_dir_owner: false,
     }];
 
     /// The id of [`FILED_CHECKS`]' check in the fixture's allow-list.

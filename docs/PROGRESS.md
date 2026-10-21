@@ -5,6 +5,18 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-21 - The Kea checks run as the owner of `/etc/kea` (BUGFIX Track D 12)
+
+On Debian and Ubuntu `/etc/kea` is `_kea:_kea 0750`, and the distro's AppArmor profile for `kea-dhcp4` gives root no `dac_override`: `kea-dhcp4 -t` as root cannot open the file, as `_kea` it passes. The monitor also refused to put a candidate in a directory that root does not own (`require_trusted_dir`), so the Kea checks could not run there at all.
+
+**Change.** `ExternalCheck::run_as_dir_owner` (new, not serialized): the dhcp Kea checks set it. When such a check runs, the runner reads the owner of the candidate's directory (never from a request). If the runner is root and the owner is not, the runner gives the candidate (root, `0600`) that directory's group and mode `0640` through a `O_NOFOLLOW` descriptor. It then starts the validator through `ProcessRunner::run_as`: `std`'s `Command::uid`/`gid` clears the supplementary groups and calls `setgid` and `setuid` before `exec`, and the change from uid 0 clears every capability set. A root-owned directory (Fedora, Arch) runs the check as root, as before. For these checks the monitor and the runner accept a candidate directory with any owner (`DirOwner::Any`; still a real directory with no group or other write bit): that owner can already replace the judged file, so it gains nothing.
+
+**Capability-user mode is unchanged.** There the runner is `detent` with only `CAP_DAC_OVERRIDE`, and changing user needs `CAP_SETUID`, which the unit does not grant (a widening, not done). The check runs as `detent`, as before, and the AppArmor refusal stays.
+
+**No widening.** The runner is not confined (no seccomp or Landlock); the monitor creates the candidate in `/etc/kea`, already in its Landlock write set as the parent of `kea-dhcp4.conf`, and calls no new syscall. No unit or capability change. The candidate-directory trust check is relaxed for these two checks only, as above.
+
+**Tests.** `only_the_kea_checks_run_as_the_owner_of_their_directory` (dhcp) failed before with `left: [("/usr/sbin/dnsmasq", false), ("/usr/sbin/kea-dhcp4", false), ("/usr/sbin/kea-dhcp6", false)]`. `a_root_runner_runs_the_check_as_the_directory_owner_and_lets_its_group_read`, `a_runner_that_is_not_root_runs_the_check_as_itself`, `a_root_owned_directory_runs_the_check_as_root`, `a_candidate_that_cannot_be_handed_over_fails_the_check_run` (`service/checks.rs`), `real_runner_runs_a_program_as_the_given_user`, `a_runner_without_run_as_refuses_to_change_user` (`service/exec.rs`), and the `DirOwner::Any` rows of `dir_owner_accepts_only_the_owners_it_names` (`monitor.rs`).
+
 ## 2026-10-21 - resolver writes a drop-in where `/etc` has no resolved.conf (BUGFIX Track D 16)
 
 Fedora and Arch ship `resolved.conf` only under `/usr/lib/systemd`, so the resolver had no file to edit; the D3 runs copied the vendor file to `/etc`.

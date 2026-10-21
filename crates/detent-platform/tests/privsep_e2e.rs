@@ -113,6 +113,7 @@ fn build_descriptor(target_path: &Path) -> &'static ModuleDescriptor {
         expects: CheckExpectation::ExitZero,
         applies_to: &[],
         stage_as: None,
+        run_as_dir_owner: false,
     }])
     .as_slice();
     leak(ModuleDescriptor {

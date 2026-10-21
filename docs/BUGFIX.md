@@ -448,7 +448,10 @@ deferred by the owner.
     ["systemd-networkd.service"])`. Fix idea: choose the binding from the
     backend that owns the written file, and for ifupdown/NM/netplan use that
     backend's apply command.~~ Done 2026-10-15 (`PROGRESS.md`).
-12. **`kea-dhcp4 -t` cannot open any file as root in the container.** `kea-dhcp4
+12. **`kea-dhcp4 -t` cannot open any file as root in the container.** Kea part
+    done 2026-10-21 (`PROGRESS.md`; owner decision: run the Kea checks as the
+    owner of `/etc/kea`, with no capability). **Open:** the two minor notes
+    at the end. `kea-dhcp4
     -t /etc/kea/kea-dhcp4.conf` as root: `Syntax check failed with: Unable to
     open file /etc/kea/kea-dhcp4.conf`; as `_kea` it passes. Kea 2.6.3
     (Debian) and 3.0.4 (Ubuntu). Not shown to happen outside a container;

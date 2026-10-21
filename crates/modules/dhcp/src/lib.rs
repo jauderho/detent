@@ -1717,7 +1717,9 @@ static TARGETS: &[Target] = &[
 
 /// The upstream validators run against candidate files before they are
 /// installed: `dnsmasq --test` parses a configuration file without starting
-/// the daemon, and `kea-dhcp4 -t` / `kea-dhcp6 -t` do the same for Kea.
+/// the daemon, and `kea-dhcp4 -t` / `kea-dhcp6 -t` do the same for Kea. The
+/// Kea checks run as the owner of `/etc/kea` (`_kea` on Debian and Ubuntu):
+/// the distro's `AppArmor` profile gives root no `dac_override` there.
 static CHECKS: &[ExternalCheck] = &[
     ExternalCheck {
         program: PathSpec::new("/usr/sbin/dnsmasq"),
@@ -1729,6 +1731,7 @@ static CHECKS: &[ExternalCheck] = &[
         expects: CheckExpectation::ExitZero,
         applies_to: &[DNSMASQ_CONF],
         stage_as: None,
+        run_as_dir_owner: false,
     },
     ExternalCheck {
         program: PathSpec::new("/usr/sbin/kea-dhcp4"),
@@ -1736,6 +1739,7 @@ static CHECKS: &[ExternalCheck] = &[
         expects: CheckExpectation::ExitZero,
         applies_to: &[KEA4_CONF],
         stage_as: None,
+        run_as_dir_owner: true,
     },
     ExternalCheck {
         program: PathSpec::new("/usr/sbin/kea-dhcp6"),
@@ -1743,6 +1747,7 @@ static CHECKS: &[ExternalCheck] = &[
         expects: CheckExpectation::ExitZero,
         applies_to: &[KEA6_CONF],
         stage_as: None,
+        run_as_dir_owner: true,
     },
 ];
 
@@ -3252,6 +3257,25 @@ mod tests {
         assert_eq!(descriptor.services.len(), 3);
         assert!(descriptor.commit_confirm);
         assert_eq!(descriptor.security_notes.len(), 1);
+    }
+
+    #[test]
+    fn only_the_kea_checks_run_as_the_owner_of_their_directory() {
+        // `/etc/kea` is `_kea` `0750` on Debian and Ubuntu, and the distro's
+        // AppArmor profile gives root no `dac_override` (BUGFIX Track D 12).
+        let owners: Vec<(&str, bool)> = super::DESCRIPTOR
+            .checks
+            .iter()
+            .map(|check| (check.program.as_str(), check.run_as_dir_owner))
+            .collect();
+        assert_eq!(
+            owners,
+            [
+                ("/usr/sbin/dnsmasq", false),
+                ("/usr/sbin/kea-dhcp4", true),
+                ("/usr/sbin/kea-dhcp6", true)
+            ]
+        );
     }
 
     #[test]

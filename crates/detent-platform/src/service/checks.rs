@@ -32,6 +32,9 @@ const DETAIL_CAP: usize = OUTPUT_CAP;
 /// a blocking one.
 pub struct ExternalCheckRunner {
     runner: Box<dyn ProcessRunner>,
+    /// This process's effective uid: only root can run a check as another
+    /// user ([`ExternalCheck::run_as_dir_owner`]).
+    euid: u32,
 }
 
 impl std::fmt::Debug for ExternalCheckRunner {
@@ -50,7 +53,62 @@ impl ExternalCheckRunner {
     /// Builds a runner backed by `runner`, for tests.
     #[must_use]
     pub fn with_runner(runner: Box<dyn ProcessRunner>) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            euid: rustix::process::geteuid().as_raw(),
+        }
+    }
+
+    /// As [`Self::with_runner`], as if this process's euid were `euid`.
+    #[cfg(test)]
+    fn with_runner_as_euid(runner: Box<dyn ProcessRunner>, euid: u32) -> Self {
+        Self { runner, euid }
+    }
+
+    /// The uid and gid a [`ExternalCheck::run_as_dir_owner`] check runs as:
+    /// the owner of the candidate's directory, read now, never taken from a
+    /// request. `None` (run as this process) when this process is not root,
+    /// which cannot change user, or root owns the directory. Before it
+    /// returns ids, the candidate (a file root created `0600`) is given the
+    /// directory's group and mode `0640`, so that user can read it but not
+    /// change it.
+    fn check_user(&self, candidate: &Path) -> Result<Option<(u32, u32)>, HookError> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let failed = |what: &str| {
+            HookError::Failed(format!(
+                "cannot run the check as its directory's owner: {what}"
+            ))
+        };
+        if self.euid != 0 {
+            return Ok(None);
+        }
+        let dir = candidate
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .ok_or_else(|| failed("the candidate has no directory"))?;
+        let owner = std::fs::symlink_metadata(dir).map_err(|err| failed(&err.to_string()))?;
+        if owner.uid() == 0 {
+            return Ok(None);
+        }
+        let fd = rustix::fs::open(
+            candidate,
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|err| failed(&err.to_string()))?;
+        let file = std::fs::File::from(fd);
+        if !file
+            .metadata()
+            .map_err(|err| failed(&err.to_string()))?
+            .is_file()
+        {
+            return Err(failed("the candidate is not a regular file"));
+        }
+        std::os::unix::fs::fchown(&file, None, Some(owner.gid()))
+            .map_err(|err| failed(&err.to_string()))?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o640))
+            .map_err(|err| failed(&err.to_string()))?;
+        Ok(Some((owner.uid(), owner.gid())))
     }
 }
 
@@ -72,6 +130,11 @@ impl CheckRunner for ExternalCheckRunner {
                 "check program is not an absolute path".to_owned(),
             ));
         }
+        let user = if check.run_as_dir_owner {
+            self.check_user(candidate)?
+        } else {
+            None
+        };
         let staged = match check.stage_as {
             Some(relative) => Some(StagedRoot::new(candidate, relative)?),
             None => None,
@@ -87,7 +150,10 @@ impl CheckRunner for ExternalCheckRunner {
                 ArgTemplate::TempFile => input_str.to_owned(),
             });
         }
-        let output = self.runner.run(program, &args, CHECK_TIMEOUT);
+        let output = match user {
+            Some(user) => self.runner.run_as(program, &args, CHECK_TIMEOUT, user),
+            None => self.runner.run(program, &args, CHECK_TIMEOUT),
+        };
         drop(staged);
         let output = output.map_err(|err| HookError::Failed(err.to_string()))?;
         if output.timed_out {
@@ -192,6 +258,8 @@ mod tests {
     #[derive(Default)]
     struct FakeRunner {
         response: Mutex<Option<ProcessOutput>>,
+        /// The user of each run: `None` for `run`, the ids for `run_as`.
+        users: Mutex<Vec<Option<(u32, u32)>>>,
     }
 
     impl FakeRunner {
@@ -213,10 +281,35 @@ mod tests {
 
         fn run(
             &self,
+            program: &'static str,
+            args: &[String],
+            timeout: Duration,
+        ) -> Result<ProcessOutput, ProcessError> {
+            self.respond(program, args, timeout, None)
+        }
+
+        fn run_as(
+            &self,
+            program: &'static str,
+            args: &[String],
+            timeout: Duration,
+            user: (u32, u32),
+        ) -> Result<ProcessOutput, ProcessError> {
+            self.respond(program, args, timeout, Some(user))
+        }
+    }
+
+    impl SharedFake {
+        fn respond(
+            &self,
             _program: &'static str,
             _args: &[String],
             _timeout: Duration,
+            user: Option<(u32, u32)>,
         ) -> Result<ProcessOutput, ProcessError> {
+            if let Ok(mut users) = self.0.users.lock() {
+                users.push(user);
+            }
             self.0
                 .response
                 .lock()
@@ -293,6 +386,7 @@ mod tests {
             expects: CheckExpectation::StdoutContains("Loaded services"),
             applies_to: &[],
             stage_as: None,
+            run_as_dir_owner: false,
         };
         // Matching stdout but non-zero exit must NOT pass.
         let fake =
@@ -321,5 +415,92 @@ mod tests {
             .map_err(|err| err.to_string())?;
         assert!(outcome3.passed);
         Ok(())
+    }
+
+    /// A Kea-like check: run as the owner of the candidate's directory.
+    const KEA: ExternalCheck = ExternalCheck {
+        program: PathSpec::new("/usr/sbin/kea-dhcp4"),
+        args: &[ArgTemplate::Literal("-t"), ArgTemplate::TempFile],
+        expects: CheckExpectation::ExitZero,
+        applies_to: &[],
+        stage_as: None,
+        run_as_dir_owner: true,
+    };
+
+    #[test]
+    fn a_root_runner_runs_the_check_as_the_directory_owner_and_lets_its_group_read()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = tempfile::tempdir()?;
+        let owner = std::fs::metadata(dir.path())?;
+        if owner.uid() == 0 {
+            // The test needs a directory root does not own.
+            return Ok(());
+        }
+        let candidate = dir.path().join(".detent-candidate-x");
+        std::fs::write(&candidate, b"{}")?;
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o600))?;
+        let fake = Arc::new(FakeRunner::default());
+        let runner =
+            ExternalCheckRunner::with_runner_as_euid(Box::new(SharedFake(Arc::clone(&fake))), 0);
+        let outcome = runner.run_check(&KEA, &candidate)?;
+        assert!(outcome.passed);
+        assert_eq!(
+            fake.users.lock().map(|users| users.clone()).ok(),
+            Some(vec![Some((owner.uid(), owner.gid()))])
+        );
+        let after = std::fs::metadata(&candidate)?;
+        assert_eq!((after.gid(), after.mode() & 0o777), (owner.gid(), 0o640));
+        Ok(())
+    }
+
+    #[test]
+    fn a_runner_that_is_not_root_runs_the_check_as_itself() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let fake = Arc::new(FakeRunner::default());
+        let runner =
+            ExternalCheckRunner::with_runner_as_euid(Box::new(SharedFake(Arc::clone(&fake))), 1000);
+        runner.run_check(&KEA, Path::new("/nonexistent/.detent-candidate-x"))?;
+        assert_eq!(
+            fake.users.lock().map(|users| users.clone()).ok(),
+            Some(vec![None])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_root_owned_directory_runs_the_check_as_root() -> Result<(), Box<dyn std::error::Error>> {
+        let fake = Arc::new(FakeRunner::default());
+        let runner =
+            ExternalCheckRunner::with_runner_as_euid(Box::new(SharedFake(Arc::clone(&fake))), 0);
+        // `/` is root's on every host the tests run on.
+        runner.run_check(&KEA, Path::new("/.detent-candidate-x"))?;
+        assert_eq!(
+            fake.users.lock().map(|users| users.clone()).ok(),
+            Some(vec![None])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_candidate_that_cannot_be_handed_over_fails_the_check_run() {
+        let runner = ExternalCheckRunner::with_runner_as_euid(
+            Box::new(SharedFake(Arc::new(FakeRunner::default()))),
+            0,
+        );
+        for candidate in ["/nonexistent/.detent-candidate-x", "candidate"] {
+            assert!(
+                runner.run_check(&KEA, Path::new(candidate)).is_err(),
+                "{candidate}"
+            );
+        }
+        // A directory, not a file, in a directory root does not own.
+        if let Ok(dir) = tempfile::tempdir()
+            && std::fs::create_dir(dir.path().join("sub")).is_ok()
+            && !rustix::process::geteuid().is_root()
+        {
+            assert!(runner.run_check(&KEA, &dir.path().join("sub")).is_err());
+            assert!(runner.run_check(&KEA, &dir.path().join("absent")).is_err());
+        }
     }
 }

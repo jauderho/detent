@@ -197,6 +197,7 @@ static CHECKS: &[ExternalCheck] = &[ExternalCheck {
     expects: CheckExpectation::ExitZero,
     applies_to: &[],
     stage_as: None,
+    run_as_dir_owner: false,
 }];
 
 /// TODO(descriptor): the services a change to these files affects. Give every

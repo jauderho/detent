@@ -320,6 +320,7 @@ fn build_descriptor(id: &'static str, target: &Path, shape: Shape) -> &'static M
             expects: CheckExpectation::ExitZero,
             applies_to,
             stage_as: None,
+            run_as_dir_owner: false,
         }])
         .as_slice(),
     };
