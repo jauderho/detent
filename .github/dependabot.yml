@@ -35,6 +35,11 @@ updates:
       interval: "weekly"
     cooldown:
       default-days: 7
+    # openapi-typescript 7.13 fails on TypeScript 7 (`createKeywordTypeNode`
+    # is undefined), so `api:check` breaks. Remove when it supports TS 7.
+    ignore:
+      - dependency-name: "typescript"
+        versions: [">=7"]
 
   # Maintain dependencies for container images (ADR-011: 7-day cooldown).
   - package-ecosystem: "docker"
