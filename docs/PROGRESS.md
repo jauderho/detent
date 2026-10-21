@@ -5,6 +5,16 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-21 - resolver writes a drop-in where `/etc` has no resolved.conf (BUGFIX Track D 16)
+
+Fedora and Arch ship `resolved.conf` only under `/usr/lib/systemd`, so the resolver had no file to edit; the D3 runs copied the vendor file to `/etc`.
+
+**Change.** `ModuleDescriptor::relocated` has a second rule: a file target `<file>.d/<name>` that the profile detects stands in for `<file>` when `<file>` does not exist (after the same-name rule, which still needs the alternative to exist). The drop-in stands in even when it is missing too, so `get` warns `ops-target-missing` and apply refuses with the drop-in's path: apply never creates a target, and the operator creates the drop-in (an empty file is enough; the model must then hold `resolve`, the `[Resolve]` header). The resolver declares `/etc/systemd/resolved.conf.d/90-detent.conf` (`0644`, root, detected with systemd-resolved); `systemd-resolved.service` reads it. The engine, the allow-list and the CLI already call `relocated`, so they agree. A host with `/etc/systemd/resolved.conf` is unchanged.
+
+**No widening.** The unit already lists `-/etc/systemd/resolved.conf.d`. The monitor's Landlock write set gains `/etc/systemd/resolved.conf.d` (the parent of the new target), which is below `/etc/systemd`, already in the set as the parent of `resolved.conf`; no seccomp or capability change.
+
+**Tests.** `a_missing_file_is_replaced_by_its_drop_in` (core) failed before with `left: "/etc/systemd/resolved.conf" right: "/etc/systemd/resolved.conf.d/90-detent.conf"`; `a_host_without_resolved_conf_writes_the_drop_in` (resolver) failed before with the same values at `crates/modules/resolver/src/lib.rs:2686:9`. `spikes/d3-inside.sh` now creates the empty drop-in instead of copying the vendor file.
+
 ## 2026-10-21 - netplan edits keep `renderer:` in place (BUGFIX Track D 14)
 
 The D3 rerun showed an edit of the stock Ubuntu layout (`network:`, `version: 2`, `renderer: NetworkManager`) put `ethernets:` between `version:` and `renderer:`. `renderer:` is not modeled (an `Unknown` line), and a new line went right after the previous kept line.

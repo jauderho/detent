@@ -124,7 +124,12 @@ from silently applying to no field.
 Targets are `&'static` path templates — a request can select a module, never the
 file it writes. The engine reads and writes only `TargetKind::File` targets; a
 backend that keeps its configuration in a directory needs one file target there
-(network: `/etc/netplan/90-detent.yaml`). `backend_detect` reads
+(network: `/etc/netplan/90-detent.yaml`). `ModuleDescriptor::relocated` picks
+one file per host: a file declared at two paths with the same name (chrony) is
+managed where it exists; a file target `<file>.d/<name>` stands in for `<file>`
+when `<file>` does not exist (resolver: `resolved.conf.d/90-detent.conf` on
+Fedora and Arch, which ship `resolved.conf` only under `/usr/lib`; the operator
+creates it, as apply never creates a target). `backend_detect` reads
 `HostProfile::service_versions`, so a backend can only be detected through a key
 a probe in `detent-platform` (`host/mod.rs` `SERVICE_PROBES`) fills. A model with
 one section per backend file (resolver, dhcp) overrides

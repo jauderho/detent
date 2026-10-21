@@ -328,17 +328,13 @@ seed_target() {
       echo "copied /etc/chrony.conf to /etc/chrony/chrony.conf"
       ;;
     resolver)
-      local vendor f
-      vendor=""
-      for f in /usr/lib/systemd/resolved.conf /lib/systemd/resolved.conf; do
-        if [[ -f "${f}" ]]; then
-          vendor="${f}"
-          break
-        fi
-      done
-      [[ -n "${vendor}" && ! -e /etc/systemd/resolved.conf ]] || return 1
-      cp -p "${vendor}" /etc/systemd/resolved.conf
-      echo "copied ${vendor} to /etc/systemd/resolved.conf"
+      # No resolved.conf in /etc (Fedora, Arch): detent writes its drop-in,
+      # which the operator creates empty. The vendor file is not copied.
+      local dropin=/etc/systemd/resolved.conf.d/90-detent.conf
+      [[ ! -e /etc/systemd/resolved.conf && ! -e "${dropin}" ]] || return 1
+      mkdir -p /etc/systemd/resolved.conf.d
+      : >"${dropin}"
+      echo "created an empty ${dropin}"
       ;;
     network)
       [[ ! -e /etc/network/interfaces ]] || return 1
@@ -862,7 +858,7 @@ section_resolver() {
   log "resolver"
   cli_get resolver || return 0
   rec resolver get PASS "model keys: $(jq -c '.model | keys' "${WORK}/resolver.get.json")"
-  jq -c '.resolved |= (. + [{"dns_over_tls":{"mode":"opportunistic"}},{"dns_sec":{"mode":"allow_downgrade"}}])' \
+  jq -c '.resolved |= ((if any(.[]; . == "resolve") then . else ["resolve"] + . end) + [{"dns_over_tls":{"mode":"opportunistic"}},{"dns_sec":{"mode":"allow_downgrade"}}])' \
     "${WORK}/resolver.model.json" >"${WORK}/resolver.edit.json"
   cli_validate resolver "${WORK}/resolver.edit.json" validate
   cli_plan resolver "${WORK}/resolver.edit.json" plan
@@ -875,10 +871,12 @@ section_resolver() {
     rec resolver cli-apply-refused FAIL "rc=${RC} $(first_line "${CAPFILE}" '.')"
   fi
   # API apply of the resolved settings, rolled back to prove the window.
-  local before
-  before="$(sha256sum /etc/systemd/resolved.conf | cut -d' ' -f1)"
+  # Fedora and Arch have no resolved.conf in /etc: detent writes its drop-in.
+  local before rfile=/etc/systemd/resolved.conf
+  [[ -e "${rfile}" ]] || rfile=/etc/systemd/resolved.conf.d/90-detent.conf
+  before="$(sha256sum "${rfile}" | cut -d' ' -f1)"
   resolver_apply apply-resolved \
-    '.resolved |= (. + [{"dns_over_tls":{"mode":"opportunistic"}},{"dns_sec":{"mode":"allow_downgrade"}}])'
+    '.resolved |= ((if any(.[]; . == "resolve") then . else ["resolve"] + . end) + [{"dns_over_tls":{"mode":"opportunistic"}},{"dns_sec":{"mode":"allow_downgrade"}}])'
   local where
   where="$(grep -rl 'DNSOverTLS=opportunistic' /etc/systemd/resolved.conf /etc/systemd/resolved.conf.d 2>/dev/null | head -n 1 || true)"
   if [[ -n "${where}" ]]; then
@@ -888,10 +886,10 @@ section_resolver() {
   fi
   if [[ "${APPLY_OK}" == true ]]; then
     settle_commit rollback resolver
-    if [[ "$(sha256sum /etc/systemd/resolved.conf | cut -d' ' -f1)" == "${before}" ]]; then
-      rec resolver rollback PASS "resolved.conf is byte-identical after the rollback"
+    if [[ "$(sha256sum "${rfile}" | cut -d' ' -f1)" == "${before}" ]]; then
+      rec resolver rollback PASS "${rfile} is byte-identical after the rollback"
     else
-      rec resolver rollback FAIL "resolved.conf differs after the rollback"
+      rec resolver rollback FAIL "${rfile} differs after the rollback"
     fi
   fi
   unhide_all
