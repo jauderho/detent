@@ -103,6 +103,10 @@ enum InUse {
     Unit(&'static str),
     /// A file whose name ends in the suffix is in the directory.
     ConfigIn(&'static str, &'static str),
+    /// netplan: a `*.yaml` in `/etc/netplan` that does not render only for
+    /// `NetworkManager`. When it does, `NetworkManager` owns the network and
+    /// detent edits its keyfile (owner decision 2026-10-21).
+    Netplan,
 }
 
 /// One service version probe.
@@ -182,7 +186,7 @@ const SERVICE_PROBES: &[ServiceProbe] = &[
         key: "netplan",
         paths: &["/usr/sbin/netplan", "/usr/bin/netplan"],
         args: None,
-        in_use: InUse::ConfigIn("/etc/netplan", ".yaml"),
+        in_use: InUse::Netplan,
     },
     ServiceProbe {
         key: "ifupdown",
@@ -291,6 +295,10 @@ fn in_use(fs: &dyn HostFs, prober: &dyn Prober, init: InitSystem, rule: InUse) -
                 .is_some_and(|systemctl| prober.run(systemctl, &["is-active", unit]).is_ok())
         }
         InUse::ConfigIn(dir, suffix) => fs.list_dir(dir).iter().any(|name| name.ends_with(suffix)),
+        InUse::Netplan => {
+            in_use(fs, prober, init, InUse::ConfigIn("/etc/netplan", ".yaml"))
+                && !linux::netplan_renders_only_for_network_manager(fs)
+        }
     }
 }
 
@@ -442,6 +450,52 @@ mod tests {
         );
         let fs = FakeFs::new().with_file("/etc/netplan/01.yaml", "");
         assert!(detect_service_versions(&fs, &prober, InitSystem::Systemd).is_empty());
+    }
+
+    #[test]
+    fn netplan_that_renders_only_for_network_manager_leaves_the_network_to_it() {
+        // The stock Ubuntu desktop file, a per-interface renderer, quoted
+        // and commented values: NetworkManager's keyfile is the file to edit.
+        for (name, yaml) in [
+            (
+                "01-network-manager-all.yaml",
+                "# Let NetworkManager manage all devices on this system\n\
+                 network:\n  version: 2\n  renderer: NetworkManager\n",
+            ),
+            (
+                "50-eth.yaml",
+                "network:\n  ethernets:\n    eth0:\n      renderer: \"NetworkManager\" # nm\n",
+            ),
+        ] {
+            let (fs, prober) = network_host();
+            let fs = fs.with_file(&format!("/etc/netplan/{name}"), yaml);
+            assert!(
+                !detect_service_versions(&fs, &prober, InitSystem::Systemd).contains_key("netplan"),
+                "{name}"
+            );
+        }
+        // Mixed, networkd, or no renderer (netplan's default is networkd):
+        // netplan stays the backend, as before.
+        for files in [
+            &[
+                ("01.yaml", "network:\n  renderer: NetworkManager\n"),
+                ("02.yaml", "network:\n  renderer: networkd\n"),
+            ][..],
+            &[("01.yaml", "network:\n  renderer: networkd\n")][..],
+            &[("01.yaml", "network:\n  version: 2\n")][..],
+        ] {
+            let (mut fs, prober) = network_host();
+            for (name, yaml) in files {
+                fs = fs.with_file(&format!("/etc/netplan/{name}"), yaml);
+            }
+            assert_eq!(
+                detect_service_versions(&fs, &prober, InitSystem::Systemd)
+                    .get("netplan")
+                    .map(String::as_str),
+                Some(UNKNOWN_VERSION),
+                "{files:?}"
+            );
+        }
     }
 
     #[test]

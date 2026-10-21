@@ -312,7 +312,11 @@ client ─▶ worker: /api/v1 handler ─▶ Operation::Apply ─▶ OpsEngine (
   probes fill (`host/mod.rs` `SERVICE_PROBES`); a network stack counts only
   while it is in use (`NetworkManager.service`, `systemd-networkd.service`
   or `networking.service` active, or a `*.yaml` in `/etc/netplan`), with
-  the precedence netplan, `NetworkManager`, networkd, ifupdown.
+  the precedence netplan, `NetworkManager`, networkd, ifupdown. netplan
+  whose every `renderer:` says `NetworkManager` does not count: then
+  `NetworkManager` owns the network and detent writes its keyfile, leaving
+  netplan's files alone (a mixed, networkd or missing renderer keeps
+  netplan).
   Proof: `a_model_section_edits_its_own_file_not_the_detected_one`,
   `a_detected_directory_target_is_passed_by_for_the_file`
   (`detent-ops/tests/engine.rs`),
