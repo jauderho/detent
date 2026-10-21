@@ -1751,27 +1751,28 @@ static SERVICES: &[ServiceBinding] = &[
             bsdrc: &[],
         },
         actions: &[ServiceAction::Reload, ServiceAction::Restart],
-        applies_to: &[],
+        applies_to: &[DNSMASQ_CONF],
         reload: &[],
     },
     ServiceBinding {
         units: UnitNames {
-            systemd: &["kea-dhcp4-server.service"],
+            // Debian and Ubuntu, then Fedora and Arch.
+            systemd: &["kea-dhcp4-server.service", "kea-dhcp4.service"],
             openrc: &["kea-dhcp4"],
             bsdrc: &[],
         },
         actions: &[ServiceAction::Restart],
-        applies_to: &[],
+        applies_to: &[KEA4_CONF],
         reload: &[],
     },
     ServiceBinding {
         units: UnitNames {
-            systemd: &["kea-dhcp6-server.service"],
+            systemd: &["kea-dhcp6-server.service", "kea-dhcp6.service"],
             openrc: &["kea-dhcp6"],
             bsdrc: &[],
         },
         actions: &[ServiceAction::Restart],
-        applies_to: &[],
+        applies_to: &[KEA6_CONF],
         reload: &[],
     },
 ];
@@ -3243,6 +3244,25 @@ mod tests {
         assert_eq!(descriptor.services.len(), 3);
         assert!(descriptor.commit_confirm);
         assert_eq!(descriptor.security_notes.len(), 1);
+    }
+
+    #[test]
+    fn each_file_acts_on_the_service_of_its_backend() {
+        let services = &super::DESCRIPTOR.services;
+        let unit = |path: super::PathSpec| {
+            services
+                .iter()
+                .find(|binding| binding.serves(path.as_str()))
+                .and_then(|binding| binding.units.systemd.first().copied())
+        };
+        assert_eq!(
+            [super::DNSMASQ_CONF, super::KEA4_CONF, super::KEA6_CONF].map(unit),
+            [
+                Some("dnsmasq.service"),
+                Some("kea-dhcp4-server.service"),
+                Some("kea-dhcp6-server.service")
+            ]
+        );
     }
 
     #[test]

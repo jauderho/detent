@@ -874,7 +874,7 @@ static RESOLVER_SERVICES: &[detent_core::descriptor::ServiceBinding] = &[
             bsdrc: &[],
         },
         actions: &[detent_core::descriptor::ServiceAction::Restart],
-        applies_to: &[],
+        applies_to: &[RESOLVED_CONF],
         reload: &[],
     },
     detent_core::descriptor::ServiceBinding {
@@ -887,7 +887,7 @@ static RESOLVER_SERVICES: &[detent_core::descriptor::ServiceBinding] = &[
             detent_core::descriptor::ServiceAction::Reload,
             detent_core::descriptor::ServiceAction::Restart,
         ],
-        applies_to: &[],
+        applies_to: &[UNBOUND_CONF],
         reload: &[],
     },
 ];
@@ -2638,6 +2638,30 @@ mod tests {
         assert!(has(&diagnostics, REC_DOT));
         assert!(!has(&diagnostics, BACKEND_MISSING));
         assert!(!diagnostics.has_errors());
+    }
+
+    #[test]
+    fn each_file_acts_on_the_service_of_its_backend() {
+        let services = &ResolverModule::descriptor().services;
+        let unit = |path: super::PathSpec| {
+            services
+                .iter()
+                .find(|binding| binding.serves(path.as_str()))
+                .and_then(|binding| binding.units.systemd.first().copied())
+        };
+        assert_eq!(
+            [
+                super::RESOLV_CONF,
+                super::RESOLVED_CONF,
+                super::UNBOUND_CONF
+            ]
+            .map(unit),
+            [
+                None,
+                Some("systemd-resolved.service"),
+                Some("unbound.service")
+            ]
+        );
     }
 
     #[test]
