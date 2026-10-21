@@ -473,6 +473,11 @@ deferred by the owner.
     interface. The classifier takes any key with an empty value as an
     interface name (a directive), so the edit deletes it. Found 2026-10-21
     while testing item 14; not fixed.
+16. ~~**resolver needs `/etc/systemd/resolved.conf`, absent on Fedora and
+    Arch.** The D3 runs copied the vendor file from `/usr/lib/systemd`.
+    Owner decision 2026-10-21: write the drop-in
+    `/etc/systemd/resolved.conf.d/90-detent.conf`; do not copy the vendor
+    file.~~ Done 2026-10-21 (`PROGRESS.md`).
 
 ### Track E — Milestone M3 (release path)
 

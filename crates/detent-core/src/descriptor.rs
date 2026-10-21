@@ -90,9 +90,16 @@ impl ModuleDescriptor {
     /// target with the same file name, most common first. When `chosen` is
     /// such a file and `exists` says it is absent, the answer is the first
     /// other declared file target with the same file name that `profile`
-    /// detects and that exists; else `chosen`. So the module has exactly one
-    /// file on a host. `exists` is called only when such an alternative is
-    /// declared; no module with one file per name is affected.
+    /// detects and that exists.
+    ///
+    /// Some distributions ship a file only under `/usr` (systemd's
+    /// `resolved.conf` on Fedora and Arch). A module declares a drop-in file
+    /// for it, `<chosen>.d/<name>`, as a [`TargetKind::File`] target. When no
+    /// same-name file exists, the answer is the first such drop-in that
+    /// `profile` detects, whether it exists or not: it is then the file the
+    /// operator creates. Else `chosen`. So the module has exactly one file on
+    /// a host. `exists` is called only when such an alternative is declared;
+    /// no module with one file per name and no drop-in file is affected.
     #[must_use]
     pub fn relocated(
         &self,
@@ -101,22 +108,33 @@ impl ModuleDescriptor {
         exists: impl Fn(&str) -> bool,
     ) -> &'static Target {
         let file_name = |target: &Target| target.path.as_str().rsplit('/').next();
+        let drop_ins = format!("{}.d/", chosen.path.as_str());
+        let detected_file = |target: &&'static Target| {
+            chosen.kind == TargetKind::File
+                && target.kind == TargetKind::File
+                && target.path != chosen.path
+                && (target.backend_detect)(profile)
+        };
         let mut alternatives = self
             .targets
             .iter()
-            .filter(|target| {
-                chosen.kind == TargetKind::File
-                    && target.kind == TargetKind::File
-                    && target.path != chosen.path
-                    && file_name(target) == file_name(chosen)
-                    && (target.backend_detect)(profile)
-            })
+            .filter(detected_file)
+            .filter(|target| file_name(target) == file_name(chosen))
             .peekable();
-        if alternatives.peek().is_none() || exists(chosen.path.as_str()) {
+        let mut drop_in = self
+            .targets
+            .iter()
+            .filter(detected_file)
+            .filter(|target| target.path.as_str().starts_with(&drop_ins))
+            .peekable();
+        if (alternatives.peek().is_none() && drop_in.peek().is_none())
+            || exists(chosen.path.as_str())
+        {
             return chosen;
         }
         alternatives
             .find(|target| exists(target.path.as_str()))
+            .or_else(|| drop_in.next())
             .unwrap_or(chosen)
     }
 }
@@ -867,11 +885,52 @@ mod tests {
         KEYS,
     ];
 
+    /// `resolved.conf`, which Fedora and Arch do not ship in `/etc`.
+    const RESOLVED: Target = Target {
+        path: PathSpec::new("/etc/systemd/resolved.conf"),
+        ..DEBIAN_CONF
+    };
+
+    /// The drop-in file that stands in for `resolved.conf`.
+    const RESOLVED_DROP_IN: Target = Target {
+        path: PathSpec::new("/etc/systemd/resolved.conf.d/90-detent.conf"),
+        ..DEBIAN_CONF
+    };
+
+    /// A file, its drop-in directory and a drop-in file, an undetected
+    /// drop-in file before it, and a file in another directory's drop-ins.
+    static WITH_DROP_IN: &[Target] = &[
+        RESOLVED,
+        Target {
+            path: PathSpec::new("/etc/systemd/resolved.conf.d"),
+            ..CONF_D
+        },
+        Target {
+            path: PathSpec::new("/etc/systemd/resolved.conf.d/10-other.conf"),
+            backend_detect: never,
+            ..DEBIAN_CONF
+        },
+        Target {
+            path: PathSpec::new("/etc/systemd/journald.conf.d/50-other.conf"),
+            ..DEBIAN_CONF
+        },
+        RESOLVED_DROP_IN,
+    ];
+
     /// Which of `RELOCATABLE` stands in for `chosen` when only `present`
     /// exist, and every path `exists` was asked about.
     fn relocate(chosen: &'static Target, present: &[&str]) -> (&'static str, Vec<String>) {
+        relocate_in(RELOCATABLE, chosen, present)
+    }
+
+    /// As [`relocate`], over `targets`.
+    fn relocate_in(
+        targets: &'static [Target],
+        chosen: &'static Target,
+        present: &[&str],
+    ) -> (&'static str, Vec<String>) {
         let descriptor = ModuleDescriptor {
-            targets: RELOCATABLE,
+            targets,
             ..DESCRIPTOR
         };
         let asked = std::cell::RefCell::new(Vec::new());
@@ -916,6 +975,32 @@ mod tests {
         assert_eq!(
             relocate(&DEBIAN_CONF, &["/opt/chrony.conf", "/etc/chrony.keys"]).0,
             "/etc/chrony/chrony.conf"
+        );
+    }
+
+    #[test]
+    fn a_missing_file_is_replaced_by_its_drop_in() {
+        // The drop-in stands in even when it is missing too: then it is the
+        // file the operator must create.
+        for present in [
+            &[][..],
+            &["/etc/systemd/resolved.conf.d/90-detent.conf"][..],
+        ] {
+            assert_eq!(
+                relocate_in(WITH_DROP_IN, &RESOLVED, present).0,
+                "/etc/systemd/resolved.conf.d/90-detent.conf"
+            );
+        }
+        assert_eq!(
+            relocate_in(WITH_DROP_IN, &RESOLVED, &["/etc/systemd/resolved.conf"]),
+            (
+                "/etc/systemd/resolved.conf",
+                vec!["/etc/systemd/resolved.conf".to_owned()]
+            )
+        );
+        assert_eq!(
+            relocate_in(WITH_DROP_IN, &RESOLVED_DROP_IN, &[]),
+            ("/etc/systemd/resolved.conf.d/90-detent.conf", Vec::new())
         );
     }
 

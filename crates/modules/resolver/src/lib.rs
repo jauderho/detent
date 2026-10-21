@@ -832,6 +832,10 @@ const SERVICE_UNBOUND: &str = "unbound";
 const RESOLV_CONF: PathSpec = PathSpec::new("/etc/resolv.conf");
 /// `/etc/systemd/resolved.conf`, the target of the `resolved` section.
 const RESOLVED_CONF: PathSpec = PathSpec::new("/etc/systemd/resolved.conf");
+/// The drop-in that stands in for `resolved.conf` where `/etc` has none
+/// (Fedora, Arch: the vendor file is under `/usr/lib/systemd`, and is never
+/// copied). See [`ModuleDescriptor::relocated`].
+const RESOLVED_DROP_IN: PathSpec = PathSpec::new("/etc/systemd/resolved.conf.d/90-detent.conf");
 /// `/etc/unbound/unbound.conf`, the target of the `unbound` section.
 const UNBOUND_CONF: PathSpec = PathSpec::new("/etc/unbound/unbound.conf");
 
@@ -858,6 +862,13 @@ static RESOLVER_TARGETS: &[Target] = &[
         backend_detect: resolved_backend_detect,
     },
     Target {
+        path: RESOLVED_DROP_IN,
+        kind: TargetKind::File,
+        mode: 0o644,
+        owner: Owner::Root,
+        backend_detect: resolved_backend_detect,
+    },
+    Target {
         path: UNBOUND_CONF,
         kind: TargetKind::File,
         mode: 0o644,
@@ -874,7 +885,7 @@ static RESOLVER_SERVICES: &[detent_core::descriptor::ServiceBinding] = &[
             bsdrc: &[],
         },
         actions: &[detent_core::descriptor::ServiceAction::Restart],
-        applies_to: &[RESOLVED_CONF],
+        applies_to: &[RESOLVED_CONF, RESOLVED_DROP_IN],
         reload: &[],
     },
     detent_core::descriptor::ServiceBinding {
@@ -2661,6 +2672,43 @@ mod tests {
                 Some("systemd-resolved.service"),
                 Some("unbound.service")
             ]
+        );
+    }
+
+    #[test]
+    fn a_host_without_resolved_conf_writes_the_drop_in() {
+        // Fedora and Arch ship `resolved.conf` only under `/usr/lib`; the
+        // vendor file is never copied. The drop-in is the file, and the
+        // resolved service reads it.
+        let descriptor = ResolverModule::descriptor();
+        let host = profile_versions(&[("systemd-resolved", "257")]);
+        let resolved = descriptor
+            .targets
+            .iter()
+            .find(|target| target.path == super::RESOLVED_CONF);
+        let file = |present: &'static [&'static str]| {
+            resolved.map(|target| {
+                descriptor
+                    .relocated(target, &host, |path| present.contains(&path))
+                    .path
+                    .as_str()
+            })
+        };
+        assert_eq!(
+            file(&[]),
+            Some("/etc/systemd/resolved.conf.d/90-detent.conf")
+        );
+        assert_eq!(
+            file(&["/etc/systemd/resolved.conf"]),
+            Some("/etc/systemd/resolved.conf")
+        );
+        assert_eq!(
+            descriptor
+                .services
+                .iter()
+                .find(|binding| binding.serves("/etc/systemd/resolved.conf.d/90-detent.conf"))
+                .and_then(|binding| binding.units.systemd.first().copied()),
+            Some("systemd-resolved.service")
         );
     }
 
