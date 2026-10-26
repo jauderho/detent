@@ -246,8 +246,17 @@ fn unbound(text: &str) -> Vec<String> {
     found
 }
 
-/// ifupdown hooks run through `/bin/sh`. Only the module's own route form,
-/// `up ip route add <to> via <via>` with plain address words, is allowed.
+/// ifupdown hooks and `mapping` scripts run through `/bin/sh`. Only the
+/// module's own route form, `up ip route add <to> via <via>` with plain
+/// address words, is allowed. Classic ifupdown and `BusyBox` also put option
+/// values raw into `/bin/sh -c` method templates (`%broadcast%`, `%iface%`),
+/// so a line that ifupdown reads as a stanza or option (its first word an
+/// option name) counts when it holds a character outside
+/// [`is_shell_inert`]. ifupdown takes `#` as a comment only at the start of
+/// a line, so a `#` later in the line is part of the value. The other
+/// formats of the network module (`Key=`, `key:`, `[section]`, `- item`)
+/// never start with an option name (a letter or digit, then letters, digits,
+/// `-` and `_`).
 fn ifupdown(text: &str) -> Vec<String> {
     text.lines()
         .filter_map(|line| {
@@ -269,10 +278,29 @@ fn ifupdown(text: &str) -> Vec<String> {
                     | "post-down"
                     | "source"
                     | "source-directory"
+                    | "mapping"
+                    | "script"
+                    | "map"
             );
-            (hook && !(key == "up" && is_route_form(line))).then(|| squash(line))
+            let option = first.starts_with(|c: char| c.is_ascii_alphanumeric())
+                && first
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'));
+            let shell = option && !line.chars().all(is_shell_inert);
+            ((hook && !(key == "up" && is_route_form(line))) || shell).then(|| squash(line))
         })
         .collect()
+}
+
+/// Characters `/bin/sh` reads as plain text in an unquoted word, plus the
+/// space and tab between words. `%` is out, so an `IPv6` zone id
+/// (`fe80::1%eth0`) is refused too.
+fn is_shell_inert(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '.' | ':' | '/' | '-' | '_' | '+' | ',' | '=' | ' ' | '\t'
+        )
 }
 
 /// `up ip route add <to> via <via>`, where `<to>` and `<via>` hold only
@@ -458,6 +486,66 @@ mod tests {
         }
     }
 
+    /// ifupdown `mapping` scripts, and shell characters in a value that
+    /// ifupdown puts in a `/bin/sh -c` method template. Each must be refused.
+    #[test]
+    fn ifupdown_mapping_and_shell_values_are_refused() {
+        let cases: &[(&str, &str, &str)] = &[
+            // ifupdown: a mapping stanza runs its script with the map lines.
+            (
+                "network",
+                "",
+                "mapping eth0\n\tscript /bin/sh\n\tmap id>/tmp/x\n",
+            ),
+            (
+                "network",
+                "mapping eth0\n",
+                "mapping eth0\n\tscript /bin/sh\n",
+            ),
+            (
+                "network",
+                "mapping eth0\n\tscript /bin/true\n",
+                "mapping eth0\n\tscript /bin/true\n\tmap id\n",
+            ),
+            // ifupdown: option values go raw into `/bin/sh -c` templates.
+            (
+                "network",
+                "",
+                "iface eth0 inet static\n\tbroadcast 1.2.3.255;id\n",
+            ),
+            ("network", "", "iface eth0 inet static\n\tnetmask 24;id\n"),
+            ("network", "", "iface eth0 inet static\n\tmtu 1500$(id)\n"),
+            (
+                "network",
+                "",
+                "iface eth0 inet static\n\thwaddress ether $(id)\n",
+            ),
+            ("network", "", "iface eth0 inet dhcp\n\thostname a|b\n"),
+            ("network", "", "iface eth0;id inet dhcp\n"),
+            (
+                "network",
+                "",
+                "iface eth0 inet6 static\n\taddress fe80::1%eth0\n",
+            ),
+            (
+                "network",
+                "",
+                "iface eth0 inet static\n\taddress 192.0.2.1 #x\n",
+            ),
+            (
+                "network",
+                "iface eth0 inet static\n\tmtu 1500\n",
+                "iface eth0 inet static\n\tmtu 1500`id`\n",
+            ),
+        ];
+        for (module, previous, candidate) in cases {
+            assert!(
+                adds(module, previous, candidate),
+                "{module}: {candidate:?} was not refused"
+            );
+        }
+    }
+
     /// What must keep working: existing directives left alone or reordered,
     /// the module's own route form, and ordinary edits beside a hook.
     #[test]
@@ -507,12 +595,66 @@ mod tests {
             ),
             ("nfs", "", "/srv 192.0.2.0/24(rw,root_squash)\n"),
             ("unknown", "", "preexec = /bin/true\n"),
+            // ifupdown: ordinary option values.
+            (
+                "network",
+                "",
+                "auto eth0\nallow-hotplug eth0\niface eth0 inet6 static\n\taddress 2001:db8::2/64\n\tgateway 2001:db8::1\n",
+            ),
+            (
+                "network",
+                "",
+                "iface eth0 inet static\n\thwaddress ether 52:54:00:12:34:56\n",
+            ),
+            (
+                "network",
+                "",
+                "\tdns-nameservers 1.1.1.1 2606:4700::1111\n\tdns-search a.example b.example\n",
+            ),
+            (
+                "network",
+                "",
+                "iface br0 inet static\n\tbridge_ports eth0 eth1\n\tbroadcast +\n",
+            ),
+            // netplan: a quoted list item is no ifupdown option.
+            (
+                "network",
+                "",
+                "network:\n  ethernets:\n    eth0:\n      addresses:\n        - \"192.0.2.10/24\"\n",
+            ),
+            // ifupdown: a mapping stanza already there, left unchanged.
+            (
+                "network",
+                "mapping eth0\n\tscript /usr/local/sbin/map-if\n\tmap home eth0-home\n",
+                "mapping eth0\n\tscript /usr/local/sbin/map-if\n\tmap home eth0-home\n",
+            ),
         ];
         for (module, previous, candidate) in cases {
             assert!(
                 !adds(module, previous, candidate),
                 "{module}: {candidate:?} was refused"
             );
+        }
+    }
+
+    /// The network module writes four formats, and each goes through the
+    /// ifupdown rule: no stock fixture of any backend may be refused once
+    /// its one hook, `source-directory`, is already in place.
+    #[test]
+    fn network_fixtures_of_every_backend_are_allowed() {
+        let fixtures = [
+            include_str!("../../../../fixtures/network/ifupdown-0.8/interfaces"),
+            include_str!("../../../../fixtures/network/netplan-1.1/netplan.yaml"),
+            include_str!("../../../../fixtures/network/network-manager-1.52/eth0.nmconnection"),
+            include_str!("../../../../fixtures/network/systemd-261/10-eth0.network"),
+            include_str!("../../../../fixtures/network/edge/crlf.network"),
+            include_str!("../../../../fixtures/network/edge/no-trailing-newline.network"),
+            include_str!("../../../../fixtures/network/edge/tabs-and-spacing.network"),
+            include_str!("../../../../fixtures/network/edge/unknown-sections.network"),
+        ];
+        let hook = "source-directory /etc/network/interfaces.d\n";
+        for fixture in fixtures {
+            assert!(!adds("network", hook, fixture), "{fixture:?} was refused");
         }
     }
 
