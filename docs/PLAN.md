@@ -1,8 +1,9 @@
 # detent — Implementation Plan
 
-> **Status:** approved 2026-09-03. Phases 0–5 and 10 are done; 6–9 are in progress.
-> The open work and its order are in [`BUGFIX.md`](BUGFIX.md); landed work is in
-> [`PROGRESS.md`](PROGRESS.md).
+> **Status:** approved 2026-09-03. Phases 0–8 and 10 are done; 9 and 12 are open.
+> The open work is Phase 12 (§5); owner decisions are in
+> [`DECISIONS.md`](DECISIONS.md); landed work is in [`PROGRESS.md`](PROGRESS.md).
+> The retired work queue is in [`archive/BUGFIX.md`](archive/BUGFIX.md).
 > **Audience:** the orchestrator (Fable Medium, or Opus 5 High as fallback) and the
 > implementor agents it delegates to. This document is written so that a fresh
 > session with no conversation context can pick up any phase and finish it.
@@ -625,7 +626,9 @@ localized, with schema-driven module forms.
 
 ---
 
-### Phase 6 — ACME: dns-01, short-lived certs, device-attest-01 `[~]`
+### Phase 6 — ACME: dns-01, short-lived certs, device-attest-01 `[x]` (v1 scope, 2026-10-26)
+
+**State:** done for v1. The Let's Encrypt staging run was skipped by the owner (a Phase 12 item). The TPM attestor is deferred past v1 (ADR-017). `detent-acme` coverage of 93 to 94 % is accepted (DECISIONS.md).
 
 **Goal:** real certs, renewed automatically, from public and private CAs.
 
@@ -642,13 +645,15 @@ localized, with schema-driven module forms.
 4. device-attest-01 → verify: CI job with `step-ca` + `swtpm` issues a cert to detent via TPM attestation; negative tests for wrong AK chain.
 5. Hot reload → verify: new cert served without restart (`openssl s_client` shows new serial).
 
-**Acceptance:** 100 % lines (attest paths measured in the swtpm job), except `detent-acme` at 93 to 94 % (owner accepted 2026-10-14, BUGFIX §4); fuzz targets for ACME JSON responses and DNS provider responses.
+**Acceptance:** 100 % lines (attest paths measured in the swtpm job), except `detent-acme` at 93 to 94 % (owner accepted 2026-10-14, DECISIONS.md); fuzz targets for ACME JSON responses and DNS provider responses.
 
 **Delegation:** ACME core + attestor → **Fable Low**; providers → Sonnet from a provider template written by Fable Low; CI containers → Sonnet.
 
 ---
 
-### Phase 7 — Modules wave 1: resolver, chrony, mounts, NFS, Samba `[~]`
+### Phase 7 — Modules wave 1: resolver, chrony, mounts, NFS, Samba `[x]` (container acceptance, 2026-10-26)
+
+**State:** accepted on the container evidence in `docs/spikes/d3-containers.md` (owner decision D3, no VMs). The VM-only checks moved to Phase 12.
 
 **Goal:** the most-used SBC configs, with smart secure defaults and upstream tracking.
 
@@ -670,7 +675,9 @@ Per module (each is one subtask following `MODULE_GUIDE.md`): lossless CST, mode
 
 ---
 
-### Phase 8 — Modules wave 2: network, DHCP `[~]`
+### Phase 8 — Modules wave 2: network, DHCP `[x]` (container acceptance, 2026-10-26)
+
+**State:** accepted on the container evidence in `docs/spikes/d3-containers.md` (owner decision D3, no VMs). The VM-only checks moved to Phase 12.
 
 **Goal:** interface configuration across the tier-1 backends, and DHCP servers.
 
@@ -743,7 +750,7 @@ Both are commit-confirm modules. Network model is backend-neutral (interface →
 
 ---
 
-### Phase 12 — Hardening, docs, and v1.0 (Milestone M4) `[ ]`
+### Phase 12 — Hardening, docs, and v1.0 (Milestone M4) `[~]`
 
 **Deliverables**
 - `docs/THREAT_MODEL.md` (STRIDE per component, mapped to tests), `docs/SECURITY_HARDENING.md` (operator checklist: unit hardening, polkit mode, TOTP, mTLS option), `docs/PENTEST_CHECKLIST.md` (OWASP ASVS L2 items mapped to tests; run `security-review` skill on the full diff).
@@ -756,7 +763,18 @@ Both are commit-confirm modules. Network model is backend-neutral (interface →
 - Final step before v1.0.0 (owner, 2026-10-14): run the `security-review` skill over the full diff and fix or record every finding.
 - v1.0.0 immutable release.
 
-**Acceptance:** every §2.7 control has a linked test; `systemd-analyze security` ≤ 2.5 (root-confined; owner accepted 2.6 on 2026-10-10, BUGFIX §4) and ≤ 1.8 (capability-user); all budgets met; PENTEST checklist all green or explicitly accepted risks with owner.
+**Open owner items** (moved here from the retired `archive/BUGFIX.md` on 2026-10-26; the detail is in that file, `docs/spikes/d3-containers.md` and `docs/DECISIONS.md`):
+- [ ] VM-only checks (Phases 7 and 8): real NetworkManager, netplan with the networkd renderer, and networkd links; `d3-containers.md` and `archive/BUGFIX.md` Track D item 3.
+- [ ] VM-only check: `x-systemd.automount` (`d3-containers.md`).
+- [ ] VM-only check: `chrony` serving time (`d3-containers.md`).
+- [ ] VM-only check: the Landlock line of `detent doctor` (`d3-containers.md`).
+- [ ] The v1.0.0 release; no release is cut yet (DECISIONS.md, Releases, 2026-10-14; `docs/RELEASING.md`).
+- [ ] The E16 real-install proof; it needs a published release (`archive/BUGFIX.md` Track F; DECISIONS.md E16).
+- [ ] Native-speaker review of the machine-drafted translations (`docs/TRANSLATING.md`).
+- [ ] Let's Encrypt staging run (`docs/spikes/acme-le.md`); skipped by the owner for now (DECISIONS.md, Track G).
+- [ ] Known limit, Rekor v1 `hashedrekord`: `verify_hashedrekord_body` (`detent-update/src/verify.rs`) expects a bare public key, but a real v1 `hashedrekord` entry embeds a Fulcio certificate. Production uses Rekor v2, which verifies. Fix needs a captured real fixture (`archive/BUGFIX.md` Track A follow-ups, Track E, R1).
+
+**Acceptance:** every §2.7 control has a linked test; `systemd-analyze security` ≤ 2.5 (root-confined; owner accepted 2.6 on 2026-10-10, DECISIONS.md) and ≤ 1.8 (capability-user); all budgets met; PENTEST checklist all green or explicitly accepted risks with owner.
 
 **Delegation:** threat model + pentest checklist → orchestrator (self-escalate to Fable High for the threat model review); mode/polkit → Fable Low; translations/docs → Haiku/Sonnet.
 
@@ -924,7 +942,8 @@ TLS 1.3 → session or Bearer → (cookie path) `Sec-Fetch-Site` + `Origin` + `X
 
 | Date | Change | By |
 |---|---|---|
-| 2026-09-30 | STAGE2/3/4 consolidated into `docs/BUGFIX.md` (the one open-work queue). Status header and Phase 6–9 lines brought up to date (`[~]`); §10 checkpoint now points to PROGRESS and BUGFIX. | orchestrator |
+| 2026-10-26 | `docs/BUGFIX.md` retired (owner decision). Owner decisions moved to `docs/DECISIONS.md`; the rest archived as `docs/archive/BUGFIX.md`. Open owner items moved to Phase 12. Phases 6 (v1 scope: Let's Encrypt staging skipped by the owner, TPM attestor deferred per ADR-017, `detent-acme` coverage 93 to 94 % accepted), 7 and 8 (container acceptance, `docs/spikes/d3-containers.md`) set to `[x]`. Phase 9 stays `[~]` (no release cut). Phase 12 set to `[~]`. | orchestrator |
+| 2026-09-30 | STAGE2/3/4 consolidated into `docs/archive/BUGFIX.md` (the one open-work queue). Status header and Phase 6–9 lines brought up to date (`[~]`); §10 checkpoint now points to PROGRESS and BUGFIX. | orchestrator |
 | 2026-09-22 | Phase 10 deviations recorded at close-out (§0 item 5, §1.6): (1) FreeBSD C-example CI deferred to parked Phase 11 — the Phase 10 deliverables line wants the C example on "Linux and FreeBSD CI" but §1.6 tier-3 forbids FreeBSD CI until a later pass and Phase 11 (BSD tier 2, incl. the `vmactions/freebsd-vm` job) is parked; tier-3/Phase 11 win by §1.6 authority, C example runs on Linux CI only. (2) `cargo-semver-checks` wired with an `origin/main` git baseline (not crates.io) since every crate sets `publish = false`; Rust API surface is internal so the check is advisory next to `cbindgen --verify`, which remains the binding C ABI gate. | orchestrator |
 | 2026-09-10 | Phase 4 closed: TLS 1.3 listener, Argon2id auth, sessions, API tokens, TOTP, rate limiting, CSRF, scoped authz, API v1 + OpenAPI, SPA serving, `serve` wired to the real server, credential CLI. Seccomp now **fails closed** (`Policy::require_seccomp`) after a filter that failed to compile left the worker unconfined while `confine` reported success. `rt_sigreturn` was missing from both…
 | 2026-09-17 | Phase 5 closed; **Milestone M2 reached** (see `docs/spikes/m2-ui.md`). Certificates + settings stay placeholders (Phase 6 / missing API). E2e against the real binary stays deferred per §5. |
@@ -938,6 +957,7 @@ TLS 1.3 → session or Bearer → (cookie path) `Sec-Fetch-Site` + `Origin` + `X
 ## 10. Checkpoint for the next session (read this first if resuming cold)
 
 Read [`PROGRESS.md`](PROGRESS.md) (newest entries first) for the current state, then
-[`BUGFIX.md`](BUGFIX.md) for the open work, its order and the binding rules. The
+Phase 12 in §5 for the open work and [`DECISIONS.md`](DECISIONS.md) for the owner
+decisions (the retired queue is [`archive/BUGFIX.md`](archive/BUGFIX.md)). The
 checkpoint that stood here (state on 2026-09-10) is in git:
 `git show 02fd9d5:docs/PLAN.md`.

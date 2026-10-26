@@ -18,7 +18,7 @@ evidence to OWASP ASVS 4.0.3 Level 2.
   `--test-threads=1`; see ARCHITECTURE §12).
 - **Status** is one of: **Covered** (a test proves the control), **Partial**
   (a test proves part of it; the rest is named), **Gap** (no test, or no
-  control), **Accepted** (an ADR, PLAN or an owner decision in BUGFIX §4
+  control), **Accepted** (an ADR, PLAN or an owner decision in DECISIONS.md
   accepts the risk; the source is named).
 - A gap has an id (`TM-G<n>`). [§8](#8-gaps) lists them with a severity.
   The owner decides which gaps to accept.
@@ -273,7 +273,7 @@ Full row: [SH-S] row "Sigstore verification".
 | UPD-1 | S | A binary not built by `release.yml` at the tag (AS9 ← A9, A11 without CI) | Pinned SAN and issuer; Fulcio chain, SCT, Rekor inclusion and checkpoint, SET or RFC 3161 time | `pinned_identity_is_the_release_workflow_at_the_tag` (`detent-update/src/verify.rs`); `wrong_identity_is_refused_at_step_3`, `a_forged_integrated_time_is_refused` (`detent-update/tests/verify_fixtures.rs`); `real_rekor_v2_bundle_verifies`, `real_rekor_v2_bundle_is_refused_for_another_tag` (`detent-update/tests/real_bundle.rs`) | Covered |
 | UPD-2 | T | Swapped asset or digest (AS9 ← A9) | SHA256SUMS and the bundle subject digest must both match | `verify_bundle_fails_naming_a_digest_mismatch` (`detent/src/run.rs`); `a_wrong_subject_digest_is_refused` (`verify_fixtures.rs`) | Covered |
 | UPD-3 | T | Downgrade or replay of an old signed release (AS9 ← A9) | Semver monotonic; `--allow-downgrade` only by hand; `bad.json` | `refuses_downgrade_by_default` (`detent-update/src/policy.rs`); `bare_update_refuses_a_downgrade_without_allow_downgrade` (`detent/src/run.rs`); `check_skips_a_bad_tag` (`detent-update/src/update.rs`) | Covered |
-| UPD-4 | T, E | A just-published malicious release from a stolen maintainer token (AS9 ← A11) | `min_age_days` gate; `detent-security: true` bypasses it; release notes step refuses an accidental marker | `refuses_younger_release`, `security_marker_bypasses_age_gate`, `marker_embedded_in_sentence_does_not_bypass` (`policy.rs`) | Accepted risk TM-G12 (owner 2026-10-14, BUGFIX §4): the `detent-security: true` marker skips the min-age gate by design; a `v*` tag push needs an admin (ruleset, 2026-10-14) |
+| UPD-4 | T, E | A just-published malicious release from a stolen maintainer token (AS9 ← A11) | `min_age_days` gate; `detent-security: true` bypasses it; release notes step refuses an accidental marker | `refuses_younger_release`, `security_marker_bypasses_age_gate`, `marker_embedded_in_sentence_does_not_bypass` (`policy.rs`) | Accepted risk TM-G12 (owner 2026-10-14, DECISIONS.md): the `detent-security: true` marker skips the min-age gate by design; a `v*` tag push needs an admin (ruleset, 2026-10-14) |
 | UPD-5 | D | A broken release bricks a headless device (AS13) | `--self-test` feature check, swap, `/healthz` with pinned TLS, rollback and `bad.json` | `refusal_order_verify_then_self_test_then_swap`, `an_unhealthy_restart_rolls_back_and_restores_the_previous_binary` (`detent/src/run.rs`); `the_wrong_certificate_is_not_trusted` (`detent-update/src/health.rs`) | Covered |
 | UPD-6 | T | Symlink or path tricks at swap time (AS9 ← A5) | Refuse a symlinked or non-file target | `a_symlinked_target_is_refused`, `a_missing_or_non_file_target_is_refused_not_created` (`detent-update/src/install.rs`) | Covered |
 | UPD-7 | T, D | Parser bugs in root code fed by the network (AS9 ← A9) | Size caps; https only; redirect caps; fuzzing of the bundle and TSA parsers | `refuses_oversized` (`detent-update/src/bundle.rs`); `refuses_redirect_to_http`, `caps_redirect_loop` (`detent-update/tests/real_transport.rs`); `list_releases_rejects_malformed_json` (`detent-update/src/fetch.rs`); fuzz targets `fuzz_bundle_parse`, `fuzz_tsa_verify` | Covered |
@@ -296,7 +296,7 @@ Full row: [SH-S] row "Sigstore verification".
 | Id | S/T/R/I/D/E | Threat | Control | Proven by | Status |
 |---|---|---|---|---|---|
 | AUD-1 | R | A mutation happens with no record (AS10) | Intent record first; write failure refuses the mutation | `an_unwritable_audit_sink_refuses_the_mutation`, `apply_writes_the_candidate_and_audits_exactly_once` (`detent-ops/tests/engine.rs`) | Covered |
-| AUD-2 | T | Records edited, deleted or reordered (AS10 ← A5 with `detent` rights, A6) | SHA-256 hash chain, sequence, torn-line notes | `a_deleted_middle_record_breaks_the_chain`, `verification_detects_tampering_and_truncation_against_an_anchor` (`detent-ops/src/audit.rs`) | Partial: the worker owns the file and can rewrite the whole chain; journald is the independent copy. `detent audit verify` (TM-G6, fixed 2026-10-10) checks the chain and prints the head digest to keep as an anchor: `audit_verify_prints_the_head_digest_of_an_intact_log`, `audit_verify_names_the_first_bad_record_and_fails`, `a_cut_off_tail_passes_the_chain_but_not_the_kept_anchor` (`detent/src/run.rs`); the operator must keep the anchor elsewhere; the auth log has no chain. Owner decision 2026-10-14 (BUGFIX §4): no built-in remote sink; the operator forwards the journal (README) for a copy the host cannot rewrite, so the remaining risk is accepted as a deployment control. Each record is also logged as the `detent audit` event (`emit`, `detent-ops/src/engine.rs`) at `RUST_LOG=info` |
+| AUD-2 | T | Records edited, deleted or reordered (AS10 ← A5 with `detent` rights, A6) | SHA-256 hash chain, sequence, torn-line notes | `a_deleted_middle_record_breaks_the_chain`, `verification_detects_tampering_and_truncation_against_an_anchor` (`detent-ops/src/audit.rs`) | Partial: the worker owns the file and can rewrite the whole chain; journald is the independent copy. `detent audit verify` (TM-G6, fixed 2026-10-10) checks the chain and prints the head digest to keep as an anchor: `audit_verify_prints_the_head_digest_of_an_intact_log`, `audit_verify_names_the_first_bad_record_and_fails`, `a_cut_off_tail_passes_the_chain_but_not_the_kept_anchor` (`detent/src/run.rs`); the operator must keep the anchor elsewhere; the auth log has no chain. Owner decision 2026-10-14 (DECISIONS.md): no built-in remote sink; the operator forwards the journal (README) for a copy the host cannot rewrite, so the remaining risk is accepted as a deployment control. Each record is also logged as the `detent audit` event (`emit`, `detent-ops/src/engine.rs`) at `RUST_LOG=info` |
 | AUD-3 | I | Secrets or config bodies in the audit trail (AS1, AS6 ← A2 via `/api/v1/audit`) | Digests and error ids only | `the_audit_log_never_contains_the_configuration_body` (`detent-ops/tests/engine.rs`); `a_record_carries_hashes_and_an_error_id_but_no_payload` (`detent-ops/src/audit.rs`); `a_record_carries_the_event_and_nothing_secret` (`detent-web/src/auth/audit.rs`) | Covered |
 | AUD-4 | D | Refused logins fill the disk (AS13 ← A1) | Rate-limited attempts not logged; 16 MiB rotation | `rate_limited_attempts_do_not_grow_the_audit_log` (`auth/routes.rs`); `a_log_at_16_mib_is_rotated_to_dot_1_before_the_next_append` (`auth/audit.rs`) | Covered |
 | AUD-5 | I, T | Other local users read or plant audit files (AS10 ← A5) | `0700` dir, `0600` file, symlink and foreign owner refused | `a_symlinked_audit_directory_is_refused`, `the_audit_directory_is_private` (`detent-ops/src/audit.rs`) | Covered |
@@ -333,9 +333,9 @@ named below.
 
 ---
 
-## 6. Future change: the Jev / TypeSafe egress (BUGFIX §5)
+## 6. Future change: the Jev / TypeSafe egress (archive/BUGFIX.md §5)
 
-BUGFIX §5 is a post-v1 experiment. Its gate requires this document to
+archive/BUGFIX.md §5 is a post-v1 experiment. Its gate requires this document to
 cover the egress it adds before any product code. **It is not in the model
 above.** If the owner says yes, update this document first. The change adds:
 
@@ -420,7 +420,7 @@ compromise), **Low** (defence in depth, evidence, or audit quality).
 | TM-G17 | Medium (capability-user mode only) | ~~Monitor and worker share a uid (polkit rule and doctor `polkit-rule` check exist; the shared uid stays)~~ Accepted (owner, 2026-10-14): the shared uid stays in capability-user mode | PKG-3 | SH Gaps 14, BUGFIX Track F |
 | TM-G18 | Low | Root `enforce_mode_*` tests for the E16 changes not yet run in CI or on the test host; aarch64 confinement not run on hardware | MON-7 | BUGFIX Track E, ARCHITECTURE §11 |
 
-Accepted residuals (owner, 2026-10-14; BUGFIX §4):
+Accepted residuals (owner, 2026-10-14; DECISIONS.md):
 
 - **AS6 TOTP keys at rest:** secrets are plain base32 in `users.json`
   (`0600`, owned by the service account), with the same protection as the

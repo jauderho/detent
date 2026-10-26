@@ -1,12 +1,12 @@
 # ADR-017: TPM device attestation (device-attest-01) deferred past v1
 Status: Deferred (2026-10-14)
-Deciders: project owner (BUGFIX.md §4, Track G question, answered 2026-10-14)
+Deciders: project owner (DECISIONS.md, Track G question, answered 2026-10-14)
 
 ## Context
 
 PLAN.md Phase 6 plans a TPM 2.0 attestor for ACME `device-attest-01`
-(feature `acme-attest`, `tss-esapi`, CI against step-ca and swtpm). BUGFIX.md
-§4 asked whether to defer it past v1. The owner answered yes. This record keeps
+(feature `acme-attest`, `tss-esapi`, CI against step-ca and swtpm).
+The Track G question in DECISIONS.md asked whether to defer it past v1. The owner answered yes. This record keeps
 the stage-1 findings, so a later attempt does not start from zero.
 
 The findings were verified by an implementer on 2026-10-14 against step-ca and
@@ -107,7 +107,7 @@ Negative:
 
 ## References
 
-PLAN.md Q2, Phase 6, §2.8, appendix on `device-attest-01`; BUGFIX.md §4 and
-Track G; ADR-002 (crypto provider), ADR-011 (cooldown), ADR-015 (acme process);
+PLAN.md Q2, Phase 6, §2.8, appendix on `device-attest-01`; DECISIONS.md and
+archive/BUGFIX.md Track G; ADR-002 (crypto provider), ADR-011 (cooldown), ADR-015 (acme process);
 step-ca provisioner documentation; crates.io metadata for `tss-esapi` and
 `tpm2-protocol` (read 2026-10-14).

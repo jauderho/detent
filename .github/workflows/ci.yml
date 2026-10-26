@@ -1011,7 +1011,7 @@ jobs:
   # applies only to the capability-user pass. The runner's systemd can differ
   # from the hosts (261.3 was measured there), so the version is logged and a
   # score that moves with a newer systemd shows up here first. Thresholds:
-  # root-confined 2.6 (owner accepted, BUGFIX section 4), capability-user 1.8,
+  # root-confined 2.6 (owner accepted, DECISIONS.md), capability-user 1.8,
   # update template 2.2 (passed to systemd as 26, 18 and 22) (2.1 measured, plus 0.1 tolerance). A failing pass
   # prints the full table.
   systemd-security:
