@@ -5,6 +5,15 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-26 - The smb.conf deny-list reads continuations every way Samba might
+
+The execution deny-list (`privsep/exec_deny.rs`) joined every line that ends in `\` before it dropped comments. Samba ends a `#` or `;` comment at the newline (`lib/util/tini.c`; the old `params.c` too). So `# note \` followed by `root preexec = /bin/sh` was one comment to the deny-list, but smbd ran `root preexec` as root. The samba module parser reads `# note \` as a comment, the validator only warns, and `testparm` accepts the file.
+
+**Change.** `samba()` reads the file four ways: no joins, joins on `\` newline only, also on `\` CR LF (the old rule), and also on `\` with blanks or CR before the newline (old `params.c` trims blanks there). Each directive is tagged with its reading, so the candidate is compared with `previous` read the same way; an unchanged file gives the same list. A `#`, `;` or `[` line that ends in `\` (after trimming) counts as a directive itself, so adding one is refused whatever the next line is; one already in the file may stay. `exports()` is not changed: it does not skip comments, and it looks for the words on each line, so a join only merges lines and cannot hide a word (nfs-utils `xgetc` joins only `\` newline and puts a space there too).
+
+**Tests.** `samba_continuations_are_read_every_way_samba_might`: seven candidates (a `#` and a `;` comment, a section line, `\` with a space, `\` with a tab and CR, `\` CR LF, an added comment that ends in `\`); before the change each was allowed. Each is now refused when added and allowed unchanged, and three ordinary edits with continuation lines are allowed.
+
+**Open (not verified).** `exports()` matches only the exact words `anonuid=0` and `anongid=0`. If nfs-utils reads the number with `strtol`, `anonuid=00` or `anonuid=+0` also maps a client to root and is not refused.
 ## 2026-10-26 - No page is wider than a phone in any locale (PLAN Phase 12)
 
 Closes the "Found, not fixed" item of the 2026-10-25 entry "Row and item controls say their caption first".
