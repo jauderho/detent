@@ -130,6 +130,13 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   `.mount`/`.automount` units. (done in code, `666572d`…`792c4dc`; the
   Phase 12 polkit rule done 2026-10-09; testhost runs passed 2026-10-07 and
   2026-10-10, `PROGRESS.md`)
+- fstab residual (owner, 2026-10-26): Tighten + record. New mountpoints under
+  protected trees and new bind/rbind/overlay lines are refused; the remaining
+  residual — fstab content is root-equivalent for a compromised worker
+  (network filesystems from an attacker server, mounts without nosuid/nodev)
+  — is accepted under ADR-001 (MON-3). Done 2026-10-26 (`PROGRESS.md`):
+  `exec_deny` `fstab()` refuses the new lines; mount activation and the
+  polkit rule also refuse mount points under a protected path.
 
 - Security-review answers (owner, 2026-10-14). Accepted for v1: ASVS 2.1.7 and
   2.1.8 (no common-password list: offline device, 12 to 128 character policy,
