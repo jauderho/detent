@@ -771,15 +771,13 @@ jobs:
         with:
           persist-credentials: false
 
-      # With no version, setup-bun installs the latest bun. bun 1.4.4 changed
-      # `bun test --coverage`: the arm of a `?:`, `??`, `||` or `&&` on its
-      # own line that did not run is now an uncovered line, and the 100 %
-      # gate below failed with no change in web/. Hold the bun that the gate
-      # was measured with; move it on together with the tests.
+      # Pinned so a new bun cannot change the 100 % coverage gate between two
+      # runs with no change in web/ (bun 1.4.4 once did). Move it on together
+      # with the tests.
       - name: Install bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.3
+          bun-version: 1.4.4
 
       # Bun reads bunfig.toml from the install directory only, never from a
       # parent, so the ADR-011 cooldown has to sit next to each package.json.

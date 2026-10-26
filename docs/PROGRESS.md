@@ -5,6 +5,14 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-26 - CI moves to bun 1.4.4 with the missed lines tested
+
+Owner decision 2026-10-26: CI uses bun 1.4.4 or later, and the bar stays at 100 % of lines. This closes the open item of the 2026-10-25 "CI: three advisories" entry.
+
+**Change.** The web job pins `bun-version: 1.4.4` (released 2026-10-22; it is the only release after 1.4.3). It is inside the 7-day window of ADR-011; the owner chose it, and the pin keeps the gate from moving with a later release. No threshold, exclusion or comment-based ignore changed, and no source file changed.
+
+**Tests.** With 1.4.4 fourteen files were below 100 %; each missed arm now has a test that runs it and checks the result. `PendingCommit`: the confirming caption and both actions locked while a confirm is in flight. `FieldControl`: the empty-list text. `SchemaForm`: two client-side issues on one control. `forms/l10n` (new test file): `optionalMessage` with a defined id and with arguments, `joinLines`. `forms/schema`: an enum with no string option, and an enum that mixes in a non-string value, both read as text. `lib/cert` (new test file): `certExpired`, and unknown expiry and unknown lifetime in `certGridItems`. `DashboardPage`: distro without a version, the expired, three-quarter, half and 30-day banners and no banner for a fresh certificate, and a failed audit tail. `ModuleDetailPage`: a module with no service and no commit-confirm, and the "was created" apply result. `ServicesPage`: a service with no start time.
+
 ## 2026-10-25 - `serve` stops cleanly on `systemctl stop` (BUGFIX Track D 12, minor note)
 
 Every `systemctl stop detent` logged `the web server did not stop cleanly: privsep channel failed`.
