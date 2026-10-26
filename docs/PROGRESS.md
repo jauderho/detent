@@ -5,6 +5,11 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-26 - The MCP over HTTP test tries a new port when its port is taken
+
+`serve_http_answers_401_until_the_startup_bearer_is_presented` (`crates/detent/src/mcp.rs`) took a free port, released it and let `serve_http` bind it. Another test could take it first; then the bind failed, `serve_http` returned `Exit::Failed`, and the test failed with "the server stopped on its own" (seen once in the Coverage job on 2026-10-26). The test now tries up to five ports and fails only when the server stops for another reason or no port works. `serve_http` is unchanged.
+
+**Checks.** `cargo test --locked -p detent --all-features --bin detent mcp::tests` three times (15 passed each); `cargo clippy --locked --workspace --all-features --all-targets -- -D warnings`.
 ## 2026-10-26 - exports: every root spelling of `anonuid` is refused
 
 Closes the "Open (not verified)" item of the "smb.conf deny-list reads continuations" entry below. `exports()` in `exec_deny.rs` matched only the exact words `anonuid=0` and `anongid=0`. exportfs reads the value as a number, so `anonuid=00`, `+0`, `0x0` (read in base 10 as 0) or a value that wraps past `u32` map a client to root too. Now a new or changed `anonuid=` or `anongid=` counts unless its value is a plain decimal `u32` above 0 with no sign or leading zero; this errs toward refusal, as the deny-list does. Test: `every_root_spelling_of_anonuid_is_refused` (failed before the change on `anonuid=00`).

@@ -867,30 +867,40 @@ mod tests {
         let (secret, _) = TokenStore::load(root.path())?.issue("mcp", Scope::Write, None)?;
         let store = Arc::new(StoreVerifier::new(root.path().to_path_buf()));
         let gate = Arc::new(BearerGate::new(secret.expose(), store));
-        let server = mcp_server(root.path(), secret.expose());
-        // A port that was free a moment ago; `serve_http` binds it itself.
-        let addr = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?;
-
-        let client = async {
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
-            while tokio::net::TcpStream::connect(addr).await.is_err() {
-                if tokio::time::Instant::now() > deadline {
-                    return Err::<_, Box<dyn std::error::Error>>("never listened".into());
+        // `serve_http` binds the address itself, so the test takes a port
+        // that was free a moment ago. Another test can take it first; then
+        // the bind fails and the test tries a new port.
+        let mut statuses = None;
+        for _ in 0..5 {
+            let server = mcp_server(root.path(), secret.expose());
+            let addr = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?;
+            let client = async {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+                while tokio::net::TcpStream::connect(addr).await.is_err() {
+                    if tokio::time::Instant::now() > deadline {
+                        return Err::<_, Box<dyn std::error::Error>>("never listened".into());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                Ok((
+                    post_initialize(addr, None).await?,
+                    post_initialize(addr, Some("wrong")).await?,
+                    post_initialize(addr, Some(secret.expose())).await?,
+                ))
+            };
+            tokio::select! {
+                exit = serve_http(server, Arc::clone(&gate), addr) => {
+                    if !matches!(exit, Exit::Failed) {
+                        return Err(format!("the server stopped on its own: {exit:?}").into());
+                    }
+                }
+                got = client => {
+                    statuses = Some(got?);
+                    break;
+                }
             }
-            Ok((
-                post_initialize(addr, None).await?,
-                post_initialize(addr, Some("wrong")).await?,
-                post_initialize(addr, Some(secret.expose())).await?,
-            ))
-        };
-        let (missing, wrong, right) = tokio::select! {
-            exit = serve_http(server, gate, addr) => {
-                return Err(format!("the server stopped on its own: {exit:?}").into());
-            }
-            statuses = client => statuses?,
-        };
+        }
+        let (missing, wrong, right) = statuses.ok_or("no free port in five tries")?;
         assert_eq!(missing, "HTTP/1.1 401 Unauthorized");
         assert_eq!(wrong, "HTTP/1.1 401 Unauthorized");
         assert_eq!(right, "HTTP/1.1 200 OK");
