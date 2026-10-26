@@ -165,6 +165,18 @@ describe('parseSchema — the nullable union', () => {
     expect(node.constraints.nullable).toBe(true)
   })
 
+  it('reads an enum that lists no string option as plain text', () => {
+    for (const list of [[], [null]]) {
+      const node = only(rootWith({ type: ['string', 'null'], enum: list }))
+      expect(node.control).toEqual({ type: 'text' })
+    }
+  })
+
+  it('reads an enum that mixes in a non-string value as plain text', () => {
+    const node = only(rootWith({ type: 'string', enum: ['a', 1] }))
+    expect(node.control).toEqual({ type: 'text' })
+  })
+
   it('marks required fields required and the rest not', () => {
     const parsed = parseSchema(hostsSchema)
     expect(field(parsed.fields, 'entries').constraints.required).toBe(true)

@@ -144,6 +144,45 @@ describe('PendingCommitProvider', () => {
     expect(screen.getByText(/waiting to be confirmed/)).toBeInTheDocument()
   })
 
+  it('shows the confirming caption and locks both actions while a confirm is in flight', async () => {
+    const user = userEvent.setup()
+    let release: (response: Response) => void = () => {}
+    const stub = stubFetchByUrl([
+      [
+        '/api/v1/auth/session',
+        () =>
+          jsonResponse({
+            csrf_token: 'csrf-abc',
+            expires_in_secs: 900,
+            scopes: ['read', 'write'],
+            subject: 'operator',
+            totp_satisfied: false,
+          }),
+      ],
+      ['/api/v1/commits/7/confirm', () => jsonResponse({ commit_id: 7 })],
+      ['/api/v1/commits/pending', () => jsonResponse(COMMIT)],
+    ])
+    const held = ((input: string | URL | Request, init?: RequestInit) =>
+      String(input).endsWith('/confirm')
+        ? new Promise<Response>((resolve) => {
+            release = resolve
+          })
+        : stub.fetch(input, init)) as typeof globalThis.fetch
+    renderWithProviders(<PendingCommitSlot />, { fetch: held })
+
+    await screen.findByText(/waiting to be confirmed/)
+    await user.click(screen.getByRole('button', { name: 'confirm change' }))
+
+    const confirming = await screen.findByRole('button', { name: /confirming/ })
+    expect(confirming).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'roll back commit' })).toBeDisabled()
+
+    await act(async () => {
+      release(jsonResponse({ commit_id: 7 }))
+    })
+    await waitFor(() => expect(screen.queryByRole('button', { name: /confirming/ })).toBeNull())
+  })
+
   it('keeps the rollback action unavailable when no commit is pending', async () => {
     const stub = stubFetchByUrl([
       [

@@ -382,6 +382,26 @@ describe('SchemaForm — diagnostics', () => {
     expect(described).toContain('hosts-diag')
   })
 
+  it('shows every diagnostic that names the same control', () => {
+    renderWithL10n(
+      <Harness
+        diagnostics={[
+          diagnostic({ field: 'entries/1/ip', id: 'hosts-first' }),
+          diagnostic({ field: 'entries/1/ip', id: 'hosts-second' }),
+        ]}
+      />,
+    )
+
+    const input = must(screen.getAllByLabelText('ip')[1], 'the second ip control')
+    const describedBy = must(input.getAttribute('aria-describedby'), 'aria-describedby')
+    const described = describedBy
+      .split(' ')
+      .map((id) => document.getElementById(id)?.textContent ?? '')
+      .join(' ')
+    expect(described).toContain('hosts-first')
+    expect(described).toContain('hosts-second')
+  })
+
   it('lands a sub-path diagnostic on the list that contains it', () => {
     renderWithL10n(<Harness diagnostics={[diagnostic({ field: 'entries/0/hostnames/0' })]} />)
 
@@ -417,6 +437,36 @@ describe('SchemaForm — diagnostics', () => {
     expect(input).toHaveAttribute('aria-invalid', 'false')
     const describedBy = must(input.getAttribute('aria-describedby'), 'aria-describedby')
     expect(document.getElementById(describedBy)).toHaveTextContent('hosts-hint')
+  })
+})
+
+describe('SchemaForm — several issues on one control', () => {
+  it('shows each client-side issue the value breaks', () => {
+    const schema = {
+      type: 'object',
+      properties: { code: { type: 'string', minLength: 5, pattern: '^[0-9]+$' } },
+      required: ['code'],
+    }
+    renderWithL10n(<Harness schema={schema} initial={{ code: 'ab' }} />)
+
+    const input = screen.getByLabelText('code')
+    expect(input).toHaveAttribute('aria-invalid', 'true')
+    const describedBy = must(input.getAttribute('aria-describedby'), 'aria-describedby')
+    const described = describedBy
+      .split(' ')
+      .map((id) => document.getElementById(id)?.textContent ?? '')
+      .join(' ')
+    expect(described).toContain('characters')
+    expect(described).toContain('does not match the form this field accepts')
+  })
+})
+
+describe('SchemaForm — an empty list', () => {
+  it('says the list is empty', () => {
+    renderWithL10n(<Harness initial={{ entries: [] }} />)
+
+    expect(screen.getByText('nothing here yet.')).toBeInTheDocument()
+    expect(screen.queryAllByLabelText('ip')).toHaveLength(0)
   })
 })
 

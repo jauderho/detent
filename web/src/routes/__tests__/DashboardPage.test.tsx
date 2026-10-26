@@ -211,6 +211,18 @@ describe('DashboardPage — empty and populated', () => {
     expect(screen.getByText('unknown')).toBeInTheDocument()
   })
 
+  it('shows the distro alone when the host reports no version', async () => {
+    const stub = stubFetchByUrl(
+      allHandlers({
+        profile: () => jsonResponse({ ...HOST_REPORT, distro_version_id: null }),
+      }),
+    )
+    renderWithProviders(<DashboardPage />, { fetch: stub.fetch })
+
+    await screen.findByText('nas-01')
+    expect(screen.getByText('ubuntu')).toBeInTheDocument()
+  })
+
   it('shows the host detection notes when the report carries any', async () => {
     const stub = stubFetchByUrl(
       allHandlers({
@@ -229,6 +241,75 @@ describe('DashboardPage — empty and populated', () => {
 
     await screen.findByText('nas-01')
     expect(screen.queryByText('detection notes')).toBeNull()
+  })
+})
+
+describe('DashboardPage — certificate banner', () => {
+  const NOW_S = Math.floor(Date.now() / 1000)
+  const DAY_S = 86_400
+
+  async function bannerFor(cert: CertReport): Promise<void> {
+    const stub = stubFetchByUrl(allHandlers({ cert: () => jsonResponse(cert) }))
+    renderWithProviders(<DashboardPage />, { fetch: stub.fetch })
+    await screen.findByText(cert.fingerprint)
+  }
+
+  it('says the certificate expired', async () => {
+    await bannerFor({ ...CERT_REPORT, not_after_unix: NOW_S - DAY_S, lifetime_used_percent: 100 })
+    expect(screen.getByText('expired; replace this certificate.')).toBeInTheDocument()
+  })
+
+  it('warns at three quarters of the lifetime', async () => {
+    await bannerFor({
+      ...CERT_REPORT,
+      not_after_unix: NOW_S + 90 * DAY_S,
+      lifetime_used_percent: 80,
+    })
+    expect(
+      screen.getByText('three quarters of the certificate lifetime is used; renew soon.'),
+    ).toBeInTheDocument()
+  })
+
+  it('warns at half the lifetime', async () => {
+    await bannerFor({
+      ...CERT_REPORT,
+      not_after_unix: NOW_S + 90 * DAY_S,
+      lifetime_used_percent: 55,
+    })
+    expect(
+      screen.getByText('half the certificate lifetime is used; renewal is scheduled.'),
+    ).toBeInTheDocument()
+  })
+
+  it('warns inside 30 days of expiry when little lifetime is used', async () => {
+    await bannerFor({
+      ...CERT_REPORT,
+      not_after_unix: NOW_S + 5 * DAY_S,
+      lifetime_used_percent: 10,
+    })
+    expect(screen.getByText('expires within 30 days; plan renewal.')).toBeInTheDocument()
+  })
+
+  it('shows no banner for a fresh certificate', async () => {
+    await bannerFor(CERT_REPORT)
+    expect(screen.queryByText(/renew/)).toBeNull()
+    expect(screen.queryByText(/expires within|expired;/)).toBeNull()
+  })
+})
+
+describe('DashboardPage — audit panel failure', () => {
+  it('shows the resolved sentence when the audit tail fails', async () => {
+    const stub = stubFetchByUrl(
+      allHandlers({ audit: () => errorResponse(500, 'web-engine-stopped') }),
+    )
+    renderWithProviders(<DashboardPage />, { fetch: stub.fetch })
+
+    expect(await screen.findByText('nas-01')).toBeInTheDocument()
+    expect(
+      await screen.findByText(
+        'the operations engine is no longer running; retry once the service is back.',
+      ),
+    ).toBeInTheDocument()
   })
 })
 

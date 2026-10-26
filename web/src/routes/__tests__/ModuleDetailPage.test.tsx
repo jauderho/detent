@@ -635,6 +635,44 @@ describe('ModuleDetailPage — apply', () => {
     })
   })
 
+  it('applies a module with no service and no commit-confirm, and says it created the file', async () => {
+    const user = userEvent.setup()
+    const PLAIN_VIEW: ModuleView = {
+      ...VIEW,
+      descriptor: { ...DESCRIPTOR, commit_confirm: false, services: [] },
+    }
+    const REPORT: ApplyReport = {
+      backed_up: false,
+      checks: [],
+      commit: null,
+      created: true,
+      module: 'hosts',
+      new_hash: 'f'.repeat(64),
+      path: '/etc/hosts',
+      prev_hash: CURRENT_HASH,
+      service: null,
+    }
+    renderDetail({
+      [AUTH_ROUTE]: () => WRITE_SESSION,
+      [MODULE_ROUTE]: () => jsonResponse(PLAIN_VIEW),
+      [APPLY_ROUTE]: () => jsonResponse(REPORT),
+    })
+    await screen.findByLabelText('hostname')
+    expect(screen.getByText('none')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'apply' })).not.toBeDisabled()
+    })
+
+    await user.click(screen.getByRole('button', { name: 'apply' }))
+    const dialog = await screen.findByRole('dialog', { name: 'apply this change?' })
+    expect(within(dialog).queryByText(/this module can lock an administrator out/)).toBeNull()
+    expect(within(dialog).queryByLabelText('afterwards')).toBeNull()
+    await user.click(within(dialog).getByRole('button', { name: 'apply' }))
+
+    const created = await screen.findByText(/did not exist and was created/)
+    expect(created.textContent).toContain('/etc/hosts')
+  })
+
   it('shows what the apply did with new fstab entries', async () => {
     const user = userEvent.setup()
     const REPORT: ApplyReport = {

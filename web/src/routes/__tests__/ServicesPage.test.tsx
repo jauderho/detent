@@ -165,6 +165,27 @@ describe('ServicesPage — row state branches', () => {
   })
 })
 
+describe('ServicesPage — since column', () => {
+  it('shows unknown when the service reports no start time', async () => {
+    const stub = stubFetchByUrl([
+      ['/api/v1/modules', () => jsonResponse([buildModule('alpha', ['restart'])])],
+      ['/api/v1/auth/session', () => jsonResponse(READ_WRITE_SESSION)],
+      [
+        'GET /api/v1/services/alpha',
+        () => jsonResponse(buildStatus({ since: null, unit: 'alpha.service' })),
+      ],
+    ])
+    renderWithProviders(<ServicesPage />, { fetch: stub.fetch })
+
+    const row = (await screen.findByText('alpha')).closest('tr')
+    expect(row).not.toBeNull()
+    if (row === null) throw new Error('unreachable')
+
+    expect(await within(row).findByText('alpha.service')).toBeInTheDocument()
+    expect(within(row).getByText('unknown')).toBeInTheDocument()
+  })
+})
+
 describe('ServicesPage — acting on a service', () => {
   it('confirms through the modal and posts the command, then shows the result', async () => {
     const user = userEvent.setup()
