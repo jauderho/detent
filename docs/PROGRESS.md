@@ -5,6 +5,13 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-26 - Read callers no longer see secret option aliases (WEB-10)
+
+A read caller (read token or read session) got module views with some secrets in clear. `redact_heuristic` (`crates/detent-web/src/api/modules.rs`) only cut the value after a literal, case-sensitive `password=`, and only blanked values under object keys named `password`, `psk`, `secret` or containing `password`. The mounts module keeps fstab options one word each, so the CIFS aliases `pass=`, `password2=` and the password in `user=bob%pw` / `username=bob%pw` (mount.cifs splits on `%`) leaked. `{key, value}` modules (samba, dhcp, chrony) never redacted a `value` whose `key` names a secret.
+
+**Change** (`api/modules.rs` only; no per-module `secret_pointers`; marker stays `[redacted]`). `redact_options` replaces `redact_password_substring`: it splits a string into words at commas and white space and redacts the value of a word whose name (before the first `=`, leading `-` removed) is on `SECRET_NAMES` (`password`, `pass`, `password2`, `passwd`, `psk`, `secret`; exact, case-insensitive) or contains `password`, and the part after `%` of a `user=` / `username=` value. Other words stay as they are: `username=bob`, `uid=0`, `pass_through=1`. In an object, a string `key` or `name` that is such a name now redacts its sibling `value`. `key` and `keyfile` are not on the list: chrony's `keyfile` is a path, and `key` alone is too common a name to blank. A difference from before: the value of a secret word now ends at white space as well as at a comma (`--password=x -v` keeps `-v`).
+
+**Tests.** `redaction_blanks_every_cifs_password_alias_in_mount_options` and `redaction_blanks_the_value_of_an_entry_whose_key_names_a_secret` fail on the old code (the aliases, `%` passwords and entry values come back in clear) and pass now. `cargo test -p detent-web`: 498 passed.
 ## 2026-10-26 - `detent user rm` and `passwd` end web sessions at once
 
 Severity medium (security). `detent user rm` or `detent user passwd` runs in another process and writes `users.json`. The server ended that user's sessions only in `UserStore::refresh`, and only a login, a user change or a TOTP enrolment called it. A plain request with a cookie called only `sessions.lookup`, so a stolen cookie stayed valid for up to 8 h with its scopes. The unit test `an_external_change_revokes_only_the_affected_sessions` called `refresh` by hand, so it did not show the gap.

@@ -252,8 +252,8 @@ fn redact_view(view: &mut ModuleView) {
 fn redact_pointer_target(value: &mut Value) {
     match value {
         Value::String(s) => {
-            if s.contains("password=") {
-                *s = redact_password_substring(s);
+            if let Some(redacted) = redact_options(s) {
+                *s = redacted;
             } else {
                 s.clear();
                 s.push_str("[redacted]");
@@ -273,26 +273,56 @@ fn redact_pointer_target(value: &mut Value) {
     }
 }
 
-fn redact_password_substring(s: &str) -> String {
-    let mut out = String::new();
-    let mut rest = s;
-    while let Some(idx) = rest.find("password=") {
-        let end = idx.saturating_add(9);
-        out.push_str(&rest[..end]);
-        out.push_str("[redacted]");
-        let tail = &rest[end..];
-        let end = tail.find(',').unwrap_or(tail.len());
-        rest = &tail[end..];
+/// Option names whose value is a secret, matched exactly and without regard
+/// to case. `pass` and `password2` are CIFS aliases of `password`. A name
+/// that contains `password` is a secret too.
+const SECRET_NAMES: &[&str] = &["password", "pass", "password2", "passwd", "psk", "secret"];
+
+fn is_secret_name(name: &str) -> bool {
+    SECRET_NAMES.iter().any(|n| name.eq_ignore_ascii_case(n))
+        || name.to_ascii_lowercase().contains("password")
+}
+
+/// Redacts the value of each `name=value` word whose name is a secret, and
+/// the part after `%` of a `user=` or `username=` value (mount.cifs reads
+/// it as the password). Words end at a comma or white space, so an option
+/// list, a whole fstab line and a command line all work. `None` when
+/// nothing was redacted.
+fn redact_options(s: &str) -> Option<String> {
+    let mut changed = false;
+    let mut out = String::with_capacity(s.len());
+    for piece in s.split_inclusive(|c: char| c == ',' || c.is_whitespace()) {
+        let word = piece.trim_end_matches(|c: char| c == ',' || c.is_whitespace());
+        let sep = &piece[word.len()..];
+        let Some((name, value)) = word.split_once('=') else {
+            out.push_str(piece);
+            continue;
+        };
+        let bare = name.trim_start_matches('-');
+        if is_secret_name(bare) {
+            changed = true;
+            for part in [name, "=[redacted]", sep] {
+                out.push_str(part);
+            }
+        } else if (bare.eq_ignore_ascii_case("user") || bare.eq_ignore_ascii_case("username"))
+            && let Some((user, _)) = value.split_once('%')
+        {
+            changed = true;
+            for part in [name, "=", user, "%[redacted]", sep] {
+                out.push_str(part);
+            }
+        } else {
+            out.push_str(piece);
+        }
     }
-    out.push_str(rest);
-    out
+    changed.then_some(out)
 }
 
 fn redact_heuristic(value: &mut Value) {
     match value {
         Value::String(s) => {
-            if s.contains("password=") {
-                *s = redact_password_substring(s);
+            if let Some(redacted) = redact_options(s) {
+                *s = redacted;
             }
         }
         Value::Array(arr) => {
@@ -301,9 +331,21 @@ fn redact_heuristic(value: &mut Value) {
             }
         }
         Value::Object(map) => {
+            // A `{key, value}` entry (samba, dhcp, chrony): the value of a
+            // secret key is a secret.
+            let secret_entry = ["key", "name"].iter().any(|f| {
+                map.get(*f)
+                    .and_then(Value::as_str)
+                    .is_some_and(is_secret_name)
+            });
             for (k, v) in map.iter_mut() {
                 let kl = k.to_ascii_lowercase();
-                if kl == "password" || kl == "psk" || kl == "secret" || kl.contains("password") {
+                if kl == "password"
+                    || kl == "psk"
+                    || kl == "secret"
+                    || kl.contains("password")
+                    || (secret_entry && k == "value")
+                {
                     redact_inner(v);
                 } else {
                     redact_heuristic(v);
@@ -629,6 +671,77 @@ mod tests {
                 "note": "password=[redacted],guest",
                 "port": 22,
             }))
+        );
+    }
+
+    /// Redacts a model with no secret pointers, as `get_one` does for a
+    /// read caller, so only the heuristic runs.
+    fn heuristic(model: serde_json::Value) -> Option<serde_json::Value> {
+        let mut view = ModuleView {
+            descriptor: &TEST_DESCRIPTOR,
+            schema: serde_json::json!({}),
+            model: Some(model),
+            current_hash: None,
+            diagnostics: Diagnostics::default(),
+            secret_pointers: &[],
+        };
+        redact_view(&mut view);
+        view.model
+    }
+
+    #[test]
+    fn redaction_blanks_every_cifs_password_alias_in_mount_options() {
+        let model = heuristic(serde_json::json!({"entries": [{
+            "options": [
+                "pass=S3cret", "password2=S3cret", "PASSWORD=S3cret", "passwd=S3cret",
+                "user=bob%S3cret", "username=bob%S3cret", "Username=bob%S3cret",
+                "username=bob", "uid=0", "pass_through=1", "keyfile=/etc/chrony.keys",
+                "rw,password=S3cret,user=bob%S3cret,guest",
+            ],
+            "line": "//srv/share /mnt cifs pass=S3cret,uid=0 0 0",
+            "exec": "ExecStart=/usr/bin/tool --password=S3cret -v uid=0 passwd=S3cret",
+            "pass": 0,
+        }]}));
+        assert_eq!(
+            model,
+            Some(serde_json::json!({"entries": [{
+                "options": [
+                    "pass=[redacted]", "password2=[redacted]", "PASSWORD=[redacted]",
+                    "passwd=[redacted]", "user=bob%[redacted]", "username=bob%[redacted]",
+                    "Username=bob%[redacted]", "username=bob", "uid=0", "pass_through=1",
+                    "keyfile=/etc/chrony.keys", "rw,password=[redacted],user=bob%[redacted],guest",
+                ],
+                "line": "//srv/share /mnt cifs pass=[redacted],uid=0 0 0",
+                "exec": "ExecStart=/usr/bin/tool --password=[redacted] -v uid=0 passwd=[redacted]",
+                "pass": 0,
+            }]}))
+        );
+    }
+
+    #[test]
+    fn redaction_blanks_the_value_of_an_entry_whose_key_names_a_secret() {
+        let model = heuristic(serde_json::json!({"entries": [
+            {"section": null, "key": "ldap admin password", "value": "S3cret"},
+            {"section": null, "key": "PSK", "value": "S3cret"},
+            {"name": "secret", "value": "S3cret"},
+            {"key": "pass", "value": null},
+            {"key": "keyfile", "value": "/etc/chrony.keys"},
+            {"key": "key", "value": "visible"},
+            {"key": "smb passwd file", "value": "/etc/samba/smbpasswd"},
+            {"key": "guest ok", "value": "yes"},
+        ]}));
+        assert_eq!(
+            model,
+            Some(serde_json::json!({"entries": [
+                {"section": null, "key": "ldap admin password", "value": "[redacted]"},
+                {"section": null, "key": "PSK", "value": "[redacted]"},
+                {"name": "secret", "value": "[redacted]"},
+                {"key": "pass", "value": null},
+                {"key": "keyfile", "value": "/etc/chrony.keys"},
+                {"key": "key", "value": "visible"},
+                {"key": "smb passwd file", "value": "/etc/samba/smbpasswd"},
+                {"key": "guest ok", "value": "yes"},
+            ]}))
         );
     }
 
