@@ -5,6 +5,12 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-26 - The audit reader does not follow a symlinked log
+
+Phase 12 follow-up. The worker owns `<state>/audit/audit.jsonl`, so it can swap the log, or the rotated `.1`, for a symlink. `FileAudit::read_log` (`verify`, the append scan) and `TailLines::open` (`query`, the rotated anchor) followed it, so a root `detent audit` run read the file the worker chose. Both now open through `detent_platform::fs::private_dir::open_read_nofollow` (`O_NOFOLLOW`), and a symlink gives an I/O error. Test: `a_symlinked_log_is_not_followed` (`detent-ops/src/audit.rs`; failed before the change). Writes already used `open_append_as` (no-follow).
+
+**Checks.** `cargo fmt --all --check`; `cargo test --locked -p detent-ops` (71 + 84 passed); `cargo test --locked -p detent-platform --lib private_dir`; `cargo clippy --locked --workspace --all-features --all-targets -- -D warnings`.
+
 ## 2026-10-26 - fstab: no new mounts over system trees, no new bind mounts
 
 Owner decision 2026-10-26 ("Tighten + record", `DECISIONS.md` "fstab residual"). A taken worker could add `/var/lib/detent/f /etc/ld.so.preload none bind 0 0`, or a bind over `/etc/systemd/system`. The line passed the mounts validator, `findmnt --verify` and the exec deny-list, and took effect at boot, or at once with `[mounts] activate_new_entries` (the daemon-reload of each fstab apply also reads a bind over the unit directory).

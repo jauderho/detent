@@ -372,13 +372,19 @@ impl FileAudit {
         Ok(None)
     }
 
-    /// Read the whole log, or nothing when it does not exist yet.
+    /// Read the whole log, or nothing when it does not exist yet. The
+    /// worker owns the log, so a symlink is not followed.
     fn read_log(&self) -> Result<Option<Vec<u8>>, AuditError> {
-        match std::fs::read(&self.path) {
-            Ok(raw) => Ok(Some(raw)),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(AuditError::Io(err)),
-        }
+        use std::io::Read as _;
+
+        let mut file = match detent_platform::fs::private_dir::open_read_nofollow(&self.path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(AuditError::Io(err)),
+        };
+        let mut raw = Vec::new();
+        file.read_to_end(&mut raw)?;
+        Ok(Some(raw))
     }
 
     /// Create the log's directory `0700`, tighten an existing one, and open the log for appending.
@@ -576,9 +582,10 @@ struct TailLines {
 }
 
 impl TailLines {
-    /// Open `path`, or `None` when it does not exist.
+    /// Open `path` without following a symlink, or `None` when it does not
+    /// exist.
     fn open(path: &Path) -> Result<Option<Self>, AuditError> {
-        let file = match std::fs::File::open(path) {
+        let file = match detent_platform::fs::private_dir::open_read_nofollow(path) {
             Ok(file) => file,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(AuditError::Io(err)),
@@ -1256,6 +1263,27 @@ mod tests {
         std::os::unix::fs::symlink(&target, parent)?;
         assert!(sink.record(&record("root", None, AuditResult::Ok)).is_err());
         assert!(std::fs::read_dir(&target)?.next().is_none());
+        Ok(())
+    }
+
+    /// The worker owns the log, so it can swap the log, or the rotated log,
+    /// for a symlink; a root reader does not follow it.
+    #[test]
+    fn a_symlinked_log_is_not_followed() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let other = FileAudit::new(dir.path().join("other.jsonl"));
+        other.record(&record("root", Some("hosts"), AuditResult::Ok))?;
+        let sink = FileAudit::new(dir.path().join("audit.jsonl"));
+        std::os::unix::fs::symlink(other.path(), sink.path())?;
+        assert!(matches!(sink.verify(), Err(AuditError::Io(_))));
+        assert!(matches!(
+            sink.query(&AuditQuery::default()),
+            Err(AuditError::Io(_))
+        ));
+        std::fs::remove_file(sink.path())?;
+        sink.record(&record("root", None, AuditResult::Ok))?;
+        std::os::unix::fs::symlink(other.path(), sink.rotated_path())?;
+        assert!(matches!(sink.verify(), Err(AuditError::Io(_))));
         Ok(())
     }
 

@@ -159,6 +159,24 @@ pub fn open_append_as(path: &Path, mode: u32, owner: FileOwner) -> io::Result<Fi
     Ok(File::from(fd))
 }
 
+/// Open `path` read-only without following a symlink.
+///
+/// A root reader of a file the worker owns uses this, so the worker cannot
+/// point it at another file.
+///
+/// # Errors
+///
+/// The OS error when `path` is a symlink or cannot be opened.
+pub fn open_read_nofollow(path: &Path) -> io::Result<File> {
+    let fd = openat(
+        CWD,
+        path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    Ok(File::from(fd))
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::{PermissionsExt as _, chown, symlink};
