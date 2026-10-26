@@ -511,16 +511,30 @@ fn unmangle(raw: &[u8]) -> Vec<u8> {
     out
 }
 
-/// exports: options that map a client to root.
+/// exports: options that map a client to root. exportfs reads `anonuid` and
+/// `anongid` as numbers, so any value but a plain non-zero `u32` counts.
 fn exports(text: &str) -> Vec<String> {
     join_continuations(text)
         .lines()
         .filter(|line| {
             line.split(|c: char| matches!(c, ',' | '(' | ')') || c.is_whitespace())
-                .any(|word| matches!(word, "no_root_squash" | "anonuid=0" | "anongid=0"))
+                .any(|word| {
+                    word == "no_root_squash"
+                        || word
+                            .strip_prefix("anonuid=")
+                            .or_else(|| word.strip_prefix("anongid="))
+                            .is_some_and(|id| !is_plain_nonzero_id(id))
+                })
         })
         .map(squash)
         .collect()
+}
+
+/// A decimal `u32` above 0, written without a sign or a leading zero.
+fn is_plain_nonzero_id(id: &str) -> bool {
+    id.starts_with(|c: char| matches!(c, '1'..='9'))
+        && id.bytes().all(|b| b.is_ascii_digit())
+        && id.parse::<u32>().is_ok()
 }
 
 #[cfg(test)]
@@ -968,6 +982,34 @@ mod tests {
                 !adds("mounts", previous, candidate),
                 "{candidate:?} was refused"
             );
+        }
+    }
+
+    /// exportfs reads `anonuid` and `anongid` as numbers, so every spelling
+    /// of 0, and a value that wraps, maps a client to root. Only a plain
+    /// non-zero `u32` is allowed.
+    #[test]
+    fn every_root_spelling_of_anonuid_is_refused() {
+        for option in [
+            "anonuid=00",
+            "anonuid=+0",
+            "anonuid=-0",
+            "anonuid= 0",
+            "anonuid=0x0",
+            "anongid=000",
+            "anonuid=4294967296",
+            "anonuid=",
+        ] {
+            let candidate = format!("/srv 192.0.2.0/24(rw,{option})\n");
+            assert!(adds("nfs", "", &candidate), "{candidate:?} was not refused");
+            assert!(
+                !adds("nfs", &candidate, &candidate),
+                "{candidate:?} was refused unchanged"
+            );
+        }
+        for option in ["anonuid=65534", "anongid=100", "anonuid=4294967295"] {
+            let candidate = format!("/srv 192.0.2.0/24(rw,{option})\n");
+            assert!(!adds("nfs", "", &candidate), "{candidate:?} was refused");
         }
     }
 }

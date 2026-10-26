@@ -5,6 +5,11 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-26 - exports: every root spelling of `anonuid` is refused
+
+Closes the "Open (not verified)" item of the "smb.conf deny-list reads continuations" entry below. `exports()` in `exec_deny.rs` matched only the exact words `anonuid=0` and `anongid=0`. exportfs reads the value as a number, so `anonuid=00`, `+0`, `0x0` (read in base 10 as 0) or a value that wraps past `u32` map a client to root too. Now a new or changed `anonuid=` or `anongid=` counts unless its value is a plain decimal `u32` above 0 with no sign or leading zero; this errs toward refusal, as the deny-list does. Test: `every_root_spelling_of_anonuid_is_refused` (failed before the change on `anonuid=00`).
+
+**Checks.** `cargo fmt --all --check`; `cargo test --locked -p detent-platform --lib exec_deny` (10 passed); `cargo clippy --locked -p detent-platform --all-features --all-targets -- -D warnings`.
 ## 2026-10-26 - The audit reader does not follow a symlinked log
 
 Phase 12 follow-up. The worker owns `<state>/audit/audit.jsonl`, so it can swap the log, or the rotated `.1`, for a symlink. `FileAudit::read_log` (`verify`, the append scan) and `TailLines::open` (`query`, the rotated anchor) followed it, so a root `detent audit` run read the file the worker chose. Both now open through `detent_platform::fs::private_dir::open_read_nofollow` (`O_NOFOLLOW`), and a symlink gives an I/O error. Test: `a_symlinked_log_is_not_followed` (`detent-ops/src/audit.rs`; failed before the change). Writes already used `open_append_as` (no-follow).
