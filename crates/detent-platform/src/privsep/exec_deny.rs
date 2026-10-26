@@ -381,9 +381,39 @@ const SAFE_SYSTEMD_OPTIONS: &[&str] = &[
     "rw-only",
 ];
 
+/// Trees a new fstab mount point may not be in, equal or under (owner
+/// decision 2026-10-26). A mount there replaces files that root reads or
+/// runs: configuration and units (`/etc`, `/run` and its links `/var/run`
+/// and `/var/lock`), programs and libraries (`/usr`, `/bin`, `/sbin` and
+/// the `/lib*` trees, also where they are not links to `/usr`), the kernel
+/// and boot loader (`/boot`), root's home (`/root`: `.ssh`, shell start
+/// files) and detent's own state (`/var/lib/detent`, the packaged state
+/// root). An ancestor of one (`/`, `/var`, `/var/lib`) is refused too.
+const PROTECTED_TREES: &[&str] = &[
+    "/bin",
+    "/boot",
+    "/etc",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/libx32",
+    "/root",
+    "/run",
+    "/sbin",
+    "/usr",
+    "/var/lib/detent",
+    "/var/lock",
+    "/var/run",
+];
+
+/// World-writable directories: the detent user can put a link below one,
+/// and mount follows it, so a mount point under one is refused. The
+/// directory itself is root's (a `tmpfs` on `/tmp` stays allowed).
+const WRITABLE_DIRS: &[&str] = &["/tmp", "/var/tmp", "/dev/shm"];
+
 /// fstab: systemd mount options outside [`SAFE_SYSTEMD_OPTIONS`], mount
-/// helpers and FUSE types, which name the program to run. Compared without
-/// case.
+/// helpers and FUSE types, which name the program to run, and mounts that
+/// replace system files ([`replaces_system_files`]). Compared without case.
 fn fstab(text: &str) -> Vec<String> {
     text.lines()
         .filter(|line| {
@@ -391,19 +421,94 @@ fn fstab(text: &str) -> Vec<String> {
             let fuse = fields
                 .get(2)
                 .is_some_and(|kind| kind.to_ascii_lowercase().contains("fuse"));
-            fuse || line
-                .split(|c: char| c == ',' || c.is_whitespace())
-                .map(str::to_ascii_lowercase)
-                .any(|word| {
-                    let systemd = word.strip_prefix("x-systemd.").is_some_and(|option| {
-                        let name = option.split_once('=').map_or(option, |(name, _)| name);
-                        !SAFE_SYSTEMD_OPTIONS.contains(&name)
-                    });
-                    systemd || word.starts_with("helper=") || word.starts_with("uhelper=")
-                })
+            fuse || replaces_system_files(&fields)
+                || line
+                    .split(|c: char| c == ',' || c.is_whitespace())
+                    .map(str::to_ascii_lowercase)
+                    .any(|word| {
+                        let systemd = word.strip_prefix("x-systemd.").is_some_and(|option| {
+                            let name = option.split_once('=').map_or(option, |(name, _)| name);
+                            !SAFE_SYSTEMD_OPTIONS.contains(&name)
+                        });
+                        systemd || word.starts_with("helper=") || word.starts_with("uhelper=")
+                    })
         })
         .map(squash)
         .collect()
+}
+
+/// An fstab entry (its whitespace-separated `fields`) that binds, rbinds or
+/// overlays other files onto its mount point, or whose mount point is in
+/// or over a protected tree ([`protected_mountpoint`]). A comment is none.
+fn replaces_system_files(fields: &[&str]) -> bool {
+    let Some(mountpoint) = fields.get(1) else {
+        return false;
+    };
+    if fields.first().is_some_and(|spec| spec.starts_with('#')) {
+        return false;
+    }
+    let lower = |at: usize| fields.get(at).map(|field| field.to_ascii_lowercase());
+    let overlay = lower(2).is_some_and(|kind| kind.contains("overlay"));
+    let binds = lower(3).is_some_and(|options| {
+        options.split(',').any(|option| {
+            matches!(option, "bind" | "rbind")
+                || ["lowerdir=", "upperdir=", "workdir="]
+                    .iter()
+                    .any(|key| option.starts_with(key))
+        })
+    });
+    overlay || binds || protected_mountpoint(mountpoint)
+}
+
+/// Whether a mount on the fstab field `raw` could replace system files: its
+/// decoded path is in or over a [`PROTECTED_TREES`] entry (so also `/`), or
+/// under a [`WRITABLE_DIRS`] entry. A path that is not absolute, has a `..`
+/// component or does not decode to UTF-8 counts too. `none` and `swap`
+/// (swap entries) do not.
+fn protected_mountpoint(raw: &str) -> bool {
+    use std::path::{Component, Path};
+    if matches!(raw, "none" | "swap") {
+        return false;
+    }
+    let Ok(decoded) = String::from_utf8(unmangle(raw.as_bytes())) else {
+        return true;
+    };
+    let path = Path::new(&decoded);
+    if !path.is_absolute() || path.components().any(|part| part == Component::ParentDir) {
+        return true;
+    }
+    PROTECTED_TREES
+        .iter()
+        .any(|tree| path.starts_with(tree) || Path::new(tree).starts_with(path))
+        || WRITABLE_DIRS
+            .iter()
+            .any(|dir| path.starts_with(dir) && path != Path::new(dir))
+}
+
+/// The `\ooo` octal escapes of an fstab field decoded, as libmount reads
+/// them (`\040` is a space); any other backslash is kept. The mounts
+/// module's rule, which this crate cannot reach (no dependency on it).
+fn unmangle(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some((&byte, tail)) = rest.split_first() {
+        let decoded = tail
+            .get(..3)
+            .filter(|digits| digits.iter().all(|digit| (b'0'..=b'7').contains(digit)))
+            .and_then(|digits| std::str::from_utf8(digits).ok())
+            .and_then(|digits| u8::from_str_radix(digits, 8).ok());
+        match decoded {
+            Some(decoded) if byte == b'\\' => {
+                out.push(decoded);
+                rest = tail.get(3..).unwrap_or_default();
+            }
+            _ => {
+                out.push(byte);
+                rest = tail;
+            }
+        }
+    }
+    out
 }
 
 /// exports: options that map a client to root.
@@ -777,5 +882,92 @@ mod tests {
             "",
             "{\"x\": \"a\\\"b\", \"hooks-libraries\": [\"q]\"]}"
         ));
+    }
+
+    /// fstab lines that mount over a system tree or bind, rbind or overlay
+    /// other files onto a mount point (owner decision 2026-10-26). Each must
+    /// be refused when new.
+    #[test]
+    fn fstab_mounts_over_system_trees_and_binds_are_refused() {
+        let cases: &[&str] = &[
+            "/var/lib/detent/f /etc/ld.so.preload none bind 0 0\n",
+            "/var/lib/detent/u /etc/systemd/system none bind 0 0\n",
+            "/srv/a /srv/b none rbind 0 0\n",
+            "/srv/a /srv/b none defaults,BIND 0 0\n",
+            "overlay /srv/o overlay lowerdir=/a,upperdir=/b,workdir=/c 0 0\n",
+            "x /srv/o ext4 lowerdir=/a 0 0\n",
+            "x /srv/o ext4 upperdir=/b 0 0\n",
+            "/dev/sdb1 /usr/local/bin ext4 defaults 0 2\n",
+            "/dev/sdb1 /etc/foo ext4 defaults 0 2\n",
+            "/dev/sdb1 /etc ext4 defaults 0 2\n",
+            "/dev/sdb1 / ext4 defaults 0 1\n",
+            "/dev/sdb1 /var ext4 defaults 0 2\n",
+            "/dev/sdb1 /var/lib/detent ext4 defaults 0 2\n",
+            "/dev/sdb1 /etc/my\\040dir ext4 defaults 0 2\n",
+            "/dev/sdb1 /\\145tc/x ext4 defaults 0 2\n",
+            "/dev/sdb1 /etc/../etc/x ext4 defaults 0 2\n",
+            "/dev/sdb1 /srv/../etc ext4 defaults 0 2\n",
+            "/dev/sdb1 //etc//x/ ext4 defaults 0 2\n",
+            "/dev/sdb1 /./etc/./x ext4 defaults 0 2\n",
+            "/dev/sdb1 /boot/efi vfat defaults 0 2\n",
+            "/dev/sdb1 /bin/x ext4 defaults 0 2\n",
+            "/dev/sdb1 /sbin/x ext4 defaults 0 2\n",
+            "/dev/sdb1 /lib/x ext4 defaults 0 2\n",
+            "/dev/sdb1 /lib64/x ext4 defaults 0 2\n",
+            "/dev/sdb1 /root/.ssh ext4 defaults 0 2\n",
+            "tmpfs /run/systemd/system tmpfs mode=0777 0 0\n",
+            "tmpfs /var/run/systemd/system tmpfs mode=0777 0 0\n",
+            "/dev/sdb1 /tmp/link ext4 defaults 0 2\n",
+            "/dev/sdb1 /var/tmp/link ext4 defaults 0 2\n",
+            "/dev/sdb1 /dev/shm/link ext4 defaults 0 2\n",
+            "/dev/sdb1 srv/rel ext4 defaults 0 2\n",
+            "/dev/sdb1 /etc/\\377 ext4 defaults 0 2\n",
+            "  /dev/sdb1   /etc/foo   ext4 defaults 0 2\n",
+        ];
+        for candidate in cases {
+            assert!(
+                adds("mounts", "", candidate),
+                "{candidate:?} was not refused"
+            );
+        }
+        // A changed line over a protected tree counts as new.
+        assert!(adds(
+            "mounts",
+            "/dev/sdb1 /etc/foo ext4 defaults 0 2\n",
+            "/dev/sdc1 /etc/foo ext4 defaults 0 2\n",
+        ));
+    }
+
+    /// What must keep working in fstab: an unchanged bind line, ordinary
+    /// data and network mounts, swap, comments, and a tmpfs on `/tmp`.
+    #[test]
+    fn fstab_ordinary_mounts_and_unchanged_binds_are_allowed() {
+        let bind = "/srv/a /etc/foo none bind 0 0\n";
+        let cases: &[(&str, &str)] = &[
+            (bind, bind),
+            (
+                bind,
+                "/srv/a   /etc/foo  none  bind  0  0\n/dev/sdb1 /srv/data ext4 defaults 0 2\n",
+            ),
+            ("", "/dev/sdb1 /srv/data ext4 defaults 0 2\n"),
+            ("", "nas:/export /mnt/nas nfs defaults,_netdev,nofail 0 0\n"),
+            ("", "UUID=1234 none swap sw 0 0\n"),
+            ("", "/swapfile swap swap defaults 0 0\n"),
+            ("", "# /boot/efi was on /dev/sda1 during installation\n"),
+            ("", "  # /dev/sdb1 /etc/x none bind 0 0\n"),
+            ("", "tmpfs /tmp tmpfs defaults,nosuid,nodev 0 0\n"),
+            ("", "/dev/sdb1 /srv/etc ext4 defaults 0 2\n"),
+            ("", "/dev/sdb1 /etcetera ext4 defaults 0 2\n"),
+            ("", "/dev/sdb1 /var/log ext4 defaults 0 2\n"),
+            ("", "/dev/sdb1 /srv/my\\040data ext4 defaults 0 2\n"),
+            ("", "/dev/sdb1 /mnt/binder ext4 defaults 0 2\n"),
+            ("", "\n"),
+        ];
+        for (previous, candidate) in cases {
+            assert!(
+                !adds("mounts", previous, candidate),
+                "{candidate:?} was refused"
+            );
+        }
     }
 }
