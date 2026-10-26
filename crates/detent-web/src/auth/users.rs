@@ -371,11 +371,7 @@ impl UserStore {
         if cur == inner.fp {
             return Ok(());
         }
-        let before: std::collections::HashMap<String, String> = inner
-            .users
-            .iter()
-            .map(|r| (r.name.clone(), r.phc.clone()))
-            .collect();
+        let before = Self::credentials(&inner.users);
         let users = match std::fs::read(path) {
             Ok(raw) => Self::decode(path, &raw)?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
@@ -389,11 +385,7 @@ impl UserStore {
         inner.users = users;
         inner.fp = cur;
         if let Some(sessions) = sessions {
-            let after: std::collections::HashMap<String, String> = inner
-                .users
-                .iter()
-                .map(|r| (r.name.clone(), r.phc.clone()))
-                .collect();
+            let after = Self::credentials(&inner.users);
             for (name, old) in before {
                 match after.get(&name) {
                     None => sessions.revoke_subject(&name),
@@ -403,6 +395,17 @@ impl UserStore {
             }
         }
         Ok(())
+    }
+    /// Each user's credentials: the password hash and the TOTP secret. A
+    /// change of either ends the user's sessions; the replay counter is not
+    /// a credential.
+    fn credentials(
+        users: &[UserRecord],
+    ) -> std::collections::HashMap<String, (String, Option<String>)> {
+        users
+            .iter()
+            .map(|r| (r.name.clone(), (r.phc.clone(), r.totp_secret.clone())))
+            .collect()
     }
     /// Add a user.
     ///

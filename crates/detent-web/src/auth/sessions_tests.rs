@@ -9,7 +9,7 @@ use tower::ServiceExt as _;
 
 use super::{SESSION_REVOKE_PATH, SESSIONS_PATH, SESSIONS_REVOKE_OTHERS_PATH};
 use crate::auth::audit::AuthEvent;
-use crate::auth::routes::{LOGIN_PATH, routes};
+use crate::auth::routes::{LOGIN_PATH, SESSION_PATH, routes};
 use crate::auth::session::COOKIE_NAME;
 use crate::authz::Scope;
 use crate::csrf::{CSRF_HEADER, SAME_ORIGIN, SEC_FETCH_SITE, csrf_guard};
@@ -415,5 +415,158 @@ async fn a_session_that_owes_a_password_change_cannot_list_or_end_sessions() -> 
         );
     }
     assert!(live(state, &carol));
+    Ok(())
+}
+
+// -- a change another process makes to the user file -------------------------
+
+/// The status and message id of a plain authenticated GET of `uri`.
+async fn get(state: &AppState, browser: &Browser, uri: &str) -> Result<(StatusCode, String), E> {
+    let response = app(state)
+        .oneshot(from(browser, Method::GET, uri, false)?)
+        .await?;
+    let status = response.status();
+    let id = json(response)
+        .await?
+        .pointer("/message_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_owned();
+    Ok((status, id))
+}
+
+/// Whether `browser` is refused as unauthenticated on a route that takes a
+/// pending caller (`/auth/session`) and on one that takes a full caller
+/// (`/auth/sessions`).
+async fn refused(state: &AppState, browser: &Browser) -> Result<bool, E> {
+    for uri in [SESSION_PATH, SESSIONS_PATH] {
+        let (status, id) = get(state, browser, uri).await?;
+        if status != StatusCode::UNAUTHORIZED || id != "web-auth-unauthenticated" {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Whether `browser` still reaches both routes.
+async fn admitted(state: &AppState, browser: &Browser) -> Result<bool, E> {
+    for uri in [SESSION_PATH, SESSIONS_PATH] {
+        if get(state, browser, uri).await?.0 != StatusCode::OK {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// A second store over the same file, as `detent user` opens it.
+fn cli(fixture: &TestState) -> Result<crate::auth::users::UserStore, E> {
+    Ok(crate::auth::users::UserStore::load(fixture.state_root())?)
+}
+
+/// `detent user rm` in another process ends the user's sessions on the
+/// server's next request, with no explicit refresh; other users keep theirs.
+#[tokio::test]
+async fn a_user_removed_by_another_process_is_signed_out_at_once() -> R {
+    let fixture = fixture()?;
+    let state = &fixture.state;
+    let alice = sign_in(state, "alice").await?;
+    let bob = sign_in(state, "bob").await?;
+    assert!(admitted(state, &alice).await?);
+
+    cli(&fixture)?.remove("alice")?;
+
+    assert!(refused(state, &alice).await?);
+    assert!(!live(state, &alice));
+    assert!(admitted(state, &bob).await?);
+    Ok(())
+}
+
+/// `detent user passwd` in another process ends the user's sessions on the
+/// server's next request; other users keep theirs.
+#[tokio::test]
+async fn a_password_reset_by_another_process_signs_the_user_out_at_once() -> R {
+    let fixture = fixture()?;
+    let state = &fixture.state;
+    let alice = sign_in(state, "alice").await?;
+    let bob = sign_in(state, "bob").await?;
+    assert!(admitted(state, &alice).await?);
+
+    cli(&fixture)?.set_password(&state.auth.hasher, "alice", "a new long passphrase")?;
+
+    assert!(refused(state, &alice).await?);
+    assert!(admitted(state, &bob).await?);
+    Ok(())
+}
+
+/// A session for `alice` made directly in the table, as a login with a TOTP
+/// code would make it.
+fn session_for_alice(state: &AppState) -> Result<Browser, E> {
+    let (id, _session) = state.auth.sessions.create(
+        "alice",
+        crate::authz::Scopes::read_write(),
+        true,
+        Instant::now(),
+    )?;
+    Ok(Browser {
+        id: id.expose().to_owned(),
+        csrf: String::new(),
+    })
+}
+
+/// Enrolling, replacing or clearing a TOTP secret in another process ends
+/// the user's sessions; a new replay counter alone does not.
+#[tokio::test]
+async fn a_totp_change_by_another_process_signs_the_user_out_at_once() -> R {
+    use crate::auth::totp::TotpSecret;
+
+    let fixture = fixture()?;
+    let state = &fixture.state;
+    let alice = sign_in(state, "alice").await?;
+    let bob = sign_in(state, "bob").await?;
+    let store = cli(&fixture)?;
+
+    store.note_totp_counter("alice", 7)?;
+    assert!(admitted(state, &alice).await?, "a counter is no credential");
+
+    store.set_totp("alice", Some(&TotpSecret::generate()?))?;
+    assert!(refused(state, &alice).await?, "enrolled");
+
+    let replaced = session_for_alice(state)?;
+    assert!(admitted(state, &replaced).await?);
+    store.set_totp("alice", Some(&TotpSecret::generate()?))?;
+    assert!(refused(state, &replaced).await?, "replaced");
+
+    let cleared = session_for_alice(state)?;
+    assert!(admitted(state, &cleared).await?);
+    store.set_totp("alice", None)?;
+    assert!(refused(state, &cleared).await?, "cleared");
+
+    assert!(admitted(state, &bob).await?);
+    Ok(())
+}
+
+/// A user file the server cannot read refuses every session request, rather
+/// than trusting the copy in memory.
+#[tokio::test]
+async fn an_unreadable_user_file_refuses_the_session() -> R {
+    let fixture = fixture()?;
+    let state = &fixture.state;
+    let alice = sign_in(state, "alice").await?;
+    assert!(admitted(state, &alice).await?);
+
+    let path = state.auth.users.path().to_path_buf();
+    std::fs::remove_file(&path)?;
+    std::fs::create_dir(&path)?;
+
+    for uri in [SESSION_PATH, SESSIONS_PATH] {
+        assert_eq!(
+            get(state, &alice, uri).await?,
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "web-auth-store-unreadable".to_owned()
+            ),
+            "{uri}"
+        );
+    }
     Ok(())
 }

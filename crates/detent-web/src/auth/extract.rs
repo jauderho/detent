@@ -210,8 +210,9 @@ impl Caller {
     /// # Errors
     ///
     /// [`AuthError::AmbiguousCredentials`] when both a cookie and a bearer
-    /// token are presented, and [`AuthError::Unauthenticated`] when neither is,
-    /// or when the one that is does not resolve.
+    /// token are presented, [`AuthError::Unauthenticated`] when neither is,
+    /// or when the one that is does not resolve, and a store error when the
+    /// user or token file cannot be read again.
     pub fn resolve(
         state: &AppState,
         headers: &HeaderMap,
@@ -238,6 +239,11 @@ impl Caller {
         match (cookie_id(headers), bearer(headers)) {
             (Some(_cookie), Some(_token)) => Err(AuthError::AmbiguousCredentials),
             (Some(id), None) => {
+                // `detent user` writes the file from another process. Read
+                // it again first, so a removed user or a changed credential
+                // ends the session here. A file that cannot be read refuses
+                // the request: the copy in memory may be stale.
+                state.auth.users.refresh()?;
                 let session = state
                     .auth
                     .sessions

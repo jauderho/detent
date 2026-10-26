@@ -5,6 +5,13 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-26 - `detent user rm` and `passwd` end web sessions at once
+
+Severity medium (security). `detent user rm` or `detent user passwd` runs in another process and writes `users.json`. The server ended that user's sessions only in `UserStore::refresh`, and only a login, a user change or a TOTP enrolment called it. A plain request with a cookie called only `sessions.lookup`, so a stolen cookie stayed valid for up to 8 h with its scopes. The unit test `an_external_change_revokes_only_the_affected_sessions` called `refresh` by hand, so it did not show the gap.
+
+**Change.** The cookie branch of `Caller::resolve_from` (`auth/extract.rs`) calls `users.refresh()` before the lookup, as the token store does on each `authenticate`. `Caller`, `PendingCaller` and `WriteCaller` all resolve through it. When the file cannot be read, the request is refused with the store error (`500 web-auth-store-unreadable`, or `400 web-auth-store-malformed`); the copy in memory is not used. `refresh` now also compares the TOTP secret, so a TOTP enrolment, replacement or removal ends the user's sessions too; the replay counter does not. Cost: one `stat` per cookie request; the file is read only when its `(dev, ino, len, mtime)` changed. The CSRF guard still looks up the session without a refresh; a stale session there only leads to the extractor, which refuses it.
+
+**Tests** (`auth/sessions_tests.rs`, plain GETs of `/auth/session` and `/auth/sessions`, no manual refresh): `a_user_removed_by_another_process_is_signed_out_at_once`, `a_password_reset_by_another_process_signs_the_user_out_at_once` (both: the other user keeps the session), `a_totp_change_by_another_process_signs_the_user_out_at_once`, `an_unreadable_user_file_refuses_the_session`. All four failed before the change (`200` where `401` or `500` was expected); the TOTP test still failed with only the extractor change. PENTEST_CHECKLIST 2.5.6 and 3.3.3 and the SECURITY_HARDENING token row cite them.
 ## 2026-10-26 - `RunCheck` bytes pass the same gate as writes
 
 **Bug (high).** `Request::RunCheck` wrote the worker's bytes to a candidate file and the root runner ran the module's validator on them. It skipped both content gates of `WriteTarget`: the execution deny-list (`exec_deny::adds_exec_directive`) and the module parser and validator. A compromised worker could send `conf-script=/bin/sh -c '...'` to the dhcp module's `dnsmasq --test -C <candidate>` check, which runs as root and runs `conf-script` while it parses; or Kea `hooks-libraries`, which `kea-dhcp4 -t` loads.
