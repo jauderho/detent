@@ -889,31 +889,7 @@ impl<'a> Monitor<'a> {
         previous: &[u8],
         bytes: &[u8],
     ) -> Result<(), Response> {
-        let Some(descriptor) = self.allow.module(module) else {
-            return Err(unknown(IdKind::Module, u32::from(module.get())));
-        };
-        if Self::has_new_forbidden_exec_directive(descriptor.id, previous, bytes) {
-            return Err(Response::Error(ProtoError::Io(
-                "module content adds a forbidden execution directive".to_owned(),
-            )));
-        }
-        let validation = if let Some(registry) = &self.module_registry {
-            let Some(module) = registry.iter().find(|module| module.id() == descriptor.id) else {
-                return Err(Response::Error(ProtoError::Io(
-                    "module parser is unavailable".to_owned(),
-                )));
-            };
-            Self::validate_candidate(module.as_ref(), bytes, &self.host_profile)
-        } else {
-            let modules = detent_modules::modules();
-            let Some(module) = modules.iter().find(|module| module.id() == descriptor.id) else {
-                return Err(Response::Error(ProtoError::Io(
-                    "module parser is unavailable".to_owned(),
-                )));
-            };
-            Self::validate_candidate(module.as_ref(), bytes, &self.host_profile)
-        };
-        validation?;
+        self.gate_content(module, &[previous], bytes)?;
         if !self.hooks.checks.configured() {
             return Ok(());
         }
@@ -944,6 +920,48 @@ impl<'a> Monitor<'a> {
                 )));
             }
         }
+        Ok(())
+    }
+
+    /// The content gate of both the write path and [`Request::RunCheck`],
+    /// before any root validator sees `bytes`: refuse a new execution
+    /// directive, then run the module's parser and validator. `previous`
+    /// holds the current contents of each file the bytes can replace; a
+    /// directive is new unless one of them holds it.
+    fn gate_content(
+        &self,
+        module: ModuleId,
+        previous: &[&[u8]],
+        bytes: &[u8],
+    ) -> Result<(), Response> {
+        let Some(descriptor) = self.allow.module(module) else {
+            return Err(unknown(IdKind::Module, u32::from(module.get())));
+        };
+        if previous
+            .iter()
+            .all(|previous| Self::has_new_forbidden_exec_directive(descriptor.id, previous, bytes))
+        {
+            return Err(Response::Error(ProtoError::Io(
+                "module content adds a forbidden execution directive".to_owned(),
+            )));
+        }
+        let validation = if let Some(registry) = &self.module_registry {
+            let Some(module) = registry.iter().find(|module| module.id() == descriptor.id) else {
+                return Err(Response::Error(ProtoError::Io(
+                    "module parser is unavailable".to_owned(),
+                )));
+            };
+            Self::validate_candidate(module.as_ref(), bytes, &self.host_profile)
+        } else {
+            let modules = detent_modules::modules();
+            let Some(module) = modules.iter().find(|module| module.id() == descriptor.id) else {
+                return Err(Response::Error(ProtoError::Io(
+                    "module parser is unavailable".to_owned(),
+                )));
+            };
+            Self::validate_candidate(module.as_ref(), bytes, &self.host_profile)
+        };
+        validation?;
         Ok(())
     }
 
@@ -1027,6 +1045,23 @@ impl<'a> Monitor<'a> {
         let Some(entry) = self.allow.check(id) else {
             return unknown(IdKind::Check, u32::from(id.get()));
         };
+        // The current contents of each file the check judges. One that
+        // cannot be read adds nothing, so its directives count as new.
+        let mut previous: Vec<Vec<u8>> = entry
+            .targets
+            .iter()
+            .filter_map(|target| self.allow.target(*target))
+            .filter(|target| target.kind == super::proto::PathKind::File)
+            .filter_map(|target| read_with_digest(&target.path).ok())
+            .map(|(contents, _)| contents)
+            .collect();
+        if previous.is_empty() {
+            previous.push(Vec::new());
+        }
+        let previous: Vec<&[u8]> = previous.iter().map(Vec::as_slice).collect();
+        if let Err(response) = self.gate_content(entry.module, &previous, bytes) {
+            return response;
+        }
         let (candidate, candidate_path) = match self.create_check_candidate(id, entry.check) {
             Ok(created) => created,
             Err(err) => return Response::Error(err),
@@ -3166,6 +3201,114 @@ mod tests {
             assert!(matches!(response, Response::Error(_)));
             assert_eq!(std::fs::read(&target)?, original);
         }
+        Ok(())
+    }
+
+    /// A monitor over a one-target "dhcp" module whose target holds
+    /// `current`, with a parser that accepts any text, so only the
+    /// execution-directive gate can refuse.
+    fn dhcp_check_monitor<'a>(
+        dir: &TempDir,
+        current: &[u8],
+        checks: &'a RecordingChecks,
+    ) -> Result<Monitor<'a>, Box<dyn std::error::Error>> {
+        let target = dir.path().join("dnsmasq.conf");
+        std::fs::write(&target, current)?;
+        let allow = Allowlist::from_modules(
+            &[descriptor_with_id(&target, "dhcp")],
+            &Config::with_state_root(dir.path().join("state")),
+        )?;
+        let hooks = Hooks {
+            checks,
+            services: &super::NoServices,
+        };
+        Ok(greeted(allow, hooks))
+    }
+
+    /// `RunCheck` runs a root validator on worker bytes, so it gets the
+    /// write path's gate: dnsmasq runs `conf-script` while it parses, and
+    /// Kea `-t` loads `hooks-libraries`.
+    #[test]
+    fn run_check_refuses_new_root_exec_directives() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TempDir::new()?;
+        let checks = RecordingChecks::default();
+        let mut monitor = dhcp_check_monitor(&dir, b"port=0\n", &checks)?;
+        for candidate in [
+            &b"port=0\nconf-script=/bin/sh -c 'id > /tmp/pwned'\n"[..],
+            b"{ \"Dhcp4\": { \"hooks-libraries\": [ { \"library\": \"/tmp/evil.so\" } ] } }\n",
+        ] {
+            let response = monitor.dispatch(Request::RunCheck {
+                check: CheckId(0),
+                bytes: candidate.to_vec(),
+            })?;
+            assert_eq!(
+                io_message(&response),
+                Some("module content adds a forbidden execution directive"),
+                "unexpected response {response:?}"
+            );
+        }
+        assert_eq!(checks.seen(), [] as [(PathBuf, Vec<u8>); 0]);
+        assert_eq!(entries(dir.path())?, ["dnsmasq.conf"]);
+        Ok(())
+    }
+
+    /// A check of bytes that keep a directive already in the live file
+    /// still runs, so a plan of an unchanged file does not fail.
+    #[test]
+    fn run_check_allows_an_existing_exec_directive() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TempDir::new()?;
+        let checks = RecordingChecks::default();
+        let current = b"conf-script=/usr/local/bin/hosts\nport=0\n";
+        let mut monitor = dhcp_check_monitor(&dir, current, &checks)?;
+        let candidate = b"conf-script=/usr/local/bin/hosts\nport=53\n";
+        let response = monitor.dispatch(Request::RunCheck {
+            check: CheckId(0),
+            bytes: candidate.to_vec(),
+        })?;
+        assert!(matches!(response, Response::Checked(outcome) if outcome.passed));
+        let seen = checks.seen();
+        let (_, bytes) = seen.first().ok_or("the check did not run")?;
+        assert_eq!(bytes, candidate);
+        Ok(())
+    }
+
+    /// Bytes the module parser rejects never reach the validator.
+    #[test]
+    fn run_check_refuses_content_the_module_parser_rejects()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        let allow = fx.allow()?;
+        let checks = RecordingChecks::default();
+        let hooks = Hooks {
+            checks: &checks,
+            services: &super::NoServices,
+        };
+        let registry = allow.module(ModuleId(0)).map(|descriptor| {
+            vec![Box::new(RejectingModule {
+                descriptor,
+                at: RejectAt::Parse,
+            }) as Box<dyn DynModule>]
+        });
+        let mut monitor = greeted_with_registry(allow, hooks, registry);
+        let response = monitor.dispatch(Request::RunCheck {
+            check: CheckId(0),
+            bytes: b"candidate".to_vec(),
+        })?;
+        assert!(
+            io_message(&response)
+                .is_some_and(|message| message.starts_with("module parser rejected")),
+            "unexpected response {response:?}"
+        );
+        let response = monitor.dispatch(Request::RunCheck {
+            check: CheckId(0),
+            bytes: vec![0xff, 0xfe, 0xfd],
+        })?;
+        assert_eq!(
+            io_message(&response),
+            Some("module content is not valid UTF-8")
+        );
+        assert_eq!(checks.seen(), [] as [(PathBuf, Vec<u8>); 0]);
+        assert_eq!(entries(&fx.root)?, ["target.conf"]);
         Ok(())
     }
     // -- backups and restore ------------------------------------------------

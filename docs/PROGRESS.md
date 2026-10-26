@@ -5,6 +5,15 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-26 - `RunCheck` bytes pass the same gate as writes
+
+**Bug (high).** `Request::RunCheck` wrote the worker's bytes to a candidate file and the root runner ran the module's validator on them. It skipped both content gates of `WriteTarget`: the execution deny-list (`exec_deny::adds_exec_directive`) and the module parser and validator. A compromised worker could send `conf-script=/bin/sh -c '...'` to the dhcp module's `dnsmasq --test -C <candidate>` check, which runs as root and runs `conf-script` while it parses; or Kea `hooks-libraries`, which `kea-dhcp4 -t` loads.
+
+**Change.** `monitor.rs`: the content gate of `revalidate` is now `gate_content` (deny-list, then UTF-8, module parse and module validate), and `run_check` calls it before it creates the candidate file. For `RunCheck` the previous contents are those of each file target the check judges (`CheckEntry::targets`); a directive is new unless one of them holds it, as on a write. A target that is missing or cannot be read adds nothing, so its directives count as new. The refusal is the same `Io` error as on a write. No protocol or runner change.
+
+**Endpoints.** No HTTP or MCP endpoint sends raw bytes to `RunCheck`: the only caller is `detent-ops` `run_checks`, from `plan` and `apply`, with bytes the module renders from the model. The bug needs a compromised worker (TB2); the gate is in the monitor, so it holds for every caller.
+
+**Tests.** `run_check_refuses_new_root_exec_directives` (dnsmasq `conf-script`, Kea `hooks-libraries`; the check hook is not called, no candidate is left) and `run_check_refuses_content_the_module_parser_rejects` (parse error and non-UTF-8; the hook is not called) failed before the fix with `Checked(CheckOutcome { ... passed: true ... })`. `run_check_allows_an_existing_exec_directive`: bytes that keep a directive of the live file still run the check, so `plan` of an unchanged file does not regress. THREAT_MODEL TB4 and MON-3 and the SECURITY_HARDENING rows name both paths. Run on macOS only; the Linux-only confined-monitor tests run in CI.
 ## 2026-10-26 - The dhcp module refuses `conf-script`
 
 Phase 12 follow-up. dnsmasq runs a `conf-script` command as root while it reads its configuration, also under `--test`. The monitor's execution deny-list already refused it on writes; the module's own list of external directives (`INCLUDE_KEYS` in `crates/modules/dhcp/src/lib.rs`) did not, so `validate` passed it. It is now on that list: `validate` reports `EXTERNAL_DIRECTIVE` as an error and the line is not rendered. Test: `validate_refuses_conf_script` (failed before the change).
