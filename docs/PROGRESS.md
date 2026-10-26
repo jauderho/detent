@@ -5,6 +5,17 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-26 - Exec deny-list: ifupdown `mapping` scripts and shell characters in values
+
+The ifupdown rule of `exec_deny` (`crates/detent-platform/src/privsep/exec_deny.rs`) missed two ways for the worker to run a command as root on `ifup -a` or a networking restart.
+
+**Gaps.** (1) A `mapping` stanza: ifupdown runs its `script` program as root and gives it the `map` lines on stdin. (2) Classic ifupdown 0.8 and BusyBox put option values raw into method templates (`inet.defn`: `%address%`, `%broadcast%`, `%mtu%`, `%hwaddress%`, `%hostname%`, `%iface%`) and run them with `/bin/sh -c`. The network module keeps unmodelled options as `Unknown` lines and `validate` checks only the address, gateway, DNS and interface name fields, so `broadcast 1.2.3.255;id` got to a root shell.
+
+**Change.** In `ifupdown()` only. `mapping`, `script` and `map` are exec directives. A line that ifupdown reads as a stanza or an option (its first word a letter or digit, then letters, digits, `-` and `_`) is an exec directive when it holds a character that is not an ASCII letter or digit, `. : / - _ + , =`, space or tab. As before, only a new or changed directive is refused; an unchanged one stays. `%` is refused, so an IPv6 zone id (`fe80::1%eth0`) needs a hand edit. A `#` after the start of a line is part of the value (ifupdown reads `#` as a comment only at the start), so it is refused too.
+
+**Other formats.** The deny-list knows only the module id, so the NetworkManager keyfile, netplan and networkd files of the network module also go through `ifupdown()`. Their lines start with `Key=`, `key:`, `[section]` or `- item`, never with an option name, so the value rule does not apply to them (`dns=192.168.1.1;8.8.8.8;` and `- "192.0.2.10/24"` stay allowed).
+
+**Tests.** New: `ifupdown_mapping_and_shell_values_are_refused` (12 cases: the mapping stanza, a new `script`, a new `map`, `broadcast 1.2.3.255;id`, `netmask 24;id`, `mtu 1500$(id)`, `hwaddress ether $(id)`, `hostname a|b`, `iface eth0;id`, a zone id, a mid-line `#`, a changed `mtu`). Before the fix all 12 were not refused. `network_fixtures_of_every_backend_are_allowed` runs the stock fixture of each of the four backends and the edge fixtures (green before and after). `ordinary_edits_are_allowed` has new cases: IPv6 address and gateway, a MAC `hwaddress`, `dns-nameservers` with IPv6, `dns-search`, `bridge_ports`, `broadcast +`, a quoted netplan list item, and an unchanged `mapping` stanza. The new refused cases are in their own test because `every_known_bypass_is_refused` would go over the clippy line limit. ADR-001 still applies: the deny-list is best effort.
 ## 2026-10-26 - The smb.conf deny-list reads continuations every way Samba might
 
 The execution deny-list (`privsep/exec_deny.rs`) joined every line that ends in `\` before it dropped comments. Samba ends a `#` or `;` comment at the newline (`lib/util/tini.c`; the old `params.c` too). So `# note \` followed by `root preexec = /bin/sh` was one comment to the deny-list, but smbd ran `root preexec` as root. The samba module parser reads `# note \` as a comment, the validator only warns, and `testparm` accepts the file.
