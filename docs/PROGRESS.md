@@ -5,6 +5,20 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-26 - fstab: no new mounts over system trees, no new bind mounts
+
+Owner decision 2026-10-26 ("Tighten + record", `DECISIONS.md` "fstab residual"). A taken worker could add `/var/lib/detent/f /etc/ld.so.preload none bind 0 0`, or a bind over `/etc/systemd/system`. The line passed the mounts validator, `findmnt --verify` and the exec deny-list, and took effect at boot, or at once with `[mounts] activate_new_entries` (the daemon-reload of each fstab apply also reads a bind over the unit directory).
+
+**Change.**
+- `exec_deny.rs` `fstab()`: a line counts as an exec directive (a new or changed one is refused; an unchanged one stays) when its options hold `bind`, `rbind`, `lowerdir=`, `upperdir=` or `workdir=`, its type holds `overlay`, or its mount point is in or over a `PROTECTED_TREES` entry: `/etc`, `/run`, `/var/run`, `/var/lock` (configuration and units), `/usr`, `/bin`, `/sbin`, `/lib`, `/lib32`, `/lib64`, `/libx32` (programs and libraries), `/boot`, `/root`, `/var/lib/detent` (packaged state root). "Over" gives `/`, `/var` and `/var/lib`. A mount point under `/tmp`, `/var/tmp` or `/dev/shm` is refused too: the `detent` user can put a link there, and mount follows it (the directory itself stays allowed: `tmpfs /tmp`). The mount point is decoded as the mounts module does (`\040` octal escapes; this crate does not depend on that module, so `unmangle` is a copy); `.`, `//` and a trailing `/` are ignored; a path with `..`, a relative path or one that is not UTF-8 is refused. Comment lines do not count for this rule.
+- `mounts.rs` `covers()`: mount activation also refuses a mount point under `/etc`, `/usr`, `/boot`, the state root or the binary directory.
+- `packaging/polkit/50-detent.rules`: `PROTECTED_MOUNT_PREFIXES` (`boot-`, `etc-`, `usr-`, `var-lib-detent-`) refuses the unit names under those paths, also with a fragment.
+- THREAT_MODEL MON-3 (residual), RUN-5 and PKG-6 (the old text said only root writes `/etc/fstab`; A6 writes it through the monitor).
+
+**Residual, accepted (ADR-001, MON-3).** fstab content stays root-equivalent for a taken worker: a network filesystem from an attacker server, a mount without `nosuid`/`nodev`, a link on a filesystem it mounted. The runner and polkit lists are not widened to `/bin`, `/sbin`, `/lib*`, `/root` or `/run`: the write-time refusal covers new lines there.
+
+**Tests.** Red before the fix: `fstab_mounts_over_system_trees_and_binds_are_refused` (`"/var/lib/detent/f /etc/ld.so.preload none bind 0 0\n" was not refused`); `protected_mount_points_are_refused_and_never_reach_the_init_system`, now with `/etc/systemd/system`, `/usr/local/bin`, `/boot/efi` and a path under the state root (they were not in the protected list); `the_polkit_rule_grants_only_the_start_of_an_update_instance` (`detent|M|etc-systemd-system.mount|start|1|no: yes`) and `the_polkit_rule_protects_the_mount_points_the_runner_protects` (no prefix list). Green after. `fstab_ordinary_mounts_and_unchanged_binds_are_allowed` keeps an unchanged bind line, `/dev/sdb1 /srv/data ext4`, NFS on `/mnt/nas`, swap, comments, `tmpfs /tmp`, `/srv/etc` and `/etcetera`. Not run on the test host.
+
 ## 2026-10-26 - No page is wider than a phone in any locale (PLAN Phase 12)
 
 Closes the "Found, not fixed" item of the 2026-10-25 entry "Row and item controls say their caption first".
