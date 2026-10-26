@@ -42,9 +42,13 @@
 //! Unknown subtrees — any map/list branch whose key-path is not in the
 //! modeled set (`network.ethernets.<iface>.{dhcp4,dhcp6,addresses,gateway4,
 //! gateway6,nameservers.addresses,routes}`, `network.vlans.<iface>.{id,link}`,
-//! `network.bridges.<iface>.interfaces`) — are left `Unknown` by the
-//! classifier and therefore preserved byte-identical. Anchors (`&`/`*`),
-//! `!` tags and `|`/`>` literals are not parsed and are likewise `Unknown`.
+//! `network.bridges.<iface>.interfaces`) — are preserved byte-identical. The
+//! classifier sees one line at a time, so a key with no value (`match:`) is a
+//! `Directive` like an interface name; the key-path decides
+//! ([`is_modeled_netplan_path`]): an interface is a key directly under a
+//! collection, and an edit leaves every line outside the modeled paths where
+//! it is. Anchors (`&`/`*`), `!` tags and `|`/`>` literals are not parsed and
+//! are `Unknown`.
 //!
 //! # Formatting policy
 //!
@@ -71,7 +75,7 @@ use detent_core::descriptor::{
     TargetKind, UiGroup, UnitNames, Upstream, ValidationCtx, apply_hints,
 };
 use detent_core::diag::{Diagnostic, Diagnostics, FieldPath, MessageId, Severity};
-use detent_core::doc::{Document, EntryPlan, LineKind};
+use detent_core::doc::{Document, EntryPlan, Line, LineKind};
 use detent_core::module::{ConfigModule, EditError, EditReport, ModelError, ParseError};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -369,7 +373,8 @@ fn parse_netplan_kv(raw: &str) -> Option<(usize, String, String)> {
     ];
     if !known_leaves.contains(&key) && !value.is_empty() {
         // Unknown keys with a value stay opaque (Unknown) and are preserved byte-identical.
-        // Map keys with empty value like 'eth0:' under ethernets/vlans/bridges are interface names.
+        // A key with an empty value (`eth0:`, `match:`) is accepted here; its
+        // key-path decides whether it is modeled (`is_modeled_netplan_path`).
         return None;
     }
     // Reject anchors/tags/literals that would be opaque subtrees.
@@ -377,6 +382,43 @@ fn parse_netplan_kv(raw: &str) -> Option<(usize, String, String)> {
         return None;
     }
     Some((indent, key.to_owned(), value.to_owned()))
+}
+
+/// The netplan collections whose keys detent models as interfaces.
+const NETPLAN_COLLECTIONS: [&str; 3] = ["ethernets", "vlans", "bridges"];
+
+/// The keys of a netplan interface that detent models.
+const NETPLAN_IFACE_KEYS: [&str; 10] = [
+    "dhcp4",
+    "dhcp6",
+    "addresses",
+    "gateway4",
+    "gateway6",
+    "nameservers",
+    "routes",
+    "id",
+    "link",
+    "interfaces",
+];
+
+/// Whether detent models the netplan key at `path`: `network`, `version`, a
+/// collection, an interface (a key directly under a collection), a modeled
+/// key of an interface, or `nameservers.addresses`. Any other key (`match:`,
+/// `search:`, an interface name one level too deep, a `bonds:` subtree) is
+/// not modeled: an edit keeps it and the lines under it.
+fn is_modeled_netplan_path(path: &[String]) -> bool {
+    let path: Vec<&str> = path.iter().map(String::as_str).collect();
+    match path.as_slice() {
+        ["network"] => true,
+        ["network", key] => *key == "version" || NETPLAN_COLLECTIONS.contains(key),
+        ["network", collection, _] | ["network", collection, _, "nameservers", "addresses"] => {
+            NETPLAN_COLLECTIONS.contains(collection)
+        }
+        ["network", collection, _, key] => {
+            NETPLAN_COLLECTIONS.contains(collection) && NETPLAN_IFACE_KEYS.contains(key)
+        }
+        _ => false,
+    }
 }
 
 /// Whether a netplan line opens a block whose lines an edit keeps together:
@@ -471,13 +513,18 @@ fn parse_inline_list(value: &str) -> Option<Vec<String>> {
 /// Build the model from a document by scanning directive lines and updating
 /// interface builders in file order. Each backend's syntax contributes to the
 /// same `BTreeMap<name, Interface>` so mixed-backend files merge.
+///
+/// Also returns the rows of the netplan lines the model does not read: keys
+/// outside [`is_modeled_netplan_path`] and list items that are not addresses,
+/// routes or name servers.
 #[allow(
     clippy::too_many_lines,
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
     clippy::assigning_clones
 )]
-fn build_model_from_lines(lines: &[String]) -> Model {
+fn build_model_from_lines(lines: &[String]) -> (Model, BTreeSet<usize>) {
+    let mut unmodeled = BTreeSet::new();
     let mut ifaces: BTreeMap<String, Interface> = BTreeMap::new();
     let mut current_iface: Option<String> = None;
     let mut current_section: String = String::new();
@@ -494,91 +541,86 @@ fn build_model_from_lines(lines: &[String]) -> Model {
             }
             netplan_stack.push((indent, key.clone()));
             let path: Vec<String> = netplan_stack.iter().map(|(_, k)| k.clone()).collect();
-            // `network:` top
-            if path == ["network"] {
-                // nothing
-            } else if path.len() >= 3 && path[0] == "network" {
-                let collection = &path[1];
-                if path.len() == 3
-                    && (collection == "ethernets"
-                        || collection == "vlans"
-                        || collection == "bridges")
-                {
-                    // New interface under this collection
-                    let iface = key.clone();
-                    netplan_iface = Some(iface.clone());
-                    ifaces.entry(iface.clone()).or_insert_with(|| Interface {
-                        name: iface.clone(),
-                        dhcp_v4: false,
-                        dhcp_v6: false,
-                        addresses: Vec::new(),
-                        gateway_v4: None,
-                        gateway_v6: None,
-                        dns: Vec::new(),
-                        routes: Vec::new(),
-                        vlan: None,
-                        bridge: None,
-                    });
-                } else if let Some(iface_name) = netplan_iface.clone()
-                    && let Some(entry) = ifaces.get_mut(&iface_name)
-                {
-                    // Leaf under an interface; the interface was created above
-                    // when `netplan_iface` was set, so the entry always exists.
-                    let leaf = key.as_str();
-                    match leaf {
-                        "dhcp4" => {
-                            entry.dhcp_v4 = value == "true" || value == "yes";
-                        }
-                        "dhcp6" => {
-                            entry.dhcp_v6 = value == "true" || value == "yes";
-                        }
-                        "gateway4" if !value.is_empty() => {
-                            entry.gateway_v4 = Some(value.clone());
-                        }
-                        "gateway6" if !value.is_empty() => {
-                            entry.gateway_v6 = Some(value.clone());
-                        }
-                        "addresses" => {
-                            if let Some(list) = parse_inline_list(&value) {
-                                // `nameservers: {addresses: [...]}` is DNS, not
-                                // interface addresses.
-                                if path.len() >= 2 && path[path.len() - 2] == "nameservers" {
-                                    entry.dns.extend(list);
-                                } else {
-                                    entry.addresses.extend(list);
-                                }
-                            } else if !value.is_empty() && !value.starts_with('[') {
-                                entry.addresses.push(value.clone());
-                            }
-                        }
-                        "id" => {
-                            if let Ok(id) = value.parse::<u16>() {
-                                let link = entry
-                                    .vlan
-                                    .as_ref()
-                                    .map(|v| v.link.clone())
-                                    .unwrap_or_default();
-                                entry.vlan = Some(Vlan { link, id });
-                            }
-                        }
-                        "link" if !value.is_empty() => {
-                            let id = entry.vlan.as_ref().map_or(0, |v| v.id);
-                            entry.vlan = Some(Vlan {
-                                link: value.clone(),
-                                id,
-                            });
-                        }
-                        "interfaces" => {
-                            if let Some(list) = parse_inline_list(&value) {
-                                entry.bridge = Some(Bridge { members: list });
-                            }
-                        }
-                        _ => {}
+            let modeled = is_modeled_netplan_path(&path);
+            if !modeled {
+                unmodeled.insert(i);
+            } else if path.len() == 3 {
+                // A key directly under a collection: a new interface.
+                let iface = key.clone();
+                netplan_iface = Some(iface.clone());
+                ifaces.entry(iface.clone()).or_insert_with(|| Interface {
+                    name: iface.clone(),
+                    dhcp_v4: false,
+                    dhcp_v6: false,
+                    addresses: Vec::new(),
+                    gateway_v4: None,
+                    gateway_v6: None,
+                    dns: Vec::new(),
+                    routes: Vec::new(),
+                    vlan: None,
+                    bridge: None,
+                });
+            } else if let Some(iface_name) = netplan_iface.clone()
+                && let Some(entry) = ifaces.get_mut(&iface_name)
+            {
+                // Leaf under an interface (or `version:` or a collection,
+                // which no arm reads); the interface was created above when
+                // `netplan_iface` was set, so the entry always exists.
+                let leaf = key.as_str();
+                match leaf {
+                    "dhcp4" => {
+                        entry.dhcp_v4 = value == "true" || value == "yes";
                     }
+                    "dhcp6" => {
+                        entry.dhcp_v6 = value == "true" || value == "yes";
+                    }
+                    "gateway4" if !value.is_empty() => {
+                        entry.gateway_v4 = Some(value.clone());
+                    }
+                    "gateway6" if !value.is_empty() => {
+                        entry.gateway_v6 = Some(value.clone());
+                    }
+                    "addresses" => {
+                        if let Some(list) = parse_inline_list(&value) {
+                            // `nameservers: {addresses: [...]}` is DNS, not
+                            // interface addresses.
+                            if path.len() >= 2 && path[path.len() - 2] == "nameservers" {
+                                entry.dns.extend(list);
+                            } else {
+                                entry.addresses.extend(list);
+                            }
+                        } else if !value.is_empty() && !value.starts_with('[') {
+                            entry.addresses.push(value.clone());
+                        }
+                    }
+                    "id" => {
+                        if let Ok(id) = value.parse::<u16>() {
+                            let link = entry
+                                .vlan
+                                .as_ref()
+                                .map(|v| v.link.clone())
+                                .unwrap_or_default();
+                            entry.vlan = Some(Vlan { link, id });
+                        }
+                    }
+                    "link" if !value.is_empty() => {
+                        let id = entry.vlan.as_ref().map_or(0, |v| v.id);
+                        entry.vlan = Some(Vlan {
+                            link: value.clone(),
+                            id,
+                        });
+                    }
+                    "interfaces" => {
+                        if let Some(list) = parse_inline_list(&value) {
+                            entry.bridge = Some(Bridge { members: list });
+                        }
+                    }
+                    _ => {}
                 }
             }
             // Handle netplan nameservers.addresses inline
-            if path.last().is_some_and(|k| k == "nameservers")
+            if modeled
+                && path.last().is_some_and(|k| k == "nameservers")
                 && !value.is_empty()
                 && let Some(list) = parse_inline_list(&value)
                 && let Some(iface_name) = netplan_iface.clone()
@@ -592,7 +634,12 @@ fn build_model_from_lines(lines: &[String]) -> Model {
         if let Some((indent, value)) = parse_netplan_list_item(raw) {
             // Determine parent key via stack top.
             let parent = netplan_stack.last().map_or("", |(_, k)| k.as_str());
-            if parent == "addresses" {
+            let path: Vec<String> = netplan_stack.iter().map(|(_, k)| k.clone()).collect();
+            if !is_modeled_netplan_path(&path)
+                || !matches!(parent, "addresses" | "routes" | "nameservers")
+            {
+                unmodeled.insert(i);
+            } else if parent == "addresses" {
                 if let Some(iface_name) = netplan_iface.clone()
                     && let Some(entry) = ifaces.get_mut(&iface_name)
                     && !value.is_empty()
@@ -633,26 +680,25 @@ fn build_model_from_lines(lines: &[String]) -> Model {
                     // Single-line route with only `to:`
                     netplan_pending_route_to = Some(to);
                 } else if value.starts_with("via:")
+                    && let Some(iface_name) = netplan_iface.clone()
+                    && let Some(entry) = ifaces.get_mut(&iface_name)
                     && let Some(to) = netplan_pending_route_to.take()
                 {
                     let via = value.strip_prefix("via:").unwrap_or("").trim().to_owned();
-                    if let Some(iface_name) = netplan_iface.clone()
-                        && let Some(entry) = ifaces.get_mut(&iface_name)
-                    {
-                        // Replace last route's via if it was pending
-                        if let Some(last) = entry.routes.last_mut() {
-                            if last.to == to && last.via.is_empty() {
-                                last.via = via;
-                            } else {
-                                entry.routes.push(Route { to, via });
-                            }
+                    // Replace last route's via if it was pending
+                    if let Some(last) = entry.routes.last_mut() {
+                        if last.to == to && last.via.is_empty() {
+                            last.via = via;
                         } else {
                             entry.routes.push(Route { to, via });
                         }
+                    } else {
+                        entry.routes.push(Route { to, via });
                     }
                 }
-            } else if parent == "nameservers" {
-                // nameservers block list — not modeled separately, treat as dns
+            } else {
+                // The parent is `nameservers`: a block list — not modeled
+                // separately, treat as dns
                 if let Some(iface_name) = netplan_iface.clone()
                     && let Some(entry) = ifaces.get_mut(&iface_name)
                     && !value.is_empty()
@@ -961,7 +1007,7 @@ fn build_model_from_lines(lines: &[String]) -> Model {
     }
     let mut interfaces: Vec<Interface> = ifaces.into_values().collect();
     interfaces.sort_by(|a, b| a.name.cmp(&b.name));
-    Model { interfaces }
+    (Model { interfaces }, unmodeled)
 }
 
 /// Render the model losslessly per detected backend.
@@ -2226,10 +2272,85 @@ fn settle_run(
     deleted.clear();
 }
 
+/// The rows of the netplan lines in `doc` that the model does not read.
+fn netplan_unmodeled_rows(doc: &Document) -> BTreeSet<usize> {
+    let raws: Vec<String> = doc.lines().iter().map(|l| l.raw().to_owned()).collect();
+    build_model_from_lines(&raws).1
+}
+
+/// Each line of a netplan file that the model does not read, with the keys
+/// above it by indent (a list item stands for itself by its text). An edit
+/// keeps these lines; when one of them comes to sit under other keys, the
+/// edit took away the key that held it or put a new one above it.
+fn netplan_unmodeled_outline(doc: &Document) -> Vec<(String, Vec<String>)> {
+    let unmodeled = netplan_unmodeled_rows(doc);
+    let mut above: Vec<(usize, String)> = Vec::new();
+    let mut outline = Vec::new();
+    for (row, line) in doc.lines().iter().enumerate() {
+        if matches!(line.kind(), LineKind::Blank | LineKind::Comment) {
+            continue;
+        }
+        let raw = line.raw();
+        let indent = indent_of(raw);
+        while above.last().is_some_and(|(d, _)| *d >= indent) {
+            above.pop();
+        }
+        if line.kind() == LineKind::Unknown || unmodeled.contains(&row) {
+            outline.push((
+                raw.to_owned(),
+                above.iter().map(|(_, key)| key.clone()).collect(),
+            ));
+        }
+        let t = raw.trim();
+        let node = parse_netplan_list_item(raw).map_or_else(
+            || {
+                t.split_once(':')
+                    .map_or(t, |(key, _)| key.trim())
+                    .to_owned()
+            },
+            |(_, value)| value,
+        );
+        above.push((indent, node));
+    }
+    outline
+}
+
+/// The minimal edit of a netplan file. Only the lines the model reads are
+/// entries; every other line (`match:` and its keys, `search:`, a `bonds:`
+/// subtree) stays byte for byte where it is. Refuses an edit that would put
+/// such a line under other keys (removing the interface or route that holds
+/// it, say), as that changes what the line means.
+fn edit_netplan(doc: &mut Document, planned: &[String]) -> Result<EditReport, EditError> {
+    let outline = netplan_unmodeled_outline(doc);
+    let unmodeled = netplan_unmodeled_rows(doc);
+    let mut entries = doc.clone();
+    entries.rebuild(|lines| {
+        for (row, line) in lines.iter_mut().enumerate() {
+            if unmodeled.contains(&row) {
+                *line = Line::new(line.raw().to_owned(), LineKind::Unknown, line.ending());
+            }
+        }
+    });
+    let report = entries
+        .plan_entries(
+            planned,
+            |raw| Some(raw.to_owned()),
+            |raw| Ok(raw.clone()),
+            opens_netplan_block,
+        )
+        .map(|plan| doc.apply_plan(plan))?;
+    if netplan_unmodeled_outline(doc) != outline {
+        return Err(EditError::Unsupported {
+            message: "edit would move netplan lines detent does not model; refusing".to_owned(),
+        });
+    }
+    Ok(report)
+}
+
 /// Whether `doc` parses back to `model`, ignoring interface order.
 fn round_trips(doc: &Document, model: &Model) -> bool {
     let reparsed = Document::parse(&doc.render(), classify);
-    let mut back = build_model_from_lines(
+    let (mut back, _) = build_model_from_lines(
         &reparsed
             .lines()
             .iter()
@@ -2266,7 +2387,7 @@ impl ConfigModule for NetworkModule {
 
     fn to_model(doc: &Self::Doc) -> Result<Self::Model, ModelError> {
         let raws: Vec<String> = doc.lines().iter().map(|l| l.raw().to_owned()).collect();
-        Ok(build_model_from_lines(&raws))
+        Ok(build_model_from_lines(&raws).0)
     }
 
     fn apply(doc: &mut Self::Doc, model: &Self::Model) -> Result<EditReport, EditError> {
@@ -2338,18 +2459,16 @@ impl ConfigModule for NetworkModule {
             .into_iter()
             .filter(|l| is_directive_like(l))
             .collect();
-        let edited = doc.edit_entries(
-            &planned,
-            |raw| Some(raw.to_owned()),
-            |raw| Ok(raw.clone()),
-            |raw| {
-                if flavor == BackendFlavor::Netplan {
-                    opens_netplan_block(raw)
-                } else {
-                    parse_section(raw).is_some()
-                }
-            },
-        );
+        let edited = if flavor == BackendFlavor::Netplan {
+            edit_netplan(doc, &planned)
+        } else {
+            doc.edit_entries(
+                &planned,
+                |raw| Some(raw.to_owned()),
+                |raw| Ok(raw.clone()),
+                |raw| parse_section(raw).is_some(),
+            )
+        };
         // An unknown line between rewritten directives (an unknown section
         // header, say) can change what they mean; refuse, leaving the
         // document as it was, instead of silently dropping modeled state.
@@ -4403,6 +4522,149 @@ mod tests {
         let out = NetworkModule::render(&doc);
         assert!(out.starts_with(src), "{out}");
         assert!(out.contains("    eth1:\n"), "{out}");
+        Ok(())
+    }
+
+    /// Changes `from` to `to` in the model of `src` through `apply`, checks
+    /// that the file reads back as the model, and returns it.
+    fn netplan_edit(src: &str, from: &str, to: &str) -> Result<String, String> {
+        let mut doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
+        assert_eq!(NetworkModule::render(&doc), src);
+        let mut model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        for iface in &mut model.interfaces {
+            for addr in &mut iface.addresses {
+                if addr == from {
+                    to.clone_into(addr);
+                }
+            }
+        }
+        NetworkModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let out = NetworkModule::render(&doc);
+        let reparsed = NetworkModule::parse(&out).map_err(|e| e.to_string())?;
+        assert_eq!(
+            NetworkModule::to_model(&reparsed).map_err(|e| e.to_string())?,
+            model
+        );
+        Ok(out)
+    }
+
+    #[test]
+    fn a_netplan_edit_keeps_unmodeled_keys_with_no_value() -> Result<(), String> {
+        // The installer's layout: `match:` and `set-name:` pin the name, and
+        // `search:` is a block list under `nameservers:`. detent models
+        // neither, so an edit of the address keeps every one of their lines.
+        let src = "# This is the network config written by 'subiquity'\n\
+                   network:\n  version: 2\n  renderer: networkd\n  ethernets:\n    eth0:\n      \
+                   match:\n        macaddress: \"52:54:00:12:34:56\"\n      set-name: eth0\n      \
+                   dhcp4: false\n      dhcp6: false\n      addresses:\n        - 192.0.2.10/24\n      \
+                   nameservers:\n        search:\n          - example.com\n        \
+                   addresses: [192.0.2.53]\n      routes:\n        - to: default\n          \
+                   via: 192.0.2.1\n          metric: 100\n      optional: true\n";
+        let out = netplan_edit(src, "192.0.2.10/24", "192.0.2.11/24")?;
+        assert_eq!(out, src.replacen("192.0.2.10/24", "192.0.2.11/24", 1));
+        Ok(())
+    }
+
+    #[test]
+    fn a_netplan_edit_keeps_unmodeled_keys_with_tabs_comments_and_empty_values()
+    -> Result<(), String> {
+        // Tab indents, comments between the keys, and keys with an empty
+        // mapping as their value. The modeled lines of the tab file are
+        // written again with spaces; `match:` stays under `eth0:`.
+        let tabs = "network:\n\tversion: 2\n\tethernets:\n\t\teth0:\n\t\t\tmatch:\n\t\t\t\t\
+                    name: en*\n\t\t\tdhcp4: false\n\t\t\tdhcp6: false\n\t\t\taddresses:\n\t\t\t\t\
+                    - 192.0.2.10/24\n";
+        let out = netplan_edit(tabs, "192.0.2.10/24", "192.0.2.11/24")?;
+        assert!(
+            out.contains("    eth0:\n\t\t\tmatch:\n\t\t\t\tname: en*\n      dhcp4: false\n"),
+            "{out}"
+        );
+        let comments = "network:\n  version: 2\n  ethernets:\n    eth0:\n      \
+                        # Pin the name to the NIC.\n      match:\n        # The onboard port.\n        \
+                        macaddress: \"52:54:00:12:34:56\"\n\n      dhcp4-overrides:\n      \
+                        dhcp6-overrides: {}\n      dhcp4: false\n      dhcp6: false\n      \
+                        addresses:\n        - 192.0.2.10/24\n      wakeonlan:\n";
+        let out = netplan_edit(comments, "192.0.2.10/24", "192.0.2.11/24")?;
+        assert_eq!(out, comments.replacen("192.0.2.10/24", "192.0.2.11/24", 1));
+        Ok(())
+    }
+
+    #[test]
+    fn a_netplan_key_at_the_wrong_depth_is_no_interface() -> Result<(), String> {
+        // `eth1:` under `eth0:` and `eth9:` under `network:` are not
+        // interfaces, and `bond0:` is in a collection detent does not model:
+        // their keys belong to none of the modeled interfaces.
+        let src = "network:\n  version: 2\n  eth9:\n    dhcp4: true\n  ethernets:\n    eth0:\n      \
+                   dhcp4: false\n      dhcp6: false\n      addresses:\n        - 192.0.2.10/24\n      \
+                   eth1:\n        dhcp4: true\n        addresses: [192.0.2.30/24]\n  bonds:\n    \
+                   bond0:\n      interfaces: [eth0]\n      addresses:\n        - 192.0.2.20/24\n";
+        let doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
+        let model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        assert_eq!(
+            model.interfaces,
+            vec![super::Interface {
+                name: "eth0".to_owned(),
+                dhcp_v4: false,
+                dhcp_v6: false,
+                addresses: vec!["192.0.2.10/24".to_owned()],
+                gateway_v4: None,
+                gateway_v6: None,
+                dns: Vec::new(),
+                routes: Vec::new(),
+                vlan: None,
+                bridge: None,
+            }]
+        );
+        let out = netplan_edit(src, "192.0.2.10/24", "192.0.2.11/24")?;
+        assert_eq!(out, src.replacen("192.0.2.10/24", "192.0.2.11/24", 1));
+        Ok(())
+    }
+
+    #[test]
+    fn a_netplan_edit_that_would_orphan_unmodeled_lines_is_refused() -> Result<(), String> {
+        // Removing `eth0` would leave `match:` under `ethernets:`, and
+        // removing the route would put `metric:` under the route before it.
+        let src = "network:\n  version: 2\n  ethernets:\n    eth0:\n      match:\n        \
+                   macaddress: \"52:54:00:12:34:56\"\n      dhcp4: true\n      dhcp6: false\n    \
+                   eth1:\n      dhcp4: false\n      dhcp6: false\n      routes:\n        \
+                   - to: 10.0.0.0/24\n          via: 192.0.2.1\n        - to: 10.0.1.0/24\n          \
+                   via: 192.0.2.1\n          metric: 100\n";
+        let doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
+        let model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        let mut without_eth0 = model.clone();
+        without_eth0.interfaces.retain(|iface| iface.name != "eth0");
+        let mut without_route = model;
+        for iface in &mut without_route.interfaces {
+            iface.routes.retain(|route| route.to != "10.0.1.0/24");
+        }
+        for edit in [without_eth0, without_route] {
+            let mut doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
+            let refused = NetworkModule::apply(&mut doc, &edit);
+            assert!(
+                matches!(&refused, Err(super::EditError::Unsupported { message })
+                    if message.contains("does not model")),
+                "{refused:?}"
+            );
+            assert_eq!(NetworkModule::render(&doc), src);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_new_netplan_interface_goes_after_the_match_block_of_the_one_before() -> Result<(), String>
+    {
+        let src = "network:\n  version: 2\n  ethernets:\n    eth0:\n      dhcp4: true\n      \
+                   dhcp6: false\n      match:\n        macaddress: \"52:54:00:12:34:56\"\n";
+        let mut doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
+        let mut model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        let mut eth1 = model.interfaces.first().cloned().ok_or("no eth0")?;
+        eth1.name = "eth1".to_owned();
+        model.interfaces.push(eth1);
+        NetworkModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        assert_eq!(
+            NetworkModule::render(&doc),
+            format!("{src}    eth1:\n      dhcp4: true\n      dhcp6: false\n")
+        );
         Ok(())
     }
 

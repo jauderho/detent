@@ -470,12 +470,12 @@ deferred by the owner.
     got the new block between `version:` and `renderer:`. Owner decision
     2026-10-21: keep key order; never move `renderer`.~~ Done 2026-10-21
     (`PROGRESS.md`).
-15. **A netplan edit drops an unmodeled key with no value.** In an interface
+15. ~~**A netplan edit drops an unmodeled key with no value.** In an interface
     with `match:` and `macaddress: ...` under it, an edit removes the
     `match:` line and keeps `macaddress:`, which then reads as a key of the
     interface. The classifier takes any key with an empty value as an
     interface name (a directive), so the edit deletes it. Found 2026-10-21
-    while testing item 14; not fixed.
+    while testing item 14.~~ Done 2026-10-25 (`PROGRESS.md`).
 16. ~~**resolver needs `/etc/systemd/resolved.conf`, absent on Fedora and
     Arch.** The D3 runs copied the vendor file from `/usr/lib/systemd`.
     Owner decision 2026-10-21: write the drop-in
