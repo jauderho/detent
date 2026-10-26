@@ -468,10 +468,11 @@ deferred by the owner.
     entry restored, the one failure can only be the mount stop, the unit
     reload or the service replay (the restore did not fail); recovery logs
     only the count, so the cause is not known. Done 2026-10-25: recovery logs
-    each failure text. Open: a `SIGTERM` to the monitor's pid only (OpenRC
-    `start-stop-daemon --stop`, `kill <pid>`) now does nothing; forwarding it
-    to the worker needs `kill` in the `MONITOR` seccomp table and `CAP_KILL`
-    (owner decision).
+    each failure text. A `SIGTERM` to the monitor's pid only (OpenRC
+    `start-stop-daemon --stop`, `kill <pid>`) does nothing. Owner decision
+    2026-10-25: a stop signals the whole process group, as systemd does; no
+    `kill` or `CAP_KILL` for the monitor. The future OpenRC script and a
+    manual stop use `kill -TERM -- -<pgid>` (`ARCHITECTURE.md`).
 13. ~~**Kea trailing comma reads as dnsmasq.** The stock Debian and Ubuntu
     `kea-dhcp4.conf` has a comma before a `}` (after `"pattern"`, then
     comments). Kea accepts it; the JSONC parser refused it, so the file was

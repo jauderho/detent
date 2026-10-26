@@ -132,7 +132,10 @@ privilege.
   `spawn.rs`) and end only when the worker's `Shutdown` or a closed channel
   ends them; a commit-confirm window still open is rolled back then, with
   the runner alive. The worker registers its handlers before it logs
-  `listening on`. The monitor drops the runner channel and reaps the runner; the acme
+  `listening on`. A stop must signal the whole process group, as systemd
+  does: a signal to the monitor's pid alone does nothing (owner decision
+  2026-10-25; the monitor has no `kill` and no `CAP_KILL`). An OpenRC
+  script or a manual stop must use `kill -TERM -- -<pgid>`. The monitor drops the runner channel and reaps the runner; the acme
   process sees its channel readable during its wait between rounds
   (`wait_or_peer`), reads EOF, ends with status 0, and the monitor reaps it last. The
   monitor has no `CAP_KILL`: it can only wait. During a round the acme
