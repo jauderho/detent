@@ -251,7 +251,8 @@ fn outcome(mountpoint: String, unit: String, state: MountState, detail: String) 
 }
 
 /// `/` and every path in [`PROTECTED`], the state root and the binary's
-/// directory: a mount point equal to one or an ancestor of one is refused.
+/// directory: a mount point equal to one, an ancestor of one or under one
+/// is refused.
 fn protected_paths(allow: &Allowlist) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = PROTECTED.iter().map(PathBuf::from).collect();
     paths.push(allow.state_root().to_path_buf());
@@ -263,9 +264,13 @@ fn protected_paths(allow: &Allowlist) -> Vec<PathBuf> {
     paths
 }
 
-/// Whether a mount on `mountpoint` would cover one of `paths`.
+/// Whether a mount on `mountpoint` would cover one of `paths` or files
+/// under one of them.
 fn covers(mountpoint: &str, paths: &[PathBuf]) -> bool {
-    mountpoint == "/" || paths.iter().any(|path| path.starts_with(mountpoint))
+    mountpoint == "/"
+        || paths
+            .iter()
+            .any(|path| path.starts_with(mountpoint) || Path::new(mountpoint).starts_with(path))
 }
 
 fn state_of(found: &[MountUnitState], unit: &str) -> Option<State> {
@@ -616,8 +621,11 @@ mod tests {
             .ok_or("parent")?
             .display()
             .to_string();
-        let current =
-            format!("/srv x\n/ x\n/etc x\n/usr x\n/boot x\n{state_parent} x\n/srv/ok x\n");
+        let state_child = fx.state_root().join("sub").display().to_string();
+        let current = format!(
+            "/srv x\n/ x\n/etc x\n/usr x\n/boot x\n{state_parent} x\n/srv/ok x\n\
+             /etc/systemd/system x\n/usr/local/bin x\n/boot/efi x\n{state_child} x\n"
+        );
         std::fs::write(&fx.fstab, current)?;
         let units = Units::default();
         let outcomes = start_added(&fx.allow, &fx.records, &units, TargetId(0))?;
@@ -628,7 +636,17 @@ mod tests {
             .collect();
         assert_eq!(
             protected,
-            owned(&["/", "/etc", "/usr", "/boot", &state_parent])
+            owned(&[
+                "/",
+                "/etc",
+                "/usr",
+                "/boot",
+                &state_parent,
+                "/etc/systemd/system",
+                "/usr/local/bin",
+                "/boot/efi",
+                &state_child,
+            ])
         );
         assert!(
             units

@@ -194,8 +194,8 @@ fn render_entry(entry: &Entry) -> Result<String, EditError> {
 /// The unit name is the one `systemd-fstab-generator` writes: the mount point
 /// with its fstab octal escapes (`\040`) decoded, then escaped as
 /// `systemd-escape --path` does. The platform layer refuses protected mount
-/// points (`/` and the ancestors of `/etc`, `/usr`, …); this function does
-/// not know the host.
+/// points (`/`, the ancestors of `/etc`, `/usr`, … and the paths under
+/// them); this function does not know the host.
 fn added_mounts(previous: &str, current: &str) -> Vec<MountUnit> {
     let before: Vec<Entry> = previous.lines().filter_map(parse_entry).collect();
     let mut units: Vec<MountUnit> = Vec::new();

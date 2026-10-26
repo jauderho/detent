@@ -122,7 +122,7 @@ polkit.addRule(function (action, subject) {
   }
 
   // Mount units of fstab entries: what `systemd-escape --path` writes, never
-  // the root mount ("-.mount") or a mount over a protected path.
+  // the root mount ("-.mount") or a mount over or under a protected path.
   var MOUNT_UNIT = /^[A-Za-z0-9:_.\\][A-Za-z0-9:_.\\-]*\.(mount|automount)$/;
   // Where the fstab generator writes a unit's fragment. The unit name holds
   // no "/" (MOUNT_UNIT), so this path cannot traverse out of the directory.
@@ -145,9 +145,20 @@ polkit.addRule(function (action, subject) {
     "var.automount",
     "var.mount",
   ];
+  // Units of mount points under a protected path: the escaped path and "-",
+  // the escape of "/". "/usr/local/bin" is under "/usr".
+  var PROTECTED_MOUNT_PREFIXES = [
+    "boot-",
+    "etc-",
+    "usr-",
+    "var-lib-detent-",
+  ];
   if (
     MOUNT_UNIT.test(unit) &&
     PROTECTED_MOUNT_UNITS.indexOf(unit) === -1 &&
+    !PROTECTED_MOUNT_PREFIXES.some(function (prefix) {
+      return unit.indexOf(prefix) === 0;
+    }) &&
     (verb == "start" || verb == "stop")
   ) {
     // Only a unit the fstab generator backs with a fragment file. Without

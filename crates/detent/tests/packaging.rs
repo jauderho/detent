@@ -538,6 +538,16 @@ const RULE_CASES: &[&str] = &[
     // Protected names stay refused even with a fragment present.
     "detent|M|etc.mount|start|1|no",
     "detent|M|var-lib.mount|stop|1|no",
+    // Units under a protected path are refused too, even with a fragment.
+    "detent|M|etc-systemd-system.mount|start|1|no",
+    "detent|M|etc-ld.so.preload.mount|start|1|no",
+    "detent|M|usr-local-bin-x.mount|start|1|no",
+    "detent|M|boot-efi.automount|start|1|no",
+    "detent|M|var-lib-detent-x.mount|stop|1|no",
+    // A name that only begins like a protected one is not under it.
+    "detent|M|etcetera.mount|start|1|yes",
+    r"detent|M|var-lib-detent\x2dx.mount|start|1|yes",
+    "detent|M|srv-etc.mount|start|1|yes",
     "detent|R|||1|yes",
     // network's NetworkManager reload (a restart, then `nmcli connection
     // up`): network-control, for detent only. Not settings changes.
@@ -629,12 +639,14 @@ fn the_polkit_rule_grants_only_the_start_of_an_update_instance()
 
 /// The mount units the rule refuses are the ones over the paths the runner
 /// protects (`privsep::mounts`: `/etc`, `/usr`, `/boot`, the state root, the
-/// binary directory and every ancestor of them), for the packaged state root
-/// and binary directory. `/` itself: the pattern refuses a leading `-`.
+/// binary directory, every ancestor of them and every path under them), for
+/// the packaged state root and binary directory. `/` itself: the pattern
+/// refuses a leading `-`.
 #[test]
 fn the_polkit_rule_protects_the_mount_points_the_runner_protects() {
+    let protected = ["/etc", "/usr", "/boot", "/var/lib/detent", "/usr/local/bin"];
     let mut expected = Vec::new();
-    for path in ["/etc", "/usr", "/boot", "/var/lib/detent", "/usr/local/bin"] {
+    for path in protected {
         for ancestor in std::path::Path::new(path).ancestors() {
             let name = ancestor
                 .to_string_lossy()
@@ -654,6 +666,31 @@ fn the_polkit_rule_protects_the_mount_points_the_runner_protects() {
         .collect();
     refused.sort();
     assert_eq!(refused, expected);
+    // Units under those paths: per path its escaped name and `-` (the
+    // escape of `/`), less a prefix that another one already covers
+    // (`/usr/local/bin` is under `/usr`).
+    let all: Vec<String> = protected
+        .iter()
+        .map(|path| format!("{}-", path.trim_start_matches('/').replace('/', "-")))
+        .collect();
+    let mut expected: Vec<&String> = all
+        .iter()
+        .filter(|prefix| {
+            !all.iter()
+                .any(|other| other != *prefix && prefix.starts_with(other.as_str()))
+        })
+        .collect();
+    expected.sort();
+    let mut prefixes: Vec<String> = polkit_block("var PROTECTED_MOUNT_PREFIXES = [")
+        .iter()
+        .flat_map(|line| quoted(line))
+        .collect();
+    prefixes.sort();
+    assert_eq!(prefixes.iter().collect::<Vec<_>>(), expected);
+    assert_eq!(prefixes, ["boot-", "etc-", "usr-", "var-lib-detent-"]);
+    assert!(polkit_code().contains(
+        "PROTECTED_MOUNT_PREFIXES.some(function (prefix) {\n      return unit.indexOf(prefix) === 0;\n    })"
+    ));
     assert!(
         polkit_code().contains(
             r"var MOUNT_UNIT = /^[A-Za-z0-9:_.\\][A-Za-z0-9:_.\\-]*\.(mount|automount)$/;"
