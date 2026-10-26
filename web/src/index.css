@@ -443,7 +443,7 @@ main:focus {
   justify-content: center;
   gap: 6px;
   min-height: 28px;
-  padding: 0 12px;
+  padding: 4px 12px;
   font-family: inherit;
   font-size: 11px;
   font-weight: 400;
@@ -456,7 +456,10 @@ main:focus {
   transition: none;
   cursor: pointer;
   user-select: none;
-  white-space: nowrap;
+  /* A caption wider than the space left (a long German or French one on a
+     phone) breaks between words instead of pushing the page wider. A row of
+     buttons that can wrap (.btngroup) moves a button to the next line first. */
+  text-align: center;
 }
 @media (hover: hover) {
   .btn:hover:not(:disabled) {
