@@ -491,7 +491,7 @@ async fn a_password_reset_by_another_process_signs_the_user_out_at_once() -> R {
     let bob = sign_in(state, "bob").await?;
     assert!(admitted(state, &alice).await?);
 
-    cli(&fixture)?.set_password(&state.auth.hasher, "alice", "a new long passphrase")?;
+    cli(&fixture)?.set_password(&state.auth.hasher, "alice", &PASSWORD.repeat(2))?;
 
     assert!(refused(state, &alice).await?);
     assert!(admitted(state, &bob).await?);
