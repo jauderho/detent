@@ -467,7 +467,11 @@ deferred by the owner.
     orderly stop now rolls back at stop, with the runner alive. With one
     entry restored, the one failure can only be the mount stop, the unit
     reload or the service replay (the restore did not fail); recovery logs
-    only the count, so the cause is not known. Open: log the failure texts.
+    only the count, so the cause is not known. Done 2026-10-25: recovery logs
+    each failure text. Open: a `SIGTERM` to the monitor's pid only (OpenRC
+    `start-stop-daemon --stop`, `kill <pid>`) now does nothing; forwarding it
+    to the worker needs `kill` in the `MONITOR` seccomp table and `CAP_KILL`
+    (owner decision).
 13. ~~**Kea trailing comma reads as dnsmasq.** The stock Debian and Ubuntu
     `kea-dhcp4.conf` has a comma before a `}` (after `"pattern"`, then
     comments). Kea accepts it; the JSONC parser refused it, so the file was

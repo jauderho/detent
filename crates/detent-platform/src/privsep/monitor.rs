@@ -1601,6 +1601,13 @@ impl<'a> Monitor<'a> {
             op: "remove_file",
             source,
         })?;
+        for failure in &failures {
+            tracing::warn!(
+                commit = marker.commit,
+                failure = %failure,
+                "a step of the commit recovery failed"
+            );
+        }
         tracing::warn!(
             commit = marker.commit,
             restored,
@@ -5513,6 +5520,33 @@ mod tests {
             .recover_pending()?
             .ok_or("expected a recovered commit")?;
         assert_eq!(recovered.failures, vec!["reload boom".to_owned()]);
+        Ok(())
+    }
+
+    /// Recovery logs the text of each failure, not only their count.
+    #[test]
+    fn recover_pending_logs_the_text_of_a_failed_service_replay()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fx = fixture()?;
+        {
+            let mut monitor = greeted(fx.allow()?, Hooks::default());
+            arm_commit(&mut monitor, Some(RESTART_BINDING_0))?;
+        }
+        let hooks = Hooks {
+            checks: &super::NoChecks,
+            services: &FailingServices,
+        };
+        let monitor = Monitor::new(fx.allow()?, hooks);
+        let (recovered, events) = capture(|| monitor.recover_pending());
+        let recovered = recovered?.ok_or("expected a recovered commit")?;
+        assert_eq!(recovered.restored, 1);
+        assert_eq!(recovered.failures, vec!["boom".to_owned()]);
+        assert!(
+            events
+                .iter()
+                .any(|event| field(event, "failure") == Some("boom")),
+            "{events:?}"
+        );
         Ok(())
     }
 
