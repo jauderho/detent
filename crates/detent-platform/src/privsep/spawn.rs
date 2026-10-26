@@ -610,7 +610,7 @@ mod tests {
     use super::{
         DEFAULT_WORKER_USER, MonitorHandle, NoSandbox, Role, SandboxError, SandboxHooks,
         SpawnConfig, SpawnError, become_worker, child_failure, harden, is_root,
-        resolve_worker_account, spawn_acme, spawn_pair,
+        resolve_worker_account, spawn_acme, spawn_pair, spawn_runner,
     };
     use crate::privsep::acme::{ACME_PROTO_VERSION, ACME_TIMEOUT, AcmeMessage};
     use crate::privsep::allowlist::{Allowlist, Config};
@@ -819,6 +819,70 @@ mod tests {
             handle.channel.recv::<AcmeMessage>(),
             Err(ChannelError::Closed)
         ));
+        Ok(())
+    }
+
+    /// `systemctl stop` sends `SIGTERM` to every process of the unit. A
+    /// process that blocked the stop signals keeps running and exits by
+    /// itself; one that did not dies by the signal.
+    #[test]
+    fn a_process_that_blocks_stop_signals_outlives_them() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use rustix::process::{Signal, getpid, kill_process};
+        for (block, want) in [(true, Some(0)), (false, None)] {
+            let (handle, ()) = spawn_acme(
+                &SpawnConfig::unprivileged(),
+                &NoSandbox,
+                (),
+                move |_, ()| {
+                    if block && super::block_stop_signals().is_err() {
+                        return 1;
+                    }
+                    for signal in [Signal::TERM, Signal::INT] {
+                        if kill_process(getpid(), signal).is_err() {
+                            return 2;
+                        }
+                    }
+                    0
+                },
+            )?;
+            assert_eq!(handle.wait()?, want, "blocked: {block}");
+        }
+        Ok(())
+    }
+
+    /// The runner blocks the stop signals: after `SIGTERM` and `SIGINT` it
+    /// still answers, and it ends with status 0 when its channel closes.
+    #[test]
+    fn the_runner_outlives_a_stop_signal_and_ends_with_its_channel()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::privsep::proto::CheckId;
+        use crate::privsep::runner::{RunnerRequest, RunnerResponse};
+        use rustix::process::{Pid, Signal, kill_process};
+
+        let state = tempfile::tempdir()?;
+        let allow = Allowlist::from_modules(&[], &Config::with_state_root(state.path()))?;
+        let mut runner = spawn_runner(
+            &allow,
+            state.path(),
+            &detent_core::descriptor::HostProfile::default(),
+        )?;
+        let refused = RunnerResponse::Failed("unknown check".to_owned());
+        let mut ask = || -> Result<RunnerResponse, ChannelError> {
+            runner.channel.send(&RunnerRequest::Check {
+                check: CheckId(0),
+                candidate: "probe".to_owned(),
+            })?;
+            runner.channel.recv::<RunnerResponse>()
+        };
+        // An answer means the runner runs its loop: the mask is set.
+        assert_eq!(ask()?, refused);
+        let pid = Pid::from_raw(runner.child_pid).ok_or("no runner pid")?;
+        kill_process(pid, Signal::TERM)?;
+        kill_process(pid, Signal::INT)?;
+        assert_eq!(ask()?, refused);
+        drop(runner.channel);
+        assert_eq!(super::wait_for(runner.child_pid)?, Some(0));
         Ok(())
     }
 

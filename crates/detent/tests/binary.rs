@@ -963,7 +963,11 @@ fn mcp_stdio_fails_when_the_client_hangs_up_before_initialize() -> TestResult {
 /// group of a real `serve`: the monitor and the runner must wait for the
 /// worker's orderly stop, so nothing reports a failed stop and the server
 /// exits 0.
-#[cfg(feature = "web")]
+///
+/// Not on Linux: there `serve` confines the monitor, which must drop its
+/// capability bounding set, and an unprivileged test cannot. The block
+/// itself is tested on every platform in `detent-platform` (`spawn.rs`).
+#[cfg(all(feature = "web", not(target_os = "linux")))]
 #[test]
 fn serve_stops_cleanly_when_the_whole_group_gets_sigterm() -> TestResult {
     use std::io::{BufRead as _, BufReader};
