@@ -2,8 +2,8 @@
 
 This file is the record of owner decisions and accepted risks. Other documents
 cite it by item (for example `E16`, `D9`). Newest decisions carry their date in
-the entry. Item ids and Track names come from the retired work queue,
-[`archive/BUGFIX.md`](archive/BUGFIX.md); the full item text is there.
+the entry. Item ids and Track names come from the retired work queue. The fix of each
+item is in [`PROGRESS.md`](PROGRESS.md), under the item id.
 
 ## Decisions
 

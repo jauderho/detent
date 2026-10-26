@@ -162,7 +162,7 @@ Trust material is embedded at build time (PLAN §2.9 step 4) in
 key and the `ctfe.sigstore.dev/2022` CT log public key, extracted from Sigstore's `trusted_root.json` (2026-10-03: root-signing
 commit 5888f35, recorded in `trust::TRUST_MANIFEST`).
 
-For Rekor v2 (BUGFIX Track E 7) the same
+For Rekor v2 (PROGRESS 2026-10-05, Rekor v2) the same
 `trusted_root.json` also gives the `log2025-1.rekor.sigstore.dev` Ed25519
 key (origin and `validFor` start as constants) and the `timestamp.sigstore.dev`
 TSA leaf and root. Those are proven against `trusted_root.json` only: log id

@@ -194,6 +194,34 @@ More bugs are caught in this reread than by the test suite.
 | **Privacy** | No personal information or references to a contributor's setup in committed files or commit messages: no host names, local paths, ssh details or addresses. Call a test machine "the test host". |
 | **Commits** | Sign commits (`git commit -S -s`). One logical change per commit. Imperative present tense. No `Claude-Session:` trailer in commit messages or PR bodies. |
 
+### Work rules and traps
+
+Kept from the retired work queue; they still bind.
+
+- No new lint suppressions (`#[allow]`, `#[expect]`, `#[ignore]`, `biome-ignore`,
+  `eslint-disable`, `@ts-*`, `shellcheck disable`). No lower coverage floor, and
+  no `|| true` or `continue-on-error` in CI.
+- No invented versions, tags or digests. New dependencies follow ADR-011 (7-day
+  cooldown, `deny.toml`).
+- No history rewrite on pushed commits.
+- "Done", "green" or "clean" always comes with the command and its result.
+- Jev (the post-v1 experiment, `docs/THREAT_MODEL.md` section 6) may classify
+  and route work only. It never decides readiness: push, merge, "done" and
+  release belong to the gates.
+- `git commit` takes the whole index. Run `git diff --cached --stat` first.
+  Sub-agents never stage another agent's files.
+- A shared `CARGO_TARGET_DIR` across worktrees is unsafe (freshness is by mtime).
+  Give each worktree its own target directory.
+- `ci.yml`, `codespell.yml`, `linter.yml` and `fuzz.yml` run on a branch only
+  through `workflow_dispatch`.
+- In the `detent` crate `time` is on only with the `update` feature. Code built
+  for feature set B cannot use it.
+- Local ACME runs: pass Pebble's static `test/certs/pebble.minica.pem` as the
+  CA, and use `curl --noproxy '*'` for loopback requests.
+- An old `.git/sequencer` makes `git cherry-pick --continue` resume old
+  commits. Check it first; clear it with `git cherry-pick --quit`, never `--abort`.
+- smb.conf words (for example `browseable`) go in `.codespellignore`.
+
 ---
 
 ## Tooling

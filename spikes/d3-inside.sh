@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # d3-inside.sh - Phase 7 and Phase 8 acceptance checks of one distro, run
-# INSIDE a container whose PID 1 is systemd (BUGFIX Track D 3, done in
+# INSIDE a container whose PID 1 is systemd (PROGRESS 2026-10-14, D3 containers, done in
 # containers; owner decision 2026-10-14). spikes/d3-containers.sh builds the
 # container and calls this script; read that script for the whole flow.
 #
@@ -997,7 +997,7 @@ section_dhcp() {
   settle_commit confirm dhcp
   unhide_all
   # Kea: a model with only the kea_v4 section edits the Kea file, with
-  # dnsmasq still installed (BUGFIX Track D 7).
+  # dnsmasq still installed (PROGRESS 2026-10-15, edits go to the file of their backend).
   local kea_filter='.dnsmasq = [] | .kea_v4 = {"interfaces":["mgmt0"],"subnets":[{"id":1,"subnet":"192.0.2.0/24","pools":[{"pool":"192.0.2.50 - 192.0.2.150"}],"routers":["192.0.2.1"],"domain-name-servers":["192.0.2.1"]}],"valid-lifetime":3600}'
   jq -c "${kea_filter}" "${WORK}/dhcp.model.json" >"${WORK}/dhcp.kea.json"
   cli_validate dhcp "${WORK}/dhcp.kea.json" validate-kea

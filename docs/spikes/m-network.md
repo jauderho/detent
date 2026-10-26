@@ -1,7 +1,7 @@
 # Module spike: network
 
 Status: scaffold. Nothing has been run. Results come from the VM runs
-(BUGFIX Track D, item 3, "D3"). PLAN Phase 8, task "verify on VM".
+(PROGRESS 2026-10-14, "D3"). PLAN Phase 8, task "verify on VM".
 
 ## Purpose
 

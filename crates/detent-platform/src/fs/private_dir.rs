@@ -6,7 +6,7 @@
 //! `O_DIRECTORY | O_NOFOLLOW` and does `fstat` and `fchmod` on the descriptor.
 //!
 //! The state root belongs to the worker account, but a root command-line run
-//! writes the audit log in it too (BUGFIX D4). [`ensure_private_as_parent`]
+//! writes the audit log in it too (PROGRESS 2026-10-15, audit log owner). [`ensure_private_as_parent`]
 //! and [`open_append_as`] give what that run makes, or what an older version
 //! left root-owned, the owner of the state root, so the worker can use it.
 

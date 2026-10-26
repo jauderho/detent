@@ -1,13 +1,13 @@
 # D3: Phase 7 and Phase 8 acceptance in containers
 
-Date: 2026-10-14. BUGFIX Track D item 3. Owner decision 2026-10-14: run the
+Date: 2026-10-14. PROGRESS 2026-10-14 (D3 acceptance). Owner decision 2026-10-14: run the
 per-module acceptance (PLAN Phase 7) and the network matrix (PLAN Phase 8) in
 containers on the test host, no VMs. Build under test: `0.1.1` from `59fb2eb`
 (`cargo zigbuild --locked --release -p detent --target
 x86_64-unknown-linux-musl`, default features, built off the test host).
 
-Nothing in `crates/` changed. Every fault below is recorded as a BUGFIX item
-(Track D 4 to 12) with the exact output. No fault was fixed here.
+Nothing in `crates/` changed. Every fault below is recorded as a Track D item
+(4 to 12, PROGRESS 2026-10-15 and 2026-10-21) with the exact output. No fault was fixed here.
 
 ## Second rerun 2026-10-21: owner decisions (Track D 12 to 17)
 
@@ -194,7 +194,7 @@ name the fault.
 | dhcp | 10 / 5 / 0 | 10 / 5 / 0 | 4 / 10 / 0 | 11 / 4 / 0 |
 | network | 16 / 10 / 0 | 8 / 9 / 0 | 4 / 5 / 0 | 8 / 9 / 0 |
 
-Notes by module (the `FAIL` rows, with the BUGFIX item):
+Notes by module (the `FAIL` rows, with the Track D item):
 
 - host: `order`. A root CLI write before `serve` ever ran leaves the audit
   log root-owned; the first API apply then answers `500 ops-audit-unavailable`

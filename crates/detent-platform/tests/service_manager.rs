@@ -320,7 +320,7 @@ fn other_init_systems_have_no_unit_files_to_reload_and_run_nothing() -> TestResu
 }
 
 // ---------------------------------------------------------------------------
-// Reload by a binding's own commands (BUGFIX Track D 11)
+// Reload by a binding's own commands (PROGRESS 2026-10-15, service of the written file)
 // ---------------------------------------------------------------------------
 
 static RELOAD: &[ReloadCommand] = &[
@@ -428,7 +428,7 @@ fn a_reload_by_commands_needs_every_program_and_runs_nothing_without() {
 }
 
 // ---------------------------------------------------------------------------
-// The update unit (BUGFIX E16)
+// The update unit (PROGRESS 2026-10-07, E16 update in a transient unit)
 // ---------------------------------------------------------------------------
 
 /// `argv` as owned strings.

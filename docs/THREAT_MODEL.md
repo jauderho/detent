@@ -1,7 +1,7 @@
 # detent threat model
 
 STRIDE per component, mapped to the tests that prove each control (PLAN §3,
-PLAN Phase 12, BUGFIX Track F). State as of 2026-10-09 (`main` at
+PLAN Phase 12, PROGRESS 2026-10-09 threat model entry). State as of 2026-10-09 (`main` at
 `b2686f9`).
 
 This document does not repeat the control tables. For each control it names
@@ -333,16 +333,17 @@ named below.
 
 ---
 
-## 6. Future change: the Jev / TypeSafe egress (archive/BUGFIX.md §5)
+## 6. Future change: the Jev / TypeSafe egress
 
-archive/BUGFIX.md §5 is a post-v1 experiment. Its gate requires this document to
-cover the egress it adds before any product code. **It is not in the model
+This is a post-v1 experiment, not started. Its gate: v1.0 shipped, this
+document covers the egress it adds, and the owner answers yes to the egress
+question. All three hold before any product code. **It is not in the model
 above.** If the owner says yes, update this document first. The change adds:
 
 - **A new outbound data flow** (new boundary TB10: worker → third-party
   model endpoint) carrying `ApplyFeatures`: module id, service action, unit
   names, counts, check results, Fluent ids. Threat: information disclosure
-  of host structure to the endpoint and to A9. Required test (from §5): a
+  of host structure to the endpoint and to A9. Required test: a
   secret in `PlanReport.rendered` never reaches the request.
 - **A new asset**: the API key file (`0600`), redacted in `Debug`, logs,
   audit and every endpoint. Needs the same file checks as `secrets.toml`
@@ -399,7 +400,7 @@ Severity: **High** (remote attacker reaches an asset), **Medium** (a
 control the plan promises is missing or can be bypassed after a first
 compromise), **Low** (defence in depth, evidence, or audit quality).
 
-| Id | Severity | Gap | Rows | In BUGFIX or SH before this pass? |
+| Id | Severity | Gap | Rows | In the old work queue or SH before this pass? |
 |---|---|---|---|---|
 | TM-G1 | Medium | ~~No TOTP enrolment path: `UserStore::set_totp` has no production caller, so MFA cannot be turned on, and `auth.totp_required = true` locks every account out~~ Fixed: `detent user totp enable` and `disable` (2026-10-09) and the console settings page over `/api/v1/auth/totp/*` (2026-10-10); `totp_required` still refuses an account with no key | WEB-4 | No |
 | TM-G2 | Medium | ~~`WORKER` seccomp allows `socket` and `sendto` without argument filters: a taken worker can send UDP to any address without `connect`; the unit has no `IPAddressDeny=` (PKG-4)~~ Fixed 2026-10-10: argument filters on `socket` (TCP stream only) and `sendto` (NULL address only), worker table only; the unit still has no `IPAddressDeny=` | WRK-2 | No |
@@ -417,8 +418,8 @@ compromise), **Low** (defence in depth, evidence, or audit quality).
 | TM-G14 | Low | `PR_SET_DUMPABLE=0` has no test | MON-7 | SH Gaps 6 |
 | TM-G15 | Low | ~~`systemd-analyze security` not re-measured in CI~~ Fixed 2026-10-14: job `systemd-security` | PKG-1 | SH Gaps 8 |
 | TM-G16 | Low | ~~No `testssl.sh` run; `scripts/tls-check.sh` not in CI~~ `scripts/tls-check.sh` runs in CI (`acme-serve` job, 2026-10-14); no `testssl.sh`, accepted (owner, 2026-10-14): `scripts/tls-check.sh` and the rustls tests are the evidence | WEB-1 | SH Gaps 12 |
-| TM-G17 | Medium (capability-user mode only) | ~~Monitor and worker share a uid (polkit rule and doctor `polkit-rule` check exist; the shared uid stays)~~ Accepted (owner, 2026-10-14): the shared uid stays in capability-user mode | PKG-3 | SH Gaps 14, BUGFIX Track F |
-| TM-G18 | Low | Root `enforce_mode_*` tests for the E16 changes not yet run in CI or on the test host; aarch64 confinement not run on hardware | MON-7 | BUGFIX Track E, ARCHITECTURE §11 |
+| TM-G17 | Medium (capability-user mode only) | ~~Monitor and worker share a uid (polkit rule and doctor `polkit-rule` check exist; the shared uid stays)~~ Accepted (owner, 2026-10-14): the shared uid stays in capability-user mode | PKG-3 | SH Gaps 14, PROGRESS 2026-10-10 capability-user entry |
+| TM-G18 | Low | Root `enforce_mode_*` tests for the E16 changes not yet run in CI or on the test host; aarch64 confinement not run on hardware | MON-7 | PROGRESS 2026-10-10 E16 entries, ARCHITECTURE §11 |
 
 Accepted residuals (owner, 2026-10-14; DECISIONS.md):
 

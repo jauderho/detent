@@ -1,7 +1,7 @@
 # Module spike: dhcp
 
 Status: scaffold. Nothing has been run. Results come from the VM runs
-(BUGFIX Track D, item 3, "D3"). PLAN Phase 8, task "verify on VM".
+(PROGRESS 2026-10-14, "D3"). PLAN Phase 8, task "verify on VM".
 
 ## Purpose
 
@@ -15,7 +15,7 @@ dnsmasq (`dnsmasq.conf`, `dnsmasq.d/`), Kea DHCPv4 and DHCPv6 (JSON with comment
 ## Include lines
 
 A `conf-dir` line is allowed only with one of these values (owner decision
-2026-10-15, BUGFIX D9), key `conf-dir` exactly. It gives the warning
+2026-10-15, PROGRESS 2026-10-15, D9), key `conf-dir` exactly. It gives the warning
 `dhcp-stock-include`: the line stays in the file byte for byte, detent never
 writes a new one, and it does not read or manage the directory. Every other
 include or script line (`conf-file`, `conf-dir`, `include`, `includedir`,

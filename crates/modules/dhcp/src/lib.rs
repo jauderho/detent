@@ -3262,7 +3262,7 @@ mod tests {
     #[test]
     fn only_the_kea_checks_run_as_the_owner_of_their_directory() {
         // `/etc/kea` is `_kea` `0750` on Debian and Ubuntu, and the distro's
-        // AppArmor profile gives root no `dac_override` (BUGFIX Track D 12).
+        // AppArmor profile gives root no `dac_override` (PROGRESS 2026-10-21, Kea checks run as the owner of /etc/kea).
         let owners: Vec<(&str, bool)> = super::DESCRIPTOR
             .checks
             .iter()

@@ -1,7 +1,7 @@
 # Module spike: chrony
 
 Status: scaffold. Nothing has been run. Results come from the VM runs
-(BUGFIX Track D, item 3, "D3"). PLAN Phase 7, task "verify on VM".
+(PROGRESS 2026-10-14, "D3"). PLAN Phase 7, task "verify on VM".
 
 ## Purpose
 
@@ -14,12 +14,12 @@ back its real configuration files with the real service.
 
 `chrony.conf` is at `/etc/chrony/chrony.conf` on Debian and Ubuntu and at
 `/etc/chrony.conf` on Fedora and Arch. The module manages the first of the two
-that exists, `/etc/chrony/chrony.conf` when neither does (BUGFIX D8). When the
+that exists, `/etc/chrony/chrony.conf` when neither does (PROGRESS 2026-10-15, D8). When the
 file is missing, `get` gives the warning `ops-target-missing`.
 
 ## Include lines
 
-Only these stock lines are allowed (owner decision 2026-10-15, BUGFIX D9),
+Only these stock lines are allowed (owner decision 2026-10-15, PROGRESS 2026-10-15, D9),
 with exactly this key and value. Each gives the warning `chrony-stock-include`:
 the line stays in the file byte for byte, and detent does not read or manage
 the files it includes. Every other `include`, `includedir`, `confdir`,

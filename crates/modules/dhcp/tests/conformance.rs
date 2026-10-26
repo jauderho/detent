@@ -23,7 +23,7 @@
 //! * `fixtures/dhcp/distro/fedora-44.dnsmasq.conf` — the stock
 //!   `/etc/dnsmasq.conf` of Fedora 44, byte for byte from the `dnsmasq`
 //!   2.92-4.fc44 package (2026-10-15). It is the upstream sample plus four
-//!   active lines, one of them the stock `conf-dir` include (BUGFIX D9).
+//!   active lines, one of them the stock `conf-dir` include (PROGRESS 2026-10-15, D9 stock include lines).
 //! * `fixtures/dhcp/edge/` — hand-made adversarial cases: CRLF, no trailing
 //!   newline (dnsmasq and JSONC flavors), tabs and odd spacing around `=`,
 //!   garbage lines that must stay `Unknown`, a Kea file exercising every

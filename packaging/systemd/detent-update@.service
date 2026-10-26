@@ -1,7 +1,7 @@
 # packaging/systemd/detent-update@.service
 #
 # The CLI updater for one release, started by detent's runner for a web or
-# MCP install (BUGFIX E16): `systemctl start --no-block
+# MCP install (PROGRESS 2026-10-07, E16 update in a transient unit): `systemctl start --no-block
 # detent-update@v1.2.3.service`. The instance name is the release tag,
 # verbatim: detent starts it only for a tag that passes
 # `proto::is_release_tag` (`v` + semver, only [0-9A-Za-z.-]), which needs no

@@ -68,10 +68,10 @@ use detent_core::descriptor::{ServiceAction as CoreServiceAction, TargetKind};
 /// [`ServiceAction::Status`]) is appended to its enum too; the version stays
 /// `2`, and no request changed.
 ///
-/// [`CheckInfo::targets`] (BUGFIX Track D 5) appends a field inside
+/// [`CheckInfo::targets`] (PROGRESS 2026-10-15, external checks judge only their own file) appends a field inside
 /// [`HelloAck`], which changes the wire shape: the version is `3`.
 ///
-/// [`BindingInfo::targets`] (BUGFIX Track D 11) does the same: the version
+/// [`BindingInfo::targets`] (PROGRESS 2026-10-15, service of the written file) does the same: the version
 /// is `4`.
 pub const PROTO_VERSION: u16 = 4;
 /// Largest encoded message accepted in either direction, in bytes.
@@ -467,7 +467,7 @@ pub enum Request {
         chunk: Vec<u8>,
     },
     /// Start the CLI updater for release `tag` outside detent's own
-    /// service (BUGFIX E16): the runner runs `systemctl start --no-block --
+    /// service (PROGRESS 2026-10-07, E16 update in a transient unit): the runner runs `systemctl start --no-block --
     /// detent-update@<tag>.service`, an instance of the packaged template
     /// unit, which runs `/usr/local/bin/detent update --tag=<tag>`. The
     /// argv is fixed in the runner and the command in the unit file; only

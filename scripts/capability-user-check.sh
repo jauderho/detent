@@ -2,7 +2,7 @@
 #
 # capability-user-check.sh - Prove on a real systemd host (the test host) that
 # detent works in the capability-user privilege mode (PLAN §2.4, Phase 12;
-# BUGFIX Track F): the service runs as `detent` with only the ambient
+# PROGRESS 2026-10-10, capability-user mode on the test host): the service runs as `detent` with only the ambient
 # capabilities it needs, each child keeps only its own, a module apply writes
 # a root-owned file in /etc, a service restart goes through polkit, the
 # polkit rule refuses what it must refuse, and `detent doctor` is green.

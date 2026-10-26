@@ -3,7 +3,6 @@
 > **Status:** approved 2026-09-03. Phases 0–8 and 10 are done; 9 and 12 are open.
 > The open work is Phase 12 (§5); owner decisions are in
 > [`DECISIONS.md`](DECISIONS.md); landed work is in [`PROGRESS.md`](PROGRESS.md).
-> The retired work queue is in [`archive/BUGFIX.md`](archive/BUGFIX.md).
 > **Audience:** the orchestrator (Fable Medium, or Opus 5 High as fallback) and the
 > implementor agents it delegates to. This document is written so that a fresh
 > session with no conversation context can pick up any phase and finish it.
@@ -763,16 +762,16 @@ Both are commit-confirm modules. Network model is backend-neutral (interface →
 - Final step before v1.0.0 (owner, 2026-10-14): run the `security-review` skill over the full diff and fix or record every finding.
 - v1.0.0 immutable release.
 
-**Open owner items** (moved here from the retired `archive/BUGFIX.md` on 2026-10-26; the detail is in that file, `docs/spikes/d3-containers.md` and `docs/DECISIONS.md`):
-- [ ] VM-only checks (Phases 7 and 8): real NetworkManager, netplan with the networkd renderer, and networkd links; `d3-containers.md` and `archive/BUGFIX.md` Track D item 3.
+**Open owner items** (the detail is in `docs/spikes/d3-containers.md`, `docs/DECISIONS.md` and `docs/PROGRESS.md`):
+- [ ] VM-only checks (Phases 7 and 8): real NetworkManager, netplan with the networkd renderer, and networkd links; `d3-containers.md`; PROGRESS 2026-10-14, D3 acceptance.
 - [ ] VM-only check: `x-systemd.automount` (`d3-containers.md`).
 - [ ] VM-only check: `chrony` serving time (`d3-containers.md`).
 - [ ] VM-only check: the Landlock line of `detent doctor` (`d3-containers.md`).
 - [ ] The v1.0.0 release; no release is cut yet (DECISIONS.md, Releases, 2026-10-14; `docs/RELEASING.md`).
-- [ ] The E16 real-install proof; it needs a published release (`archive/BUGFIX.md` Track F; DECISIONS.md E16).
+- [ ] The E16 real-install proof; it needs a published release (PROGRESS 2026-10-10, E16 template unit; DECISIONS.md E16).
 - [ ] Native-speaker review of the machine-drafted translations (`docs/TRANSLATING.md`).
 - [ ] Let's Encrypt staging run (`docs/spikes/acme-le.md`); skipped by the owner for now (DECISIONS.md, Track G).
-- [ ] Known limit, Rekor v1 `hashedrekord`: `verify_hashedrekord_body` (`detent-update/src/verify.rs`) expects a bare public key, but a real v1 `hashedrekord` entry embeds a Fulcio certificate. Production uses Rekor v2, which verifies. Fix needs a captured real fixture (`archive/BUGFIX.md` Track A follow-ups, Track E, R1).
+- [ ] Known limit, Rekor v1 `hashedrekord`: `verify_hashedrekord_body` (`detent-update/src/verify.rs`) expects a bare public key, but a real v1 `hashedrekord` entry embeds a Fulcio certificate. Production uses Rekor v2, which verifies. Fix needs a captured real fixture (PROGRESS 2026-10-05, Rekor v2).
 
 **Acceptance:** every §2.7 control has a linked test; `systemd-analyze security` ≤ 2.5 (root-confined; owner accepted 2.6 on 2026-10-10, DECISIONS.md) and ≤ 1.8 (capability-user); all budgets met; PENTEST checklist all green or explicitly accepted risks with owner.
 
@@ -942,8 +941,8 @@ TLS 1.3 → session or Bearer → (cookie path) `Sec-Fetch-Site` + `Origin` + `X
 
 | Date | Change | By |
 |---|---|---|
-| 2026-10-26 | `docs/BUGFIX.md` retired (owner decision). Owner decisions moved to `docs/DECISIONS.md`; the rest archived as `docs/archive/BUGFIX.md`. Open owner items moved to Phase 12. Phases 6 (v1 scope: Let's Encrypt staging skipped by the owner, TPM attestor deferred per ADR-017, `detent-acme` coverage 93 to 94 % accepted), 7 and 8 (container acceptance, `docs/spikes/d3-containers.md`) set to `[x]`. Phase 9 stays `[~]` (no release cut). Phase 12 set to `[~]`. | orchestrator |
-| 2026-09-30 | STAGE2/3/4 consolidated into `docs/archive/BUGFIX.md` (the one open-work queue). Status header and Phase 6–9 lines brought up to date (`[~]`); §10 checkpoint now points to PROGRESS and BUGFIX. | orchestrator |
+| 2026-10-26 | `docs/BUGFIX.md` retired (owner decision). Owner decisions moved to `docs/DECISIONS.md`; the rest is recorded in `docs/PROGRESS.md`. Open owner items moved to Phase 12. Phases 6 (v1 scope: Let's Encrypt staging skipped by the owner, TPM attestor deferred per ADR-017, `detent-acme` coverage 93 to 94 % accepted), 7 and 8 (container acceptance, `docs/spikes/d3-containers.md`) set to `[x]`. Phase 9 stays `[~]` (no release cut). Phase 12 set to `[~]`. | orchestrator |
+| 2026-09-30 | STAGE2/3/4 consolidated into the work queue (since retired). Status header and Phase 6–9 lines brought up to date (`[~]`); §10 checkpoint now points to PROGRESS and the work queue. | orchestrator |
 | 2026-09-22 | Phase 10 deviations recorded at close-out (§0 item 5, §1.6): (1) FreeBSD C-example CI deferred to parked Phase 11 — the Phase 10 deliverables line wants the C example on "Linux and FreeBSD CI" but §1.6 tier-3 forbids FreeBSD CI until a later pass and Phase 11 (BSD tier 2, incl. the `vmactions/freebsd-vm` job) is parked; tier-3/Phase 11 win by §1.6 authority, C example runs on Linux CI only. (2) `cargo-semver-checks` wired with an `origin/main` git baseline (not crates.io) since every crate sets `publish = false`; Rust API surface is internal so the check is advisory next to `cbindgen --verify`, which remains the binding C ABI gate. | orchestrator |
 | 2026-09-10 | Phase 4 closed: TLS 1.3 listener, Argon2id auth, sessions, API tokens, TOTP, rate limiting, CSRF, scoped authz, API v1 + OpenAPI, SPA serving, `serve` wired to the real server, credential CLI. Seccomp now **fails closed** (`Policy::require_seccomp`) after a filter that failed to compile left the worker unconfined while `confine` reported success. `rt_sigreturn` was missing from both…
 | 2026-09-17 | Phase 5 closed; **Milestone M2 reached** (see `docs/spikes/m2-ui.md`). Certificates + settings stay placeholders (Phase 6 / missing API). E2e against the real binary stays deferred per §5. |
@@ -958,6 +957,6 @@ TLS 1.3 → session or Bearer → (cookie path) `Sec-Fetch-Site` + `Origin` + `X
 
 Read [`PROGRESS.md`](PROGRESS.md) (newest entries first) for the current state, then
 Phase 12 in §5 for the open work and [`DECISIONS.md`](DECISIONS.md) for the owner
-decisions (the retired queue is [`archive/BUGFIX.md`](archive/BUGFIX.md)). The
+decisions. The
 checkpoint that stood here (state on 2026-09-10) is in git:
 `git show 02fd9d5:docs/PLAN.md`.

@@ -1,4 +1,4 @@
-//! RFC 3161 timestamp verification (BUGFIX Track E 7, Rekor v2).
+//! RFC 3161 timestamp verification (PROGRESS 2026-10-05, Rekor v2).
 //!
 //! A Rekor v2 entry carries no signed `integratedTime`; the signing time is
 //! the `genTime` of an RFC 3161 timestamp over the DSSE signature, signed by

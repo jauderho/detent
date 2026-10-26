@@ -472,7 +472,7 @@ fn classify(raw: &str) -> LineKind {
         return LineKind::Unknown;
     }
     // ifupdown stanzas. `source` and `source-directory` are not modeled:
-    // they stay `Unknown`, so an edit never drops them (BUGFIX Track D 10).
+    // they stay `Unknown`, so an edit never drops them (PROGRESS 2026-10-15, ifupdown keeps source lines).
     if parse_ifupdown_auto(raw).is_some()
         || parse_ifupdown_iface(raw).is_some()
         || parse_ifupdown_option(raw).is_some()

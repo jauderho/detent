@@ -776,7 +776,7 @@ impl<'a> Monitor<'a> {
         Ok(response)
     }
 
-    /// Start the CLI updater for `tag` (BUGFIX E16): a valid release tag,
+    /// Start the CLI updater for `tag` (PROGRESS 2026-10-07, E16 update in a transient unit): a valid release tag,
     /// newer than the running version, then the hook. The update itself
     /// runs in the template unit's instance; this answers when its start
     /// job is queued.

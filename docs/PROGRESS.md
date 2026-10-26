@@ -5,6 +5,12 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-26 - The BUGFIX archive is dropped
+
+Owner decision 2026-10-26: delete `docs/archive/BUGFIX.md`. Docs and comments only; no behaviour changed.
+
+**Change.** Every citation of a BUGFIX item (code comments, tests, scripts, packaging, ADRs, spikes, THREAT_MODEL, SECURITY_HARDENING, PENTEST_CHECKLIST, ARCHITECTURE, PLAN) now names the PROGRESS entry that records the fix, by date and title. Open items keep their line in PLAN Phase 12. The rules and traps that still bind moved to `AGENTS.md` ("Work rules and traps"). The Jev / TypeSafe experiment keeps its gate in `docs/THREAT_MODEL.md` section 6. The old text stays in git history: `git show b9dcafd:docs/archive/BUGFIX.md`.
+
 ## 2026-10-26 - BUGFIX.md retired
 
 Owner decision 2026-10-26: the work queue is done, so `docs/BUGFIX.md` is retired. Docs only.
@@ -12,7 +18,7 @@ Owner decision 2026-10-26: the work queue is done, so `docs/BUGFIX.md` is retire
 **Moved.**
 - Owner decisions (old §4), verbatim: `docs/DECISIONS.md`. Every "BUGFIX §4" citation now points there.
 - Open owner items: PLAN Phase 12 ("Open owner items"). They are the VM-only checks (real NetworkManager, netplan with the networkd renderer, networkd links; `x-systemd.automount`; `chrony` serving time; the Landlock line of `doctor`), the v1.0.0 release, the E16 real-install proof, the locale review of machine-drafted translations, the Let's Encrypt staging run (skipped by the owner for now), and the known limit "real `hashedrekord` body" (Rekor v1; production uses Rekor v2, which verifies).
-- The rest (rules, traps, tracks A to G, the Jev / TypeSafe experiment): `docs/archive/BUGFIX.md`. Item ids such as D9 or E16 in code comments and ADRs resolve there.
+- The rest (rules, traps, tracks A to G, the Jev / TypeSafe experiment) was archived as `docs/archive/BUGFIX.md`. That file is deleted (see the entry above); it stays in git history.
 
 **Status.** PLAN Phase 6 is `[x]` for v1 (Let's Encrypt staging skipped by the owner, TPM attestor deferred per ADR-017, `detent-acme` coverage 93 to 94 % accepted). Phases 7 and 8 are `[x]` on the container evidence (`docs/spikes/d3-containers.md`); the VM-only gaps moved to Phase 12. Phase 9 stays `[~]` (no release cut). Phase 12 is `[~]`.
 

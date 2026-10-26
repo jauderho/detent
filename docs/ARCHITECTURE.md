@@ -468,7 +468,7 @@ any degraded step (`report_confinement`, `serve.rs`).
    the uid check on the staging and audit directories separates nothing
    (SECURITY_HARDENING Gaps item 14).
 8. Open items (including the STAGE3 review items) are tracked in
-   [`PLAN.md`](PLAN.md) Phase 12 (the old queue is [`archive/BUGFIX.md`](archive/BUGFIX.md)).
+   [`PLAN.md`](PLAN.md) Phase 12.
 
 ## 12. How to verify
 

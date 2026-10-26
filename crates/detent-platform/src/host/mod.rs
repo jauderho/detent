@@ -168,7 +168,7 @@ const SERVICE_PROBES: &[ServiceProbe] = &[
         args: Some(&["--version"]),
         in_use: InUse::Installed,
     },
-    // The network stacks (BUGFIX Track D 7): the `network` module picks its
+    // The network stacks (PROGRESS 2026-10-15, edits go to the file of their backend): the `network` module picks its
     // file from these, with the precedence of `detect_network_backend`.
     ServiceProbe {
         key: "NetworkManager",

@@ -108,6 +108,6 @@ Negative:
 ## References
 
 PLAN.md Q2, Phase 6, §2.8, appendix on `device-attest-01`; DECISIONS.md and
-archive/BUGFIX.md Track G; ADR-002 (crypto provider), ADR-011 (cooldown), ADR-015 (acme process);
+PROGRESS 2026-10-14 (Track G, TPM attestor deferred); ADR-002 (crypto provider), ADR-011 (cooldown), ADR-015 (acme process);
 step-ca provisioner documentation; crates.io metadata for `tss-esapi` and
 `tpm2-protocol` (read 2026-10-14).

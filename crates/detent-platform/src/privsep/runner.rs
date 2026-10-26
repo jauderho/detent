@@ -96,8 +96,8 @@ pub enum RunnerRequest {
     /// Forget the mount units the last start recorded (a confirm).
     ForgetStartedMounts,
     /// Start the CLI updater for release `tag`: the instance
-    /// `detent-update@<tag>.service` of the packaged template unit (BUGFIX
-    /// E16). The runner checks the tag again ([`is_release_tag`]) and builds
+    /// `detent-update@<tag>.service` of the packaged template unit (PROGRESS 2026-10-07,
+    /// E16 update in a transient unit). The runner checks the tag again ([`is_release_tag`]) and builds
     /// the unit name from it.
     StartUpdate {
         /// Release tag, e.g. `v1.2.3`.

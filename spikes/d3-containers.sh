@@ -2,7 +2,7 @@
 #
 # d3-containers.sh - Run the Phase 7 per-module acceptance and the Phase 8
 # network matrix of detent in podman containers on the test host, one
-# container per distro with systemd as PID 1 (BUGFIX Track D 3, done in
+# container per distro with systemd as PID 1 (PROGRESS 2026-10-14, D3 containers, done in
 # containers; owner decision 2026-10-14: containers only, no VMs).
 #
 # Usage:

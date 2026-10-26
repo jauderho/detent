@@ -3,8 +3,8 @@
 # mounts-activation-check.sh - Prove on a real systemd host (testhost) that a
 # `mounts` apply through a running `detent serve` starts the mount units of
 # the fstab entries it adds, that a commit-confirm rollback stops exactly
-# those units and nothing else, and that a confirm keeps them (BUGFIX Track
-# D 1; owner decision 2026-10-06: [mounts] activate_new_entries).
+# those units and nothing else, and that a confirm keeps them (PROGRESS
+# 2026-10-06, mount activation; owner decision 2026-10-06: [mounts] activate_new_entries).
 #
 # Usage:
 #   scripts/mounts-activation-check.sh [OPTIONS]

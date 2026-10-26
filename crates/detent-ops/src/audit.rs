@@ -309,7 +309,7 @@ impl FileAudit {
     ///
     /// The directory and the log belong to the owner of the state root (the
     /// worker account), also when a root command-line run writes them: the
-    /// worker of `serve` appends to the same log (BUGFIX D4).
+    /// worker of `serve` appends to the same log (PROGRESS 2026-10-15, audit log owner).
     #[must_use]
     pub fn under_state_root(state_root: &Path) -> Self {
         Self {
