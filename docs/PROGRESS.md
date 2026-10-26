@@ -5,6 +5,13 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-26 - The dhcp module refuses `conf-script`
+
+Phase 12 follow-up. dnsmasq runs a `conf-script` command as root while it reads its configuration, also under `--test`. The monitor's execution deny-list already refused it on writes; the module's own list of external directives (`INCLUDE_KEYS` in `crates/modules/dhcp/src/lib.rs`) did not, so `validate` passed it. It is now on that list: `validate` reports `EXTERNAL_DIRECTIVE` as an error and the line is not rendered. Test: `validate_refuses_conf_script` (failed before the change).
+
+**Docs.** `SECURITY_HARDENING.md` cited `an_audit_directory_owned_by_another_user_is_refused` in `audit.rs`; `08221d4` moved that check to `a_directory_owned_by_another_user_is_refused_and_not_changed` in `private_dir.rs`. Both rows now cite the test that exists.
+
+**Checks.** `cargo fmt --all --check`; `cargo test --locked -p detent-module-dhcp` (77 + 21 passed); `cargo clippy --locked -p detent-module-dhcp --all-targets -- -D warnings`.
 ## 2026-10-26 - The BUGFIX archive is dropped
 
 Owner decision 2026-10-26: delete `docs/archive/BUGFIX.md`. Docs and comments only; no behaviour changed.

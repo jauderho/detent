@@ -184,6 +184,7 @@ const INCLUDE_KEYS: &[&str] = &[
     "dhcp-script",
     "dhcp-luascript",
     "dhcp-scriptuser",
+    "conf-script",
 ];
 
 /// Parses one dnsmasq line as a setting, or `None` when it is not one.
@@ -2560,6 +2561,15 @@ mod tests {
             assert!(INCLUDE_KEYS.contains(&key), "{key}");
             assert!(parse_dnsmasq(&format!("{key}=/tmp/x")).is_some(), "{key}");
         }
+    }
+
+    /// `conf-script` runs a command as root while dnsmasq reads its
+    /// configuration, even under `--test`; it is refused like an external
+    /// file.
+    #[test]
+    fn validate_refuses_conf_script() {
+        let model = dnsmasq_only(vec![dnsmasq_setting("conf-script", Some("/bin/sh -c id"))]);
+        assert!(has(&model, EXTERNAL_DIRECTIVE, Severity::Error));
     }
 
     #[test]
