@@ -25,10 +25,10 @@
 
 use std::future::Future;
 use std::ops::ControlFlow;
-use std::os::fd::{AsFd as _, BorrowedFd};
+use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use detent_acme::{
     Account, AcmeError, DnsProvider, DnsRecord, IssueRequest, Issued, RetryPolicy, Warning,
@@ -41,9 +41,10 @@ use detent_platform::privsep::spawn::{
 };
 use detent_platform::privsep::transport::{Channel, ChannelError};
 use detent_web::{AcmeConfig, CertStore, CertifiedKeyPair, TlsError};
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
+use rustix::fs::FileType;
+use rustix::io::Errno;
 use rustls_pki_types::CertificateDer;
-use tokio::io::Interest;
-use tokio::io::unix::AsyncFd;
 
 /// The longest time between two checks of the served certificate. A
 /// certificate due sooner is checked at its due time instead ([`next_check`]).
@@ -631,19 +632,55 @@ fn requested(pending: bool) -> bool {
 /// caller then reads the channel ([`run_loop`]), so the acme process renews
 /// at once, or ends when the worker does.
 ///
-/// `channel` is registered with the runtime for this wait only, so a
-/// readiness left from an earlier answer cannot end it. Nothing is read,
-/// and the blocking mode of the channel does not change. When the
-/// descriptor cannot be watched, it waits the full `delay`.
+/// A blocking thread polls a duplicate of `channel` with `poll(2)`
+/// ([`readable_within`]). Poll keeps no readiness from one call to the
+/// next, so a readiness left from an earlier answer cannot end the wait.
+/// Nothing is read, and the blocking mode of the channel does not change.
+/// When the descriptor cannot be watched (it is not a socket, or the poll
+/// fails), it waits the rest of `delay`.
 pub(crate) async fn wait_or_peer(channel: BorrowedFd<'_>, delay: Duration) -> ControlFlow<()> {
-    let Ok(watched) = AsyncFd::with_interest(channel, Interest::READABLE) else {
-        tracing::warn!("the acme channel cannot be watched; the wait runs to its end");
-        tokio::time::sleep(delay).await;
-        return ControlFlow::Continue(());
+    let started = Instant::now();
+    let polled = match watched(channel) {
+        Ok(watched) => tokio::task::spawn_blocking(move || readable_within(&watched, delay))
+            .await
+            .unwrap_or_else(|err| Err(std::io::Error::other(err))),
+        Err(err) => Err(err),
     };
-    tokio::select! {
-        () = tokio::time::sleep(delay) => ControlFlow::Continue(()),
-        _ = watched.readable() => ControlFlow::Break(()),
+    match polled {
+        Ok(true) => ControlFlow::Break(()),
+        Ok(false) => ControlFlow::Continue(()),
+        Err(err) => {
+            tracing::warn!(reason = %err, "the acme channel cannot be watched; the wait runs to its end");
+            tokio::time::sleep(delay.saturating_sub(started.elapsed())).await;
+            ControlFlow::Continue(())
+        }
+    }
+}
+
+/// A duplicate of `channel` that a blocking thread can own, or an error when
+/// `channel` is not a socket: `poll(2)` calls a regular file readable at
+/// once, so it cannot tell when the peer sends.
+fn watched(channel: BorrowedFd<'_>) -> std::io::Result<OwnedFd> {
+    let stat = rustix::fs::fstat(channel)?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::Socket {
+        return Err(std::io::Error::other("the descriptor is not a socket"));
+    }
+    channel.try_clone_to_owned()
+}
+
+/// Whether `channel` polls readable within `delay`: the peer sent a message
+/// or closed its end. A signal does not end the wait early.
+fn readable_within(channel: &OwnedFd, delay: Duration) -> std::io::Result<bool> {
+    let started = Instant::now();
+    loop {
+        let left = Timespec::try_from(delay.saturating_sub(started.elapsed()))
+            .map_err(std::io::Error::other)?;
+        let mut fds = [PollFd::new(channel, PollFlags::IN)];
+        match poll(&mut fds, Some(&left)) {
+            Ok(ready) => return Ok(ready > 0),
+            Err(Errno::INTR) => {}
+            Err(err) => return Err(err.into()),
+        }
     }
 }
 
@@ -2005,6 +2042,23 @@ mod tests {
         Ok(())
     }
 
+    /// A message that was read before the wait does not end it, and the
+    /// blocking mode of the channel stays as it was.
+    #[test]
+    fn a_message_already_read_does_not_end_the_next_wait() -> R {
+        use std::os::fd::AsFd as _;
+        let (mut acme_end, mut worker_end) = Channel::pair()?;
+        let blocking = rustix::fs::fcntl_getfl(acme_end.as_fd())?;
+        worker_end.send(&WorkerMessage::Installed)?;
+        let stirred = block_on(wait_or_peer(acme_end.as_fd(), Duration::from_secs(60)))?;
+        assert_eq!(stirred, ControlFlow::Break(()));
+        assert_eq!(acme_end.recv::<WorkerMessage>()?, WorkerMessage::Installed);
+        let quiet = block_on(wait_or_peer(acme_end.as_fd(), Duration::from_millis(20)))?;
+        assert_eq!(quiet, ControlFlow::Continue(()));
+        assert_eq!(rustix::fs::fcntl_getfl(acme_end.as_fd())?, blocking);
+        Ok(())
+    }
+
     /// A directory whose stored ACME pair is `cert`.
     fn served_dir(cert: &Cert) -> Result<tempfile::TempDir, Box<dyn std::error::Error>> {
         let dir = tempfile::TempDir::new()?;
@@ -2574,11 +2628,8 @@ mod tests {
         Ok(())
     }
 
-    /// The runtime cannot watch a regular file: the wait still runs, to its
-    /// end, and says so in the log. Linux only: epoll refuses a regular file,
-    /// but kqueue (macOS) accepts one, so there this path cannot be reached
-    /// with a file.
-    #[cfg(target_os = "linux")]
+    /// A regular file is not watched (poll calls it readable at once): the
+    /// wait still runs, to its end, and says so in the log.
     #[test]
     fn a_descriptor_that_cannot_be_watched_waits_the_full_delay() -> R {
         use std::os::fd::AsFd as _;

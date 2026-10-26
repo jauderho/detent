@@ -298,7 +298,7 @@ impl Channel {
 /// The underlying socket's descriptor, borrowed.
 ///
 /// It exists so a caller can wait until the channel is readable, for example
-/// with tokio's `AsyncFd`: the acme process sleeps between checks and must
+/// with `poll(2)`: the acme process sleeps between checks and must
 /// notice when the worker closes the channel. The caller must not read or
 /// write through the descriptor, and must not change its flags: the framing
 /// and the timeouts belong to [`Channel`].
@@ -675,8 +675,8 @@ mod tests {
         Ok(fds.iter().any(|fd| fd.revents().contains(PollFlags::IN)))
     }
 
-    /// The borrowed descriptor is what a caller waits on (with tokio's
-    /// `AsyncFd`): it polls readable once the peer sends or closes, and not
+    /// The borrowed descriptor is what a caller waits on (with
+    /// `poll(2)`): it polls readable once the peer sends or closes, and not
     /// before.
     #[test]
     fn the_descriptor_polls_readable_after_the_peer_sends_or_closes()

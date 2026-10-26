@@ -20,7 +20,8 @@ clap = { workspace = true }
 fluent-bundle = { workspace = true }
 # `termios`: `detent setup`/`user add`/`user passwd` read a password from the
 # controlling terminal with echo disabled (PLAN §2.6: never on argv).
-rustix = { workspace = true, features = ["termios"] }
+# `event`: the acme process polls its channel between checks (`wait_or_peer`).
+rustix = { workspace = true, features = ["event", "termios"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
