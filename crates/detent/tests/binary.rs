@@ -957,3 +957,82 @@ fn mcp_stdio_fails_when_the_client_hangs_up_before_initialize() -> TestResult {
     assert_eq!(output.stdout, [] as [u8; 0]);
     Ok(())
 }
+
+/// `systemctl stop` sends `SIGTERM` to every process of the unit (systemd's
+/// default `KillMode=control-group`). This does the same to the process
+/// group of a real `serve`: the monitor and the runner must wait for the
+/// worker's orderly stop, so nothing reports a failed stop and the server
+/// exits 0.
+#[cfg(feature = "web")]
+#[test]
+fn serve_stops_cleanly_when_the_whole_group_gets_sigterm() -> TestResult {
+    use std::io::{BufRead as _, BufReader};
+    use std::os::unix::process::CommandExt as _;
+    use std::time::{Duration, Instant};
+
+    let tmp = tempfile::tempdir()?;
+    let state = tmp.path().join("state-root");
+    std::fs::create_dir_all(&state)?;
+    let config = tmp.path().join("detent.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[listen]\naddr = \"127.0.0.1:0\"\n\n[tls]\ncert_dir = \"{}\"\n\n\
+             [auth.argon2]\nm_kib = 19456\nt = 1\np = 1\n",
+            state.join("certs").display()
+        ),
+    )?;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_detent"))
+        .args(["--locale", "en-US", "--state-root"])
+        .arg(&state)
+        .arg("--config")
+        .arg(&config)
+        .arg("serve")
+        .env_remove("RUST_LOG")
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let group = rustix::process::Pid::from_child(&child);
+
+    // Every line of stderr; the reader ends when the last process closes it.
+    let stderr = child.stderr.take().ok_or("no stderr")?;
+    let (lines, notes) = std::sync::mpsc::channel::<String>();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            let _ = lines.send(line);
+        }
+    });
+    let mut seen: Vec<String> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !seen.iter().any(|line| line.contains("listening on")) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let Ok(line) = notes.recv_timeout(left) else {
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+            let _ = child.wait();
+            return Err(format!("serve never listened: {seen:#?}").into());
+        };
+        seen.push(line);
+    }
+
+    rustix::process::kill_process_group(group, rustix::process::Signal::TERM)?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+            break child.wait()?;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    // The worker and the runner may still hold stderr for a moment.
+    let _ = reader.join();
+    seen.extend(notes.try_iter());
+    let text = seen.join("\n");
+    assert!(!text.contains("did not stop cleanly"), "{text}");
+    assert_eq!(status.code(), Some(0), "{status:?}\n{text}");
+    Ok(())
+}

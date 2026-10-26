@@ -127,12 +127,18 @@ privilege.
   `renew_once(force)`). A held pair is still installed first. Any other
   message during the wait ends the loop, with a warning.
 - Shutdown order: the worker exits (SIGTERM/SIGINT) and the monitor reaps
-  it; the monitor drops the runner channel and reaps the runner; the acme
+  it. `systemctl stop` sends SIGTERM to every process of the unit, so the
+  monitor and the runner block SIGINT and SIGTERM (`block_stop_signals`,
+  `spawn.rs`) and end only when the worker's `Shutdown` or a closed channel
+  ends them; a commit-confirm window still open is rolled back then, with
+  the runner alive. The worker registers its handlers before it logs
+  `listening on`. The monitor drops the runner channel and reaps the runner; the acme
   process sees its channel readable during its wait between rounds
   (`wait_or_peer`), reads EOF, ends with status 0, and the monitor reaps it last. The
   monitor has no `CAP_KILL`: it can only wait. During a round the acme
   process ends at its next install or wait, so the last reap can take as
-  long as one order.
+  long as one order. A SIGTERM for the whole unit ends the acme process at
+  once: it does not block the signal.
 - The worker binds the listener, so the port must be ≥ 1024
   (`PRIVILEGED_PORT_CEILING`, `serve.rs`).
 - The dns-01 provider secret lives in `secrets.toml`, next to `detent.toml`

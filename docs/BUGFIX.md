@@ -456,10 +456,18 @@ deferred by the owner.
     open file /etc/kea/kea-dhcp4.conf`; as `_kea` it passes. Kea 2.6.3
     (Debian) and 3.0.4 (Ubuntu). Not shown to happen outside a container;
     check on the test host before D5 is fixed, because the check runs as root.
-    Also minor: every `systemctl stop detent` logs `the web server did not
-    stop cleanly: privsep channel failed`; once, a CLI start after a stop
-    during an open window logged `recovered unconfirmed commit 1; restored 1
-    targets with 1 failures.` (not reproduced).
+    Also minor: ~~every `systemctl stop detent` logs `the web server did not
+    stop cleanly: privsep channel failed`~~ Done 2026-10-25 (`PROGRESS.md`):
+    the stop `SIGTERM` reaches every process of the unit, and it killed the
+    monitor and the runner before the worker's `Shutdown`; they now block
+    `SIGINT` and `SIGTERM` and end on their channel. Once, a CLI start after
+    a stop during an open window logged `recovered unconfirmed commit 1;
+    restored 1 targets with 1 failures.` (not reproduced). Finding
+    2026-10-25: the marker was left because the monitor was killed; an
+    orderly stop now rolls back at stop, with the runner alive. With one
+    entry restored, the one failure can only be the mount stop, the unit
+    reload or the service replay (the restore did not fail); recovery logs
+    only the count, so the cause is not known. Open: log the failure texts.
 13. ~~**Kea trailing comma reads as dnsmasq.** The stock Debian and Ubuntu
     `kea-dhcp4.conf` has a comma before a `}` (after `"pattern"`, then
     comments). Kea accepts it; the JSONC parser refused it, so the file was

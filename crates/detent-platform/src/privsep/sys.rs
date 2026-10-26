@@ -1,6 +1,6 @@
 //! The only `unsafe` in the privsep layer, isolated in one small module.
 //!
-//! Everything else in `privsep` is safe Rust over `rustix` and `std`. Four
+//! Everything else in `privsep` is safe Rust over `rustix` and `std`. These
 //! POSIX calls have no safe wrapper anywhere in the dependency set allowed for
 //! this crate:
 //!
@@ -11,6 +11,7 @@
 //! | `setgid` | not wrapped by `rustix` 1.1 |
 //! | `setuid` | not wrapped by `rustix` 1.1 |
 //! | `_exit` | `std::process::exit` runs `atexit` handlers, which is not async-signal-safe in a forked child |
+//! | `sigemptyset`, `sigaddset`, `sigprocmask` | `rustix` exposes only `runtime::kernel_sigprocmask`, behind the `runtime` feature and documented as not for a process that links libc |
 //!
 //! They are declared here rather than by taking a dependency on `libc`, so the
 //! crate's dependency set stays exactly what PLAN §4.2 allows. The declarations
@@ -30,12 +31,29 @@ type GroupCount = usize;
 #[cfg(not(target_os = "linux"))]
 type GroupCount = c_int;
 
+/// Room for a `sigset_t`: 128 bytes on Linux (glibc and musl), 4 on macOS.
+/// Only `sigemptyset` and `sigaddset` write it, each within its own size.
+#[repr(C)]
+struct SigSet([u64; 16]);
+
+/// `SIG_BLOCK`: 0 on Linux, 1 on macOS and the BSDs.
+#[cfg(target_os = "linux")]
+const SIG_BLOCK: c_int = 0;
+#[cfg(not(target_os = "linux"))]
+const SIG_BLOCK: c_int = 1;
+
+/// `SIGINT` and `SIGTERM`: the same numbers on Linux and macOS.
+const STOP_SIGNALS: [c_int; 2] = [2, 15];
+
 unsafe extern "C" {
     fn fork() -> c_int;
     fn setgroups(size: GroupCount, list: *const u32) -> c_int;
     fn setgid(gid: u32) -> c_int;
     fn setuid(uid: u32) -> c_int;
     fn _exit(status: c_int) -> !;
+    fn sigemptyset(set: *mut SigSet) -> c_int;
+    fn sigaddset(set: *mut SigSet, signum: c_int) -> c_int;
+    fn sigprocmask(how: c_int, set: *const SigSet, old: *mut SigSet) -> c_int;
 }
 
 // Under `cargo llvm-cov` only (it compiles with `--cfg=coverage`). LLVM's
@@ -113,6 +131,37 @@ pub fn drop_to(uid: u32, gid: u32) -> std::io::Result<()> {
             return Err(std::io::Error::last_os_error());
         }
         if setuid(uid) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// `sigprocmask(SIG_BLOCK, {SIGINT, SIGTERM})`: this thread no longer takes
+/// a stop signal. Call it while the process has one thread; threads started
+/// later inherit the mask. A program started with `std::process::Command`
+/// gets an empty mask: the standard library clears it in the child.
+///
+/// # Errors
+///
+/// [`std::io::Error`] from `errno` at the first call that fails.
+pub fn block_stop_signals() -> std::io::Result<()> {
+    let mut set = SigSet([0; 16]);
+    // SAFETY: `set` is a live, writable buffer at least as large as the
+    // platform's `sigset_t`, and `sigemptyset`/`sigaddset` write only inside
+    // that size. `sigprocmask` reads the same buffer and is given a null
+    // pointer for the old mask, which POSIX permits. Each return value is
+    // checked before the next call.
+    unsafe {
+        if sigemptyset(&raw mut set) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        for signal in STOP_SIGNALS {
+            if sigaddset(&raw mut set, signal) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        if sigprocmask(SIG_BLOCK, &raw const set, std::ptr::null_mut()) != 0 {
             return Err(std::io::Error::last_os_error());
         }
     }

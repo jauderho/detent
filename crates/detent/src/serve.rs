@@ -46,8 +46,8 @@ use detent_platform::privsep::monitor::{
 };
 use detent_platform::privsep::runner::RunnerClient;
 use detent_platform::privsep::spawn::{
-    AcmeHandle, Role, RunnerHandle, SpawnConfig, SpawnError, abort_child, reap_child, spawn_pair,
-    spawn_runner,
+    AcmeHandle, Role, RunnerHandle, SpawnConfig, SpawnError, abort_child, block_stop_signals,
+    reap_child, spawn_pair, spawn_runner,
 };
 #[cfg(feature = "web")]
 use detent_platform::privsep::transport::Channel;
@@ -174,6 +174,11 @@ pub fn run(
             // The monitor never talks to the acme process: it drops the
             // channel here and keeps only the pid, to reap it.
             let acme_pid = acme.map(|acme| acme.child_pid);
+            // A stop signal for the whole group must reach only the worker:
+            // the monitor ends when the worker asks it to.
+            if let Err(err) = block_stop_signals() {
+                tracing::warn!(error = %err, "the monitor did not block stop signals");
+            }
             report_confinement(&hooks, &settings.state_root, "monitor", renderer, streams);
             let exit = run_monitor(
                 &host,
@@ -989,6 +994,12 @@ fn run_worker(
         engine_thread,
         sweeper: _sweeper,
     } = prepared;
+    // Before the line that says the server is up: a stop signal sent after
+    // it must start the graceful shutdown, not kill the worker.
+    let stop = {
+        let _entered = runtime.enter();
+        shutdown_signal()
+    };
     let _ = renderer.line(
         streams.notes,
         MessageId::new("cli-serve-listening"),
@@ -999,7 +1010,7 @@ fn run_worker(
     // own contract). Not exercised in-process: it blocks on a real process
     // signal, which a shared test harness has no safe way to deliver to only
     // this test (see `docs/spikes/m1-e2e.md` for the real-process run).
-    runtime.block_on(server.serve(shutdown_signal()));
+    runtime.block_on(server.serve(stop));
 
     // `router`/`state`/`server` are gone by now, taking the last `EngineHandle`
     // with them (`EngineThread::join`'s own contract), so this does not hang.
@@ -1257,24 +1268,31 @@ async fn bind_web_server(
 
 /// Resolves on `SIGTERM` or `SIGINT`, for [`run_worker`]'s graceful shutdown.
 ///
+/// The handlers are registered at the call, not at the first poll: from
+/// then on a stop signal no longer kills the worker. Call it inside the
+/// runtime's context.
+///
 /// If this process cannot register a signal handler at all (an exhausted
 /// signal slot, on some platform), the future is left pending rather than
 /// resolving immediately — the worker keeps serving, and the operator still
 /// has `SIGKILL`.
 #[cfg(feature = "web")]
-async fn shutdown_signal() {
+fn shutdown_signal() -> impl std::future::Future<Output = ()> {
     use tokio::signal::unix::{SignalKind, signal};
-    match (
+    let signals = (
         signal(SignalKind::terminate()),
         signal(SignalKind::interrupt()),
-    ) {
-        (Ok(mut terminate), Ok(mut interrupt)) => {
-            tokio::select! {
-                () = async { let _ = terminate.recv().await; } => {},
-                () = async { let _ = interrupt.recv().await; } => {},
+    );
+    async move {
+        match signals {
+            (Ok(mut terminate), Ok(mut interrupt)) => {
+                tokio::select! {
+                    () = async { let _ = terminate.recv().await; } => {},
+                    () = async { let _ = interrupt.recv().await; } => {},
+                }
             }
+            _ => std::future::pending::<()>().await,
         }
-        _ => std::future::pending::<()>().await,
     }
 }
 

@@ -310,8 +310,11 @@ pub struct RunnerHandle {
 /// Fork the runner, which answers [`RunnerRequest`](super::runner::RunnerRequest)s
 /// with the real validator and service hooks, unconfined, until its channel
 /// closes. Call it before [`spawn_pair`], so that the monitor's confinement
-/// does not reach the runner's children. `profile` must be the one the
-/// monitor is given: both pick the candidate directory from it
+/// does not reach the runner's children. The runner blocks `SIGINT` and
+/// `SIGTERM` ([`block_stop_signals`]): a stop signal sent to the whole
+/// process group must not end it while the monitor may still need it.
+/// `profile` must be the one the monitor is given: both pick the candidate
+/// directory from it
 /// ([`Allowlist::candidate_dir`](super::allowlist::Allowlist::candidate_dir)).
 ///
 /// # Errors
@@ -335,6 +338,9 @@ pub fn spawn_runner(
         }
         Side::Child => {
             drop(monitor_end);
+            if let Err(err) = block_stop_signals() {
+                let _ = writeln!(std::io::stderr(), "runner: stop signals not blocked: {err}");
+            }
             if let Err(err) = keep_only(&RUNNER_CAPS) {
                 report_and_abort("runner", &err);
             }
@@ -481,6 +487,22 @@ fn report_and_abort(role: &str, error: &SpawnError) -> ! {
 /// [`spawn_pair`] returns can exit the same way.
 pub fn abort_child(status: i32) -> ! {
     sys::exit_immediately(status)
+}
+
+/// Block `SIGINT` and `SIGTERM` in this process, which must have one thread.
+///
+/// `systemctl stop` sends `SIGTERM` to every process of the unit. Only the
+/// worker acts on it: it stops serving and asks the monitor to shut down.
+/// The monitor and the runner end when their channel closes, so neither
+/// may die before the worker's request arrives. The monitor calls this after
+/// [`spawn_pair`] (the worker must keep the signals), the runner at its
+/// start. Programs the runner starts get an empty mask.
+///
+/// # Errors
+///
+/// [`std::io::Error`] when the mask cannot be changed.
+pub fn block_stop_signals() -> std::io::Result<()> {
+    sys::block_stop_signals()
 }
 
 /// [`abort_child`] for a child that already installed its sandbox: it writes
