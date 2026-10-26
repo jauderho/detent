@@ -25,13 +25,25 @@ describe('TagList', () => {
     ).toHaveAttribute('aria-invalid', 'true')
   })
 
+  it('starts the name of every item control with its visible caption', () => {
+    renderWithL10n(<TagList label="tags" items={['a']} onChange={mock()} />)
+
+    const controls = screen.getAllByRole('button')
+    expect(controls.map((button) => button.textContent)).toEqual(['up', 'down', 'remove', 'add'])
+    expect(
+      controls.map((button) =>
+        (button.getAttribute('aria-label') ?? '').replace(/[\u2068\u2069]/g, ''),
+      ),
+    ).toEqual(['up: tags item 1', 'down: tags item 1', 'remove tags item 1', 'add an item to tags'])
+  })
+
   it('moves an item down in place', async () => {
     const onChange = mock()
     renderWithL10n(<TagList label="tags" items={['a', 'b']} onChange={onChange} />)
 
     await userEvent.click(
       screen.getByRole('button', {
-        name: (name) => name.replace(/[\u2068\u2069]/g, '') === 'move tags item 1 down',
+        name: (name) => name.replace(/[\u2068\u2069]/g, '') === 'down: tags item 1',
       }),
     )
     expect(onChange).toHaveBeenLastCalledWith(['b', 'a'])

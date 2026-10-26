@@ -257,7 +257,7 @@ describe('SchemaForm — the row editor', () => {
     const onModel = mock()
     renderWithL10n(<Harness initial={initial} onModel={onModel} />)
 
-    await userEvent.click(screen.getByRole('button', { name: named('move entries row 3 up') }))
+    await userEvent.click(screen.getByRole('button', { name: named('up: entries row 3') }))
 
     expect(onModel).toHaveBeenLastCalledWith({
       entries: [
@@ -267,7 +267,7 @@ describe('SchemaForm — the row editor', () => {
       ],
     })
 
-    await userEvent.click(screen.getByRole('button', { name: named('move entries row 1 down') }))
+    await userEvent.click(screen.getByRole('button', { name: named('down: entries row 1') }))
 
     expect(onModel).toHaveBeenLastCalledWith({
       entries: [
@@ -278,12 +278,30 @@ describe('SchemaForm — the row editor', () => {
     })
   })
 
+  it('starts the name of every row control with its visible caption', () => {
+    renderWithL10n(<Harness />)
+
+    const row = must(
+      screen.getByRole('button', { name: named('up: entries row 1') }).parentElement,
+      'the row controls',
+    )
+    const controls = Array.from(row.querySelectorAll('button'))
+    expect(controls.map((button) => button.textContent)).toEqual(['up', 'down', 'remove'])
+    for (const button of controls) {
+      const name = (button.getAttribute('aria-label') ?? '').replace(ISOLATES, '')
+      expect(name).toStartWith(button.textContent ?? '')
+    }
+    expect(screen.getByRole('button', { name: named('add a row to entries') })).toHaveTextContent(
+      'add',
+    )
+  })
+
   it('disables the move controls at the ends of the list', () => {
     renderWithL10n(<Harness />)
 
-    expect(screen.getByRole('button', { name: named('move entries row 1 up') })).toBeDisabled()
-    expect(screen.getByRole('button', { name: named('move entries row 2 down') })).toBeDisabled()
-    expect(screen.getByRole('button', { name: named('move entries row 1 down') })).toBeEnabled()
+    expect(screen.getByRole('button', { name: named('up: entries row 1') })).toBeDisabled()
+    expect(screen.getByRole('button', { name: named('down: entries row 2') })).toBeDisabled()
+    expect(screen.getByRole('button', { name: named('down: entries row 1') })).toBeEnabled()
   })
 
   it('is fully reachable from the keyboard', async () => {
@@ -312,7 +330,7 @@ describe('SchemaForm — the tag list', () => {
       entries: [{ ip: '1.1.1.1', hostnames: ['a', 'b', ''] }],
     })
 
-    await userEvent.click(screen.getByRole('button', { name: named('move hostnames item 2 up') }))
+    await userEvent.click(screen.getByRole('button', { name: named('up: hostnames item 2') }))
     expect(onModel).toHaveBeenLastCalledWith({
       entries: [{ ip: '1.1.1.1', hostnames: ['b', 'a', ''] }],
     })

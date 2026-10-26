@@ -157,7 +157,7 @@ describe('round-trip fidelity', () => {
       .getAllByRole('button')
       .filter(
         (button) =>
-          (button.getAttribute('aria-label') ?? '').replace(/[⁨⁩]/g, '') === 'move entries row 3 up',
+          (button.getAttribute('aria-label') ?? '').replace(/[⁨⁩]/g, '') === 'up: entries row 3',
       )
     const moveUp = buttons[0]
     if (moveUp === undefined) throw new Error('no move control for row 3')

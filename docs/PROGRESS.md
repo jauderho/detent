@@ -5,6 +5,16 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-25 - Row and item controls say their caption first (WCAG 2.5.3)
+
+`@axe-core/playwright` 4.14.0 (Dependabot #94) reports `label-content-name-mismatch` on three a11y e2e scans: the move and remove controls of the row editor (`FieldControl.tsx`) and the tag list (`TagList.tsx`) showed `dn` and `del`, and their `aria-label` (`move entries row 1 down`) did not hold those words. Owner decision 2026-10-25: fix the labels and take 4.14.0.
+
+**Change.** Only strings; no component change. The captions are real words (en: `up`, `down`, `remove`, `add`), and each `aria-label` starts with its caption, then gives the field and the position: `down: entries row 1`, `up: hostnames item 2`, `remove entries row 1`, `add a row to entries`. The same rule holds in all 12 locales (es-ES already met it). Captions changed: en `dn`/`del` to `down`/`remove`; de `weg` to `entfernen`; fr `suppr` to `supprimer`; pt-BR `sob`/`bx`/`exc` to `subir`/`descer`/`remover`; ru `доб.`/`удал.` to `добавить`/`удалить`. Non-English text is machine-drafted, as the `# needs-review` header of each file says.
+
+**Tests.** `src/forms/__tests__/labelInName.test.ts` formats each of the eight names in every shipped locale and asserts that it starts with its caption, then a space or colon; before the string change it failed for every locale but es-ES. `SchemaForm` and `TagList` tests assert the visible captions and the new names. With 4.14.0 and the old strings, `a module page with a live form is clean`, `the step-up dialog is clean` and `an open dialog is clean` failed; now all 36 e2e pass. A scratch axe run of the module page in each of the 13 locales (with the pseudo-locale) had no violation.
+
+**Found, not fixed.** At 390 px the module page is wider than the screen in de-DE, es-ES, fr-FR, pt-BR and ru-RU (`scrollWidth` 451 to 536) with the old strings too; the e2e width check runs in en-US only. The other `aria-label`s on buttons (`sessions-end-label`, `tokens-revoke-label`, the modal close `✕`, the field-info `?`) already hold their visible text, or show only a symbol.
+
 ## 2026-10-25 - CI: three advisories, a safe acme wait, bun held at 1.4.3
 
 Main CI failed in two jobs with no change to the code they check.
