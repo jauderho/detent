@@ -56,13 +56,63 @@ fn join_continuations(text: &str) -> String {
     text.replace("\\\r\n", " ").replace("\\\n", " ")
 }
 
-/// smb.conf. Samba ignores case, whitespace and (conservatively here)
-/// underscores in parameter names, so `rootpreexec`, `root  preexec` and
-/// `Root_PreExec` are one name. Any parameter that runs a program or loads
-/// code or configuration counts.
+/// `text` with each line joined to the next where the line ends in `\` and
+/// `joins` accepts what stands between that `\` and the newline.
+fn join_where(text: &str, joins: impl Fn(&str) -> bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let head = line.strip_suffix('\n').and_then(|body| {
+            let at = body.rfind('\\')?;
+            joins(body.get(at.saturating_add(1)..)?).then(|| body.get(..at))?
+        });
+        match head {
+            Some(head) => {
+                out.push_str(head);
+                out.push(' ');
+            }
+            None => out.push_str(line),
+        }
+    }
+    out
+}
+
+/// smb.conf. Samba ends a `#` or `;` comment at the newline, and its readers
+/// may differ on a `\` with blanks or `\r` before the newline, so the file is
+/// read four ways: no joins, joins on `\` newline only, also on `\` CR LF,
+/// and also on `\` with blanks or CR before the newline. Each directive is
+/// tagged with its reading, so it is compared with `previous` read the same
+/// way. A comment or section line that ends in `\` counts as a directive.
 fn samba(text: &str) -> Vec<String> {
-    join_continuations(text)
+    let readings = [
+        text.to_owned(),
+        join_where(text, str::is_empty),
+        join_continuations(text),
+        join_where(text, |tail| {
+            tail.chars().all(|c| matches!(c, ' ' | '\t' | '\r'))
+        }),
+    ];
+    let mut found: Vec<String> = text
         .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with(['#', ';', '[']) && line.ends_with('\\'))
+        .map(|line| format!("continued {}", squash(line)))
+        .collect();
+    for (view, reading) in readings.iter().enumerate() {
+        found.extend(
+            samba_directives(reading)
+                .into_iter()
+                .map(|directive| format!("{view}:{directive}")),
+        );
+    }
+    found
+}
+
+/// smb.conf directives, one per line of `text`. Samba ignores case,
+/// whitespace and (conservatively here) underscores in parameter names, so
+/// `rootpreexec`, `root  preexec` and `Root_PreExec` are one name. Any
+/// parameter that runs a program or loads code or configuration counts.
+fn samba_directives(text: &str) -> Vec<String> {
+    text.lines()
         .filter_map(|line| {
             let line = line.trim();
             if line.is_empty() || line.starts_with(['#', ';', '[']) {
@@ -512,6 +562,52 @@ mod tests {
             assert!(
                 !adds(module, previous, candidate),
                 "{module}: {candidate:?} was refused"
+            );
+        }
+    }
+
+    /// Samba ends a comment or section line at the newline, and its readers
+    /// may or may not join `\` followed by blanks or `\r`. Each reading must
+    /// be covered, and an unchanged file must still pass.
+    #[test]
+    fn samba_continuations_are_read_every_way_samba_might() {
+        let bypasses = [
+            "[s]\n# x \\\nroot preexec = /bin/sh\n",
+            "[s]\n; x \\\nroot preexec = /bin/sh\n",
+            "[s] \\\nroot preexec = /bin/sh\n",
+            "[s]\nroot preex\\ \nec = /bin/sh\n",
+            "[s]\nroot preex\\\t\r\nec = /bin/sh\n",
+            "[s]\nworkgroup = x \\\r\nroot preexec = /bin/sh\n",
+            "[s]\n# x \\\npath = /a\n",
+        ];
+        for candidate in bypasses {
+            assert!(
+                adds("samba", "[s]\n", candidate),
+                "{candidate:?} was not refused"
+            );
+            assert!(
+                !adds("samba", candidate, candidate),
+                "{candidate:?} was refused unchanged"
+            );
+        }
+        let edits = [
+            (
+                "[s]\nroot preexec = /bin/true \\\n  --quiet\npath = /a\n",
+                "[s]\npath = /b\nroot preexec = /bin/true \\\n  --quiet\n",
+            ),
+            (
+                "[s]\npath = /a\n",
+                "[s]\ncomment = a long \\\n  text\npath = /b\n",
+            ),
+            (
+                "[s]\n# x \\\nroot preexec = /bin/true\npath = /a\n",
+                "[s]\n# x \\\nroot preexec = /bin/true\npath = /b\n",
+            ),
+        ];
+        for (previous, candidate) in edits {
+            assert!(
+                !adds("samba", previous, candidate),
+                "{candidate:?} was refused"
             );
         }
     }
