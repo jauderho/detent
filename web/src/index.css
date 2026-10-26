@@ -226,10 +226,24 @@ main:focus {
    The language <select> sizes itself to its widest *option*, not its selected
    value, so `qps-ploc` alone made it 88px and pushed the bar back past 390px
    after the switcher landed. Cap it and drop the redundant "utc" word (the
-   clock reads as a clock); both controls stay usable. */
+   clock reads as a clock); both controls stay usable.
+
+   The brand is the one segment that may shrink: a longer name (`[detent]`
+   in the pseudo-locale) is cut with an ellipsis, so the controls on the right
+   stay on screen. The whole name stays in the DOM for a screen reader. */
 @media (max-width: 560px) {
   .status .seg {
     padding: 0 8px;
+  }
+  .status .brand {
+    min-width: 0;
+  }
+  .status .brand > span:last-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .status .mark {
+    flex-shrink: 0;
   }
   .status .online-label {
     display: none;
@@ -526,37 +540,35 @@ main:focus {
 }
 
 /* grouped buttons share an edge — §6. Rendered as a <fieldset> for its
-   native role="group", so its UA border/padding/margin are reset here. */
+   native role="group", so its UA border/padding/margin are reset here.
+
+   A group wider than its box wraps (a long caption in German or French makes
+   the module actions wider than a phone). Each button keeps all four borders
+   and overlaps the next one by its 1px hairline, so a wrapped row keeps its
+   left edge and the joints stay single 1px lines in both directions. */
 .btngroup {
   display: inline-flex;
+  flex-wrap: wrap;
   margin: 0;
   padding: 0;
   min-inline-size: 0;
   border: none;
 }
-.btngroup > .btn + .btn,
-.btngroup > .tinybtn + .tinybtn {
-  border-inline-start: none;
+.btngroup > .btn,
+.btngroup > .tinybtn {
+  margin-inline-end: -1px;
+  margin-block-end: -1px;
 }
 
 /* The section strip is one row of seven cells, 631px wide — more than a phone.
-   Below that it wraps: each cell grows to fill its row and overlaps its
-   neighbour's hairline by 1px, so the grid keeps single 1px joints in both
-   directions. The left border comes back (width and style only, so the blue of
-   the active cell survives). */
+   Below that it wraps (as every group does) and each cell grows to fill its
+   row. */
 @media (max-width: 680px) {
   .nav-strip {
-    flex-wrap: wrap;
     width: 100%;
   }
   .nav-strip > .btn {
     flex: 1 1 auto;
-    margin-inline-end: -1px;
-    margin-block-end: -1px;
-  }
-  .nav-strip > .btn + .btn {
-    border-inline-start-width: 1px;
-    border-inline-start-style: solid;
   }
 }
 

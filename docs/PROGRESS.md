@@ -5,6 +5,18 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-26 - No page is wider than a phone in any locale (PLAN Phase 12)
+
+Closes the "Found, not fixed" item of the 2026-10-25 entry "Row and item controls say their caption first".
+
+**Found.** At 390 px, with every route probed in all 13 locales (12 and the pseudo-locale), `document.documentElement.scrollWidth` was above 390 in two places:
+- The module page, in es-ES (482), pt-BR (451), fr-FR (536), de-DE (459), ru-RU (498) and bn-BD (439). The four module actions (`.btngroup`: validate, plan, apply, discard edits) are one `inline-flex` row that cannot wrap; "annuler les modifications" or "Änderungen verwerfen" makes the row wider than the panel, and the grid item, both panels and the page grow with it. In en-US the row already went past the panel edge (to 369 px), but not past the screen.
+- Every page in the pseudo-locale (405): the status bar. Its segments do not wrap (fixed 38 px, §6), and `[detent]` and `[mode]` make them 15 px too wide.
+The tables of services, backups, audit and settings are wider than the screen in most locales, but they scroll in their own named region (`.dtable-scroll`), as designed. No translation changed.
+
+**Change (`src/index.css` only).** A `.btngroup` wraps. Each button keeps all four borders and overlaps the next by its 1px hairline (`margin-inline-end` and `margin-block-end: -1px`), which is the method the section strip used below 680 px; so a wrapped row keeps its left edge and the joints stay single lines. The strip now only adds its full width and its cells that grow. This also fixes a fault of the strip: the joint rule `border-inline-start: none` reset the border colour to `currentColor`, so the restored left borders of the wrapped strip were drawn in `--ink` (the active cell in `--cta-ink`), not `--line-2` and `--blue`. Below 560 px the brand segment of the status bar may shrink, with an ellipsis; the mark keeps its size and the whole name stays in the DOM.
+
+**Tests.** The e2e width check now runs once per locale in `AVAILABLE_LOCALES` (13 tests). Each picks the locale in the status-bar picker, measures the sign-in page, signs in through the form, and measures the dashboard, modules, the hosts module page with its form, services, backups, audit, certificates and settings. With the old stylesheet it failed for es-ES, pt-BR, fr-FR, de-DE, ru-RU, bn-BD (`/modules/hosts`, 482, 451, 536, 459, 498, 439) and qps-ploc (sign-in, 405). A scratch probe at 768 and 1024 px found no overflow. A scratch axe scan of the module page at 390 px is clean in the 12 shipped locales; in the pseudo-locale it reports only `html-lang-valid` (`lang="qps-ploc"`), which does not come from this change.
 ## 2026-10-26 - Read callers no longer see secret option aliases (WEB-10)
 
 A read caller (read token or read session) got module views with some secrets in clear. `redact_heuristic` (`crates/detent-web/src/api/modules.rs`) only cut the value after a literal, case-sensitive `password=`, and only blanked values under object keys named `password`, `psk`, `secret` or containing `password`. The mounts module keeps fstab options one word each, so the CIFS aliases `pass=`, `password2=` and the password in `user=bob%pw` / `username=bob%pw` (mount.cifs splits on `%`) leaked. `{key, value}` modules (samba, dhcp, chrony) never redacted a `value` whose `key` names a secret.

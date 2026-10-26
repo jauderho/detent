@@ -7,7 +7,8 @@
  * whether a keyboard alone can get through the apply flow.
  */
 
-import { expect, test } from '@playwright/test'
+import { expect, type Page, test } from '@playwright/test'
+import { AVAILABLE_LOCALES } from '../src/i18n/locales'
 import { signIn, stubApi } from './api'
 
 test.describe('sign in and navigate', () => {
@@ -292,26 +293,46 @@ test.describe('a phone-width screen', () => {
    * not scroll — it is cut off, and a control past the edge cannot be reached.
    * The width the document asks for is the only place that shows.
    */
-  test('no section is wider than 390px', async ({ page }) => {
-    await page.setViewportSize({ width: 390, height: 844 })
-    await stubApi(page)
-    await signIn(page)
+  const WIDTH = 390
+  /** Every section, and a module page with a live form, by address. */
+  const PAGES = [
+    '/',
+    '/modules',
+    '/modules/hosts',
+    '/services',
+    '/backups',
+    '/audit',
+    '/certificates',
+    '/settings',
+  ]
+  const pageWidth = (page: Page) => page.evaluate(() => document.documentElement.scrollWidth)
 
-    for (const section of [
-      'dashboard',
-      'modules',
-      'services',
-      'backups',
-      'audit',
-      'certificates',
-      'settings',
-    ]) {
-      await page.getByRole('link', { name: section }).click()
-      await page.getByRole('heading', { level: 1 }).waitFor()
-      const width = await page.evaluate(() => document.documentElement.scrollWidth)
-      expect(width, section).toBeLessThanOrEqual(390)
-    }
-  })
+  // Every locale: a German or French caption is wider than the English one, and
+  // the pseudo-locale's brackets make every string wider.
+  for (const locale of AVAILABLE_LOCALES) {
+    test(`no page is wider than ${WIDTH}px in ${locale}`, async ({ page }) => {
+      await page.setViewportSize({ width: WIDTH, height: 844 })
+      await stubApi(page)
+      await page.goto('/')
+      await page.getByRole('combobox', { name: 'interface language' }).selectOption(locale)
+      await expect(page.locator('html')).toHaveAttribute('lang', locale)
+      expect(await pageWidth(page), `${locale} sign-in`).toBeLessThanOrEqual(WIDTH)
+
+      // The form's labels are in the chosen language, so find its fields by name.
+      await page.locator('input[name="username"]').fill('operator')
+      await page.locator('input[name="password"]').fill('correct horse battery staple')
+      await page.locator('button[type="submit"]').click()
+      await page.getByRole('navigation').waitFor()
+
+      for (const path of PAGES) {
+        await page.goto(path)
+        await page.getByRole('heading', { level: 1 }).waitFor()
+        if (path === '/modules/hosts') await page.getByRole('textbox').first().waitFor()
+        if (path === '/settings') await page.getByRole('table').nth(1).waitFor()
+        expect(await pageWidth(page), `${locale} ${path}`).toBeLessThanOrEqual(WIDTH)
+      }
+    })
+  }
 })
 
 test.describe('keyboard and focus', () => {
