@@ -5,6 +5,11 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-26 - The release guard and the updater read the security marker the same way
+
+Below-the-bar item of the security review. `select` (`detent-update/src/policy.rs`) trimmed all white space around `detent-security: true`, but the release guard (`release.yml`, "Refuse accidental security marker") matched the line exactly with `grep -x`. A padded marker in generated notes passed the guard and still skipped the age gate on devices. Both now ignore spaces and tabs only: the updater uses `trim_matches([' ', '\t'])`, the guard `LC_ALL=C grep -qxE '[[:blank:]]*detent-security: true[[:blank:]]*'`. Other white space (no-break space, em space, vertical tab) no longer counts. Test: `only_blank_padding_around_the_marker_is_ignored` (failed before the change on a no-break space).
+
+**Checks.** `cargo fmt --all --check`; `cargo test --locked -p detent-update` (150 passed); `cargo clippy --locked -p detent-update --all-features --all-targets -- -D warnings`; the guard pattern by hand (padded marker matches, `detent-security: truex` does not).
 ## 2026-10-26 - Security review before v1.0.0 (PLAN Phase 12)
 
 Owner step of 2026-10-14: the `security-review` skill over the whole tree. Four read-only passes (web and auth; privsep, platform and modules; updater, ACME, CLI, FFI and workflows; a second pass over the parts the first did not reach: module parsers against the deny-list, relocated targets, `fs/atomic.rs`, mount activation, the acme process, polkit and units). Each candidate went to a separate false-positive check; the skill reports confidence 8 or more.
@@ -19,7 +24,7 @@ Owner step of 2026-10-14: the `security-review` skill over the whole tree. Four 
 
 **Found sound.** CSRF and the session store, token scopes, the Sigstore verifier and update flow, ACME hooks and secret redaction, workflow inputs, `fs/atomic.rs`, allow-list relocation, mount unit names, the polkit rule, `detent-update@.service`.
 
-**Not finished.** One nfs exports option-value check stopped early; the exports rule was tightened anyway (above). Below the bar and not fixed: the security marker in `gate_age` is trimmed while the release guard is not (it only skips the age gate of a signed release); a read caller could test guesses at a secret through `plan`'s `would_change` (about 5 of 10).
+**Not finished.** One nfs exports option-value check stopped early; the exports rule was tightened anyway (above). Below the bar: the security marker was trimmed by the updater but not by the release guard (fixed, entry above); a read caller could test guesses at a secret through `plan`'s `would_change` (about 5 of 10, not fixed).
 
 **Size.** The full default build grew past its 3 % band; the owner approved the re-cut (`size-baseline.json`, 5927536 bytes).
 

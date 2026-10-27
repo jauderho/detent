@@ -517,7 +517,9 @@ jobs:
         run: |
           set -euo pipefail
           notes=$(gh api repos/${{ github.repository }}/releases/generate-notes --field tag_name="$GITHUB_REF_NAME" --jq .body)
-          if printf '%s\n' "$notes" | grep -qx 'detent-security: true'; then
+          # The updater ignores spaces and tabs around the marker
+          # (policy.rs `select`), so this guard does too.
+          if printf '%s\n' "$notes" | LC_ALL=C grep -qxE '[[:blank:]]*detent-security: true[[:blank:]]*'; then
             if [ "${{ inputs.security }}" != "true" ]; then
               echo "::error::generated notes contain detent-security: true without workflow input security=true" >&2
               echo "$notes" >&2

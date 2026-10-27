@@ -135,10 +135,12 @@ fn gate_age(
     now: OffsetDateTime,
     policy: &Policy,
 ) -> Result<Candidate, PolicyError> {
+    // Spaces and tabs around the marker are ignored, as the release guard
+    // (`release.yml`) ignores them; other white space is not.
     let security = release
         .body
         .lines()
-        .any(|line| line.trim() == SECURITY_MARKER);
+        .any(|line| line.trim_matches([' ', '\t']) == SECURITY_MARKER);
     if !security {
         if let Some(published) = release.published {
             #[allow(clippy::arithmetic_side_effects)] // time subtraction clamps to the era bounds
@@ -273,6 +275,39 @@ mod tests {
             select(&[young], &current(), now(), &Policy::default()),
             Err(PolicyError::TooYoung { .. })
         ));
+    }
+
+    /// The release guard (`release.yml`) ignores spaces and tabs around the
+    /// marker and nothing else, so other white space must not bypass the
+    /// gate here either. A CRLF line still counts.
+    #[test]
+    fn only_blank_padding_around_the_marker_is_ignored() {
+        for body in [
+            "\u{a0}detent-security: true",
+            "detent-security: true\u{2003}",
+            "\u{b}detent-security: true",
+        ] {
+            let mut young = candidate("v0.0.2", 0);
+            young.body = body.to_owned();
+            assert!(
+                matches!(
+                    select(&[young], &current(), now(), &Policy::default()),
+                    Err(PolicyError::TooYoung { .. })
+                ),
+                "{body:?} bypassed the age gate"
+            );
+        }
+        for body in [
+            "\tdetent-security: true ",
+            "Notes.\r\ndetent-security: true\r\n",
+        ] {
+            let mut young = candidate("v0.0.2", 0);
+            young.body = body.to_owned();
+            assert!(
+                select(&[young], &current(), now(), &Policy::default()).is_ok(),
+                "{body:?} did not bypass the age gate"
+            );
+        }
     }
 
     #[test]
