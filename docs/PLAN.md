@@ -759,7 +759,7 @@ Both are commit-confirm modules. Network model is backend-neutral (interface →
 - Translations bootstrap: `de`, `ja` (machine-drafted, marked `# needs-review`), pseudo-locale in CI.
 - `cargo-mutants` weekly job (advisory), `cargo geiger` report in CI, `cargo semver-checks` for `detent-core`/`detent-ffi`.
 - Final size/RSS measurements published in README; `improve-it` skill pass on the UI.
-- Final step before v1.0.0 (owner, 2026-10-14): run the `security-review` skill over the full diff and fix or record every finding.
+- Final step before v1.0.0 (owner, 2026-10-14): run the `security-review` skill over the full diff and fix or record every finding. Done 2026-10-26 (PROGRESS, "Security review before v1.0.0"); run it again on the release tag.
 - v1.0.0 immutable release.
 
 **Open owner items** (the detail is in `docs/spikes/d3-containers.md`, `docs/DECISIONS.md` and `docs/PROGRESS.md`):
