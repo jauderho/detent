@@ -379,9 +379,11 @@ impl OpsEngine {
         let schema = module.schema_json();
         let secret_pointers = module.secret_pointers();
         let wiring = wiring(&self.client, descriptor, &self.host.profile, None)?;
-        let read = self.client.read_target(wiring.target);
-        let missing = matches!(read, Err(ClientError::Remote(ProtoError::NotFound)));
-        let contents = read.ok();
+        let contents = match self.client.read_target(wiring.target) {
+            Ok(contents) => Some(contents),
+            Err(ClientError::Remote(ProtoError::NotFound)) => None,
+            Err(err) => return Err(map_client(err)),
+        };
 
         let (model, current_hash) = match contents {
             Some(contents) => {
@@ -397,13 +399,11 @@ impl OpsEngine {
         let diagnostics = match model {
             Some(ref model) => module.validate_json(model, &ctx)?,
             // A missing file is said, not left as a silent null model.
-            None => missing
-                .then(|| {
-                    Diagnostic::new(Severity::Warning, MessageId::new("ops-target-missing"))
-                        .with_arg("path", wiring.path.clone())
-                })
-                .into_iter()
-                .collect(),
+            None => std::iter::once(
+                Diagnostic::new(Severity::Warning, MessageId::new("ops-target-missing"))
+                    .with_arg("path", wiring.path.clone()),
+            )
+            .collect(),
         };
         Ok(OpOutcome::Module(Box::new(ModuleView {
             descriptor,

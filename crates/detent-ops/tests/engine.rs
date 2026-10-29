@@ -897,6 +897,24 @@ fn get_module_reports_no_model_when_the_target_is_missing() -> TestResult {
     fx.finish()
 }
 
+/// A read that fails for any reason but a missing file is an error, not an
+/// empty module: an empty view would look like a host with no config.
+#[test]
+fn get_module_reports_a_target_that_cannot_be_read() -> TestResult {
+    let mut fx = harness(b"v1\n", Setup::default())?;
+    std::fs::remove_file(&fx.target)?;
+    std::fs::create_dir(&fx.target)?;
+    let outcome = fx.run(Operation::GetModule {
+        id: MODULE.to_owned(),
+    });
+    assert!(
+        outcome.is_err(),
+        "a directory read as a module view: {outcome:?}"
+    );
+    std::fs::remove_dir(&fx.target)?;
+    fx.finish()
+}
+
 /// D8: a module that declares one file at two paths (chrony:
 /// `/etc/chrony/chrony.conf` on Debian, `/etc/chrony.conf` on Fedora and
 /// Arch) reads, plans and writes the one that exists.
