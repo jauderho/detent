@@ -5,6 +5,17 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-29 - Repo audit: four fixes
+
+A whole-repo audit (correctness, safety, load, tests, lean) found four items.
+
+- **Backup rotation kept the wrong backup** (`detent-platform/src/fs/atomic.rs`). Rotation kept the newest backups by name, and names are times. A clock behind the older backups (a board with no clock, booted without network) named the new backup first, so rotation deleted it at once, and a commit-confirm rollback, which restores from that path, failed. `rotate_backups` now keeps the new backup by path, plus the newest others. Test: `rotation_keeps_the_new_backup_when_the_clock_is_behind` (failed before: the backup was gone).
+- **A failed module read looked like an empty module** (`detent-ops/src/engine.rs`, `get_module`). Every read error but a missing file was dropped, so the view had no model and no diagnostic. Now only a missing file gives `ops-target-missing`; any other error is returned. Test: `get_module_reports_a_target_that_cannot_be_read` (failed before).
+- **Two copies of the fstab escape decoder** (the mounts module and `exec_deny`). Both now use `detent_core::fstab::unmangle`, so the unit names and the protected-path check read a mount point the same way.
+- A dead `let _ = profile;` in the network defaults is gone.
+
+**Checks.** `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-features --all-targets -- -D warnings`; `cargo test --locked` for `detent-core`, `detent-platform`, `detent-ops`, `detent-web`, `detent-module-mounts` and `detent-module-network`.
+
 ## 2026-10-26 - The release guard and the updater read the security marker the same way
 
 Below-the-bar item of the security review. `select` (`detent-update/src/policy.rs`) trimmed all white space around `detent-security: true`, but the release guard (`release.yml`, "Refuse accidental security marker") matched the line exactly with `grep -x`. A padded marker in generated notes passed the guard and still skipped the age gate on devices. Both now ignore spaces and tabs only: the updater uses `trim_matches([' ', '\t'])`, the guard `LC_ALL=C grep -qxE '[[:blank:]]*detent-security: true[[:blank:]]*'`. Other white space (no-break space, em space, vertical tab) no longer counts. Test: `only_blank_padding_around_the_marker_is_ignored` (failed before the change on a no-break space).
