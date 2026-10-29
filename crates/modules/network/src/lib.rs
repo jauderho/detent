@@ -2719,7 +2719,6 @@ impl ConfigModule for NetworkModule {
     }
 
     fn defaults(profile: &HostProfile) -> Self::Model {
-        let _ = profile;
         match profile.os {
             Os::Linux | Os::MacOs | Os::Other => Model {
                 interfaces: vec![Interface {
