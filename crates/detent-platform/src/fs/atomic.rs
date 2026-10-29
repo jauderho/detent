@@ -443,7 +443,7 @@ pub fn write_atomic(req: &WriteRequest<'_>) -> Result<WriteOutcome, AtomicError>
                 found.digest,
                 SystemTime::now(),
             )?;
-            rotate_backups(req.backup_dir, req.keep_backups)?;
+            rotate_backups(req.backup_dir, req.keep_backups, &path)?;
             Some(path)
         }
         _ => None,
@@ -1013,12 +1013,18 @@ fn backup_names(backup_dir: &Path) -> Result<Vec<String>, AtomicError> {
     Ok(names)
 }
 
-/// Delete all but the `keep` newest backups.
-fn rotate_backups(backup_dir: &Path, keep: usize) -> Result<(), AtomicError> {
+/// Delete all but `keep` backups: `newest`, and the newest others by name.
+fn rotate_backups(backup_dir: &Path, keep: usize, newest: &Path) -> Result<(), AtomicError> {
     let mut names = backup_names(backup_dir)?;
     if names.len() <= keep {
         return Ok(());
     }
+    // `newest` was just written. Names sort by time, and a clock behind the
+    // older backups sorts it first, so it is kept by path, not by name: a
+    // commit-confirm rollback restores from it.
+    let newest = newest.file_name().and_then(|name| name.to_str());
+    names.retain(|name| Some(name.as_str()) != newest);
+    let keep = keep.saturating_sub(1);
     names.sort_unstable();
     names.reverse();
     let dir_fd = open_dir(backup_dir)?;
@@ -1136,6 +1142,31 @@ mod tests {
         let first = write_backup(&backups, b"x", digest, now)?;
         let second = write_backup(&backups, b"x", digest, now)?;
         assert_ne!(first, second);
+        assert_eq!(list_backups(&backups)?.len(), 2);
+        Ok(())
+    }
+
+    /// A clock behind the existing backups (a board with no clock, booted
+    /// without network) names the new backup first in sort order. Rotation
+    /// must still keep it: a commit-confirm rollback restores from it.
+    #[test]
+    fn rotation_keeps_the_new_backup_when_the_clock_is_behind()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::TempDir::new()?;
+        let backups = dir.path().join("backups");
+        let target = dir.path().join("target.conf");
+        std::fs::write(&target, b"old")?;
+        let later = SystemTime::now()
+            .checked_add(std::time::Duration::from_hours(8760))
+            .ok_or("time overflow")?;
+        for _ in 0..2 {
+            write_backup(&backups, b"older", Sha256Digest::of(b"older"), later)?;
+        }
+        let mut request = super::WriteRequest::new(&target, b"new", &backups);
+        request.keep_backups = 2;
+        let outcome = super::write_atomic(&request)?;
+        let backup = outcome.backup.ok_or("the write made no backup")?;
+        assert_eq!(std::fs::read(&backup)?, b"old");
         assert_eq!(list_backups(&backups)?.len(), 2);
         Ok(())
     }
