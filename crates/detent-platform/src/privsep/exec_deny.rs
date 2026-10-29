@@ -470,7 +470,7 @@ fn protected_mountpoint(raw: &str) -> bool {
     if matches!(raw, "none" | "swap") {
         return false;
     }
-    let Ok(decoded) = String::from_utf8(unmangle(raw.as_bytes())) else {
+    let Ok(decoded) = String::from_utf8(detent_core::fstab::unmangle(raw.as_bytes())) else {
         return true;
     };
     let path = Path::new(&decoded);
@@ -483,32 +483,6 @@ fn protected_mountpoint(raw: &str) -> bool {
         || WRITABLE_DIRS
             .iter()
             .any(|dir| path.starts_with(dir) && path != Path::new(dir))
-}
-
-/// The `\ooo` octal escapes of an fstab field decoded, as libmount reads
-/// them (`\040` is a space); any other backslash is kept. The mounts
-/// module's rule, which this crate cannot reach (no dependency on it).
-fn unmangle(raw: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(raw.len());
-    let mut rest = raw;
-    while let Some((&byte, tail)) = rest.split_first() {
-        let decoded = tail
-            .get(..3)
-            .filter(|digits| digits.iter().all(|digit| (b'0'..=b'7').contains(digit)))
-            .and_then(|digits| std::str::from_utf8(digits).ok())
-            .and_then(|digits| u8::from_str_radix(digits, 8).ok());
-        match decoded {
-            Some(decoded) if byte == b'\\' => {
-                out.push(decoded);
-                rest = tail.get(3..).unwrap_or_default();
-            }
-            _ => {
-                out.push(byte);
-                rest = tail;
-            }
-        }
-    }
-    out
 }
 
 /// exports: options that map a client to root. exportfs reads `anonuid` and

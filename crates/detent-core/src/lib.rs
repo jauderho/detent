@@ -17,6 +17,8 @@
 //! * [`module`] — the [`ConfigModule`](module::ConfigModule) trait, its error types,
 //!   and the object-safe [`DynModule`](module::DynModule) JSON adapter.
 //! * [`version`] — dotted numeric version comparison for `since`-gated options.
+//! * [`fstab`] — fstab field decoding shared by the mounts module and the
+//!   monitor's execution deny-list.
 //! * [`align`] — the bounded Myers alignment shared by the plan diff and by
 //!   [`Document::edit_entries`](doc::Document::edit_entries).
 //! * [`conformance`] — the six invariant checks and the
@@ -29,5 +31,6 @@ pub mod conformance;
 pub mod descriptor;
 pub mod diag;
 pub mod doc;
+pub mod fstab;
 pub mod module;
 pub mod version;
