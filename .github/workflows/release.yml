@@ -24,12 +24,10 @@ permissions:
   contents: read
 
 env:
-  # Exact pin, NOT stable: the published binaries' hashes must be
-  # reproducible (rebuild-verify.yml rebuilds hash-for-hash), so the
-  # toolchain cannot drift with the runner image. Bump deliberately
-  # together with rust-toolchain.toml. The `rust` job's drift step in
-  # ci.yml fails closed when preinstalled stable moves past the pin.
-  RUST_TOOLCHAIN: "1.99.0"
+  # Current stable, as rust-toolchain.toml (owner decision 2026-10-31,
+  # DECISIONS.md). rebuild-verify.yml rebuilds hash-for-hash only while
+  # the stable used here is still the current stable.
+  RUST_TOOLCHAIN: stable
 
 jobs:
   build:
@@ -139,8 +137,8 @@ jobs:
           } >> "$GITHUB_ENV"
 
       # `toolchain` is a required input for this action (it has no
-      # rust-toolchain.toml auto-detection of its own); pinned to match
-      # rust-toolchain.toml so the cross target lands on the same
+      # rust-toolchain.toml auto-detection of its own); stable, as
+      # rust-toolchain.toml, so the cross target lands on the same
       # toolchain `cargo` actually uses.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -292,8 +290,8 @@ jobs:
           set -euo pipefail
           echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
 
-      # SBOM enumerates the dependency graph of the pinned toolchain's
-      # build; use the exact pin, not drifting stable.
+      # SBOM enumerates the dependency graph of the build; use the same
+      # stable as the build job.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:

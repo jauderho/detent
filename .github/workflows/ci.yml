@@ -23,15 +23,12 @@ permissions:
   contents: read
 
 env:
-  # The ubuntu-26.04 image provisions only `stable-*` (install-rust.sh:
-  # `--default-toolchain=stable`); there is no versioned `1.99.0-*` dir,
-  # so a versioned channel would download on first use. RUSTUP_TOOLCHAIN
-  # outranks rust-toolchain.toml, forcing every cargo/rustc/rustup step
-  # onto the preinstalled default with no download. The pin file stays
-  # versioned for local dev; when preinstalled stable is not the pin (the
-  # runner image rolls out over days, so one run can see 1.98.x and the
-  # next 1.99.x), the `rust`/`size` steps install the pin and switch
-  # RUSTUP_TOOLCHAIN to it.
+  # rust-toolchain.toml follows stable (owner decision 2026-10-31,
+  # DECISIONS.md). The ubuntu-26.04 image provisions `stable-*`
+  # (install-rust.sh: `--default-toolchain=stable`). RUSTUP_TOOLCHAIN
+  # outranks rust-toolchain.toml, so every cargo/rustc/rustup step uses
+  # the preinstalled stable and does not download the file's extra
+  # components; the jobs that need one add it.
   RUSTUP_TOOLCHAIN: stable
 
 jobs:
@@ -94,25 +91,6 @@ jobs:
         with:
           persist-credentials: false
 
-      # ubuntu-26.04 provisions only `stable-*` (install-rust.sh:
-      # `--default-toolchain=stable`, plus clippy and rustfmt components),
-      # and `RUSTUP_TOOLCHAIN: stable` (workflow env) outranks
-      # rust-toolchain.toml so every step reuses it with no download. The
-      # pin file stays versioned for local dev; this step installs the pin
-      # when preinstalled stable is anything else (older or newer: image
-      # rollout lags the pin, or passes it). Read the default *outside*
-      # the checkout: the env override does not apply there.
-      - name: Rust matches rust-toolchain.toml
-        run: |
-          pinned=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
-          actual=$(cd "$RUNNER_TEMP" && rustup run stable rustc --version | awk '{print $2}')
-          if [[ "$actual" == "$pinned" ]]; then
-            echo "stable ${actual} matches pin"
-          else
-            echo "preinstalled stable is ${actual}; installing pin ${pinned}"
-            rustup toolchain install "$pinned" --profile minimal --component clippy --component rustfmt
-            echo "RUSTUP_TOOLCHAIN=${pinned}" >> "$GITHUB_ENV"
-          fi
       # clippy/rustfmt are requested by rust-toolchain.toml but only rustfmt
       # is listed under the image README's "Packages"; idempotent no-op when
       # already present.
@@ -248,8 +226,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      # Workflow env forces RUSTUP_TOOLCHAIN=stable (outranks the
-      # `rust-toolchain.toml` 1.99.0 pin), so plain `cargo` resolves to
+      # Workflow env forces RUSTUP_TOOLCHAIN=stable (outranks
+      # `rust-toolchain.toml`), so plain `cargo` resolves to
       # stable where cargo-miri is not installed. Route through the
       # nightly toolchain explicitly.
       # No MIRIFLAGS needed: the suite passes under default isolation.
@@ -598,10 +576,6 @@ jobs:
     name: Rust (build, test, clippy) on macOS
     runs-on: macos-latest
     if: ${{ github.event_name != 'pull_request' }}
-    env:
-      # Override workflow-wide `stable`: this job installs the pinned
-      # toolchain (macOS images may lag) and must use it, not default.
-      RUSTUP_TOOLCHAIN: "1.99.0"
     steps:
       # harden-runner supports GitHub-hosted macOS runners in audit mode
       # only (as release.yml's macOS build legs use it).
@@ -616,12 +590,12 @@ jobs:
           persist-credentials: false
 
       # macOS images may lag the Ubuntu 26.04 image,
-      # so this one job installs the pinned toolchain instead of using
+      # so this one job installs current stable instead of using
       # the preinstalled copy. Revisit when the macOS image catches up.
-      - name: Install Rust toolchain (pinned to rust-toolchain.toml)
+      - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: "1.99.0"
+          toolchain: stable
           components: clippy
 
       - name: Cache cargo
@@ -900,19 +874,9 @@ jobs:
           persist-credentials: false
 
       # Preinstalled stable (via workflow RUSTUP_TOOLCHAIN) plus the musl
-      # cross target; the pin is installed instead when stable is not the
-      # pin. Same outside-checkout read as `rust`.
+      # cross target.
       - name: rustup target add aarch64-unknown-linux-musl
-        run: |
-          pinned=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
-          actual=$(cd "$RUNNER_TEMP" && rustup run stable rustc --version | awk '{print $2}')
-          if [[ "$actual" != "$pinned" ]]; then
-            echo "preinstalled stable is ${actual}; installing pin ${pinned}"
-            rustup toolchain install "$pinned" --profile minimal
-            echo "RUSTUP_TOOLCHAIN=${pinned}" >> "$GITHUB_ENV"
-            export RUSTUP_TOOLCHAIN="$pinned"
-          fi
-          rustup target add aarch64-unknown-linux-musl
+        run: rustup target add aarch64-unknown-linux-musl
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2

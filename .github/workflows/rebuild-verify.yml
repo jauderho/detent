@@ -44,11 +44,12 @@ permissions:
   attestations: read
 
 env:
-  # Exact pin, NOT stable: this job rebuilds a published release
-  # hash-for-hash, so it must use the same toolchain release.yml did.
-  # The checked-out tag carries its own rust-toolchain.toml; bump this
-  # alongside that file on deliberate upgrades.
-  RUST_TOOLCHAIN: "1.99.0"
+  # Current stable, as release.yml and the tag's rust-toolchain.toml
+  # (owner decision 2026-10-31, DECISIONS.md). The rebuild matches
+  # hash-for-hash only while the stable that built the release is still
+  # the current stable. After stable moves on, a mismatch is expected
+  # until the next release.
+  RUST_TOOLCHAIN: stable
 
 jobs:
   rebuild-verify:
