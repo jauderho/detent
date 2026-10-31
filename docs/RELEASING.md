@@ -168,9 +168,13 @@ advisories bypass the cooldown. Do not lower these values.
 6. `rebuild-verify.yml` runs weekly and on demand (`workflow_dispatch`): it
    rebuilds the latest tag from source with the same reproducible flags and
    compares hashes against the published assets, plus `gh attestation verify`
-   per asset. A red rebuild-verify run on a published release is a
-   supply-chain incident — investigate immediately; do not publish further
-   releases until explained.
+   per asset. It builds with the current stable Rust. The release used the
+   stable of its day, so the hashes match only while that stable is still
+   current (owner decision 2026-10-31, `DECISIONS.md`). A red
+   rebuild-verify run is a supply-chain incident unless stable moved on
+   after the release: check the stable version first. Otherwise
+   investigate immediately; do not publish further releases until
+   explained.
 
 Verification failures are always release-blockers. There is no override path;
 the updater refuses closed on any verification failure (ADR-005, ADR-014).

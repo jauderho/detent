@@ -5,6 +5,21 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-10-31 - Rust follows stable everywhere
+
+Owner decision 2026-10-31 (`DECISIONS.md`, "Rust toolchain").
+
+- `rust-toolchain.toml`: `channel = "stable"` (was `1.99.0`); profile and components unchanged.
+- `ci.yml`: the "Rust matches rust-toolchain.toml" step and the pin install in the `size` job's target step are gone; `rust-macos` drops its `RUSTUP_TOOLCHAIN: "1.99.0"` override and installs `stable`. The workflow-wide `RUSTUP_TOOLCHAIN: stable` stays (it keeps the runner's preinstalled stable and skips the file's extra components).
+- `release.yml`, `rebuild-verify.yml`: `RUST_TOOLCHAIN: stable`. Action SHAs unchanged.
+- No toolchain-bump workflow or script existed; nothing to remove.
+- `Cargo.toml` `rust-version = "1.98"` (MSRV) is unchanged: stable is newer, so nothing contradicts it.
+- Docs: CONTRIBUTING, PLAN (§1.3 ADR-011 row, layout, Rust paragraph, §6.4 row), FFI, RELEASING, SECURITY_HARDENING, THREAT_MODEL SUP-4, TOOLS, and a dated note in ADR-011.
+
+**Trap.** `rebuild-verify.yml` builds with the current stable. A release matches its rebuild only while the stable that built it is still current; after the next stable (about every six weeks) the weekly run reports a mismatch until the next release. Check the stable version before treating a red run as an incident (RELEASING step 6).
+
+**Checks.** Local stable 1.99.1. `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-features --all-targets -- -D warnings` (no new lints); `cargo test --locked --workspace` (exit 0, no failures); `actionlint` on the three changed workflows (only the known `ubuntu-26.04` label and three shellcheck warnings that also exist on main).
+
 ## 2026-10-29 - Repo audit: four fixes
 
 A whole-repo audit (correctness, safety, load, tests, lean) found four items.

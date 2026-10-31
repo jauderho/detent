@@ -5,8 +5,10 @@ short version for getting a change merged.
 
 ## Toolchain
 
-- Rust: pinned in `rust-toolchain.toml` (currently 1.98.0). Do not build with
-  a different toolchain.
+- Rust: current stable; `rust-toolchain.toml` sets `channel = "stable"`
+  (owner decision 2026-10-31, `docs/DECISIONS.md`). Run `rustup update stable`
+  before you check a change. The minimum version is `rust-version` in
+  `Cargo.toml`.
 - Web: `bun` for package management and scripts; `biome` for lint/format.
 - Do not add a dependency from an ecosystem outside `deny.toml`'s allow-list
   without discussing it first.
@@ -51,8 +53,9 @@ Per `docs/PLAN.md` §6.5, a PR description includes:
 
 ## Supply-chain cooldown
 
-New dependency versions (Cargo, Bun, GitHub Actions, the Rust toolchain) are
-subject to a 7-day cooldown before use — see `docs/adr/ADR-011-supply-chain-cooldown.md`.
+New dependency versions (Cargo, Bun, GitHub Actions) are subject to a 7-day
+cooldown before use. The Rust toolchain is not: it follows stable (owner
+decision 2026-10-31) — see `docs/adr/ADR-011-supply-chain-cooldown.md`.
 Security advisories bypass the cooldown; nothing else does.
 
 ## Adding a module or a translation

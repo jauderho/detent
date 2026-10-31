@@ -159,3 +159,9 @@ Format: `- <ITEM>: <question> — proposed: <default> — owner answer:`
   followed, with a warning that the included files are not managed; every
   other include stays an error; `validate` exits non-zero on an error. Done
   2026-10-15 (`PROGRESS.md`).
+- Rust toolchain (owner, 2026-10-31): `rust-toolchain.toml` follows stable
+  everywhere (`channel = "stable"`); `ci.yml`, `release.yml` and
+  `rebuild-verify.yml` use stable too. Accepted: releases are no longer
+  rebuildable byte for byte after stable moves on (`rebuild-verify.yml`
+  matches only while the release's stable is current); the ADR-011 toolchain
+  cooldown is dropped. MSRV stays `rust-version = "1.98"` in `Cargo.toml`.

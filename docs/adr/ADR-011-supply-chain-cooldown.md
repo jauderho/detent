@@ -22,6 +22,10 @@ Actions, and the Rust toolchain; security advisories bypass the cooldown
 | Rust toolchain | `rust-toolchain.toml` bumped by a scheduled workflow only when the release is ≥ 7 days old; point releases for security are exempt. |
 | CI container images | pinned by digest; bumped by Dependabot `docker` ecosystem with cooldown 7. |
 
+Note (2026-10-31): the "Rust toolchain" row is dropped by owner decision
+(`docs/DECISIONS.md`, "Rust toolchain"). `rust-toolchain.toml` follows
+stable, with no cooldown. The other rows are unchanged.
+
 ## Consequences
 
 Positive:

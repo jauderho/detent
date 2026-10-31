@@ -10,7 +10,7 @@ dependencies. This is the development and CI toolchain.
 
 | Tool | Needed for | Install |
 |---|---|---|
-| Rust 1.99.0 | everything | `rustup toolchain install 1.99.0` (pinned in `rust-toolchain.toml`) |
+| Rust stable | everything | `rustup toolchain install stable` (`rust-toolchain.toml` follows stable) |
 | [`bun`](https://bun.com) 1.4+ | the web console: package manager, script runner, **and test runner** | `curl -fsSL https://bun.sh/install \| bash` |
 
 Rust alone builds and tests the CLI and the API. `bun` is needed only when
@@ -127,10 +127,10 @@ Use:
 | Command | What |
 |---|---|
 | `cargo +nightly build --profile server-dev -p detent` | fastest edit-compile loop; binary in `target/server-dev/` |
-| `cargo build`, `cargo test` (stable, pinned 1.99.0) | the gates; what CI runs |
+| `cargo build`, `cargo test` (stable) | the gates; what CI runs |
 | `sccache --show-stats` | cache hits; the cache is capped at 5 GiB in `~/.config/sccache/config` |
 
-Cranelift needs nightly, so the gates stay on the pinned stable toolchain.
+Cranelift needs nightly, so the gates stay on the stable toolchain.
 sccache does not cache incremental crates (this workspace's own crates), only
 dependencies. A change of `rustflags` rebuilds everything: after you first
 add this config, delete `target/debug` once (`make clean` does not).

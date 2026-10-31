@@ -82,7 +82,7 @@ keyfiles, ifupdown, netplan; FreeBSD `rc.conf` in tier 2).
 | ADR‑008 | **Lossless document model:** each module parses into a concrete-syntax tree preserving comments, whitespace, order, and unknown directives; edits are minimal; `render(parse(s)) == s` is a hard invariant. | Users' hand edits and comments survive; diff previews are honest. |
 | ADR‑009 | **Runtime:** tokio current-thread runtime; axum 0.8; no `reqwest` (single hyper‑rustls client shared by ACME and update). | Memory footprint and dependency surface. |
 | ADR‑010 | **Panic policy:** `panic = "abort"`, and `clippy::unwrap_used`, `expect_used`, `panic`, `indexing_slicing` denied in non-test code. FFI never unwinds. | Size, security, ABI safety. |
-| ADR‑011 | **Supply-chain cooldown of 7 days** for Cargo, Bun, GitHub Actions, and the Rust toolchain (§6.4). Security advisories bypass cooldown. | Requested; catches nearly all historical registry compromises. |
+| ADR‑011 | **Supply-chain cooldown of 7 days** for Cargo, Bun and GitHub Actions (§6.4); the Rust toolchain row was dropped by owner decision 2026-10-31 (`DECISIONS.md`). Security advisories bypass cooldown. | Requested; catches nearly all historical registry compromises. |
 | ADR‑012 | **Commit‑confirm** for network/resolver/mount changes: auto-rollback unless the admin confirms within a timeout (§2.5). | Headless SBCs must not be bricked by a bad interface config. |
 
 ### 1.4 Reconciled deviations from `AESTHETIC_CONTRACT.md`
@@ -134,7 +134,7 @@ Vite admin app the following are applied deliberately (record in ADR‑006):
 ```
 detent/
 ├── Cargo.toml                 # workspace, resolver = "3", edition = "2024"
-├── rust-toolchain.toml        # pinned stable (e.g. "1.98.0"), profile = minimal + clippy, rustfmt, llvm-tools
+├── rust-toolchain.toml        # channel = "stable", profile = minimal + clippy, rustfmt, llvm-tools
 ├── .cargo/config.toml         # lints, target cfgs, [registry] global-min-publish-age (when stable)
 ├── deny.toml                  # cargo-deny: advisories, licenses, bans, sources = crates.io only
 ├── web/bunfig.toml            # [install] minimumReleaseAge = 604800, exact = true — must sit next to package.json; bun does not read a parent's bunfig
@@ -386,10 +386,10 @@ process and as the sum of the three (22.8 MiB; `PROGRESS.md`).
 
 Spike 00 baseline (aarch64-musl, stripped, TLS+HTTP+ACME+argon2+mimalloc-secure, no modules, no SPA): 2.77 MiB with aws-lc-rs, 2.30 MiB with ring. The CLI row therefore requires the CLI build to exclude the TLS/HTTP/ACME/update stack (features off), not a smaller TLS stack. All three rows are re-derived from real builds at the end of Phase 4 and recorded in `size-baseline.json`. FreeBSD artifacts are dynamically linked against the base system libc (zig sysroot pins the minimum FreeBSD version, currently 14.0); "single static binary" applies to Linux musl targets.
 
-Rust: latest stable pinned in `rust-toolchain.toml` (currently 1.98.0), edition 2024,
+Rust: current stable (`rust-toolchain.toml` `channel = "stable"`, owner decision 2026-10-31), edition 2024,
 `resolver = "3"`. Use let-chains, `LazyLock`, `impl Trait` args, `NumBuffer`/`format_into`
-where formatting hot paths matter (1.98), `str::substr_range` where useful. MSRV = pinned
-stable; no compatibility promises for older compilers.
+where formatting hot paths matter (1.98), `str::substr_range` where useful. MSRV = `rust-version`
+in `Cargo.toml` (1.98); no compatibility promises for older compilers.
 
 Lints (`[workspace.lints]`): `rust: unsafe_code = "forbid"` (overridden to `deny`+allow-listed
 in `detent-platform` and `detent-ffi`), `missing_docs = "warn"`, `clippy::all`, `clippy::pedantic`,
@@ -818,7 +818,7 @@ Test data policy: fixtures are real upstream samples with version directories; a
 | Cargo | `dependabot.yml` `cooldown.default-days: 7` (security updates bypass). `.cargo/config.toml` `[registry] global-min-publish-age = "7 days"` added the day Cargo stabilizes it (tracked: rust-lang/cargo#17335, expected 1.100); until then CI runs `cargo-cooldown --days 7 -- fetch` as a lockfile check. |
 | Bun/npm | `web/bunfig.toml` `[install] minimumReleaseAge = 604800`, alongside `web/package.json` because bun reads `bunfig.toml` from the install directory only; `scripts/cooldown-check.sh` in CI asserts that placement for every manifest; Dependabot `bun` ecosystem with the same cooldown. |
 | GitHub Actions | already configured (`cooldown.default-days: 7`); SHA pins. |
-| Rust toolchain | `rust-toolchain.toml` bumped by a scheduled workflow only when the release is ≥ 7 days old (point releases for security exempt). |
+| Rust toolchain | No cooldown: `rust-toolchain.toml` follows stable (owner decision 2026-10-31, `DECISIONS.md`). |
 | Container images in CI | pinned by digest; bumped by Dependabot `docker` ecosystem with cooldown 7. |
 
 ### 6.5 Commit and PR conventions
