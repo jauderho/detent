@@ -822,7 +822,10 @@ fn run_update(
         // The swap runs in this process, with whatever privileges the
         // operator has (PLAN §2.9 step 5b); there is no privsep path.
         &|candidate| detent_update::install::swap(candidate, &target),
-        &|| restart_and_check(&config_path),
+        &|| {
+            health_target(&config_path)
+                .map(|health| Box::new(move || restart_and_check(&health)) as Box<RestartCheck<'_>>)
+        },
         renderer,
         streams,
     )
@@ -915,35 +918,47 @@ const DETENT_UNITS: detent_core::descriptor::UnitNames = detent_core::descriptor
     bsdrc: &["detent"],
 };
 
-/// Restarts detent's own service and asks the listener whether it came back.
-///
+/// What the post-update health check needs: the address to poll and the
+/// serving certificate to pin.
+#[cfg(feature = "update")]
+struct HealthTarget {
+    addr: std::net::SocketAddr,
+    cert: Vec<u8>,
+}
+
 /// Reads `detent.toml` for the address to poll and the certificate to pin —
 /// the health check is the only reason this command needs the config at all,
-/// and a config it cannot read means a check it cannot make.
+/// and a config it cannot read means a check it cannot make. Read before the
+/// download and the swap: no restart has happened, so a failure here refuses
+/// the update and never marks a release bad.
 #[cfg(feature = "update")]
-fn restart_and_check(config_path: &std::path::Path) -> RestartOutcome {
-    use detent_core::descriptor::ServiceAction;
-    use detent_platform::service::ServiceError;
-
-    let config = match detent_web::Config::load(config_path) {
-        Ok(config) => config,
-        Err(err) => return RestartOutcome::Unhealthy(err.to_string()),
-    };
+fn health_target(config_path: &std::path::Path) -> Result<HealthTarget, String> {
+    let config = detent_web::Config::load(config_path).map_err(|err| err.to_string())?;
     // Capture the expected serving certificate before the restart. Loading it
     // afterwards would let a replacement certificate become the pin.
     let cert_dir = &config.tls.cert_dir;
     let cert = match detent_web::tls::serving_pair(cert_dir) {
         Ok(Some(pair)) => pair.cert_der().to_vec(),
         Ok(None) => {
-            return RestartOutcome::Unhealthy(format!(
+            return Err(format!(
                 "{}: bootstrap certificate is missing",
                 cert_dir.display()
             ));
         }
-        Err(err) => {
-            return RestartOutcome::Unhealthy(format!("{}: {err}", cert_dir.display()));
-        }
+        Err(err) => return Err(format!("{}: {err}", cert_dir.display())),
     };
+    Ok(HealthTarget {
+        addr: config.listen.addr,
+        cert,
+    })
+}
+
+/// Restarts detent's own service and asks the listener whether it came back.
+#[cfg(feature = "update")]
+fn restart_and_check(health: &HealthTarget) -> RestartOutcome {
+    use detent_core::descriptor::ServiceAction;
+    use detent_platform::service::ServiceError;
+
     let manager =
         detent_platform::service::for_host(detent_platform::host::detect_real().profile.init);
     match manager.act(&DETENT_UNITS, ServiceAction::Restart) {
@@ -963,8 +978,8 @@ fn restart_and_check(config_path: &std::path::Path) -> RestartOutcome {
     }
 
     match detent_update::health::wait_healthy(
-        config.listen.addr,
-        &cert,
+        health.addr,
+        &health.cert,
         detent_update::health::DEADLINE,
     ) {
         Ok(()) => RestartOutcome::Healthy,
@@ -1007,6 +1022,13 @@ type BinarySwap<'a> =
 #[cfg(feature = "update")]
 type RestartCheck<'a> = dyn Fn() -> RestartOutcome + 'a;
 
+/// Reads what the health check needs and returns the [`RestartCheck`] that
+/// uses it, or why it cannot. Runs before the download and the swap, so a
+/// check that cannot be made refuses the update instead of rolling back a
+/// release that never ran.
+#[cfg(feature = "update")]
+type RestartSetup<'a> = dyn Fn() -> Result<Box<RestartCheck<'a>>, String> + 'a;
+
 /// What restarting the service achieved.
 #[cfg(feature = "update")]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1043,7 +1065,7 @@ fn run_update_on(
     staging_parent: &std::path::Path,
     probe: &FeatureProbe,
     swap: &BinarySwap<'_>,
-    restart: &RestartCheck<'_>,
+    restart: &RestartSetup<'_>,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
@@ -1176,9 +1198,10 @@ fn render_available(
     Ok(())
 }
 
-/// The bare-`update` half: verify into staging, run the candidate's own
-/// self-test probe (feature-checked), and only then swap it over the running
-/// binary. Every earlier refusal leaves the binary untouched.
+/// The bare-`update` half: set up the health check, verify into staging,
+/// run the candidate's own self-test probe (feature-checked), and only then
+/// swap it over the running binary. Every earlier refusal leaves the binary
+/// untouched.
 #[cfg(feature = "update")]
 #[allow(clippy::too_many_arguments)]
 fn apply_update(
@@ -1193,10 +1216,14 @@ fn apply_update(
     tag: Option<&str>,
     probe: &FeatureProbe,
     swap: &BinarySwap<'_>,
-    restart: &RestartCheck<'_>,
+    restart: &RestartSetup<'_>,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
+    let restart = match restart() {
+        Ok(restart) => restart,
+        Err(reason) => return failed(renderer, streams, &reason),
+    };
     let bad_tags = detent_update::update::read_bad(bad);
     match detent_update::update::prepare(
         transport,
@@ -1213,7 +1240,7 @@ fn apply_update(
             // cover this build's feature set before anything is installed.
             match probe(&candidate.binary_path) {
                 Ok(_) => {
-                    install_candidate(&candidate, stamp, bad, swap, restart, renderer, streams)
+                    install_candidate(&candidate, stamp, bad, swap, &*restart, renderer, streams)
                 }
                 Err(err) => failed(renderer, streams, &err.to_string()),
             }
@@ -2492,6 +2519,43 @@ mod tests {
         Ok(())
     }
 
+    /// A health check that cannot be set up (no readable config, no serving
+    /// certificate to pin) refuses the update before the swap. No restart
+    /// happened, so the release must not be marked bad.
+    #[cfg(feature = "update")]
+    #[test]
+    fn an_unusable_health_check_refuses_before_the_swap() -> R {
+        let calls = probe_log();
+        let swaps = probe_log();
+        let (_home, target) = install_target()?;
+        let run = run_update_hermetic(
+            &verified_feed()?,
+            &semver::Version::new(0, 0, 1),
+            &detent_update::Policy::default(),
+            &fixture_trust()?,
+            &recording_ok_probe(&calls, &["hosts", "web", "update"]),
+            &recording_swap(&swaps, &target),
+            &healthy_restart(),
+            Mode::NoHealthCheck("bootstrap certificate is missing"),
+        )?;
+        assert_eq!(run.exit, Exit::Failed);
+        assert!(
+            run.notes
+                .contains("update failed: bootstrap certificate is missing"),
+            "{}",
+            run.notes
+        );
+        assert!(swaps.borrow().is_empty(), "nothing may be swapped");
+        assert_eq!(std::fs::read(&target)?, RUNNING_BINARY);
+        assert!(!target.with_file_name("detent.prev").exists());
+        assert!(
+            detent_update::update::read_bad(&detent_update::update::bad_path(run.dir.path()))
+                .is_empty(),
+            "a release that never ran must not be marked bad"
+        );
+        Ok(())
+    }
+
     #[cfg(feature = "update")]
     #[test]
     fn a_rollback_that_cannot_restore_service_says_so_loudly() -> R {
@@ -2861,6 +2925,9 @@ mod tests {
         Tag(&'static str),
         /// `--tag` for a tag this host already rolled back (`bad.json`).
         RejectedTag(&'static str),
+        /// The bare `update` on a host whose health check cannot be set up:
+        /// the config or the serving certificate cannot be read.
+        NoHealthCheck(&'static str),
     }
 
     #[cfg(feature = "update")]
@@ -2925,12 +2992,15 @@ mod tests {
             false,
             match mode {
                 Mode::Tag(tag) | Mode::RejectedTag(tag) => Some(tag),
-                Mode::Check | Mode::Bare => None,
+                Mode::Check | Mode::Bare | Mode::NoHealthCheck(_) => None,
             },
             &std::env::temp_dir(),
             probe,
             swap,
-            restart,
+            &|| match mode {
+                Mode::NoHealthCheck(reason) => Err(reason.to_owned()),
+                _ => Ok(Box::new(restart) as Box<super::RestartCheck<'_>>),
+            },
             &renderer,
             &mut Streams {
                 input: &mut std::io::empty(),
@@ -4591,23 +4661,22 @@ mod tests {
         assert!(features.features.iter().any(|id| id == "update"));
     }
 
-    /// Before restarting anything, the post-update check needs the config
-    /// and the serving certificate it will pin; a config it cannot read, a
-    /// certificate directory with no certificate, or one it cannot read, are
-    /// each an unhealthy outcome naming the cause — the caller rolls back.
+    /// The post-update check needs the config and the serving certificate it
+    /// will pin, read before the swap; a config it cannot read, a certificate
+    /// directory with no certificate, or one it cannot read, each name the
+    /// cause — the caller refuses the update.
     #[cfg(feature = "update")]
     #[test]
-    fn restart_and_check_is_unhealthy_without_a_config_or_a_certificate() -> R {
+    fn health_target_needs_a_config_and_a_certificate() -> R {
         let dir = tempfile::TempDir::new()?;
 
         let malformed = dir.path().join("malformed.toml");
         std::fs::write(&malformed, "not toml")?;
         assert!(
-            matches!(
-                super::restart_and_check(&malformed),
-                super::RestartOutcome::Unhealthy(ref reason) if !reason.is_empty()
-            ),
-            "a malformed config must be unhealthy"
+            super::health_target(&malformed)
+                .err()
+                .is_some_and(|reason| !reason.is_empty()),
+            "a malformed config must be refused"
         );
 
         let empty = dir.path().join("empty-certs");
@@ -4618,8 +4687,8 @@ mod tests {
             format!("[tls]\ncert_dir = {:?}\n", empty.display().to_string()),
         )?;
         assert_eq!(
-            super::restart_and_check(&config),
-            super::RestartOutcome::Unhealthy(format!(
+            super::health_target(&config).err(),
+            Some(format!(
                 "{}: bootstrap certificate is missing",
                 empty.display()
             ))
@@ -4632,16 +4701,17 @@ mod tests {
             &config,
             format!("[tls]\ncert_dir = {:?}\n", not_a_dir.display().to_string()),
         )?;
-        let outcome = super::restart_and_check(&config);
+        let reason = super::health_target(&config).err().unwrap_or_default();
         assert!(
-            matches!(
-                outcome,
-                super::RestartOutcome::Unhealthy(ref reason)
-                    if reason.starts_with(&format!("{}: ", not_a_dir.display()))
-                        && !reason.contains("bootstrap certificate is missing")
-            ),
-            "{outcome:?}"
+            reason.starts_with(&format!("{}: ", not_a_dir.display()))
+                && !reason.contains("bootstrap certificate is missing"),
+            "{reason}"
         );
+
+        let pair = detent_web::tls::bootstrap_self_signed(&["detent.local".to_owned()])?;
+        detent_web::tls::store_bootstrap(&empty, &pair)?;
+        let health = super::health_target(&dir.path().join("no-cert.toml"))?;
+        assert_eq!(health.cert, pair.cert_der());
         Ok(())
     }
 
