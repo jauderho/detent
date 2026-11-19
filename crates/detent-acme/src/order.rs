@@ -755,6 +755,7 @@ async fn load_or_create_account(
     let builder = account_builder(ca_root)?;
 
     if let Some(json) = cached {
+        check_credentials_directory(&json, directory_url)?;
         let credentials = parse_credentials(&json)?;
         return builder
             .from_credentials(credentials)
@@ -769,6 +770,22 @@ async fn load_or_create_account(
         key.as_ref(),
     )
     .await
+}
+
+/// Refuses saved credentials that name another CA: instant-acme would use the
+/// stored `directory` and ignore `directory_url`, so a moved `directory_url`
+/// would keep ordering from the old CA.
+fn check_credentials_directory(json: &str, directory_url: &str) -> Result<(), AcmeError> {
+    let saved = serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v.get("directory")?.as_str().map(str::to_owned));
+    match saved {
+        Some(saved) if saved != directory_url => Err(AcmeError::Config(format!(
+            "saved ACME credentials are for {saved}, but directory_url is {directory_url}; \
+             remove the credentials file to register a new account"
+        ))),
+        _ => Ok(()),
+    }
 }
 
 /// Parses cached account credentials: garbage must surface as
@@ -1223,6 +1240,19 @@ mod tests {
         );
         Ok(())
     }
+    #[test]
+    fn saved_credentials_for_another_ca_are_refused() {
+        let json = r#"{"id":"x","directory":"https://staging.example/dir"}"#;
+        assert!(check_credentials_directory(json, "https://staging.example/dir").is_ok());
+        let err = check_credentials_directory(json, "https://prod.example/dir").err();
+        assert!(
+            matches!(&err, Some(AcmeError::Config(m))
+                if m.contains("https://staging.example/dir") && m.contains("https://prod.example/dir")),
+            "a directory mismatch must name both URLs, got {err:?}"
+        );
+        assert!(check_credentials_directory("{}", "https://prod.example/dir").is_ok());
+    }
+
     #[test]
     fn corrupt_credential_json_maps_to_a_credentials_error() {
         // `parse_credentials` is the production mapping `load_or_create_account`
