@@ -23,6 +23,11 @@ phase or a self-contained piece of work finishes.
 - serve: an `unreachable_code` error under default features (no
   `acme-dns-providers`), found by clippy without `--all-features`.
 - The implementors hit a usage limit, so the orchestrator made these changes.
+- CI coverage job: the root sandbox step now finds the `detent_platform`
+  test binary in `debug/deps` or `debug/build/detent-platform/<hash>/out`.
+  Without a matching cache, cargo 1.100 uses the second layout.
+- **Size.** The `full-ui` row went 3,652 B over its band (7,285,488 B at
+  `ee623aa`). Owner-approved re-cut of that row only; the other rows pass.
 
 **Checks.** `cargo fmt --all --check` clean; `cargo clippy --workspace
 --all-targets --locked -- -D warnings` exit 0 with and without
