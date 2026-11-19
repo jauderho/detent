@@ -1908,7 +1908,9 @@ mod tests {
             ),
             (
                 // The shape of an account, with a key the client rejects.
-                format!(r#"{{"id":"{ACCOUNT_KEY}","key_pkcs8":"{ACCOUNT_KEY}","directory":"x"}}"#),
+                format!(
+                    r#"{{"id":"{ACCOUNT_KEY}","key_pkcs8":"{ACCOUNT_KEY}","directory":"https://127.0.0.1:9/dir"}}"#
+                ),
                 "the ACME server or client failed",
             ),
             (
