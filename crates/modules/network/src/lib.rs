@@ -4191,6 +4191,21 @@ mod tests {
              \tdns-nameservers 192.168.1.1\n"
         );
 
+        // DHCPv4 with a static IPv6 address and no gateways.
+        let mut dhcp = iface(&["2001:db8::10/64"], None, None);
+        dhcp.dhcp_v4 = true;
+        let dhcp = super::Model {
+            interfaces: vec![dhcp],
+        };
+        assert_eq!(
+            render(&dhcp)?,
+            "auto eth0\n\
+             iface eth0 inet dhcp\n\
+             \tdns-nameservers 192.168.1.1\n\
+             iface eth0 inet6 static\n\
+             \taddress 2001:db8::10/64\n"
+        );
+
         // An IPv4 gateway with no IPv4 address has no stanza to live in.
         let mut doc = NetworkModule::parse("auto eth0\n").map_err(|e| e.to_string())?;
         let orphan = super::Model {

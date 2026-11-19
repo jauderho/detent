@@ -1359,17 +1359,17 @@ fn sync_items<P>(
         .enumerate()
         .filter_map(|(slot, kept)| kept.then_some(slot))
         .collect();
-    let positions: Vec<usize> = items
-        .iter()
-        .enumerate()
-        .filter_map(|(index, item)| project(&item.value).map(|_| index))
+    let mut slots: Vec<&mut ArrItem> = items
+        .iter_mut()
+        .filter(|item| project(&item.value).is_some())
         .collect();
-    let mut taken: Vec<Option<Jsonc>> = positions
-        .iter()
-        .map(|index| {
-            items
-                .get_mut(*index)
-                .map(|item| std::mem::replace(&mut item.value, Jsonc::Lit(Lit::Raw(String::new()))))
+    let mut taken: Vec<Option<Jsonc>> = slots
+        .iter_mut()
+        .map(|item| {
+            Some(std::mem::replace(
+                &mut item.value,
+                Jsonc::Lit(Lit::Raw(String::new())),
+            ))
         })
         .collect();
 
@@ -1386,13 +1386,13 @@ fn sync_items<P>(
         }
     }
 
+    // There are never more slots than values, so every slot gets one; the
+    // values left over are appended.
     let mut values = values.into_iter();
-    for (rank, index) in positions.iter().enumerate() {
-        if let (Some(item), Some((value, from))) = (items.get_mut(*index), values.next()) {
-            item.value = value;
-            if from != Some(rank) {
-                report.changed_lines = report.changed_lines.saturating_add(1);
-            }
+    for ((rank, slot), (value, from)) in slots.iter_mut().enumerate().zip(values.by_ref()) {
+        slot.value = value;
+        if from != Some(rank) {
+            report.changed_lines = report.changed_lines.saturating_add(1);
         }
     }
     let fresh: Vec<ArrItem> = values
@@ -1407,7 +1407,8 @@ fn sync_items<P>(
 }
 
 /// [`sync_items`] for lists whose items are whole values (pool ranges,
-/// interface names, option data): an item matches an equal wanted value.
+/// interface names, option data): an item matches an equal wanted value, so
+/// a matched value never needs an update.
 fn sync_modeled_items<P, F, G>(
     items: &mut Vec<ArrItem>,
     wanted: &[P],
@@ -1420,13 +1421,16 @@ fn sync_modeled_items<P, F, G>(
     G: Fn(&P) -> Jsonc,
 {
     let equal = |have: &P, want: &P| have == want;
-    let update = |value: &mut Jsonc, want: &P, report: &mut EditReport| {
-        if project(value).as_ref() != Some(want) {
-            *value = render(want);
-            report.changed_lines = report.changed_lines.saturating_add(1);
-        }
-    };
-    sync_items(items, wanted, &project, &[&equal], &render, &update, report);
+    let unchanged = |_: &mut Jsonc, _: &P, _: &mut EditReport| {};
+    sync_items(
+        items,
+        wanted,
+        &project,
+        &[&equal],
+        &render,
+        &unchanged,
+        report,
+    );
 }
 
 /// Rewrites one modeled list member of `obj`: absent means "add canonically
@@ -1622,10 +1626,12 @@ fn sync_subnets(items: &mut Vec<ArrItem>, wanted: &[KeaSubnet], report: &mut Edi
     let project = |value: &Jsonc| value.as_obj().and_then(project_subnet);
     let same_id = |have: &KeaSubnet, want: &KeaSubnet| have.id == want.id;
     let same_prefix = |have: &KeaSubnet, want: &KeaSubnet| have.subnet == want.subnet;
+    // `project` read the value as an object, so `as_obj_mut` always has one.
     let merge = |value: &mut Jsonc, want: &KeaSubnet, report: &mut EditReport| {
-        if let Jsonc::Obj(obj) = value {
-            merge_subnet(obj, want, report);
-        }
+        value
+            .as_obj_mut()
+            .into_iter()
+            .for_each(|obj| merge_subnet(obj, want, report));
     };
     sync_items(
         items,
