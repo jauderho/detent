@@ -34,6 +34,7 @@ const DATE_TIME_OPTIONS: Intl.DateTimeFormatOptions = {
   minute: '2-digit',
   second: '2-digit',
   hour12: false,
+  timeZoneName: 'short',
 }
 
 /**

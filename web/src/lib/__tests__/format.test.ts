@@ -33,6 +33,14 @@ describe('formatDateTime', () => {
     expect(formatted).toContain('2026')
   })
 
+  it('names the time zone', () => {
+    const zone = new Intl.DateTimeFormat('en-US', { timeZoneName: 'short' })
+      .formatToParts(new Date(INSTANT_MS))
+      .find((part) => part.type === 'timeZoneName')?.value
+    expect(zone).toBeDefined()
+    expect(formatDateTime('en-US', INSTANT_MS)).toEndWith(` ${zone}`)
+  })
+
   it('answers null rather than "Invalid Date" for an unusable value', () => {
     expect(formatDateTime('en-US', Number.NaN)).toBeNull()
     expect(formatDateTime('en-US', Number.POSITIVE_INFINITY)).toBeNull()
