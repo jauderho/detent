@@ -122,6 +122,7 @@ network-tip-bridge-members = имена интерфейсов — участн�
 
 ## network module — validation diagnostics
 network-invalid-cidr = `{$value}` не является допустимым адресом CIDR.
+network-invalid-interface-name = `{$value}` не является допустимым именем интерфейса.
 network-invalid-ip = `{$value}` не является допустимым IP-адресом.
 network-gateway-outside-subnet = шлюз `{$gateway}` находится вне подсетей этого интерфейса.
 network-vlan-range = идентификатор VLAN `{$id}` вне диапазона 1–4094.

@@ -123,6 +123,7 @@ network-tip-bridge-members = このブリッジのメンバーインターフェ
 
 ## network module — validation diagnostics
 network-invalid-cidr = `{$value}` は有効な CIDR アドレスではありません。
+network-invalid-interface-name = `{$value}` は有効なインターフェース名ではありません。
 network-invalid-ip = `{$value}` は有効な IP アドレスではありません。
 network-gateway-outside-subnet = ゲートウェイ `{$gateway}` がこのインターフェースのサブネットの外にあります。
 network-vlan-range = VLAN ID `{$id}` が 1–4094 の範囲外です。

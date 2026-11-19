@@ -2002,6 +2002,8 @@ fn schema_with_hints() -> serde_json::Value {
 
 /// Fluent id: malformed CIDR or IP.
 const INVALID_CIDR: MessageId = MessageId::new("network-invalid-cidr");
+/// Fluent id: an interface name no renderer writes.
+const INVALID_INTERFACE_NAME: MessageId = MessageId::new("network-invalid-interface-name");
 /// Fluent id: malformed IP.
 const INVALID_IP: MessageId = MessageId::new("network-invalid-ip");
 /// Fluent id: gateway outside interface subnets.
@@ -2575,7 +2577,7 @@ impl ConfigModule for NetworkModule {
             for (field, name) in names {
                 if !is_valid_ifname(name) || name.starts_with('-') {
                     diagnostics.push(
-                        Diagnostic::new(Severity::Error, INVALID_CIDR)
+                        Diagnostic::new(Severity::Error, INVALID_INTERFACE_NAME)
                             .with_field(FieldPath::new(format!("{base}/{field}")))
                             .with_arg("value", name.clone()),
                     );
@@ -2813,10 +2815,10 @@ impl ConfigModule for NetworkModule {
 mod tests {
     use super::{
         DESCRIPTOR, DHCP_STATIC_MIXED, DUPLICATE_INTERFACE, GATEWAY_OUTSIDE_SUBNET, INJECTION,
-        INVALID_CIDR, INVALID_IP, NetworkModule, REC_IPV6_PRIVACY, REC_NO_PROMISC, REC_RA_ACCEPT,
-        STATIC_NO_DNS, STATIC_NO_GATEWAY, VLAN_RANGE, classify, detect_flavor, is_valid_cidr,
-        is_valid_ip, parse_ifupdown_auto, parse_ifupdown_iface, parse_inline_list, parse_kv_equals,
-        parse_netplan_kv, parse_section, schema_with_hints,
+        INVALID_CIDR, INVALID_INTERFACE_NAME, INVALID_IP, NetworkModule, REC_IPV6_PRIVACY,
+        REC_NO_PROMISC, REC_RA_ACCEPT, STATIC_NO_DNS, STATIC_NO_GATEWAY, VLAN_RANGE, classify,
+        detect_flavor, is_valid_cidr, is_valid_ip, parse_ifupdown_auto, parse_ifupdown_iface,
+        parse_inline_list, parse_kv_equals, parse_netplan_kv, parse_section, schema_with_hints,
     };
     use detent_core::descriptor::{HostProfile, InitSystem, Os, ValidationCtx};
     use detent_core::diag::{MessageId, Severity};
@@ -2848,6 +2850,7 @@ mod tests {
             "network-tip-vlan-id",
             "network-tip-bridge-members",
             "network-invalid-cidr",
+            "network-invalid-interface-name",
             "network-invalid-ip",
             "network-gateway-outside-subnet",
             "network-vlan-range",
@@ -3152,7 +3155,7 @@ mod tests {
         let ctx = ValidationCtx::new(&host);
         NetworkModule::validate(model, &ctx)
             .iter()
-            .filter(|d| d.severity == Severity::Error && d.id.as_str() == INVALID_CIDR.as_str())
+            .filter(|d| d.severity == Severity::Error && d.id == INVALID_INTERFACE_NAME)
             .filter_map(|d| d.field.as_ref().map(|f| f.as_str().to_owned()))
             .collect()
     }
