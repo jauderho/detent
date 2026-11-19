@@ -111,12 +111,11 @@ async fn notices_for(state: &AppState, id: &str) -> Result<serde_json::Value, E>
 fn kinds(body: &serde_json::Value) -> Vec<&str> {
     body.pointer("/changes")
         .and_then(|v| v.as_array())
-        .map(|list| {
+        .map_or_default(|list| {
             list.iter()
                 .filter_map(|c| c.pointer("/change").and_then(|v| v.as_str()))
                 .collect()
         })
-        .unwrap_or_default()
 }
 
 fn failed(body: &serde_json::Value) -> Option<u64> {

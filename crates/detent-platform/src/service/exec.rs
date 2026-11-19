@@ -208,8 +208,8 @@ fn run_confined(
         }
     };
 
-    let stdout = stdout_reader.map(join_capped_reader).unwrap_or_default();
-    let stderr = stderr_reader.map(join_capped_reader).unwrap_or_default();
+    let stdout = stdout_reader.map_or_default(join_capped_reader);
+    let stderr = stderr_reader.map_or_default(join_capped_reader);
 
     Ok(ProcessOutput {
         status,

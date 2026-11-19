@@ -60,19 +60,17 @@ fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
 
 /// Count leftover temp files in `dir`.
 fn temp_debris(dir: &Path) -> usize {
-    fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .filter(|entry| {
-                    entry
-                        .file_name()
-                        .to_str()
-                        .is_some_and(|name| name.starts_with(".detent-tmp-"))
-                })
-                .count()
-        })
-        .unwrap_or_default()
+    fs::read_dir(dir).map_or_default(|entries| {
+        entries
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(".detent-tmp-"))
+            })
+            .count()
+    })
 }
 
 // --- digest ---------------------------------------------------------------

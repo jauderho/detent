@@ -559,10 +559,7 @@ impl UserStore {
     /// store that answers "no users" refuses every login, which is the safe
     /// direction.
     fn records(&self) -> Vec<UserRecord> {
-        self.inner
-            .lock()
-            .map(|g| g.users.clone())
-            .unwrap_or_default()
+        self.inner.lock().map_or_default(|g| g.users.clone())
     }
 
     /// Apply `change` to one named record, then persist.

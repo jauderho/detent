@@ -427,10 +427,7 @@ mod tests {
         }
 
         fn calls(&self) -> Vec<(&'static str, Vec<String>)> {
-            self.calls
-                .lock()
-                .map(|calls| calls.clone())
-                .unwrap_or_default()
+            self.calls.lock().map_or_default(|calls| calls.clone())
         }
     }
 

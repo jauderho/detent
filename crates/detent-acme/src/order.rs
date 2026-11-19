@@ -456,18 +456,16 @@ pub fn leaf_dns_names_der(chain: &[CertificateDer<'_>]) -> Result<Vec<String>, A
     let san = cert
         .subject_alternative_name()
         .map_err(|e| AcmeError::Config(format!("leaf subjectAltName does not parse: {e}")))?;
-    Ok(san
-        .map(|ext| {
-            ext.value
-                .general_names
-                .iter()
-                .filter_map(|name| match name {
-                    GeneralName::DNSName(dns) => Some((*dns).to_owned()),
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default())
+    Ok(san.map_or_default(|ext| {
+        ext.value
+            .general_names
+            .iter()
+            .filter_map(|name| match name {
+                GeneralName::DNSName(dns) => Some((*dns).to_owned()),
+                _ => None,
+            })
+            .collect()
+    }))
 }
 
 /// PEM-chain wrapper over [`leaf_validity_der`]: extracts the leaf's DER

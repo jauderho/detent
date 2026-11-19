@@ -405,8 +405,7 @@ impl ConfigModule for GatedKv {
 fn host_with_kv(version: Option<&str>) -> HostProfile {
     HostProfile {
         service_versions: version
-            .map(|v| BTreeMap::from([("kv".to_owned(), v.to_owned())]))
-            .unwrap_or_default(),
+            .map_or_default(|v| BTreeMap::from([("kv".to_owned(), v.to_owned())])),
         ..profile()
     }
 }
@@ -415,14 +414,12 @@ fn gate_findings(version: Option<&str>, model: &serde_json::Value) -> Vec<(Sever
     let host = host_with_kv(version);
     let module: Box<dyn DynModule> = Box::new(Dyn::<GatedKv>::new());
     let diagnostics = module.validate_json(model, &ValidationCtx::new(&host));
-    diagnostics
-        .map(|all| {
-            all.iter()
-                .filter(|d| d.id.as_str().starts_with("core-version-"))
-                .map(|d| (d.severity, d.id.as_str().to_owned()))
-                .collect()
-        })
-        .unwrap_or_default()
+    diagnostics.map_or_default(|all| {
+        all.iter()
+            .filter(|d| d.id.as_str().starts_with("core-version-"))
+            .map(|d| (d.severity, d.id.as_str().to_owned()))
+            .collect()
+    })
 }
 
 #[test]
@@ -671,8 +668,7 @@ fn dyn_adapter_maps_every_failure_to_an_error() {
     );
     assert!(
         injected
-            .map(|e| e.to_string())
-            .unwrap_or_default()
+            .map_or_default(|e| e.to_string())
             .contains("line break")
     );
 

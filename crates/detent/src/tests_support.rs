@@ -544,8 +544,7 @@ pub fn capture<T>(body: impl FnOnce() -> T) -> (T, String) {
     let text = logs
         .0
         .lock()
-        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-        .unwrap_or_default();
+        .map_or_default(|bytes| String::from_utf8_lossy(&bytes).into_owned());
     (out, text)
 }
 

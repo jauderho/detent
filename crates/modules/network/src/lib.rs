@@ -595,11 +595,7 @@ fn build_model_from_lines(lines: &[String]) -> (Model, BTreeSet<usize>) {
                     }
                     "id" => {
                         if let Ok(id) = value.parse::<u16>() {
-                            let link = entry
-                                .vlan
-                                .as_ref()
-                                .map(|v| v.link.clone())
-                                .unwrap_or_default();
+                            let link = entry.vlan.as_ref().map_or_default(|v| v.link.clone());
                             entry.vlan = Some(Vlan { link, id });
                         }
                     }

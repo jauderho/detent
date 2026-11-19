@@ -180,8 +180,7 @@ fn the_unit_keeps_setuid_for_the_worker_drop() {
         && bounding.contains(&"CAP_SETUID")
     {
         let ambient: Vec<&str> = unit_value("AmbientCapabilities")
-            .map(|caps| caps.split_whitespace().collect())
-            .unwrap_or_default();
+            .map_or_default(|caps| caps.split_whitespace().collect());
         assert!(
             ambient.contains(&"CAP_SETUID") && ambient.contains(&"CAP_SETGID"),
             "AmbientCapabilities lacks CAP_SETUID/CAP_SETGID: {ambient:?}"

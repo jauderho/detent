@@ -487,10 +487,7 @@ impl OpsEngine {
             diff: hunks,
             unified_diff,
             rendered,
-            affected_services: wiring
-                .binding
-                .map(|(_, service)| vec![service])
-                .unwrap_or_default(),
+            affected_services: wiring.binding.map_or_default(|(_, service)| vec![service]),
             checks,
             diagnostics,
             current_hash: contents.digest,
@@ -994,8 +991,7 @@ fn wiring(
 
     let checks = client
         .tables()
-        .map(|ack| ack.checks.as_slice())
-        .unwrap_or_default()
+        .map_or_default(|ack| ack.checks.as_slice())
         .iter()
         .filter(|check| check.module == module && check.targets.contains(&chosen.id))
         .map(|check| (check.id, check.program.clone()))
@@ -1206,8 +1202,7 @@ mod tests {
         assert!(matches!(err, Err(OpsError::Module(_))));
         assert!(
             err.err()
-                .map(|err| err.to_string())
-                .unwrap_or_default()
+                .map_or_default(|err| err.to_string())
                 .contains("not valid UTF-8")
         );
     }

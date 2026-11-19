@@ -1246,7 +1246,7 @@ mod tests {
             assert!(has(signed, &owner), "the TSIG owner is the key name");
             assert!(!has(signed, b"s3cr3t"), "the secret is never sent");
         }
-        let add = seen.first().map(|(_, m)| m.clone()).unwrap_or_default();
+        let add = seen.first().map_or_default(|(_, m)| m.clone());
         assert!(has(&add, b"digest-value-42"), "present carries the value");
         Ok(())
     }

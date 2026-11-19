@@ -8,8 +8,7 @@ pub(super) fn detect_hostname(prober: &dyn Prober) -> String {
     prober
         .run("/bin/hostname", &["-s"])
         .ok()
-        .map(|out| out.trim().to_string())
-        .unwrap_or_default()
+        .map_or_default(|out| out.trim().to_string())
 }
 
 /// Detect physical RAM in MiB via `sysctl -n hw.memsize` (bytes).

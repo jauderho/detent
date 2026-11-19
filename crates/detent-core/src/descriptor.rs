@@ -767,8 +767,7 @@ mod tests {
         assert!(json.get("added_mounts").is_none());
         let units = descriptor
             .added_mounts
-            .map(|added| added("", ""))
-            .unwrap_or_default();
+            .map_or_default(|added| added("", ""));
         assert_eq!(
             units.first().map(|unit| unit.unit.as_str()),
             Some("srv.mount")

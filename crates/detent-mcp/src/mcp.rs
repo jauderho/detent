@@ -193,7 +193,7 @@ impl RecordingExecutor {
     /// Inspect what was recorded.
     #[must_use]
     pub fn recorded(&self) -> Vec<Operation> {
-        self.recorded.lock().map(|g| g.clone()).unwrap_or_default()
+        self.recorded.lock().map_or_default(|g| g.clone())
     }
 }
 
@@ -1057,17 +1057,15 @@ mod tests {
         let props = node
             .get("properties")
             .and_then(Value::as_object)
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_default();
+            .map_or_default(|m| m.keys().cloned().collect());
         let required = node
             .get("required")
             .and_then(Value::as_array)
-            .map(|a| {
+            .map_or_default(|a| {
                 a.iter()
                     .filter_map(|v| v.as_str().map(str::to_owned))
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         (required, props)
     }
 

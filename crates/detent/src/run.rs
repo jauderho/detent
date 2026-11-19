@@ -4164,13 +4164,12 @@ mod tests {
                 let ids: Vec<&str> = parsed
                     .pointer("/validated")
                     .and_then(serde_json::Value::as_array)
-                    .map(|items| {
+                    .map_or_default(|items| {
                         items
                             .iter()
                             .filter_map(|item| item.pointer("/id").and_then(|id| id.as_str()))
                             .collect()
-                    })
-                    .unwrap_or_default();
+                    });
                 assert_eq!(
                     ids.contains(&"hosts-no-hostnames"),
                     expected == Exit::Failed,

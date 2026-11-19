@@ -619,10 +619,7 @@ impl Harness {
     /// Every request the engine sent the monitor; empty unless
     /// `Setup::record` was set.
     fn requests(&self) -> Vec<Request> {
-        self.seen
-            .lock()
-            .map(|seen| seen.clone())
-            .unwrap_or_default()
+        self.seen.lock().map_or_default(|seen| seen.clone())
     }
 
     /// How often the monitor asked for a unit-file reload.
@@ -635,8 +632,7 @@ impl Harness {
         self.services
             .update_starts
             .lock()
-            .map(|starts| starts.clone())
-            .unwrap_or_default()
+            .map_or_default(|starts| starts.clone())
     }
 
     /// How often the monitor asked the runner hook to start mounts.

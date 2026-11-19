@@ -922,7 +922,7 @@ mod tests {
         let served = Arc::clone(&value);
         let authoritative = Mock::start(Arc::new(move |query, _| {
             let asked = query.name().to_ascii();
-            let current = served.lock().map(|v| v.clone()).unwrap_or_default();
+            let current = served.lock().map_or_default(|v| v.clone());
             Reply::answers(vec![txt_record(&asked, &[current.as_str()])])
         }))?;
         // The resolver: NS only at the apex, one A record for the host, and a

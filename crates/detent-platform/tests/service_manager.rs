@@ -62,10 +62,7 @@ impl FakeRunner {
     }
 
     fn calls(&self) -> Vec<(String, Vec<String>, Duration)> {
-        self.calls
-            .lock()
-            .map(|guard| guard.clone())
-            .unwrap_or_default()
+        self.calls.lock().map_or_default(|guard| guard.clone())
     }
 
     fn exists_inner(&self, path: &'static str) -> bool {
