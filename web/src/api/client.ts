@@ -265,6 +265,19 @@ export type ApiClient = {
   setUnauthorizedHandler(handler: UnauthorizedHandler | null): void
 }
 
+/** The host's clock minus the browser's, from the last `Date` header seen. */
+let serverOffsetMs = 0
+
+/**
+ * The host's time in milliseconds, as far as the console knows it: the
+ * browser clock corrected by the offset the last response's `Date` header
+ * showed. Expiry is the host's decision, so it is judged on the host's
+ * clock, not on a browser clock that may be wrong. Second precision.
+ */
+export function serverNow(): number {
+  return Date.now() + serverOffsetMs
+}
+
 export function createApiClient(options: ApiClientOptions = {}): ApiClient {
   const baseUrl = options.baseUrl ?? ''
   const doFetch = options.fetch ?? ((...args) => globalThis.fetch(...args))
@@ -302,6 +315,9 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     } catch {
       return { ok: false, error: { kind: 'network' } }
     }
+
+    const serverDate = Date.parse(response.headers.get('Date') ?? '')
+    if (!Number.isNaN(serverDate)) serverOffsetMs = serverDate - Date.now()
 
     if (response.status === 401 && options.suppressUnauthorizedEvent !== true) {
       onUnauthorized?.()

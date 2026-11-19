@@ -8,7 +8,7 @@
 
 import { describe, expect, it, mock } from 'bun:test'
 import { jsonResponse, type StubCall, stubFetch } from '@/test/providers'
-import { CSRF_HEADER, createApiClient } from '../client'
+import { CSRF_HEADER, createApiClient, serverNow } from '../client'
 
 const CSRF_TOKEN = 'csrf-token-value'
 
@@ -328,5 +328,29 @@ describe('createApiClient — Retry-After parsing', () => {
     expect(result.ok).toBe(false)
     if (result.ok || result.error.kind !== 'http') return
     expect(result.error.retryAfterSeconds).toBeNull()
+  })
+})
+
+describe('serverNow', () => {
+  it('follows the host clock from the Date header, not the browser clock', async () => {
+    const ahead = Date.now() + 3_600_000
+    const dated = (when: number) =>
+      new Response(null, { status: 204, headers: { Date: new Date(when).toUTCString() } })
+    const { fetch } = stubFetch([
+      dated(ahead),
+      new Response(null, { status: 204 }),
+      dated(Date.now()),
+    ])
+    const client = createApiClient({ fetch })
+
+    await client.post('/api/v1/auth/logout', {})
+    expect(Math.abs(serverNow() - ahead)).toBeLessThan(2_000)
+
+    // A response with no Date header keeps the last offset.
+    await client.post('/api/v1/auth/logout', {})
+    expect(Math.abs(serverNow() - ahead)).toBeLessThan(2_000)
+
+    await client.post('/api/v1/auth/logout', {})
+    expect(Math.abs(serverNow() - Date.now())).toBeLessThan(2_000)
   })
 })

@@ -23,6 +23,7 @@ import {
   type TokenRequest,
   type TokenView,
 } from '@/api/auth'
+import { serverNow } from '@/api/client'
 import { unwrap, useApiErrorMessage } from '@/api/query'
 import { useStepUp } from '@/app/StepUp'
 import { Banner, type BannerTone } from '@/components/Banner'
@@ -145,7 +146,7 @@ export function TokensPanel() {
     if (row.expires_at === null || row.expires_at === undefined) {
       return l10n.getString('tokens-expires-never')
     }
-    if (row.expires_at * MS_PER_SECOND <= Date.now()) {
+    if (row.expires_at * MS_PER_SECOND <= serverNow()) {
       return l10n.getString('tokens-expired')
     }
     return formatUnixSeconds(locale, row.expires_at) ?? l10n.getString('state-unknown')
