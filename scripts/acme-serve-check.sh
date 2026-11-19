@@ -66,7 +66,9 @@
 #                             <prefix>.<pid> (default: <workdir>/trace).
 #   --workdir <dir>          Where the configuration, the logs and the trace
 #                             go. Created if missing (default: a new
-#                             `mktemp -d` directory under /tmp).
+#                             `mktemp -d` directory under /tmp, removed at the
+#                             end; a directory given here stays, minus the
+#                             secrets, the token and the auth header).
 #   --dryrun                 Print the configuration and the commands this
 #                             script would run, without running anything.
 #   --verbose, -v            Print step-level progress and the serve log.
@@ -122,6 +124,7 @@ TLS_CHECK=""
 STOP_TIMEOUT=30
 TRACE=""
 WORKDIR=""
+OWN_WORKDIR=false
 DRYRUN=false
 VERBOSE=false
 DETENT_BIN=""
@@ -344,6 +347,7 @@ if [[ -z "${WORKDIR}" ]]; then
     WORKDIR="/tmp/detent-acme-serve.XXXXXX"
   else
     WORKDIR="$(mktemp -d /tmp/detent-acme-serve.XXXXXX)"
+    OWN_WORKDIR=true
   fi
 fi
 TRACE="${TRACE:-${WORKDIR}/trace}"
@@ -439,8 +443,9 @@ if [[ "${VERBOSE}" == true ]]; then
 fi
 
 SERVE_PID=""
+TOKEN_ID=""
 # On any exit, stop what is still running, so a failed check does not leave
-# a server behind.
+# a server behind, revoke the token and remove the secrets.
 cleanup() {
   local leader
   if [[ -n "${SERVE_PID}" ]] && kill -0 "${SERVE_PID}" 2>/dev/null; then
@@ -449,6 +454,15 @@ cleanup() {
       kill -KILL -- "-${leader}" 2>/dev/null || true
     done
     kill -KILL "${SERVE_PID}" 2>/dev/null || true
+  fi
+  if [[ -n "${TOKEN_ID}" ]]; then
+    runuser -u "${WORKER_USER}" -- "${DETENT_BIN}" --state-root "${STATE_ROOT}" \
+      token revoke "${TOKEN_ID}" >/dev/null || echo "token ${TOKEN_ID} not revoked" >&2
+  fi
+  if [[ "${OWN_WORKDIR}" == true ]]; then
+    rm -rf -- "${WORKDIR}"
+  else
+    rm -f -- "${SECRETS}" "${TOKEN_JSON:-}" "${AUTH_HEADER:-}"
   fi
 }
 trap cleanup EXIT
@@ -571,9 +585,10 @@ if [[ "${FORCED_RENEW}" == true ]]; then
   (
     umask 077
     runuser -u "${WORKER_USER}" -- "${DETENT_BIN}" --json --state-root "${STATE_ROOT}" \
-      token create w1-operator --write >"${TOKEN_JSON}"
+      token create w1-operator --write --expires-secs 3600 >"${TOKEN_JSON}"
   )
   chmod 0600 "${TOKEN_JSON}"
+  TOKEN_ID="$(jq -r '.id' "${TOKEN_JSON}")"
   OPERATOR_TOKEN="$(jq -r '.token' "${TOKEN_JSON}")"
   [[ -n "${OPERATOR_TOKEN}" && "${OPERATOR_TOKEN}" != "null" ]] ||
     die "token create produced no token (see ${TOKEN_JSON})"
