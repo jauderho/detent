@@ -1943,9 +1943,8 @@ mod contract_fuzz {
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::from(body.clone()))
                 .map_err(|error| TestCaseError::fail(error.to_string()))?;
-            let response = runtime
-                .block_on(app(live.state()).oneshot(request))
-                .map_err(|error| TestCaseError::fail(error.to_string()))?;
+            // The router's error type is `Infallible`.
+            let Ok(response) = runtime.block_on(app(live.state()).oneshot(request));
             prop_assert!(
                 !response.status().is_server_error(),
                 "{path} answered {} to {body:?}",
