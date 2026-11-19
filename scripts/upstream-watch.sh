@@ -16,7 +16,8 @@
 #   check     For every crates/modules/*/upstream.toml (not _template), list the
 #             tags of `tags_repo` (default: `repo_url`) with `git ls-remote`,
 #             select the newest release and open an issue only when it is newer
-#             than `tracked_version`.
+#             than `tracked_version`. Exits 1 when the newest release of a
+#             module cannot be found or the open issues cannot be listed.
 #   selftest  Run `select` over the recorded tag lists in
 #             scripts/fixtures/upstream-watch/<module>.tags and compare with the
 #             expected versions below. Needs no network.
@@ -98,7 +99,8 @@ cmd_check() {
         sed -n 's|.*refs/tags/||p' | select_version "${toml}" || true)"
     fi
     if [[ -z "${latest}" ]]; then
-      echo "could not determine latest for ${id}; skipping"
+      echo "could not determine latest for ${id}" >&2
+      failed=1
       continue
     fi
     if ! newer_than "${latest}" "${tracked}"; then
@@ -111,8 +113,12 @@ cmd_check() {
       echo "dryrun: would open issue: ${title}"
       continue
     fi
-    existing="$(gh issue list --search "upstream ${id} moved in:title" \
-      --state open --limit 1 --json title --jq length 2>/dev/null || echo 0)"
+    if ! existing="$(gh issue list --search "upstream ${id} moved in:title" \
+      --state open --limit 1 --json title --jq length)"; then
+      echo "could not list issues for ${id}" >&2
+      failed=1
+      continue
+    fi
     if [[ "${existing}" != "0" ]]; then
       echo "issue already open for ${id}; skipping"
       continue
