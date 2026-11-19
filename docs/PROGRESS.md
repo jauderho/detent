@@ -5,6 +5,30 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-11-19 - Audit fixes: Kea pairing, ifupdown stanzas, ACME deadline
+
+- dhcp (Kea): subnets pair with the model by `id`, then by `subnet` prefix;
+  pools, interfaces and option data pair by equal value. Never by position:
+  deleting subnet 1 used to write subnet 2's values into subnet 1's object,
+  so subnet 2 took subnet 1's `interface` and `reservations`. A new item
+  takes the slot of an unmatched one with a fresh value. A reorder moves
+  values between slots; comments stay with the slot.
+- network (ifupdown): the IPv4 gateway and the interface options go in the
+  `inet` stanza, not after `inet6`. An IPv6-only interface gets no empty
+  `inet static`; an interface with no address gets `inet manual`. An IPv4
+  gateway with no IPv4 address is refused.
+- detent-acme: each ACME exchange, body included, has the 30 s deadline and
+  1 MiB cap of the provider API client (constants now in `order.rs`). A CA
+  that stopped answering held the order and the renewal loop for good.
+- serve: an `unreachable_code` error under default features (no
+  `acme-dns-providers`), found by clippy without `--all-features`.
+- The implementors hit a usage limit, so the orchestrator made these changes.
+
+**Checks.** `cargo fmt --all --check` clean; `cargo clippy --workspace
+--all-targets --locked -- -D warnings` exit 0 with and without
+`--all-features`; `cargo test --workspace --all-features --locked` exit 0.
+Each new test failed on the old code (the ACME silent-server test hung).
+
 ## 2026-11-19 - Second audit fixes and CI repair
 
 - `packaging/install.sh` stages each file next to its target and renames it
