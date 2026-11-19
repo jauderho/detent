@@ -22,6 +22,8 @@ workspace = true
 
 [dependencies]
 thiserror = { workspace = true }
+# Warn when a challenge TXT delete fails. Already in the tree.
+tracing = { workspace = true }
 # Account credential (de)serialization for the 0600 cache file.
 serde_json = { workspace = true }
 # ACME client (RFC 8555). Pinned exact: Phase 6 spike uses this one version;

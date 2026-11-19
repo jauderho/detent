@@ -324,8 +324,9 @@ impl DnsProvider for AcmeDnsProvider {
     }
 
     fn delete(&self, _record: &DnsRecord) -> Result<(), AcmeError> {
-        // No withdraw API: post the empty TXT.
-        self.post_update("")
+        // acme-dns rejects an empty TXT (it needs 43 characters) and keeps
+        // only the 2 newest values, so there is nothing to delete.
+        Ok(())
     }
 }
 
@@ -1024,11 +1025,12 @@ mod tests {
 
         ad.delete(&record)?;
         let req = last(&script)?;
-        // No withdraw API: delete posts the empty TXT.
+        // acme-dns rejects an empty TXT and keeps only the 2 newest values,
+        // so delete sends nothing: the last request is still the present.
         let body: serde_json::Value = serde_json::from_str(&req.body)?;
         assert_eq!(
             body.get("txt").and_then(serde_json::Value::as_str),
-            Some("")
+            Some("digest-value-42")
         );
         assert!(
             req.headers

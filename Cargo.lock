@@ -717,6 +717,7 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
+ "tracing",
  "webpki-roots",
  "x509-parser",
 ]
