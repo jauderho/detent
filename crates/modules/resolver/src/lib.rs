@@ -563,6 +563,9 @@ fn parse_unbound(raw: &str) -> Option<UnboundEntry> {
     let (key, value) = trimmed.split_once(':')?;
     let key = key.trim();
     let value = value.trim();
+    if !is_one_token(value) {
+        return None;
+    }
     match key {
         "name" => Some(UnboundEntry::ForwardName {
             name: strip_quotes(value),
@@ -578,6 +581,19 @@ fn parse_unbound(raw: &str) -> Option<UnboundEntry> {
             enabled: parse_yes_no(value)?,
         }),
         _ => None,
+    }
+}
+
+/// Whether an unbound value is one token: a quoted string, or a bare word
+/// that does not open a comment. A `#` inside a bare word is part of it
+/// (`9.9.9.9@853#dns.quad9.net`); a trailing `# comment` or a second word is
+/// not modeled, so the line stays [`LineKind::Unknown`].
+fn is_one_token(value: &str) -> bool {
+    match value.strip_prefix('"') {
+        Some(rest) => rest
+            .split_once('"')
+            .is_some_and(|(_, after)| after.is_empty()),
+        None => !value.contains([' ', '\t']) && !value.starts_with('#'),
     }
 }
 
@@ -1919,6 +1935,21 @@ mod tests {
         assert_eq!(parse_unbound("stub-zone:"), None);
         assert_eq!(parse_unbound("no-colon-here"), None);
         assert_eq!(parse_unbound("    hide-identity:"), None, "empty value");
+        for commented in [
+            "    forward-addr: 9.9.9.9 # quad9",
+            "    forward-addr: 9.9.9.9\t#quad9",
+            "    name: \".\" # root",
+            "    name: \".\"#root",
+            "    name: \"lan",
+            "    name: #root",
+            "    name: a b",
+        ] {
+            assert_eq!(
+                parse_unbound(commented),
+                None,
+                "a trailing comment or a second token leaves {commented:?} unmodeled"
+            );
+        }
     }
 
     #[test]
