@@ -40,6 +40,7 @@ cli-update-held-rejected = {$tag} est plus récente que {$current} mais a été 
 cli-verify-bundle-ok = {$file} est attesté pour {$tag}
 cli-update-failed = échec de la mise à jour : {$reason}
 cli-update-busy = une autre mise à jour est en cours ; réessayez quand elle sera terminée
+cli-update-recovered = une mise à jour précédente vers {$tag} ne s’est pas terminée ; le binaire remplacé est restauré et {$tag} sera ignorée
 cli-update-installed = {$tag} installée ; le binaire remplacé est conservé dans {$previous}
 cli-update-not-restarted = le service n'a pas été redémarré, donc le nouveau binaire ne tourne pas encore : {$reason}
 cli-update-rolled-back = annulation effectuée : {$reason}

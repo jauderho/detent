@@ -46,6 +46,7 @@ cli-update-held-rejected = {$tag} is newer than {$current} but was rolled back o
 cli-verify-bundle-ok = {$file} is attested for {$tag}
 cli-update-failed = update failed: {$reason}
 cli-update-busy = another update is running; try again when it ends
+cli-update-recovered = an earlier update to {$tag} did not finish; the binary it replaced is back and {$tag} will be skipped
 cli-update-installed = installed {$tag}; the binary it replaced is kept at {$previous}
 cli-update-not-restarted = the service was not restarted, so the new binary is not running yet: {$reason}
 cli-update-rolled-back = rolled back: {$reason}

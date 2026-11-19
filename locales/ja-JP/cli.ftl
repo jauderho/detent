@@ -40,6 +40,7 @@ cli-update-held-rejected = {$tag} は {$current} より新しいですが、こ�
 cli-verify-bundle-ok = {$file} は {$tag} 用として証明されています
 cli-update-failed = 更新に失敗しました: {$reason}
 cli-update-busy = 別の更新が実行中です。終了してから再試行してください
+cli-update-recovered = 以前の {$tag} への更新が完了しませんでした。置き換えられたバイナリを復元し、{$tag} はスキップされます
 cli-update-installed = {$tag} をインストールしました。置き換えられたバイナリは {$previous} に残してあります
 cli-update-not-restarted = サービスは再起動されなかったため、新しいバイナリはまだ実行されていません: {$reason}
 cli-update-rolled-back = ロールバックしました: {$reason}

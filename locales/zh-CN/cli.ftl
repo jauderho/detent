@@ -40,6 +40,7 @@ cli-update-held-rejected = {$tag} 比 {$current} 新，但已在此主机上回�
 cli-verify-bundle-ok = {$file} 已被证明属于 {$tag}
 cli-update-failed = 更新失败：{$reason}
 cli-update-busy = 另一个更新正在运行；请在其结束后重试
+cli-update-recovered = 之前到 {$tag} 的更新未完成；已恢复被替换的二进制文件，{$tag} 将被跳过
 cli-update-installed = 已安装 {$tag}；被替换的二进制文件保存在 {$previous}
 cli-update-not-restarted = 服务未重启，因此新的二进制文件尚未运行：{$reason}
 cli-update-rolled-back = 已回滚：{$reason}

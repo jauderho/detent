@@ -823,7 +823,8 @@ fn run_update(
         &|path| detent_update::update::confirm_features(path, &current_features()),
         // The swap runs in this process, with whatever privileges the
         // operator has (PLAN §2.9 step 5b); there is no privsep path.
-        &|candidate| detent_update::install::swap(candidate, &target),
+        &|candidate, tag| detent_update::install::swap(candidate, &target, tag),
+        &|| detent_update::install::recover(&target),
         &|| {
             health_target(&config_path)
                 .map(|health| Box::new(move || restart_and_check(&health)) as Box<RestartCheck<'_>>)
@@ -1009,10 +1010,16 @@ type FeatureProbe =
 
 /// The atomic swap run on a probed candidate (PLAN §2.9 step 5b). A seam for
 /// the same reason as [`FeatureProbe`]: hermetic tests drive both outcomes
-/// without replacing the test runner's own executable.
+/// without replacing the test runner's own executable. The second argument
+/// is the tag being installed, for the unfinished-swap marker.
 #[cfg(feature = "update")]
-type BinarySwap<'a> =
-    dyn Fn(&std::path::Path) -> Result<detent_update::Installed, detent_update::UpdateError> + 'a;
+type BinarySwap<'a> = dyn Fn(&std::path::Path, &str) -> Result<detent_update::Installed, detent_update::UpdateError>
+    + 'a;
+
+/// Undoes a swap an earlier run started and never finished, and names the
+/// tag it undid. Real implementation in [`detent_update::install::recover`].
+#[cfg(feature = "update")]
+type Recover<'a> = dyn Fn() -> Result<Option<String>, detent_update::UpdateError> + 'a;
 
 /// Restarts the service and reports whether it came back serving.
 ///
@@ -1068,6 +1075,7 @@ fn run_update_on(
     staging_parent: &std::path::Path,
     probe: &FeatureProbe,
     swap: &BinarySwap<'_>,
+    recover: &Recover<'_>,
     restart: &RestartSetup<'_>,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
@@ -1090,6 +1098,7 @@ fn run_update_on(
         tag,
         probe,
         swap,
+        recover,
         restart,
         renderer,
         streams,
@@ -1221,6 +1230,7 @@ fn apply_update(
     tag: Option<&str>,
     probe: &FeatureProbe,
     swap: &BinarySwap<'_>,
+    recover: &Recover<'_>,
     restart: &RestartSetup<'_>,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
@@ -1239,6 +1249,29 @@ fn apply_update(
         Ok(restart) => restart,
         Err(reason) => return failed(renderer, streams, &reason),
     };
+    // An earlier run that died between its swap and its health check left
+    // a binary nobody found healthy: put the kept one back first, so this
+    // run starts from the release that last ran.
+    match recover() {
+        Ok(None) => {}
+        Ok(Some(tag)) => {
+            detent_update::update::mark_bad(bad, &tag);
+            renderer.line(
+                streams.notes,
+                MessageId::new("cli-update-recovered"),
+                &[("tag", &tag)],
+            )?;
+            if let RestartOutcome::Unhealthy(error) = restart() {
+                renderer.line(
+                    streams.notes,
+                    MessageId::new("cli-update-rollback-failed"),
+                    &[("reason", &tag), ("error", &error)],
+                )?;
+                return Ok(Exit::Failed);
+            }
+        }
+        Err(err) => return failed(renderer, streams, &err.to_string()),
+    }
     let bad_tags = detent_update::update::read_bad(bad);
     match detent_update::update::prepare(
         transport,
@@ -1278,7 +1311,7 @@ fn install_candidate(
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
-    let installed = match swap(&candidate.binary_path) {
+    let installed = match swap(&candidate.binary_path, &candidate.tag) {
         Ok(installed) => installed,
         Err(err) => return failed(renderer, streams, &err.to_string()),
     };
@@ -1290,6 +1323,7 @@ fn install_candidate(
 
     match restart() {
         RestartOutcome::Healthy => {
+            installed.finish();
             clear_stamp(stamp);
             renderer.line(streams.out, MessageId::new("cli-update-installed"), &args)?;
             Ok(Exit::Ok)
@@ -1298,6 +1332,7 @@ fn install_candidate(
         // under an init system. Rolling back a good binary because the host
         // has no systemd would be wrong, so this succeeds and says so.
         RestartOutcome::NotAService(reason) => {
+            installed.finish();
             clear_stamp(stamp);
             renderer.line(streams.out, MessageId::new("cli-update-installed"), &args)?;
             renderer.line(
@@ -2465,6 +2500,10 @@ mod tests {
             RUNNING_BINARY,
             "the replaced binary must be kept"
         );
+        assert!(
+            !target.with_file_name("detent.pending").exists(),
+            "a healthy install leaves no unfinished-swap marker"
+        );
         let calls = calls.borrow();
         assert_eq!(calls.len(), 1, "the self-test probe must run exactly once");
         assert_eq!(
@@ -2480,6 +2519,104 @@ mod tests {
             calls.as_slice(),
             "the swap must install exactly the binary that was probed"
         );
+        Ok(())
+    }
+
+    /// An earlier run died between its swap and its health check. The next
+    /// run puts the kept binary back, marks that release bad, restarts, and
+    /// only then installs what the feed offers.
+    #[cfg(feature = "update")]
+    #[test]
+    fn an_unfinished_swap_is_undone_before_the_next_update() -> R {
+        let calls = probe_log();
+        let swaps = probe_log();
+        let (home, target) = install_target()?;
+        let broken = home.path().join("broken");
+        std::fs::write(&broken, b"the release that never came up\n")?;
+        // Dropped without finish or rollback, as a killed run leaves it.
+        drop(detent_update::install::swap(&broken, &target, "v98.0.0")?);
+        let restarts = std::rc::Rc::new(std::cell::Cell::new(0));
+        let restart = {
+            let restarts = restarts.clone();
+            move || {
+                restarts.set(restarts.get() + 1);
+                super::RestartOutcome::Healthy
+            }
+        };
+        let run = run_update_recovering(
+            &verified_feed()?,
+            &semver::Version::new(0, 0, 1),
+            &detent_update::Policy::default(),
+            &fixture_trust()?,
+            &recording_ok_probe(&calls, &["hosts", "web", "update"]),
+            &recording_swap(&swaps, &target),
+            &|| detent_update::install::recover(&target),
+            &restart,
+            false,
+        )?;
+        assert_eq!(run.exit, Exit::Ok, "{}", run.notes);
+        assert!(run.notes.contains("v98.0.0"), "{}", run.notes);
+        assert_eq!(
+            detent_update::update::read_bad(&detent_update::update::bad_path(run.dir.path())),
+            vec!["v98.0.0".to_owned()]
+        );
+        assert_eq!(
+            restarts.get(),
+            2,
+            "one restart for the recovery, one for the install"
+        );
+        assert!(run.out.contains("installed v99.0.0"), "{}", run.out);
+        assert_eq!(
+            std::fs::read(target.with_file_name("detent.prev"))?,
+            RUNNING_BINARY,
+            "the binary kept by this run is the one the recovery put back"
+        );
+        assert!(!target.with_file_name("detent.pending").exists());
+        Ok(())
+    }
+
+    /// The recovery cannot read what it needs, or the binary it put back does
+    /// not come up: the run stops before it fetches or swaps anything.
+    #[cfg(feature = "update")]
+    #[test]
+    fn a_failed_recovery_stops_the_update() -> R {
+        let calls = probe_log();
+        let swaps = probe_log();
+        let (_home, target) = install_target()?;
+        let run = run_update_recovering(
+            &verified_feed()?,
+            &semver::Version::new(0, 0, 1),
+            &detent_update::Policy::default(),
+            &fixture_trust()?,
+            &recording_ok_probe(&calls, &["hosts", "web", "update"]),
+            &recording_swap(&swaps, &target),
+            &|| {
+                Err(detent_update::UpdateError::Install {
+                    step: "recover",
+                    reason: "unreadable".to_owned(),
+                })
+            },
+            &healthy_restart(),
+            false,
+        )?;
+        assert_eq!(run.exit, Exit::Failed);
+        assert!(run.notes.contains("unreadable"), "{}", run.notes);
+
+        let run = run_update_recovering(
+            &verified_feed()?,
+            &semver::Version::new(0, 0, 1),
+            &detent_update::Policy::default(),
+            &fixture_trust()?,
+            &recording_ok_probe(&calls, &["hosts", "web", "update"]),
+            &recording_swap(&swaps, &target),
+            &|| Ok(Some("v98.0.0".to_owned())),
+            &|| super::RestartOutcome::Unhealthy("listener never answered".to_owned()),
+            false,
+        )?;
+        assert_eq!(run.exit, Exit::Failed);
+        assert!(run.notes.contains("rollback also failed"), "{}", run.notes);
+        assert!(calls.borrow().is_empty() && swaps.borrow().is_empty());
+        assert_eq!(std::fs::read(&target)?, RUNNING_BINARY);
         Ok(())
     }
 
@@ -2910,13 +3047,16 @@ mod tests {
     fn recording_swap(
         log: &ProbeLog,
         target: &std::path::Path,
-    ) -> impl Fn(&std::path::Path) -> Result<detent_update::Installed, detent_update::UpdateError> + use<>
-    {
+    ) -> impl Fn(
+        &std::path::Path,
+        &str,
+    ) -> Result<detent_update::Installed, detent_update::UpdateError>
+    + use<> {
         let log = log.clone();
         let target = target.to_path_buf();
-        move |candidate| {
+        move |candidate, tag| {
             log.borrow_mut().push(candidate.to_owned());
-            detent_update::install::swap(candidate, &target)
+            detent_update::install::swap(candidate, &target, tag)
         }
     }
 
@@ -2925,8 +3065,11 @@ mod tests {
     #[cfg(feature = "update")]
     fn unreachable_swap(
         log: &ProbeLog,
-    ) -> impl Fn(&std::path::Path) -> Result<detent_update::Installed, detent_update::UpdateError> + use<>
-    {
+    ) -> impl Fn(
+        &std::path::Path,
+        &str,
+    ) -> Result<detent_update::Installed, detent_update::UpdateError>
+    + use<> {
         recording_swap(log, std::path::Path::new("/detent-must-not-be-swapped"))
     }
 
@@ -3002,6 +3145,33 @@ mod tests {
         restart: &super::RestartCheck<'_>,
         mode: impl Into<Mode>,
     ) -> Result<BareRun, Box<dyn std::error::Error>> {
+        run_update_recovering(
+            feed,
+            current,
+            policy,
+            trust,
+            probe,
+            swap,
+            &|| Ok(None),
+            restart,
+            mode,
+        )
+    }
+
+    /// [`run_update_hermetic`] with the unfinished-swap recovery seam.
+    #[cfg(feature = "update")]
+    #[allow(clippy::too_many_arguments)]
+    fn run_update_recovering(
+        feed: &impl detent_update::fetch::Transport,
+        current: &semver::Version,
+        policy: &detent_update::Policy,
+        trust: &detent_update::TrustRoot,
+        probe: &super::FeatureProbe,
+        swap: &super::BinarySwap<'_>,
+        recover: &super::Recover<'_>,
+        restart: &super::RestartCheck<'_>,
+        mode: impl Into<Mode>,
+    ) -> Result<BareRun, Box<dyn std::error::Error>> {
         let mode = mode.into();
         let messages = crate::i18n::Messages::new(Some("en-US"));
         let renderer = crate::output::Renderer {
@@ -3066,6 +3236,7 @@ mod tests {
             &std::env::temp_dir(),
             probe,
             swap,
+            recover,
             &|| match mode {
                 Mode::NoHealthCheck(reason) => Err(reason.to_owned()),
                 _ => Ok(Box::new(restart) as Box<super::RestartCheck<'_>>),
