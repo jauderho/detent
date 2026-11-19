@@ -42,7 +42,7 @@ use detent_core::descriptor::{
     TargetKind, UiGroup, Upstream, ValidationCtx, apply_hints,
 };
 use detent_core::diag::{Diagnostic, Diagnostics, FieldPath, MessageId, Severity};
-use detent_core::doc::{Document, LineKind};
+use detent_core::doc::{Document, Line, LineKind};
 use detent_core::module::{ConfigModule, EditError, EditReport, ModelError, ParseError};
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr};
@@ -658,6 +658,51 @@ fn opens_unbound_section(raw: &str) -> bool {
     raw.trim()
         .strip_suffix(':')
         .is_some_and(|name| !name.is_empty() && !name.contains([':', ' ', '\t', '"', '#']))
+}
+
+/// A copy of `doc` in which the forward-zone items outside a `forward-zone:`
+/// clause are [`LineKind::Unknown`]: `name:` is also a `stub-zone:`,
+/// `auth-zone:` or `view:` attribute, which this module does not model. Any
+/// other clause header ends a forward zone. `to_model` reads and `apply`
+/// plans against this copy, so those lines are never modeled or touched.
+fn modeled(doc: &Document) -> Document {
+    let mut masked = doc.clone();
+    masked.rebuild(|lines| {
+        let mut in_zone = false;
+        for line in lines.iter_mut() {
+            if opens_unbound_section(line.raw()) {
+                in_zone = line.raw().trim() == "forward-zone:";
+            } else if !in_zone
+                && matches!(
+                    parse_unbound(line.raw()),
+                    Some(
+                        UnboundEntry::ForwardName { .. }
+                            | UnboundEntry::ForwardAddr { .. }
+                            | UnboundEntry::ForwardTls { .. }
+                    )
+                )
+            {
+                *line = Line::new(line.raw().to_owned(), LineKind::Unknown, line.ending());
+            }
+        }
+    });
+    masked
+}
+
+/// The model of `doc`: every directive [`modeled`] keeps, in file order.
+fn project(doc: &Document) -> Model {
+    let mut model = Model::default();
+    for entry in modeled(doc)
+        .lines_of_kind(LineKind::Directive)
+        .filter_map(|line| parse_entry(line.raw()))
+    {
+        match entry {
+            Entry::Resolv(entry) => model.resolv.push(entry),
+            Entry::Resolved(entry) => model.resolved.push(entry),
+            Entry::Unbound(entry) => model.unbound.push(entry),
+        }
+    }
+    model
 }
 
 /// Renders a resolv.conf entry, refusing anything that would not round-trip.
@@ -1490,18 +1535,7 @@ impl ConfigModule for ResolverModule {
     /// `Unknown` and `Comment` lines stay in the `Doc` and are what makes
     /// `render` lossless.
     fn to_model(doc: &Self::Doc) -> Result<Self::Model, ModelError> {
-        let mut model = Model::default();
-        for entry in doc
-            .lines_of_kind(LineKind::Directive)
-            .filter_map(|line| parse_entry(line.raw()))
-        {
-            match entry {
-                Entry::Resolv(entry) => model.resolv.push(entry),
-                Entry::Resolved(entry) => model.resolved.push(entry),
-                Entry::Unbound(entry) => model.unbound.push(entry),
-            }
-        }
-        Ok(model)
+        Ok(project(doc))
     }
 
     /// The minimal-edit two-pass shape shared with `hosts`, run once per
@@ -1510,23 +1544,37 @@ impl ConfigModule for ResolverModule {
     /// built, read-only, before one pass applies them, so a refused value leaves
     /// the file exactly as it was; a line whose parsed entry already equals the
     /// model's is never rendered, so hand indentation and spacing survive, and
-    /// dropping or adding an entry never rewrites or moves another.
+    /// dropping or adding an entry never rewrites or moves another. An edit
+    /// that would not read back as `model` (a forward-zone item with no
+    /// `forward-zone:` header before it) is refused.
     fn apply(doc: &mut Self::Doc, model: &Self::Model) -> Result<EditReport, EditError> {
         let no_sections = |_: &str| false;
-        let mut plan = doc.plan_entries(&model.resolv, resolv_of, render_resolv, no_sections)?;
-        plan.extend(doc.plan_entries(
+        let entries = modeled(doc);
+        let mut plan =
+            entries.plan_entries(&model.resolv, resolv_of, render_resolv, no_sections)?;
+        plan.extend(entries.plan_entries(
             &model.resolved,
             resolved_of,
             render_resolved,
             no_sections,
         )?);
-        plan.extend(doc.plan_entries(
+        plan.extend(entries.plan_entries(
             &model.unbound,
             unbound_of,
             render_unbound,
             opens_unbound_section,
         )?);
-        Ok(doc.apply_plan(plan))
+        let mut edited = doc.clone();
+        let report = edited.apply_plan(plan);
+        if project(&edited) != *model {
+            return Err(EditError::Unsupported {
+                message: "the edit would not read back as the model; \
+                          a forward-zone item must follow a forward-zone: header"
+                    .to_owned(),
+            });
+        }
+        *doc = edited;
+        Ok(report)
     }
 
     /// Findings carry Fluent ids, never rendered sentences (ADR-003), a field
@@ -2284,6 +2332,70 @@ mod tests {
             .map(|d| d.severity)
             .collect();
         assert_eq!(misplaced, vec![Severity::Error]);
+    }
+
+    #[test]
+    fn names_outside_a_forward_zone_are_not_modeled() -> Result<(), String> {
+        let src = concat!(
+            "server:\n",
+            "stub-zone:\n",
+            "    name: \"lan\"\n",
+            "    stub-addr: 192.168.1.1\n",
+            "forward-zone:\n",
+            "    name: \".\"\n",
+            "    forward-addr: 192.0.2.1\n",
+            "auth-zone:\n",
+            "    name: \"example.org\"\n",
+            "    forward-tls-upstream: yes\n"
+        );
+        let mut doc = ResolverModule::parse(src).map_err(|e| e.to_string())?;
+        let model = ResolverModule::to_model(&doc).map_err(|e| e.to_string())?;
+        assert_eq!(
+            model.unbound,
+            vec![
+                UnboundEntry::Server,
+                UnboundEntry::ForwardZone,
+                UnboundEntry::ForwardName {
+                    name: ".".to_owned()
+                },
+                UnboundEntry::ForwardAddr {
+                    addr: "192.0.2.1".to_owned()
+                },
+            ],
+            "stub-zone and auth-zone names are not forward-zone names"
+        );
+        assert!(!ResolverModule::validate(&model, &ctx(&profile())).has_errors());
+        let mut wanted = model;
+        wanted.unbound.truncate(3);
+        ResolverModule::apply(&mut doc, &wanted).map_err(|e| e.to_string())?;
+        assert_eq!(
+            ResolverModule::render(&doc),
+            src.replace("    forward-addr: 192.0.2.1\n", ""),
+            "lines outside the forward zone survive the edit"
+        );
+
+        let stray = m(
+            Vec::new(),
+            Vec::new(),
+            vec![UnboundEntry::ForwardName {
+                name: ".".to_owned(),
+            }],
+        );
+        let before = ResolverModule::render(&doc);
+        assert!(
+            matches!(
+                ResolverModule::apply(&mut doc, &stray),
+                Err(EditError::Unsupported { .. })
+            ),
+            "a name with no forward-zone: header would not read back"
+        );
+        assert_eq!(
+            ResolverModule::render(&doc),
+            before,
+            "a refusal edits nothing"
+        );
+
+        Ok(())
     }
 
     #[test]
@@ -3373,7 +3485,8 @@ mod tests {
             let applied = Model {
                 resolv: vec![resolv],
                 resolved: vec![resolved],
-                unbound: vec![unbound],
+                // A forward item reads back only inside a forward zone.
+                unbound: vec![UnboundEntry::ForwardZone, unbound],
             };
             let mut doc = ResolverModule::parse("").map_err(|e| e.to_string())?;
             ResolverModule::apply(&mut doc, &applied).map_err(|e| e.to_string())?;

@@ -391,11 +391,9 @@ fn tabs_and_indentation_survive_a_noop_edit() {
                     options: vec!["ndots:2".to_owned(), "edns0".to_owned()]
                 },
             ],
+            // The forward items before any `forward-zone:` header are not
+            // modeled.
             unbound: vec![
-                UnboundEntry::ForwardTls { enabled: true },
-                UnboundEntry::ForwardAddr {
-                    addr: "192.0.2.53@853".to_owned()
-                },
                 UnboundEntry::Server,
                 UnboundEntry::Hardening {
                     key: "hide-identity".to_owned(),
