@@ -45,6 +45,7 @@ cli-update-held-young = {$tag} is newer than {$current} but younger than {$days}
 cli-update-held-rejected = {$tag} is newer than {$current} but was rolled back on this host; it is skipped
 cli-verify-bundle-ok = {$file} is attested for {$tag}
 cli-update-failed = update failed: {$reason}
+cli-update-busy = another update is running; try again when it ends
 cli-update-installed = installed {$tag}; the binary it replaced is kept at {$previous}
 cli-update-not-restarted = the service was not restarted, so the new binary is not running yet: {$reason}
 cli-update-rolled-back = rolled back: {$reason}

@@ -804,6 +804,7 @@ fn run_update(
         .map_or_else(std::env::temp_dir, std::path::Path::to_path_buf);
     let stamp = detent_update::update::stamp_path(&settings.state_root);
     let bad = detent_update::update::bad_path(&settings.state_root);
+    let lock = detent_update::update::lock_path(&settings.state_root);
     let check_only = args.check;
     let force = args.force;
     run_update_on(
@@ -815,6 +816,7 @@ fn run_update(
         check_only,
         &stamp,
         &bad,
+        &lock,
         force,
         args.tag.as_deref(),
         &staging_parent,
@@ -1060,6 +1062,7 @@ fn run_update_on(
     check_only: bool,
     stamp: &std::path::Path,
     bad: &std::path::Path,
+    lock: &std::path::Path,
     force: bool,
     tag: Option<&str>,
     staging_parent: &std::path::Path,
@@ -1083,6 +1086,7 @@ fn run_update_on(
         staging_parent,
         stamp,
         bad,
+        lock,
         tag,
         probe,
         swap,
@@ -1198,10 +1202,10 @@ fn render_available(
     Ok(())
 }
 
-/// The bare-`update` half: set up the health check, verify into staging,
-/// run the candidate's own self-test probe (feature-checked), and only then
-/// swap it over the running binary. Every earlier refusal leaves the binary
-/// untouched.
+/// The bare-`update` half: take the update lock, set up the health check,
+/// verify into staging, run the candidate's own self-test probe
+/// (feature-checked), and only then swap it over the running binary. Every
+/// earlier refusal leaves the binary untouched.
 #[cfg(feature = "update")]
 #[allow(clippy::too_many_arguments)]
 fn apply_update(
@@ -1213,6 +1217,7 @@ fn apply_update(
     staging_parent: &std::path::Path,
     stamp: &std::path::Path,
     bad: &std::path::Path,
+    lock: &std::path::Path,
     tag: Option<&str>,
     probe: &FeatureProbe,
     swap: &BinarySwap<'_>,
@@ -1220,6 +1225,16 @@ fn apply_update(
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
+    // Held to the end of this run: a second run would replace the kept
+    // binary a rollback of this one needs.
+    let _lock = match detent_update::update::lock(lock) {
+        Ok(Some(file)) => file,
+        Ok(None) => {
+            renderer.line(streams.notes, MessageId::new("cli-update-busy"), &[])?;
+            return Ok(Exit::Failed);
+        }
+        Err(err) => return failed(renderer, streams, &format!("{}: {err}", lock.display())),
+    };
     let restart = match restart() {
         Ok(restart) => restart,
         Err(reason) => return failed(renderer, streams, &reason),
@@ -2556,6 +2571,39 @@ mod tests {
         Ok(())
     }
 
+    /// One update run at a time: a second run must not replace the first
+    /// run's kept binary, so it refuses before it fetches or swaps anything.
+    #[cfg(feature = "update")]
+    #[test]
+    fn a_held_update_lock_refuses_a_second_run() -> R {
+        // A lock that cannot be opened refuses too, naming the lock path.
+        for (mode, needle) in [
+            (Mode::Locked, "another update is running"),
+            (Mode::LockUnusable, "update failed: "),
+        ] {
+            let calls = probe_log();
+            let swaps = probe_log();
+            let (_home, target) = install_target()?;
+            let run = run_update_hermetic(
+                &verified_feed()?,
+                &semver::Version::new(0, 0, 1),
+                &detent_update::Policy::default(),
+                &fixture_trust()?,
+                &recording_ok_probe(&calls, &["hosts", "web", "update"]),
+                &recording_swap(&swaps, &target),
+                &healthy_restart(),
+                mode,
+            )?;
+            assert_eq!(run.exit, Exit::Failed);
+            assert!(run.notes.contains(needle), "{}", run.notes);
+            assert!(calls.borrow().is_empty(), "nothing may be probed");
+            assert!(swaps.borrow().is_empty(), "nothing may be swapped");
+            assert_eq!(std::fs::read(&target)?, RUNNING_BINARY);
+            assert!(!target.with_file_name("detent.prev").exists());
+        }
+        Ok(())
+    }
+
     #[cfg(feature = "update")]
     #[test]
     fn a_rollback_that_cannot_restore_service_says_so_loudly() -> R {
@@ -2928,6 +2976,10 @@ mod tests {
         /// The bare `update` on a host whose health check cannot be set up:
         /// the config or the serving certificate cannot be read.
         NoHealthCheck(&'static str),
+        /// The bare `update` while another update run holds the lock.
+        Locked,
+        /// The bare `update` with a directory where the lock file goes.
+        LockUnusable,
     }
 
     #[cfg(feature = "update")]
@@ -2980,6 +3032,18 @@ mod tests {
             };
             detent_update::update::write_cached(&stamp, &offering, fixed_now()?, true)?;
         }
+        let lock = detent_update::update::lock_path(tmp.path());
+        // Another run's lock, held for the whole of this run.
+        let _held = if matches!(mode, Mode::Locked) {
+            let file = std::fs::File::create(&lock)?;
+            file.try_lock()?;
+            Some(file)
+        } else {
+            None
+        };
+        if matches!(mode, Mode::LockUnusable) {
+            std::fs::create_dir(&lock)?;
+        }
         let exit = super::run_update_on(
             feed,
             current,
@@ -2989,10 +3053,15 @@ mod tests {
             matches!(mode, Mode::Check),
             &stamp,
             &bad,
+            &lock,
             false,
             match mode {
                 Mode::Tag(tag) | Mode::RejectedTag(tag) => Some(tag),
-                Mode::Check | Mode::Bare | Mode::NoHealthCheck(_) => None,
+                Mode::Check
+                | Mode::Bare
+                | Mode::NoHealthCheck(_)
+                | Mode::Locked
+                | Mode::LockUnusable => None,
             },
             &std::env::temp_dir(),
             probe,
