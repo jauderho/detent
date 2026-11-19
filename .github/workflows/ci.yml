@@ -708,7 +708,16 @@ jobs:
       - name: cargo llvm-cov (root sandbox tests; binary runs as root, cargo never does)
         run: |
           set -euo pipefail
-          bin=$(ls -t target/llvm-cov-target/debug/deps/detent_platform-* | grep -v '\.' | head -n 1)
+          # Cargo puts the test binary in deps/ (old layout, kept when the
+          # cache restores it) or in build/detent-platform/<hash>/out/
+          # (new layout). Take the newest executable from either.
+          dirs=()
+          for dir in target/llvm-cov-target/debug/deps target/llvm-cov-target/debug/build/detent-platform; do
+            if [[ -d "$dir" ]]; then dirs+=("$dir"); fi
+          done
+          test "${#dirs[@]}" -gt 0
+          bin=$(find "${dirs[@]}" -type f -name 'detent_platform-*' ! -name '*.*' -perm -u+x \
+            -printf '%T@ %p\n' | sort -rn | head -n 1 | cut -d' ' -f2-)
           test -n "$bin" && test -x "$bin"
           sudo env "LLVM_PROFILE_FILE=$PWD/target/llvm-cov-target/detent-%p-%m.profraw" \
             "$PWD/$bin" sandbox::linux::tests --test-threads=1
