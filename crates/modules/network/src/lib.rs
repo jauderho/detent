@@ -1196,6 +1196,41 @@ fn render_networkd(iface: &Interface) -> Result<Vec<String>, EditError> {
     Ok(out)
 }
 
+/// Refuses a `NetworkManager` keyfile whose `[connection]` holds a key
+/// [`render_nm`] would overwrite: a `type` other than `ethernet`, or an
+/// `interface-name` other than the `id`. The renderer writes both from the
+/// model, so an edit would turn a Wi-Fi connection into an ethernet one, or
+/// bind the connection to another device.
+fn check_nm_connection(doc: &Document) -> Result<(), EditError> {
+    let mut section = String::new();
+    let mut ids = Vec::new();
+    let mut names = Vec::new();
+    for line in doc.lines() {
+        if let Some(name) = parse_section(line.raw()) {
+            section = name;
+        } else if section == "connection"
+            && let Some((key, value)) = parse_kv_equals(line.raw())
+        {
+            match key.as_str() {
+                "id" => ids.push(value),
+                "type" if value != "ethernet" => {
+                    return Err(EditError::Unsupported {
+                        message: format!("NetworkManager connection type {value:?} is not modeled"),
+                    });
+                }
+                "interface-name" => names.push(value),
+                _ => {}
+            }
+        }
+    }
+    if let Some(name) = names.iter().find(|name| !ids.contains(name)) {
+        return Err(EditError::Unsupported {
+            message: format!("NetworkManager interface-name {name:?} differs from the id"),
+        });
+    }
+    Ok(())
+}
+
 /// Render one interface as `NetworkManager` keyfile lines.
 #[allow(clippy::assigning_clones)]
 fn render_nm(iface: &Interface) -> Result<Vec<String>, EditError> {
@@ -2457,6 +2492,9 @@ impl ConfigModule for NetworkModule {
             return Ok(EditReport::default());
         }
         let flavor = detect_flavor(doc);
+        if flavor == BackendFlavor::NetworkManager {
+            check_nm_connection(doc)?;
+        }
         let new_lines = render_model_lines(flavor, model)?;
         for line in &new_lines {
             if !line.is_empty() && !is_directive_like(line) && !line.trim().is_empty() {
@@ -4310,6 +4348,32 @@ mod tests {
         // NetworkManager writes DHCPv6 as `[ipv6]` `method=auto`.
         let nm = "[connection]\nid=eth0\n";
         assert!(assert_apply_keeps_model(nm, &v4only)?);
+        Ok(())
+    }
+
+    #[test]
+    fn nm_edits_refuse_keys_the_renderer_would_overwrite() -> Result<(), String> {
+        let ethernet = "[connection]\nid=eth0\ntype=ethernet\ninterface-name=eth0\n\n[ethernet]\n\n[ipv4]\nmethod=auto\n";
+        for src in [
+            "[connection]\nid=home\ntype=wifi\ninterface-name=home\n\n[wifi]\nssid=home\n\n[ipv4]\nmethod=auto\n",
+            "[connection]\nid=uplink\ntype=ethernet\ninterface-name=eth0\n\n[ipv4]\nmethod=auto\n",
+            ethernet,
+        ] {
+            let mut doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
+            let mut model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+            model.interfaces[0].dns.push("192.0.2.53".to_owned());
+            let result = NetworkModule::apply(&mut doc, &model);
+            if src == ethernet {
+                assert!(result.is_ok(), "{result:?}");
+                assert!(NetworkModule::render(&doc).contains("dns=192.0.2.53"));
+            } else {
+                assert!(
+                    matches!(result, Err(super::EditError::Unsupported { .. })),
+                    "{src:?}: {result:?}"
+                );
+                assert_eq!(NetworkModule::render(&doc), src, "a refusal edits nothing");
+            }
+        }
         Ok(())
     }
 
