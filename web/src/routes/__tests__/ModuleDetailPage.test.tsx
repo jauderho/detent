@@ -13,6 +13,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { Route, Routes } from 'react-router'
 import type { ApplyReport, ModuleDescriptor, ModuleView, PlanReport } from '@/api/modules'
+import { createQueryClient } from '@/api/queryClient'
 import type { HostReport } from '@/api/system'
 import { PendingCommitSlot } from '@/app/PendingCommit'
 import { errorResponse, jsonResponse, renderWithProviders, type StubCall } from '@/test/providers'
@@ -577,6 +578,44 @@ describe('ModuleDetailPage — apply dialog', () => {
 })
 
 describe('ModuleDetailPage — apply', () => {
+  it('sends the hash the edit started from, not the newest refetch', async () => {
+    const user = userEvent.setup()
+    const NEWER_HASH = 'abcdef0123456789'.repeat(4)
+    let served: ModuleView = VIEW
+    const queryClient = createQueryClient()
+    const stub = routedFetch({
+      [AUTH_ROUTE]: () => WRITE_SESSION,
+      [MODULE_ROUTE]: () => jsonResponse(served),
+      [APPLY_ROUTE]: () => errorResponse(409, 'ops-stale-hash'),
+    })
+    renderWithProviders(
+      <Routes>
+        <Route path={ROUTES.moduleDetail} element={<ModuleDetailPage />} />
+      </Routes>,
+      { fetch: stub.fetch, queryClient, route: moduleDetailPath('hosts') },
+    )
+    await screen.findByLabelText('hostname')
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'apply' })).not.toBeDisabled()
+    })
+
+    served = { ...VIEW, current_hash: NEWER_HASH }
+    await queryClient.invalidateQueries()
+    await waitFor(() => {
+      expect(stub.calls.filter((each) => each.url === MODULE_ROUTE).length).toBe(2)
+    })
+
+    await user.click(screen.getByRole('button', { name: 'apply' }))
+    const dialog = await screen.findByRole('dialog', { name: 'apply this change?' })
+    await user.click(within(dialog).getByRole('button', { name: 'apply' }))
+
+    await waitFor(() => {
+      expect(stub.calls.some((each) => each.url === APPLY_ROUTE)).toBe(true)
+    })
+    const call = stub.calls.find((each) => each.url === APPLY_ROUTE)
+    expect(bodyOf(call)).toMatchObject({ expected_hash: CURRENT_HASH })
+  })
+
   it('confirms, sends expected_hash and the chosen service action, and arms the pending commit', async () => {
     const user = userEvent.setup()
     const REPORT: ApplyReport = {
