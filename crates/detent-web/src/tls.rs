@@ -61,10 +61,6 @@ pub const ACME_PAIR_FILE: &str = "acme.pair";
 /// Regenerate a bootstrap certificate once it has less than this much life left.
 const BOOTSTRAP_RENEWAL_WINDOW_SECS: i64 = 7 * 24 * 60 * 60;
 
-const LEGACY_BOOTSTRAP_CERT_FILE: &str = "bootstrap.cert.der";
-const LEGACY_BOOTSTRAP_KEY_FILE: &str = "bootstrap.key.der";
-const LEGACY_ACME_CERT_FILE: &str = "acme.cert.der";
-const LEGACY_ACME_KEY_FILE: &str = "acme.key.der";
 const PAIR_MAGIC: &[u8; 8] = b"DETENTPK";
 const MAX_PAIR_CERTS: usize = 16;
 /// Mode of every key and certificate file in `cert_dir`: readable only by the
@@ -677,8 +673,7 @@ pub fn bootstrap_self_signed(hostnames: &[String]) -> Result<CertifiedKeyPair, T
     ))
 }
 
-/// Read the stored bootstrap pair, preferring the atomic pair file and
-/// accepting the legacy two-file layout for migration.
+/// Read the stored bootstrap pair from the atomic pair file.
 ///
 /// # Errors
 ///
@@ -688,13 +683,7 @@ pub fn load_bootstrap(cert_dir: &Path) -> Result<Option<CertifiedKeyPair>, TlsEr
     if let Some(encoded) = read_optional(&cert_dir.join(BOOTSTRAP_PAIR_FILE))? {
         return decode_pair(&encoded).map(Some);
     }
-    let Some(certificate) = read_optional(&cert_dir.join(LEGACY_BOOTSTRAP_CERT_FILE))? else {
-        return Ok(None);
-    };
-    let Some(key) = read_optional(&cert_dir.join(LEGACY_BOOTSTRAP_KEY_FILE))? else {
-        return Ok(None);
-    };
-    Ok(Some(CertifiedKeyPair::new(certificate, key)))
+    Ok(None)
 }
 
 /// Read `path`, mapping "not there" to `None`.
@@ -709,14 +698,8 @@ fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, TlsError> {
     }
 }
 
-/// Store one complete pair with a single durable rename, then remove any
-/// legacy component files.
-fn store_pair(
-    cert_dir: &Path,
-    filename: &str,
-    pair: &CertifiedKeyPair,
-    legacy: &[&str],
-) -> Result<(), TlsError> {
+/// Store one complete pair with a single durable rename.
+fn store_pair(cert_dir: &Path, filename: &str, pair: &CertifiedKeyPair) -> Result<(), TlsError> {
     if !cert_dir.is_dir() {
         std::fs::create_dir_all(cert_dir).map_err(|source| TlsError::Prepare {
             path: cert_dir.to_path_buf(),
@@ -724,20 +707,7 @@ fn store_pair(
         })?;
     }
     confine_cert_dir(cert_dir)?;
-    write_key_file(&cert_dir.join(filename), &encode_pair(pair)?)?;
-    for name in legacy {
-        match std::fs::remove_file(cert_dir.join(name)) {
-            Ok(()) => {}
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(TlsError::Prepare {
-                    path: cert_dir.join(name),
-                    source,
-                });
-            }
-        }
-    }
-    Ok(())
+    write_key_file(&cert_dir.join(filename), &encode_pair(pair)?)
 }
 
 /// Store one bootstrap pair atomically in `cert_dir`.
@@ -747,12 +717,7 @@ fn store_pair(
 /// [`TlsError::Prepare`] when the directory cannot be created or confined,
 /// [`TlsError::Persist`] when the pair file cannot be written.
 pub fn store_bootstrap(cert_dir: &Path, pair: &CertifiedKeyPair) -> Result<(), TlsError> {
-    store_pair(
-        cert_dir,
-        BOOTSTRAP_PAIR_FILE,
-        pair,
-        &[LEGACY_BOOTSTRAP_CERT_FILE, LEGACY_BOOTSTRAP_KEY_FILE],
-    )
+    store_pair(cert_dir, BOOTSTRAP_PAIR_FILE, pair)
 }
 /// Write an ACME-issued `pair` into `cert_dir` (`0600` files, `0700` dir) and
 /// swap it into `store`, so the listener serves the new certificate without
@@ -776,20 +741,14 @@ pub fn install_acme(
 /// Atomically store one ACME-issued chain/key pair in `cert_dir`.
 ///
 /// The chain and key share one length-framed file, so the durable rename swaps
-/// both together. The legacy two-file layout is still readable and is removed
-/// only after the new pair is durable.
+/// both together.
 ///
 /// # Errors
 ///
 /// [`TlsError::Prepare`] when the directory cannot be created or confined,
 /// [`TlsError::Persist`] when the pair file cannot be written.
 pub fn store_acme(cert_dir: &Path, pair: &CertifiedKeyPair) -> Result<(), TlsError> {
-    store_pair(
-        cert_dir,
-        ACME_PAIR_FILE,
-        pair,
-        &[LEGACY_ACME_CERT_FILE, LEGACY_ACME_KEY_FILE],
-    )
+    store_pair(cert_dir, ACME_PAIR_FILE, pair)
 }
 
 fn encode_pair(pair: &CertifiedKeyPair) -> Result<Vec<u8>, TlsError> {
@@ -861,8 +820,7 @@ fn decode_pair(encoded: &[u8]) -> Result<CertifiedKeyPair, TlsError> {
     Ok(CertifiedKeyPair::from_der_chain(leaf, certs, key))
 }
 
-/// Read one usable ACME pair, preferring the atomic file and accepting the
-/// legacy length-framed chain/key files for migration.
+/// Read one usable ACME pair from the atomic pair file.
 ///
 /// Malformed, mismatched, or otherwise unusable stored material is reported as
 /// absent so the caller falls back to its bootstrap certificate. An I/O error
@@ -872,33 +830,13 @@ fn decode_pair(encoded: &[u8]) -> Result<CertifiedKeyPair, TlsError> {
 ///
 /// [`TlsError::Read`] when an existing file cannot be read.
 pub fn load_acme(cert_dir: &Path) -> Result<Option<CertifiedKeyPair>, TlsError> {
-    let pair = if let Some(encoded) = read_optional(&cert_dir.join(ACME_PAIR_FILE))? {
-        match decode_pair(&encoded) {
-            Ok(pair) => pair,
-            Err(TlsError::Pem) => return Ok(None),
-            Err(error) => return Err(error),
-        }
-    } else {
-        let Some(chain) = read_optional(&cert_dir.join(LEGACY_ACME_CERT_FILE))? else {
-            return Ok(None);
-        };
-        let Some(key) = read_optional(&cert_dir.join(LEGACY_ACME_KEY_FILE))? else {
-            return Ok(None);
-        };
-        let mut certs = Vec::new();
-        let mut rest = chain.as_slice();
-        while !rest.is_empty() {
-            match take_len_prefixed(&mut rest) {
-                Ok(cert) => certs.push(cert.to_vec()),
-                Err(TlsError::Pem) => return Ok(None),
-                Err(error) => return Err(error),
-            }
-        }
-        let mut certs = certs.into_iter();
-        let Some(leaf) = certs.next() else {
-            return Ok(None);
-        };
-        CertifiedKeyPair::from_der_chain(leaf, certs.collect(), key)
+    let Some(encoded) = read_optional(&cert_dir.join(ACME_PAIR_FILE))? else {
+        return Ok(None);
+    };
+    let pair = match decode_pair(&encoded) {
+        Ok(pair) => pair,
+        Err(TlsError::Pem) => return Ok(None),
+        Err(error) => return Err(error),
     };
     Ok(pair.to_certified_key().ok().map(|_| pair))
 }
@@ -997,11 +935,9 @@ pub fn load_or_bootstrap(
 mod tests {
     use super::{
         ACME_PAIR_FILE, ALPN_H2_HTTP11, BOOTSTRAP_PAIR_FILE, CertStore, CertifiedKeyPair,
-        LEGACY_ACME_CERT_FILE, LEGACY_ACME_KEY_FILE, LEGACY_BOOTSTRAP_CERT_FILE,
-        LEGACY_BOOTSTRAP_KEY_FILE, MAX_PAIR_CERTS, PAIR_MAGIC, TlsError, bootstrap_self_signed,
-        confine_cert_dir, decode_pair, encode_pair, fingerprint, install_acme, load_acme,
-        load_bootstrap, load_or_bootstrap, renewal_due_at, server_config, serving_pair, store_acme,
-        store_bootstrap, validity_unix,
+        MAX_PAIR_CERTS, PAIR_MAGIC, TlsError, bootstrap_self_signed, confine_cert_dir, decode_pair,
+        encode_pair, fingerprint, install_acme, load_acme, load_bootstrap, load_or_bootstrap,
+        renewal_due_at, server_config, serving_pair, store_acme, store_bootstrap, validity_unix,
     };
     use std::os::unix::fs::PermissionsExt as _;
     use std::sync::Arc;
@@ -1225,8 +1161,6 @@ mod tests {
         let name = ACME_PAIR_FILE;
         let mode = std::fs::metadata(cert_dir.join(name))?.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "{name} is {mode:o}");
-        assert!(!cert_dir.join("acme.cert.der").exists());
-        assert!(!cert_dir.join("acme.key.der").exists());
         let reloaded = load_acme(&cert_dir)?.ok_or("install left no pair")?;
         assert_eq!(reloaded, issued);
         assert_eq!(
@@ -1612,91 +1546,14 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_two_file_bootstrap_pair_is_still_read() -> R {
-        let dir = tempfile::tempdir()?;
-        let cert_dir = dir.path();
-        let pair = pair()?;
-        std::fs::write(cert_dir.join(LEGACY_BOOTSTRAP_CERT_FILE), pair.cert_der())?;
-        // Half a legacy pair is no pair at all.
-        assert!(load_bootstrap(cert_dir)?.is_none());
-
-        std::fs::write(
-            cert_dir.join(LEGACY_BOOTSTRAP_KEY_FILE),
-            &pair.key_pkcs8_der,
-        )?;
-        assert_eq!(load_bootstrap(cert_dir)?, Some(pair.clone()));
-
-        // Storing migrates: the atomic file appears and the legacy files go.
-        store_bootstrap(cert_dir, &pair)?;
-        assert!(cert_dir.join(BOOTSTRAP_PAIR_FILE).exists());
-        assert!(!cert_dir.join(LEGACY_BOOTSTRAP_CERT_FILE).exists());
-        assert!(!cert_dir.join(LEGACY_BOOTSTRAP_KEY_FILE).exists());
-        assert_eq!(load_bootstrap(cert_dir)?, Some(pair));
-        Ok(())
-    }
-
-    #[test]
-    fn a_legacy_acme_chain_is_served_and_a_malformed_one_falls_back() -> R {
-        use rcgen::generate_simple_self_signed;
-        let leaf = generate_simple_self_signed(["leaf.example".to_owned()])?;
-        let issuer = generate_simple_self_signed(["issuer.example".to_owned()])?;
-        let mut chain = Vec::new();
-        for der in [leaf.cert.der().to_vec(), issuer.cert.der().to_vec()] {
-            chain.extend_from_slice(&u32::try_from(der.len())?.to_be_bytes());
-            chain.extend_from_slice(&der);
-        }
-        let key = leaf.signing_key.serialize_der();
-
+    fn a_torn_acme_pair_falls_back_to_the_bootstrap_pair() -> R {
         let dir = tempfile::tempdir()?;
         let cert_dir = dir.path();
         let bootstrap = pair()?;
         store_bootstrap(cert_dir, &bootstrap)?;
-        std::fs::write(cert_dir.join(LEGACY_ACME_CERT_FILE), &chain)?;
-        // A chain without its key is ignored in favour of the bootstrap pair.
-        assert!(load_acme(cert_dir)?.is_none());
-        assert_eq!(serving_pair(cert_dir)?, Some(bootstrap.clone()));
-
-        std::fs::write(cert_dir.join(LEGACY_ACME_KEY_FILE), &key)?;
-        let loaded = load_acme(cert_dir)?.ok_or("the legacy chain was not read")?;
-        assert_eq!(loaded.cert_der(), leaf.cert.der().as_ref());
-        assert_eq!(
-            loaded.intermediates_der(),
-            &[issuer.cert.der().to_vec()][..]
-        );
-        // The listener prefers it over the bootstrap pair.
-        assert_eq!(serving_pair(cert_dir)?, Some(loaded));
-
-        // An empty chain and a torn frame are both "no ACME pair".
-        std::fs::write(cert_dir.join(LEGACY_ACME_CERT_FILE), b"")?;
-        assert!(load_acme(cert_dir)?.is_none());
-        std::fs::write(cert_dir.join(LEGACY_ACME_CERT_FILE), [0, 0, 0, 9, 1])?;
-        assert!(load_acme(cert_dir)?.is_none());
-        assert_eq!(serving_pair(cert_dir)?, Some(bootstrap.clone()));
-
-        // So is a torn atomic file, which takes precedence over the legacy
-        // files once it exists.
         std::fs::write(cert_dir.join(ACME_PAIR_FILE), b"torn")?;
         assert!(load_acme(cert_dir)?.is_none());
         assert_eq!(serving_pair(cert_dir)?, Some(bootstrap));
-        Ok(())
-    }
-
-    /// A legacy name that cannot be removed (here: a directory in its place)
-    /// fails the store loudly rather than leaving two layouts to disagree.
-    #[test]
-    fn a_legacy_file_that_cannot_be_removed_is_reported() -> R {
-        let dir = tempfile::tempdir()?;
-        let cert_dir = dir.path();
-        let blocker = cert_dir.join(LEGACY_BOOTSTRAP_KEY_FILE);
-        std::fs::create_dir(&blocker)?;
-        std::fs::write(blocker.join("inside"), b"x")?;
-        match store_bootstrap(cert_dir, &pair()?) {
-            Err(err @ TlsError::Prepare { .. }) => {
-                assert_eq!(err.message_id().as_str(), "web-tls-store-unwritable");
-                assert!(err.to_string().contains(LEGACY_BOOTSTRAP_KEY_FILE), "{err}");
-            }
-            other => return Err(format!("expected a prepare error, got {other:?}").into()),
-        }
         Ok(())
     }
 

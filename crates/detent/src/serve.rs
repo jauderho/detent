@@ -2566,7 +2566,7 @@ mod web_tests {
         assert_ne!(bound.local_addr().port(), 0);
         let certs = dir.path().join("certs");
         assert!(
-            certs.join("bootstrap.pair").exists() || certs.join("bootstrap.cert.der").exists(),
+            certs.join("bootstrap.pair").exists(),
             "bootstrap cert missing in {certs:?}: {:?}",
             std::fs::read_dir(&certs)
                 .map(|r| r
