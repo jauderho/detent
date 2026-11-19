@@ -14,6 +14,7 @@
 //! a leaf certificate's validity window and ARI identifier, DER or PEM.
 
 use crate::{AcmeError, DnsProvider, DnsRecord};
+use http_body_util::{BodyExt as _, Full, Limited};
 use hyper::body::Bytes;
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::Client;
@@ -30,19 +31,60 @@ use std::time::{Duration, Instant};
 
 type AcmeHttpClient = Client<HttpsConnector<HttpConnector>, BodyWrapper<Bytes>>;
 
-struct Tls13HttpClient(AcmeHttpClient);
+/// One deadline for connect, request and the complete response, for the ACME
+/// client and the provider APIs (`https.rs`).
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// ACME and provider API answers (JSON documents, a PEM chain) are small;
+/// anything larger is refused.
+pub(crate) const MAX_RESPONSE_BYTES: usize = 1 << 20;
+
+/// The ACME client transport. Each exchange, response body included, has one
+/// deadline and a size cap: instant-acme sets no per-request timeout, and its
+/// [`RetryPolicy`] deadline is only checked between polls, so a CA that stops
+/// answering would otherwise hold an order, and the renewal loop, for good.
+pub(crate) struct Tls13HttpClient {
+    client: AcmeHttpClient,
+    timeout: Duration,
+}
+
+impl Tls13HttpClient {
+    /// A TLS 1.3 client that trusts exactly `roots` and gives each exchange
+    /// `timeout`.
+    pub(crate) fn new(roots: rustls::RootCertStore, timeout: Duration) -> Result<Self, AcmeError> {
+        let client = Client::builder(TokioExecutor::new()).build(tls13_connector(roots)?);
+        Ok(Self { client, timeout })
+    }
+}
 
 impl HttpClient for Tls13HttpClient {
     fn request(
         &self,
         request: hyper::Request<BodyWrapper<Bytes>>,
     ) -> Pin<Box<dyn Future<Output = Result<BytesResponse, instant_acme::Error>> + Send>> {
-        let future = self.0.request(request);
+        let future = self.client.request(request);
+        let timeout = self.timeout;
         Box::pin(async move {
-            future
+            let exchange = async move {
+                let (parts, body) = future
+                    .await
+                    .map_err(|err| instant_acme::Error::Other(Box::new(err)))?
+                    .into_parts();
+                let body = Limited::new(body, MAX_RESPONSE_BYTES)
+                    .collect()
+                    .await
+                    .map_err(|err| {
+                        instant_acme::Error::Other(format!("ACME response body: {err}").into())
+                    })?
+                    .to_bytes();
+                Ok(BytesResponse::from(hyper::Response::from_parts(
+                    parts,
+                    Full::new(body),
+                )))
+            };
+            tokio::time::timeout(timeout, exchange)
                 .await
-                .map(BytesResponse::from)
-                .map_err(|err| instant_acme::Error::Other(Box::new(err)))
+                .map_err(|_| instant_acme::Error::Other("ACME request timed out".into()))?
         })
     }
 }
@@ -64,10 +106,10 @@ fn account_builder(ca_root: Option<&Path>) -> Result<AccountBuilder, AcmeError> 
         }
         None => roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
     }
-    let client = Client::builder(TokioExecutor::new()).build(tls13_connector(roots)?);
-    Ok(Account::builder_with_http(Box::new(Tls13HttpClient(
-        client,
-    ))))
+    Ok(Account::builder_with_http(Box::new(Tls13HttpClient::new(
+        roots,
+        REQUEST_TIMEOUT,
+    )?)))
 }
 
 /// The one client TLS posture: TLS 1.3 only, aws-lc-rs, `https://` only,
