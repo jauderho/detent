@@ -100,21 +100,30 @@ fi
 
 log "root=$ROOT min_seconds=$MIN_SECONDS"
 
-# Read `key = value` out of a bunfig.toml, ignoring comments and whitespace.
-# TOML here is a four-line file the repo owns; a full parser is not warranted.
+# Read `key = value` from the [install] section of a bunfig.toml, ignoring
+# comments and whitespace. bun reads minimumReleaseAge and its excludes only
+# there; the same key under [test] or [run] has no effect.
+# TOML here is a short file the repo owns; a full parser is not warranted.
 #
-# An absent key is a normal answer, not an error: `grep` exits 1 and, under
-# `set -o pipefail`, that status would propagate out of the command
-# substitution and abort the whole scan. The trailing `|| true` keeps a missing
-# key as an empty string so the caller can decide what it means.
+# An absent key is a normal answer, not an error: awk prints nothing and exits
+# 0, so the caller gets an empty string and decides what it means.
 toml_value() {
   local file="$1" key="$2"
-  {
-    sed -e 's/#.*$//' "$file" |
-      grep -E "^[[:space:]]*${key}[[:space:]]*=" |
-      head -n 1 |
-      sed -E "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//; s/[[:space:]]*$//"
-  } || true
+  sed -e 's/#.*$//' "$file" |
+    awk -v key="$key" '
+      /^[[:space:]]*\[/ {
+        sec = $0
+        gsub(/[[:space:]]/, "", sec)
+        in_install = (sec == "[install]")
+        next
+      }
+      in_install && !found && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+        sub("^[[:space:]]*" key "[[:space:]]*=[[:space:]]*", "")
+        sub("[[:space:]]*$", "")
+        print
+        found = 1
+      }
+    '
 }
 
 violations=0
