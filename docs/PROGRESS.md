@@ -5,6 +5,53 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-11-19 - Second audit: the remaining fixes (3, 5 to 20)
+
+- Updater:
+  - A crash between the swap and the health check no longer leaves an
+    unchecked binary. The swap writes `<target>.pending` (the tag, fsynced)
+    after it keeps `.prev` and before its rename. A healthy restart or a
+    rollback removes the marker. The next `detent update` restores `.prev`
+    if the marker is still there and the target differs from `.prev`, marks
+    the tag bad and restarts. Owner choice: only the next `detent update`
+    recovers; there is no boot-time unit.
+  - The config and the serving certificate are read before the download, so
+    a check that cannot be made refuses the update and marks nothing bad.
+  - `update/lock` (`File::try_lock`) allows one run at a time.
+  - `systemctl show` with a non-zero exit is an error.
+  - `--allow-downgrade` stops at a release that the age gate holds.
+- ACME:
+  - A changed directory URL makes `check_credentials_directory` refuse
+    credentials for the old CA.
+  - TXT delete errors are logged (`tracing::warn`). This adds `tracing`, a
+    workspace dependency, to detent-acme. acme-dns delete returns `Ok`.
+  - Zones and domains are compared in lowercase.
+- Modules:
+  - unbound: a `name:` outside `forward-zone:` is not modeled. A trailing
+    `#` comment ends the value. An edit that would not read back is refused.
+  - samba: continuation lines are not modeled, and an edit that would not
+    read back is refused.
+  - NetworkManager: a non-ethernet `type`, or an `interface-name` that does
+    not match the `id`, is refused instead of overwritten.
+  - A bad interface name has its own message,
+    `network-invalid-interface-name`.
+- Console: the module page uses the new hash after an apply. Times show
+  the zone name. Certificate and token expiry use the host clock: the
+  offset comes from each response's `Date` header (`serverNow`).
+- Scripts: `acme-serve-check` gives its token a one-hour expiry, revokes it
+  and removes its work dir. `cooldown-check` reads keys only in `[install]`.
+- Open gaps:
+  - NM: a profile with an `id` and no `interface-name` still edits.
+  - `mount_unit_state` ignores the `systemctl` exit status.
+  - detent-update has no coverage floor.
+  - The resolver refusals change what an edit can do on hand-made files.
+
+**Checks.** `cargo fmt --all --check` clean; `cargo clippy --workspace
+--all-targets --locked -- -D warnings` exit 0 with and without
+`--all-features`; detent-acme clippy with `dns-providers` exit 0; `cargo test
+--workspace --all-features --locked` exit 0; web typecheck, lint, i18n,
+api and `bun test` exit 0.
+
 ## 2026-11-19 - Audit fixes: Kea pairing, ifupdown stanzas, ACME deadline
 
 - dhcp (Kea): subnets pair with the model by `id`, then by `subnet` prefix;
