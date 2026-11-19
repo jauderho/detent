@@ -110,8 +110,12 @@ pub struct PendingCommit {
     pub commit_id: CommitId,
     /// Seconds until automatic rollback, as the monitor clamped them.
     pub timeout_s: u16,
-    /// When the window closes, RFC 3339 UTC.
+    /// When the window closes, RFC 3339 UTC, by the device's clock.
     pub deadline: String,
+    /// Seconds left when this report was produced, rounded up, so a client
+    /// whose clock differs from the device's can count down from its own
+    /// receive time instead of from `deadline`.
+    pub remaining_s: u16,
     /// How many targets the monitor will roll back if it expires.
     pub rollback_targets: u16,
 }
@@ -606,12 +610,17 @@ mod tests {
             commit_id: CommitId(1),
             timeout_s: 90,
             deadline: "2026-09-04T00:00:00Z".to_owned(),
+            remaining_s: 90,
             rollback_targets: 1,
         };
         assert!(
             serde_json::to_value(&pending)?
                 .pointer("/deadline")
                 .is_some()
+        );
+        assert_eq!(
+            serde_json::to_value(&pending)?.pointer("/remaining_s"),
+            Some(&serde_json::json!(90))
         );
         assert_eq!(pending.clone(), pending);
 

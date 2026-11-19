@@ -345,6 +345,7 @@ pub fn every_outcome() -> Vec<OpOutcome> {
                 commit_id: CommitId(1),
                 timeout_s: 90,
                 deadline: "2026-09-04T00:00:00Z".to_owned(),
+                remaining_s: 90,
                 rollback_targets: 1,
             }),
             checks: Vec::new(),

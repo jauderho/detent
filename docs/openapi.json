@@ -3142,6 +3142,7 @@
           "commit_id",
           "timeout_s",
           "deadline",
+          "remaining_s",
           "rollback_targets"
         ],
         "properties": {
@@ -3151,7 +3152,13 @@
           },
           "deadline": {
             "type": "string",
-            "description": "When the window closes, RFC 3339 UTC."
+            "description": "When the window closes, RFC 3339 UTC, by the device's clock."
+          },
+          "remaining_s": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Seconds left when this report was produced, rounded up, so a client\nwhose clock differs from the device's can count down from its own\nreceive time instead of from `deadline`.",
+            "minimum": 0
           },
           "rollback_targets": {
             "type": "integer",

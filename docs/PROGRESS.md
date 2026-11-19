@@ -5,6 +5,17 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-11-19 - The commit window counts from the server's remaining time
+
+A device with no RTC can report a commit-confirm deadline minutes behind the browser clock. The console counted down from that wall-clock `deadline`, so a device 90 s behind started at zero: the banner expired, polling stopped, and the admin could not confirm.
+
+- `PendingCommit` gains `remaining_s`: seconds left when the report was produced, rounded up. The engine keeps the window's close as a monotonic `Instant` and derives `remaining_s` on read; at arm time it equals `timeout_s`. `deadline` stays for the CLI and MCP.
+- The console runs the countdown from `remaining_s` plus `query.dataUpdatedAt`, the browser's receive time, the same pattern as `AuthProvider`.
+- `usePendingCommitQuery` sets `notifyOnChangeProps: ['data']`. Reading `dataUpdatedAt` during render made every 5 s poll re-render the shell, and in the fake-timer polling test in `PendingCommit.test.tsx` that left React stalled, so a later test file (`CredentialNotices`) timed out. Found by bisecting; the fake-timer test is unchanged.
+- Tests: `a_commit_confirm_module_arms_a_window_that_confirm_closes` (Rust, `remaining_s`), `remaining_seconds_round_up_and_clamp` (Rust), and `counts down the server remaining time when its deadline is behind the browser clock` (TS). The TS test failed before the fix: `Unable to find an element with the text: 01:00`.
+
+**Checks.** `cargo fmt --all --check` clean. `cargo test -p detent-ops --locked` 157 passed; `-p detent-web` 515 passed, 2 ignored; `-p detent` 297 passed. Web: typecheck clean, `api:check` OK, `lint` no errors (one pre-existing `biome.json` schema-version notice), `test` 614 passed.
+
 ## 2026-10-31 - Rust follows stable everywhere
 
 Owner decision 2026-10-31 (`DECISIONS.md`, "Rust toolchain").

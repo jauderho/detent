@@ -132,6 +132,7 @@ export const APPLY_REPORT = {
     commit_id: 1,
     timeout_s: 120,
     deadline: new Date(Date.now() + 120_000).toISOString(),
+    remaining_s: 120,
     rollback_targets: 1,
   },
   service: null,

@@ -12,6 +12,7 @@ import { PendingCommitSlot, usePendingCommit } from '../PendingCommit'
 const COMMIT: PendingCommit = {
   commit_id: 7,
   deadline: '2999-10-21T07:28:00Z',
+  remaining_s: 300,
   rollback_targets: 1,
   timeout_s: 300,
 }
@@ -204,6 +205,34 @@ describe('PendingCommitProvider', () => {
       expect(stub.calls.some((call) => call.url === '/api/v1/commits/pending')).toBe(true),
     )
     expect(screen.queryByRole('button', { name: 'roll back commit' })).toBeNull()
+  })
+
+  it('counts down the server remaining time when its deadline is behind the browser clock', async () => {
+    // A device with no RTC can report a deadline minutes in the past. The
+    // countdown must follow `remaining_s`, not the wall-clock `deadline`.
+    // Keep this before the fake-timer test below. Run after it, this render never
+    // reached the DOM (observed; the cause is not isolated).
+    const stub = stubFetchByUrl([
+      [
+        '/api/v1/auth/session',
+        () =>
+          jsonResponse({
+            csrf_token: 'csrf-abc',
+            expires_in_secs: 900,
+            scopes: ['read', 'write'],
+            subject: 'operator',
+            totp_satisfied: false,
+          }),
+      ],
+      [
+        '/api/v1/commits/pending',
+        () => jsonResponse({ ...COMMIT, deadline: '2000-01-01T00:00:00Z', remaining_s: 60 }),
+      ],
+    ])
+    renderWithProviders(<PendingCommitSlot />, { fetch: stub.fetch })
+
+    expect(await screen.findByText('01:00')).toBeInTheDocument()
+    expect(screen.getByText(/waiting to be confirmed/)).toBeInTheDocument()
   })
 
   it('polls while a pending commit remains armed', async () => {

@@ -48,6 +48,7 @@ describe('fetchPendingCommit', () => {
     const pending = {
       commit_id: 7,
       deadline: '2999-10-21T07:28:00Z',
+      remaining_s: 300,
       rollback_targets: 1,
       timeout_s: 300,
     }

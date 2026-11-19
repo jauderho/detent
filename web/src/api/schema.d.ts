@@ -1261,8 +1261,15 @@ export interface components {
              *     [`Operation::ConfirmCommit`](crate::Operation::ConfirmCommit).
              */
             commit_id: components["schemas"]["CommitId"];
-            /** @description When the window closes, RFC 3339 UTC. */
+            /** @description When the window closes, RFC 3339 UTC, by the device's clock. */
             deadline: string;
+            /**
+             * Format: int32
+             * @description Seconds left when this report was produced, rounded up, so a client
+             *     whose clock differs from the device's can count down from its own
+             *     receive time instead of from `deadline`.
+             */
+            remaining_s: number;
             /**
              * Format: int32
              * @description How many targets the monitor will roll back if it expires.
