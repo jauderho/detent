@@ -14,7 +14,7 @@
 //! a leaf certificate's validity window and ARI identifier, DER or PEM.
 
 use crate::{AcmeError, DnsProvider, DnsRecord};
-use http_body_util::{BodyExt as _, Full, Limited};
+use http_body_util::{BodyExt as _, Limited};
 use hyper::body::Bytes;
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::Client;
@@ -77,10 +77,10 @@ impl HttpClient for Tls13HttpClient {
                         instant_acme::Error::Other(format!("ACME response body: {err}").into())
                     })?
                     .to_bytes();
-                Ok(BytesResponse::from(hyper::Response::from_parts(
+                Ok(BytesResponse {
                     parts,
-                    Full::new(body),
-                )))
+                    body: Box::new(body),
+                })
             };
             tokio::time::timeout(timeout, exchange)
                 .await
