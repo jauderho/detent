@@ -45,7 +45,7 @@ use detent_core::descriptor::{
     UnitNames, Upstream, ValidationCtx, apply_hints,
 };
 use detent_core::diag::{Diagnostic, Diagnostics, FieldPath, MessageId, Severity};
-use detent_core::doc::{Document, LineKind};
+use detent_core::doc::{Document, Line, LineKind};
 use detent_core::module::{ConfigModule, EditError, EditReport, ModelError, ParseError};
 use detent_core::version::since_diagnostic;
 
@@ -236,6 +236,35 @@ fn classify(raw: &str) -> LineKind {
         LineKind::Directive
     } else {
         LineKind::Unknown
+    }
+}
+
+/// A copy of `doc` in which every line that continues the line before it
+/// (that line ends in `\`, as smb.conf(5) allows) is [`LineKind::Unknown`].
+/// The first line of the run is already `Unknown`; a comment line does not
+/// continue. `to_model` reads and `apply` plans against this copy, so a
+/// continued value is never modeled, rewritten or cut apart.
+fn unfolded(doc: &Document) -> Document {
+    let mut masked = doc.clone();
+    masked.rebuild(|lines| {
+        let mut continued = false;
+        for line in lines.iter_mut() {
+            if continued {
+                *line = Line::new(line.raw().to_owned(), LineKind::Unknown, line.ending());
+            }
+            continued = line.raw().trim_end().ends_with('\\') && line.kind() != LineKind::Comment;
+        }
+    });
+    masked
+}
+
+/// The model of `doc`: every directive [`unfolded`] keeps, in file order.
+fn project(doc: &Document) -> Model {
+    Model {
+        entries: unfolded(doc)
+            .lines_of_kind(LineKind::Directive)
+            .filter_map(|line| parse_entry(line.raw()))
+            .collect(),
     }
 }
 
@@ -871,12 +900,7 @@ impl ConfigModule for SambaModule {
     /// `Unknown` and `Comment` lines stay in the `Doc` and are what makes
     /// `render` lossless.
     fn to_model(doc: &Self::Doc) -> Result<Self::Model, ModelError> {
-        Ok(Model {
-            entries: doc
-                .lines_of_kind(LineKind::Directive)
-                .filter_map(|line| parse_entry(line.raw()))
-                .collect(),
-        })
+        Ok(project(doc))
     }
 
     /// The two-pass, minimal-edit shape. Pass 1 is read-only and renders every
@@ -885,11 +909,25 @@ impl ConfigModule for SambaModule {
     /// equals the model's is not rendered at all, so hand-tuned indentation
     /// survives. Pass 2 only ever touches `Directive` lines; comments, blanks
     /// and unknown directives keep their position. Entries are aligned with the
-    /// model ([`Document::edit_entries`]), so dropping or adding one never
+    /// model ([`Document::plan_entries`]), so dropping or adding one never
     /// rewrites or moves another; a new directive goes after the one before it
     /// in its `[section]`, and a new section after the end of the previous one.
+    /// An edit that would not read back as `model` (a new line after a
+    /// trailing `\`) is refused.
     fn apply(doc: &mut Self::Doc, model: &Self::Model) -> Result<EditReport, EditError> {
-        doc.edit_entries(&model.entries, parse_entry, render_line, opens_section)
+        let plan =
+            unfolded(doc).plan_entries(&model.entries, parse_entry, render_line, opens_section)?;
+        let mut edited = doc.clone();
+        let report = edited.apply_plan(plan);
+        if project(&edited) != *model {
+            return Err(EditError::Unsupported {
+                message: "the edit would not read back as the model; \
+                          a line after a trailing backslash continues the line before it"
+                    .to_owned(),
+            });
+        }
+        *doc = edited;
+        Ok(report)
     }
 
     /// Every finding carries a Fluent id — never a rendered sentence, this crate
@@ -1232,6 +1270,51 @@ mod tests {
             ])
         );
         assert_eq!(SambaModule::render(&doc), src);
+        Ok(())
+    }
+
+    #[test]
+    fn continuation_lines_are_not_modeled() -> Result<(), String> {
+        let src = concat!(
+            "[global]\n",
+            "root preexec = /usr/bin/x --a=1 \\\n",
+            "   # --c=3 \\\n",
+            "   --b=2\n",
+            "# note \\\n",
+            "workgroup = MYGROUP\n"
+        );
+        let mut doc = SambaModule::parse(src).map_err(|e| e.to_string())?;
+        let parsed = SambaModule::to_model(&doc).map_err(|e| e.to_string())?;
+        assert_eq!(
+            parsed,
+            model(vec![
+                entry(Some("global"), "", ""),
+                entry(None, "workgroup", "MYGROUP"),
+            ]),
+            "a continued line is not a directive; a comment does not continue"
+        );
+        let report = SambaModule::apply(&mut doc, &parsed).map_err(|e| e.to_string())?;
+        assert_eq!(report, EditReport::default());
+        assert_eq!(SambaModule::render(&doc), src);
+
+        let tail_src = "[global]\nroot preexec = /usr/bin/x \\\n";
+        let mut tail = SambaModule::parse(tail_src).map_err(|e| e.to_string())?;
+        let appended = model(vec![
+            entry(Some("global"), "", ""),
+            entry(Some("share"), "", ""),
+        ]);
+        assert!(
+            matches!(
+                SambaModule::apply(&mut tail, &appended),
+                Err(EditError::Unsupported { .. })
+            ),
+            "a section after a trailing backslash would fold into the command"
+        );
+        assert_eq!(
+            SambaModule::render(&tail),
+            tail_src,
+            "a refusal edits nothing"
+        );
         Ok(())
     }
 
