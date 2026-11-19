@@ -109,6 +109,15 @@ impl SystemdManager {
                 "systemctl show {unit} timed out"
             )));
         }
+        // An unknown unit exits 0 with `LoadState=not-found`; a non-zero
+        // exit (no bus, no permission) says nothing about the unit.
+        if output.status != Some(0) {
+            return Err(ServiceError::Failed(format!(
+                "systemctl show {unit} exited {:?}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
         Ok(parse_key_values(&output.stdout))
     }
 
