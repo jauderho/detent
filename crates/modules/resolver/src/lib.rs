@@ -1989,33 +1989,29 @@ mod tests {
     // ------------------------------------------------------------ render tests
 
     #[test]
-    fn render_resolv_is_canonical() -> Result<(), String> {
+    fn render_resolv_is_canonical() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(
             render_resolv(&ResolvEntry::Nameserver {
                 ip: ip("192.0.2.53")
-            })
-            .map_err(|e| e.to_string())?,
+            })?,
             "nameserver 192.0.2.53"
         );
         assert_eq!(
             render_resolv(&ResolvEntry::Search {
                 domains: vec!["example.com".to_owned()]
-            })
-            .map_err(|e| e.to_string())?,
+            })?,
             "search example.com"
         );
         assert_eq!(
             render_resolv(&ResolvEntry::Domain {
                 domain: "example.com".to_owned()
-            })
-            .map_err(|e| e.to_string())?,
+            })?,
             "domain example.com"
         );
         assert_eq!(
             render_resolv(&ResolvEntry::Options {
                 options: vec!["ndots:2".to_owned()]
-            })
-            .map_err(|e| e.to_string())?,
+            })?,
             "options ndots:2"
         );
 
@@ -2023,37 +2019,30 @@ mod tests {
     }
 
     #[test]
-    fn render_resolved_is_canonical() -> Result<(), String> {
-        assert_eq!(
-            render_resolved(&ResolvedEntry::Resolve).map_err(|e| e.to_string())?,
-            "[Resolve]"
-        );
+    fn render_resolved_is_canonical() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(render_resolved(&ResolvedEntry::Resolve)?, "[Resolve]");
         assert_eq!(
             render_resolved(&ResolvedEntry::Dns {
                 servers: vec![name("9.9.9.9", Some("dns.quad9.net"))]
-            })
-            .map_err(|e| e.to_string())?,
+            })?,
             "DNS=9.9.9.9#dns.quad9.net"
         );
         assert_eq!(
             render_resolved(&ResolvedEntry::DnsSec {
                 mode: ResolvedDnsSec::AllowDowngrade
-            })
-            .map_err(|e| e.to_string())?,
+            })?,
             "DNSSEC=allow-downgrade"
         );
         assert_eq!(
             render_resolved(&ResolvedEntry::DnsOverTls {
                 mode: ResolvedDnsOverTls::Opportunistic
-            })
-            .map_err(|e| e.to_string())?,
+            })?,
             "DNSOverTLS=opportunistic"
         );
         assert_eq!(
             render_resolved(&ResolvedEntry::Domains {
                 domains: vec!["~.".to_owned()]
-            })
-            .map_err(|e| e.to_string())?,
+            })?,
             "Domains=~."
         );
 
@@ -2061,40 +2050,30 @@ mod tests {
     }
 
     #[test]
-    fn render_unbound_is_canonical() -> Result<(), String> {
-        assert_eq!(
-            render_unbound(&UnboundEntry::Server).map_err(|e| e.to_string())?,
-            "server:"
-        );
-        assert_eq!(
-            render_unbound(&UnboundEntry::ForwardZone).map_err(|e| e.to_string())?,
-            "forward-zone:"
-        );
+    fn render_unbound_is_canonical() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(render_unbound(&UnboundEntry::Server)?, "server:");
+        assert_eq!(render_unbound(&UnboundEntry::ForwardZone)?, "forward-zone:");
         assert_eq!(
             render_unbound(&UnboundEntry::Hardening {
                 key: "aggressive-nsec".to_owned(),
                 enabled: true
-            })
-            .map_err(|e| e.to_string())?,
+            })?,
             "    aggressive-nsec: yes"
         );
         assert_eq!(
             render_unbound(&UnboundEntry::ForwardName {
                 name: ".".to_owned()
-            })
-            .map_err(|e| e.to_string())?,
+            })?,
             "    name: ."
         );
         assert_eq!(
             render_unbound(&UnboundEntry::ForwardAddr {
                 addr: "9.9.9.9@853#dns.quad9.net".to_owned()
-            })
-            .map_err(|e| e.to_string())?,
+            })?,
             "    forward-addr: 9.9.9.9@853#dns.quad9.net"
         );
         assert_eq!(
-            render_unbound(&UnboundEntry::ForwardTls { enabled: true })
-                .map_err(|e| e.to_string())?,
+            render_unbound(&UnboundEntry::ForwardTls { enabled: true })?,
             "    forward-tls-upstream: yes"
         );
 
@@ -2486,8 +2465,8 @@ mod tests {
     }
 
     #[test]
-    fn apply_removes_and_appends() -> Result<(), String> {
-        let mut doc = ResolverModule::parse("nameserver 192.0.2.1\n").map_err(|e| e.to_string())?;
+    fn apply_removes_and_appends() -> Result<(), Box<dyn std::error::Error>> {
+        let mut doc = ResolverModule::parse("nameserver 192.0.2.1\n")?;
         let wanted = m(
             vec![
                 ResolvEntry::Nameserver {
@@ -2500,7 +2479,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
         );
-        let report = ResolverModule::apply(&mut doc, &wanted).map_err(|e| e.to_string())?;
+        let report = ResolverModule::apply(&mut doc, &wanted)?;
         assert_eq!(report.changed_lines, 1);
         assert_eq!(report.added, 1);
         assert_eq!(
@@ -2509,8 +2488,7 @@ mod tests {
         );
 
         // And the inverse: a model with fewer entries drops the surplus line.
-        let mut doc = ResolverModule::parse("nameserver 192.0.2.1\noptions edns0\n")
-            .map_err(|e| e.to_string())?;
+        let mut doc = ResolverModule::parse("nameserver 192.0.2.1\noptions edns0\n")?;
         let wanted = m(
             vec![ResolvEntry::Nameserver {
                 ip: ip("192.0.2.1"),
@@ -2518,7 +2496,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
         );
-        let report = ResolverModule::apply(&mut doc, &wanted).map_err(|e| e.to_string())?;
+        let report = ResolverModule::apply(&mut doc, &wanted)?;
         assert_eq!(report.removed, 1);
         assert_eq!(ResolverModule::render(&doc), "nameserver 192.0.2.1\n");
 
@@ -2668,12 +2646,10 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_copy_validates_without_findings() -> Result<(), String> {
-        let model = ResolverModule::to_model(
-            &ResolverModule::parse("nameserver 192.0.2.1\nsearch example.com\noptions ndots:2\n")
-                .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
+    fn a_fresh_copy_validates_without_findings() -> Result<(), Box<dyn std::error::Error>> {
+        let model = ResolverModule::to_model(&ResolverModule::parse(
+            "nameserver 192.0.2.1\nsearch example.com\noptions ndots:2\n",
+        )?)?;
         let diagnostics = ResolverModule::validate(&model, &ctx(&profile()));
         assert_eq!(diagnostics, Diagnostics::new());
 
@@ -2857,11 +2833,10 @@ mod tests {
     }
 
     #[test]
-    fn each_section_names_its_own_file() -> Result<(), String> {
+    fn each_section_names_its_own_file() -> Result<(), Box<dyn std::error::Error>> {
         let target = |model: &Model| {
             ResolverModule::model_target(model)
                 .map(|path| path.map(detent_core::descriptor::PathSpec::as_str))
-                .map_err(|e| e.to_string())
         };
         assert_eq!(target(&m(Vec::new(), Vec::new(), Vec::new()))?, None);
         let nameserver = ResolvEntry::Nameserver {
@@ -3464,7 +3439,8 @@ mod tests {
     }
     #[cfg(feature = "fuzzing")]
     #[test]
-    fn arbitrary_impls_cover_every_arm_and_apply_cleanly() -> Result<(), String> {
+    fn arbitrary_impls_cover_every_arm_and_apply_cleanly() -> Result<(), Box<dyn std::error::Error>>
+    {
         use super::{arbitrary_dns_servers, arbitrary_domain, arbitrary_forward_addr};
         use arbitrary::{Arbitrary, Unstructured};
 
@@ -3484,18 +3460,12 @@ mod tests {
             &[0xff; 256],
         ];
         for data in buffers {
-            let resolv =
-                ResolvEntry::arbitrary(&mut Unstructured::new(data)).map_err(|e| e.to_string())?;
-            let resolved = ResolvedEntry::arbitrary(&mut Unstructured::new(data))
-                .map_err(|e| e.to_string())?;
-            let unbound =
-                UnboundEntry::arbitrary(&mut Unstructured::new(data)).map_err(|e| e.to_string())?;
-            let domain =
-                arbitrary_domain(&mut Unstructured::new(data)).map_err(|e| e.to_string())?;
-            let servers =
-                arbitrary_dns_servers(&mut Unstructured::new(data)).map_err(|e| e.to_string())?;
-            let addr =
-                arbitrary_forward_addr(&mut Unstructured::new(data)).map_err(|e| e.to_string())?;
+            let resolv = ResolvEntry::arbitrary(&mut Unstructured::new(data))?;
+            let resolved = ResolvedEntry::arbitrary(&mut Unstructured::new(data))?;
+            let unbound = UnboundEntry::arbitrary(&mut Unstructured::new(data))?;
+            let domain = arbitrary_domain(&mut Unstructured::new(data))?;
+            let servers = arbitrary_dns_servers(&mut Unstructured::new(data))?;
+            let addr = arbitrary_forward_addr(&mut Unstructured::new(data))?;
 
             assert!(
                 is_valid_domain(&domain),
@@ -3519,8 +3489,8 @@ mod tests {
                 // A forward item reads back only inside a forward zone.
                 unbound: vec![UnboundEntry::ForwardZone, unbound],
             };
-            let mut doc = ResolverModule::parse("").map_err(|e| e.to_string())?;
-            ResolverModule::apply(&mut doc, &applied).map_err(|e| e.to_string())?;
+            let mut doc = ResolverModule::parse("")?;
+            ResolverModule::apply(&mut doc, &applied)?;
         }
         Ok(())
     }

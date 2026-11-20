@@ -1779,7 +1779,9 @@ mod tests {
     fn protocol_rank_follows_the_documented_order() {
         assert_eq!(protocol_rank("NT1"), Some(1));
         assert_eq!(protocol_rank("smb2_02"), Some(2));
+        assert_eq!(protocol_rank("SMB2_10"), Some(3));
         assert_eq!(protocol_rank("SMB3_00"), Some(4));
+        assert_eq!(protocol_rank("SMB3_02"), Some(5));
         assert_eq!(protocol_rank("SMB3_11"), Some(6));
         assert_eq!(protocol_rank("garbage"), None);
     }
@@ -1806,23 +1808,21 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_valid_and_apply_to_an_empty_file() -> Result<(), String> {
+    fn defaults_are_valid_and_apply_to_an_empty_file() -> Result<(), Box<dyn std::error::Error>> {
         for os in [Os::Linux, Os::MacOs, Os::Other] {
             let host = profile(os);
             let ctx = ValidationCtx::new(&host);
             let model = SambaModule::defaults(&host);
             assert!(!SambaModule::validate(&model, &ctx).has_errors());
-            let mut doc = SambaModule::parse("").map_err(|e| e.to_string())?;
-            let report = SambaModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+            let mut doc = SambaModule::parse("")?;
+            let report = SambaModule::apply(&mut doc, &model)?;
             assert_eq!(report.added, model.entries.len());
             let rendered = SambaModule::render(&doc);
             assert_eq!(
                 rendered,
                 "[global]\nserver min protocol = SMB3_00\nserver signing = mandatory\nsmb encrypt = required\nmap to guest = Never\nrestrict anonymous = 2\nload printers = no\n"
             );
-            let back =
-                SambaModule::to_model(&SambaModule::parse(&rendered).map_err(|e| e.to_string())?)
-                    .map_err(|e| e.to_string())?;
+            let back = SambaModule::to_model(&SambaModule::parse(&rendered)?)?;
             assert_eq!(back, model);
         }
         Ok(())
