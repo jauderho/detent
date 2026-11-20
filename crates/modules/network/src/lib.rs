@@ -1237,6 +1237,14 @@ fn check_nm_connection(doc: &Document) -> Result<(), EditError> {
             message: format!("NetworkManager interface-name {name:?} differs from the id"),
         });
     }
+    // A profile with no `interface-name` matches any device. The renderer
+    // writes `interface-name=<id>`, which would tie it to a device of that
+    // name and could take the host off the network.
+    if let Some(id) = ids.iter().find(|id| !names.contains(id)) {
+        return Err(EditError::Unsupported {
+            message: format!("NetworkManager profile {id:?} has no interface-name"),
+        });
+    }
     Ok(())
 }
 
@@ -4197,12 +4205,16 @@ mod tests {
         // Routes and bridges have no keyfile form, so NM refuses them rather
         // than drop them. Addresses and interface shape survive the NM round
         // trip.
-        let mut nm = NetworkModule::parse("[connection]\nid=eth0\n").map_err(|e| e.to_string())?;
+        let mut nm = NetworkModule::parse("[connection]\nid=eth0\ninterface-name=eth0\n")
+            .map_err(|e| e.to_string())?;
         assert!(matches!(
             NetworkModule::apply(&mut nm, &model),
             Err(super::EditError::Unsupported { .. })
         ));
-        assert_eq!(NetworkModule::render(&nm), "[connection]\nid=eth0\n");
+        assert_eq!(
+            NetworkModule::render(&nm),
+            "[connection]\nid=eth0\ninterface-name=eth0\n"
+        );
         let mut routeless = bridgeless.clone();
         for iface in &mut routeless.interfaces {
             iface.routes.clear();
@@ -4213,7 +4225,10 @@ mod tests {
             NetworkModule::apply(&mut nm, &routeless),
             Err(super::EditError::Unsupported { .. })
         ));
-        assert_eq!(NetworkModule::render(&nm), "[connection]\nid=eth0\n");
+        assert_eq!(
+            NetworkModule::render(&nm),
+            "[connection]\nid=eth0\ninterface-name=eth0\n"
+        );
         routeless.interfaces.truncate(1);
         NetworkModule::apply(&mut nm, &routeless).map_err(|e| e.to_string())?;
         let nm_rendered = NetworkModule::render(&nm);
@@ -4423,7 +4438,7 @@ mod tests {
         assert!(lines.iter().any(|l| l == "iface eth0 inet dhcp"));
         assert!(lines.iter().any(|l| l == "iface eth0 inet6 dhcp"));
         // NetworkManager writes DHCPv6 as `[ipv6]` `method=auto`.
-        let nm = "[connection]\nid=eth0\n";
+        let nm = "[connection]\nid=eth0\ninterface-name=eth0\n";
         assert!(assert_apply_keeps_model(nm, &v4only)?);
         Ok(())
     }
@@ -4434,6 +4449,8 @@ mod tests {
         for src in [
             "[connection]\nid=home\ntype=wifi\ninterface-name=home\n\n[wifi]\nssid=home\n\n[ipv4]\nmethod=auto\n",
             "[connection]\nid=uplink\ntype=ethernet\ninterface-name=eth0\n\n[ipv4]\nmethod=auto\n",
+            // No interface-name: the profile matches any device.
+            "[connection]\nid=uplink\ntype=ethernet\n\n[ipv4]\nmethod=auto\n",
             ethernet,
         ] {
             let mut doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
@@ -5269,7 +5286,7 @@ mod tests {
             ("# /etc\n", &empty),
             ("# /etc\n", &one),
             ("[Match]\nName=eth0\n", &one),
-            ("[connection]\nid=eth0\n", &one),
+            ("[connection]\nid=eth0\ninterface-name=eth0\n", &one),
             ("auto eth0\n", &empty),
         ] {
             assert!(!assert_apply_keeps_model(src, model)?, "{src:?} accepted");
