@@ -23,7 +23,7 @@ use std::fs::{DirBuilder, OpenOptions};
 use std::io::Write as _;
 use std::os::unix::fs::{DirBuilderExt as _, FileExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use detent_core::diag::MessageId;
 use detent_platform::fs::atomic::Sha256Digest;
@@ -69,8 +69,18 @@ pub enum AuditResult {
     Started,
 }
 
+/// The warning logged when an append finds the log ending in a torn line.
+const TORN_NOTE: &str = "the audit log ends in a torn line; the next record notes its digest";
+
 /// Serializes appends across every [`FileAudit`] instance in this process.
 static APPEND_LOCK: Mutex<()> = Mutex::new(());
+
+/// Take `lock`, which serializes appends. A poisoned lock is an error: a
+/// thread panicked in the middle of an append.
+fn lock_append(lock: &Mutex<()>) -> Result<MutexGuard<'_, ()>, AuditError> {
+    lock.lock()
+        .map_err(|_| AuditError::Chain("audit append lock was poisoned".to_owned()))
+}
 
 /// The sequence and chain hash stored in every persisted audit record.
 ///
@@ -241,6 +251,12 @@ pub enum AuditError {
     /// The log's sequence or hash chain is invalid.
     #[error("audit chain is invalid: {0}")]
     Chain(String),
+}
+
+impl From<serde_json::Error> for AuditError {
+    fn from(err: serde_json::Error) -> Self {
+        Self::Encode(err.to_string())
+    }
 }
 
 /// Where audit records go.
@@ -439,9 +455,7 @@ fn sync_directory(dir: &Path) -> Result<(), AuditError> {
 
 impl AuditSink for FileAudit {
     fn record(&self, record: &AuditRecord) -> Result<(), AuditError> {
-        let _guard = APPEND_LOCK
-            .lock()
-            .map_err(|_| AuditError::Chain("audit append lock was poisoned".to_owned()))?;
+        let _guard = lock_append(&APPEND_LOCK)?;
         let start = self.rotated_anchor()?;
         let raw = self.read_log()?;
         let scan = match raw {
@@ -459,10 +473,7 @@ impl AuditSink for FileAudit {
         // a gap in the new file.
         if !scan.gap.is_empty() && !rotate {
             let bytes = scan.gap.len();
-            tracing::warn!(
-                bytes,
-                "the audit log ends in a torn line; the next record notes its digest"
-            );
+            tracing::warn!(bytes, "{TORN_NOTE}");
             chain.torn = Some(Sha256Digest::of(&scan.gap).to_string());
         }
         let mut stored = record.clone();
@@ -477,8 +488,7 @@ impl AuditSink for FileAudit {
         {
             line.push(b'\n');
         }
-        serde_json::to_writer(&mut line, &stored)
-            .map_err(|err| AuditError::Encode(err.to_string()))?;
+        serde_json::to_writer(&mut line, &stored)?;
         line.push(b'\n');
         if rotate {
             std::fs::rename(&self.path, self.rotated_path())?;
@@ -515,10 +525,7 @@ impl AuditSink for FileAudit {
                 gap.push(line);
                 continue;
             };
-            let chain = record
-                .chain
-                .clone()
-                .ok_or_else(|| AuditError::Chain("a record has no chain metadata".to_owned()))?;
+            let chain = chain_of(&record)?.clone();
             // Every record returned matches its hash, the oldest one too.
             if make_chain(&record, None)?.hash != chain.hash {
                 return Err(AuditError::Chain(format!(
@@ -627,7 +634,7 @@ fn make_chain(
 ) -> Result<AuditChain, AuditError> {
     let mut unsigned = record.clone();
     unsigned.chain = None;
-    let bytes = serde_json::to_vec(&unsigned).map_err(|err| AuditError::Encode(err.to_string()))?;
+    let bytes = serde_json::to_vec(&unsigned)?;
     Ok(AuditChain {
         sequence: previous.map_or(1, |chain| chain.sequence.saturating_add(1)),
         prev: previous.map(|chain| chain.hash.clone()),
@@ -691,6 +698,14 @@ fn scan_records(
     Ok(scan)
 }
 
+/// The chain metadata of `record`, or an error when it was never chained.
+fn chain_of(record: &AuditRecord) -> Result<&AuditChain, AuditError> {
+    record
+        .chain
+        .as_ref()
+        .ok_or_else(|| AuditError::Chain("a record has no chain metadata".to_owned()))
+}
+
 /// Check that `record` directly follows `previous` (or starts the chain),
 /// that its `torn` digest names exactly the unreadable `gap` between them,
 /// and that its hash matches its contents. `bad` is the parse error of the
@@ -701,9 +716,7 @@ fn check_link(
     gap: &[u8],
     bad: Option<String>,
 ) -> Result<(), AuditError> {
-    // Callers reject an unchained record first; this keeps the check local.
-    let no_chain = || AuditError::Chain("a record has no chain metadata".to_owned());
-    let actual = record.chain.as_ref().ok_or_else(no_chain)?;
+    let actual = chain_of(record)?;
     let sequence = actual.sequence;
     let expected_sequence = previous.map_or(1, |chain| chain.sequence.saturating_add(1));
     let expected_prev = previous.map(|chain| chain.hash.clone());
@@ -771,9 +784,9 @@ impl CaptureAudit {
 
 impl AuditSink for CaptureAudit {
     fn record(&self, record: &AuditRecord) -> Result<(), AuditError> {
-        if let Ok(mut records) = self.records.lock() {
-            records.push(record.clone());
-        }
+        self.records
+            .lock()
+            .map_or_default(|mut records| records.push(record.clone()));
         Ok(())
     }
 
@@ -1214,9 +1227,8 @@ mod tests {
 
         // A note that names other bytes is refused as well.
         let mut forged: AuditRecord = serde_json::from_str(second.trim_end())?;
-        if let Some(chain) = forged.chain.as_mut() {
-            chain.torn = Some(Sha256Digest::of(b"other\n").to_string());
-        }
+        forged.chain.as_mut().ok_or("the record has no chain")?.torn =
+            Some(Sha256Digest::of(b"other\n").to_string());
         let forged = serde_json::to_string(&forged)?;
         std::fs::write(sink.path(), format!("{first}{{ junk\n{forged}\n"))?;
         assert!(matches!(
@@ -1478,6 +1490,72 @@ mod tests {
         );
         assert!(format!("{sink:?}").contains("CaptureAudit"));
         assert_eq!(CaptureAudit::default().records(), [] as [AuditRecord; 0]);
+        Ok(())
+    }
+
+    #[test]
+    fn newest_first_without_a_limit_keeps_every_record() {
+        let records = vec![
+            record("a", None, AuditResult::Ok),
+            record("b", None, AuditResult::Ok),
+            record("c", None, AuditResult::Ok),
+        ];
+        let all = super::newest_first(records.clone(), None);
+        let who: Vec<&str> = all.iter().map(|r| r.who.as_str()).collect();
+        assert_eq!(who, ["c", "b", "a"]);
+        assert_eq!(super::newest_first(records, Some(1)).len(), 1);
+    }
+
+    #[test]
+    fn an_empty_log_file_does_not_verify() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let sink = FileAudit::new(dir.path().join("audit.jsonl"));
+        std::fs::write(sink.path(), "")?;
+        assert!(
+            matches!(sink.verify(), Err(AuditError::Chain(msg)) if msg.contains("log is empty"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_query_refuses_a_record_without_chain_metadata() -> R {
+        let dir = tempfile::TempDir::new()?;
+        let sink = FileAudit::new(dir.path().join("audit.jsonl"));
+        let unchained = serde_json::to_string(&record("root", None, AuditResult::Ok))?;
+        std::fs::write(sink.path(), format!("{unchained}\n"))?;
+        assert!(matches!(
+            sink.query(&AuditQuery::default()),
+            Err(AuditError::Chain(msg)) if msg.contains("no chain metadata")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_poisoned_append_lock_is_an_error() {
+        let lock = std::sync::Arc::new(std::sync::Mutex::new(()));
+        assert!(super::lock_append(&lock).is_ok());
+        let held = std::sync::Arc::clone(&lock);
+        let poisoner = std::thread::spawn(move || {
+            let _guard = held.lock();
+            std::panic::resume_unwind(Box::new("poison the append lock"));
+        });
+        assert!(poisoner.join().is_err());
+        assert!(matches!(
+            super::lock_append(&lock),
+            Err(AuditError::Chain(msg)) if msg.contains("poisoned")
+        ));
+    }
+
+    #[test]
+    fn a_json_encoding_failure_becomes_an_encode_error() -> R {
+        let failure = serde_json::from_str::<u8>("x")
+            .err()
+            .ok_or("x is not a number")?;
+        let message = failure.to_string();
+        assert!(matches!(
+            AuditError::from(failure),
+            AuditError::Encode(text) if text == message
+        ));
         Ok(())
     }
 }

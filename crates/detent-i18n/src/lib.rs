@@ -611,9 +611,7 @@ mod tests {
                     let end = part
                         .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
                         .unwrap_or(part.len());
-                    if let (Some(set), Some(name)) = (out.get_mut(id), part.get(..end)) {
-                        set.insert(name);
-                    }
+                    out.entry(id).or_default().extend(part.get(..end));
                 }
             }
         }
@@ -639,12 +637,14 @@ mod tests {
         let reference = message_placeables(&en_us.texts());
         for locale in CATALOGUE {
             let got = message_placeables(&locale.texts());
-            let drift: Vec<String> = reference
-                .iter()
-                .filter(|(id, vars)| got.get(*id).is_some_and(|other| other != *vars))
-                .map(|(id, vars)| format!("{id}: expected {vars:?}, found {:?}", got.get(id)))
-                .collect();
-            assert!(drift.is_empty(), "{}: {drift:#?}", locale.tag);
+            for (id, vars) in &reference {
+                assert!(
+                    got.get(id).is_none_or(|other| other == vars),
+                    "{}: {id}: expected {vars:?}, found {:?}",
+                    locale.tag,
+                    got.get(id)
+                );
+            }
         }
         Ok(())
     }

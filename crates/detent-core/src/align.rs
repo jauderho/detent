@@ -162,7 +162,15 @@ pub fn replace_all(old_len: usize, new_len: usize) -> Vec<Step> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_EDIT_DISTANCE, Step, align, replace_all};
+    use super::{MAX_EDIT_DISTANCE, Step, align, replace_all, set_cell};
+
+    #[test]
+    fn a_frontier_write_out_of_range_is_ignored() {
+        let mut front = [1_usize, 2];
+        set_cell(&mut front, 1, 9);
+        set_cell(&mut front, 2, 7);
+        assert_eq!(front, [1, 9]);
+    }
 
     /// Rebuilds `new` from `old` and a script, checking that the script is
     /// well formed on the way: each old item consumed once, in order.

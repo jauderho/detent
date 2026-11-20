@@ -274,14 +274,15 @@ impl OpsEngine {
     /// to fail the operation (intent record) or merely log (outcome record).
     /// `tracing` is the unrewritable copy that reaches journald/syslog.
     fn emit(&self, record: &AuditRecord) -> Result<(), crate::audit::AuditError> {
-        tracing::info!(
-            op = ?record.op,
-            who = %record.who,
-            module = ?record.module,
-            result = ?record.result,
-            error_id = ?record.error_id,
-            "detent audit"
-        );
+        let AuditRecord {
+            op,
+            who,
+            module,
+            result,
+            error_id,
+            ..
+        } = record;
+        tracing::info!(?op, %who, ?module, ?result, ?error_id, "detent audit");
         if let Err(err) = self.audit.record(record) {
             tracing::error!(error = %err, "the audit record could not be persisted");
             return Err(err);
