@@ -742,12 +742,18 @@ fn preflight_web_config(
     if acme && let Err(exit) = preflight_acme(&config, settings, renderer, streams)? {
         return Ok(Err(exit));
     }
-    let provider = match &config.acme.provider {
-        Some(provider) => match preflight_dns_provider(provider, settings, renderer, streams)? {
-            Ok(provider) => Some(provider),
-            Err(exit) => return Ok(Err(exit)),
-        },
-        None => None,
+    // Without `acme-dns-providers`, `Provider` is `Infallible`: nothing here may
+    // build a value from it, or the compiler reports unreachable code.
+    let provider = match config
+        .acme
+        .provider
+        .as_ref()
+        .map(|provider| preflight_dns_provider(provider, settings, renderer, streams))
+        .transpose()?
+        .transpose()
+    {
+        Ok(provider) => provider,
+        Err(exit) => return Ok(Err(exit)),
     };
     Ok(Ok((config, provider.filter(|_| acme))))
 }

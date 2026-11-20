@@ -1294,31 +1294,49 @@ fn render_nm(iface: &Interface) -> Result<Vec<String>, EditError> {
 }
 
 /// Render one interface as ifupdown stanza lines.
-///
-/// A route becomes a shell command (`up ip route add <to> via <via>`), so its
-/// fields are checked here, not left to validation.
 fn render_ifupdown(iface: &Interface) -> Result<Vec<String>, EditError> {
-    let mut out = Vec::new();
-    out.push(format!("auto {}", iface.name));
-    // `lo` with no address is the stock `inet loopback` stanza; `inet static`
-    // with no address makes ifup fail.
-    let method = if iface.dhcp_v4 && iface.addresses.is_empty() {
-        "dhcp"
-    } else if iface.name == "lo" && iface.addresses.is_empty() {
-        "loopback"
+    let (v6addrs, v4addrs): (Vec<&String>, Vec<&String>) =
+        iface.addresses.iter().partition(|a| a.contains(':'));
+    let has_v6 = !v6addrs.is_empty() || iface.dhcp_v6;
+    // `inet static` with no address makes ifup fail. Without an IPv4 address
+    // the stanza is DHCP, the stock `lo` loopback, absent for an IPv6-only
+    // interface, or `manual` for an interface with no address at all.
+    let v4_method = if !v4addrs.is_empty() {
+        Some("static")
+    } else if iface.dhcp_v4 {
+        Some("dhcp")
+    } else if iface.name == "lo" {
+        Some("loopback")
+    } else if iface.gateway_v4.is_some() {
+        return Err(EditError::Unsupported {
+            message: format!(
+                "ifupdown cannot hold an IPv4 gateway with no IPv4 address on {:?}",
+                iface.name
+            ),
+        });
+    } else if has_v6 {
+        None
     } else {
-        "static"
+        Some("manual")
     };
-    out.push(format!("iface {} inet {}", iface.name, method));
-    for addr in &iface.addresses {
-        if !addr.contains(':') {
+
+    // ifup reads each option in the stanza it sits in: the IPv4 gateway goes
+    // in the `inet` stanza, and the options for the whole interface go in
+    // the first stanza.
+    let mut out = vec![format!("auto {}", iface.name)];
+    if let Some(method) = v4_method {
+        out.push(format!("iface {} inet {method}", iface.name));
+        for addr in &v4addrs {
             out.push(format!("\taddress {addr}"));
         }
+        if let Some(gw) = iface.gateway_v4.as_deref() {
+            out.push(format!("\tgateway {gw}"));
+        }
+        push_ifupdown_shared(iface, &mut out)?;
     }
-    let v6addrs: Vec<&String> = iface.addresses.iter().filter(|a| a.contains(':')).collect();
     if !v6addrs.is_empty() {
         out.push(format!("iface {} inet6 static", iface.name));
-        for addr in v6addrs {
+        for addr in &v6addrs {
             out.push(format!("\taddress {addr}"));
         }
         if let Some(gw) = iface.gateway_v6.as_deref() {
@@ -1327,9 +1345,18 @@ fn render_ifupdown(iface: &Interface) -> Result<Vec<String>, EditError> {
     } else if iface.dhcp_v6 {
         out.push(format!("iface {} inet6 dhcp", iface.name));
     }
-    if let Some(gw) = iface.gateway_v4.as_deref() {
-        out.push(format!("\tgateway {gw}"));
+    if v4_method.is_none() {
+        push_ifupdown_shared(iface, &mut out)?;
     }
+    Ok(out)
+}
+
+/// The ifupdown options that belong to the whole interface, not to one
+/// address family.
+///
+/// A route becomes a shell command (`up ip route add <to> via <via>`), so its
+/// fields are checked here, not left to validation.
+fn push_ifupdown_shared(iface: &Interface, out: &mut Vec<String>) -> Result<(), EditError> {
     if !iface.dns.is_empty() {
         out.push(format!("\tdns-nameservers {}", iface.dns.join(" ")));
     }
@@ -1353,7 +1380,7 @@ fn render_ifupdown(iface: &Interface) -> Result<Vec<String>, EditError> {
         check_route(route, true)?;
         out.push(format!("\tup ip route add {} via {}", route.to, route.via));
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Render the whole model as netplan YAML lines.
@@ -4104,6 +4131,90 @@ mod tests {
         assert!(netplan_text.contains("gateway6:"));
         let netplan_model = NetworkModule::to_model(&netplan_doc).map_err(|e| e.to_string())?;
         assert_eq!(netplan_model.interfaces.len(), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn ifupdown_keeps_each_family_in_its_own_stanza() -> Result<(), String> {
+        let iface = |addresses: &[&str], gw4: Option<&str>, gw6: Option<&str>| super::Interface {
+            name: "eth0".to_owned(),
+            dhcp_v4: false,
+            dhcp_v6: false,
+            addresses: addresses.iter().map(|a| (*a).to_owned()).collect(),
+            gateway_v4: gw4.map(str::to_owned),
+            gateway_v6: gw6.map(str::to_owned),
+            dns: vec!["192.168.1.1".to_owned()],
+            routes: Vec::new(),
+            vlan: None,
+            bridge: None,
+        };
+        let render = |model: &super::Model| -> Result<String, String> {
+            let mut doc = NetworkModule::parse("auto eth0\n").map_err(|e| e.to_string())?;
+            NetworkModule::apply(&mut doc, model).map_err(|e| e.to_string())?;
+            assert_eq!(
+                &NetworkModule::to_model(&doc).map_err(|e| e.to_string())?,
+                model
+            );
+            Ok(NetworkModule::render(&doc))
+        };
+
+        // Dual stack: the IPv4 gateway and DNS stay in the `inet` stanza.
+        let dual = super::Model {
+            interfaces: vec![iface(
+                &["192.168.1.10/24", "2001:db8::10/64"],
+                Some("192.168.1.1"),
+                Some("2001:db8::1"),
+            )],
+        };
+        assert_eq!(
+            render(&dual)?,
+            "auto eth0\n\
+             iface eth0 inet static\n\
+             \taddress 192.168.1.10/24\n\
+             \tgateway 192.168.1.1\n\
+             \tdns-nameservers 192.168.1.1\n\
+             iface eth0 inet6 static\n\
+             \taddress 2001:db8::10/64\n\
+             \tgateway 2001:db8::1\n"
+        );
+
+        // IPv6 only: no `inet static` stanza with no address.
+        let v6_only = super::Model {
+            interfaces: vec![iface(&["2001:db8::10/64"], None, Some("2001:db8::1"))],
+        };
+        assert_eq!(
+            render(&v6_only)?,
+            "auto eth0\n\
+             iface eth0 inet6 static\n\
+             \taddress 2001:db8::10/64\n\
+             \tgateway 2001:db8::1\n\
+             \tdns-nameservers 192.168.1.1\n"
+        );
+
+        // DHCPv4 with a static IPv6 address and no gateways.
+        let mut dhcp = iface(&["2001:db8::10/64"], None, None);
+        dhcp.dhcp_v4 = true;
+        let dhcp = super::Model {
+            interfaces: vec![dhcp],
+        };
+        assert_eq!(
+            render(&dhcp)?,
+            "auto eth0\n\
+             iface eth0 inet dhcp\n\
+             \tdns-nameservers 192.168.1.1\n\
+             iface eth0 inet6 static\n\
+             \taddress 2001:db8::10/64\n"
+        );
+
+        // An IPv4 gateway with no IPv4 address has no stanza to live in.
+        let mut doc = NetworkModule::parse("auto eth0\n").map_err(|e| e.to_string())?;
+        let orphan = super::Model {
+            interfaces: vec![iface(&["2001:db8::10/64"], Some("192.168.1.1"), None)],
+        };
+        assert!(matches!(
+            NetworkModule::apply(&mut doc, &orphan),
+            Err(super::EditError::Unsupported { .. })
+        ));
         Ok(())
     }
 

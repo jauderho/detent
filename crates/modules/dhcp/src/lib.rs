@@ -1281,9 +1281,134 @@ fn append_items(items: &mut Vec<ArrItem>, fresh: Vec<ArrItem>, report: &mut Edit
     }
 }
 
-/// Pairs model items with the *modeled* items of an array in order and rewrites
-/// only the ones that differ; unmodeled items are skipped and preserved, extra
-/// modeled items are removed, extra model items are appended canonically.
+/// One identity test of [`sync_items`]: whether an existing item and a
+/// wanted item are the same item.
+type SameItem<'a, P> = &'a dyn Fn(&P, &P) -> bool;
+
+/// Syncs the *modeled* items of an array (the ones `project` reads) with
+/// `wanted`; unmodeled items are skipped and preserved.
+///
+/// Each wanted item keeps the value of the existing item it matches by the
+/// `same` tests, tried in order: an identity, never a position. So removing
+/// or reordering one item never moves the unmodeled members (a subnet's
+/// `interface` or `reservations`, a pool's `client-class`) to another. A
+/// wanted item with no match is rendered canonically into the slot of an
+/// existing item with no match (its old value is dropped whole), or appended
+/// when none is left; the other unmatched items are removed. The values then
+/// fill the slots in `wanted` order and `update` brings each kept value up
+/// to date. A value changes slot only when the model reorders the list or an
+/// earlier slot is freed; the comments around a slot stay with the slot.
+fn sync_items<P>(
+    items: &mut Vec<ArrItem>,
+    wanted: &[P],
+    project: &dyn Fn(&Jsonc) -> Option<P>,
+    same: &[SameItem<'_, P>],
+    render: &dyn Fn(&P) -> Jsonc,
+    update: &dyn Fn(&mut Jsonc, &P, &mut EditReport),
+    report: &mut EditReport,
+) {
+    let existing: Vec<(usize, P)> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| project(&item.value).map(|p| (index, p)))
+        .collect();
+    // `pairs[k]` is the index into `existing` that `wanted[k]` keeps.
+    let mut pairs: Vec<Option<usize>> = vec![None; wanted.len()];
+    let mut used = vec![false; existing.len()];
+    for test in same {
+        for (pair, want) in pairs.iter_mut().zip(wanted) {
+            if pair.is_some() {
+                continue;
+            }
+            let found = existing
+                .iter()
+                .zip(&used)
+                .position(|((_, have), taken)| !taken && test(have, want));
+            if let Some(slot) = found
+                && let Some(taken) = used.get_mut(slot)
+            {
+                *taken = true;
+                *pair = Some(slot);
+            }
+        }
+    }
+
+    // The first unmatched items give their slots to the unmatched wanted
+    // items; the rest are removed, last first so earlier indices stay valid.
+    let mut free_slots = pairs.iter().filter(|pair| pair.is_none()).count();
+    let keep: Vec<bool> = used
+        .iter()
+        .map(|matched| {
+            let reuse = !matched && free_slots > 0;
+            if reuse {
+                free_slots = free_slots.saturating_sub(1);
+            }
+            *matched || reuse
+        })
+        .collect();
+    for ((index, _), kept) in existing.iter().zip(&keep).rev() {
+        if !kept {
+            items.remove(*index);
+            report.removed = report.removed.saturating_add(1);
+        }
+    }
+
+    // What is left of `existing`, in order, and where each item is now.
+    let kept: Vec<usize> = keep
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, kept)| kept.then_some(slot))
+        .collect();
+    let mut slots: Vec<&mut ArrItem> = items
+        .iter_mut()
+        .filter(|item| project(&item.value).is_some())
+        .collect();
+    let mut taken: Vec<Option<Jsonc>> = slots
+        .iter_mut()
+        .map(|item| {
+            Some(std::mem::replace(
+                &mut item.value,
+                Jsonc::Lit(Lit::Raw(String::new())),
+            ))
+        })
+        .collect();
+
+    // The final values in `wanted` order, each with the slot it came from.
+    let mut values = Vec::with_capacity(wanted.len());
+    for (pair, want) in pairs.iter().zip(wanted) {
+        let from = pair.and_then(|slot| kept.iter().position(|k| *k == slot));
+        match from.and_then(|rank| taken.get_mut(rank).and_then(Option::take)) {
+            Some(mut value) => {
+                update(&mut value, want, report);
+                values.push((value, from));
+            }
+            None => values.push((render(want), None)),
+        }
+    }
+
+    // There are never more slots than values, so every slot gets one; the
+    // values left over are appended.
+    let mut values = values.into_iter();
+    for ((rank, slot), (value, from)) in slots.iter_mut().enumerate().zip(values.by_ref()) {
+        slot.value = value;
+        if from != Some(rank) {
+            report.changed_lines = report.changed_lines.saturating_add(1);
+        }
+    }
+    let fresh: Vec<ArrItem> = values
+        .map(|(value, _)| ArrItem {
+            value,
+            post: String::new(),
+            comma: String::new(),
+            tail: String::new(),
+        })
+        .collect();
+    append_items(items, fresh, report);
+}
+
+/// [`sync_items`] for lists whose items are whole values (pool ranges,
+/// interface names, option data): an item matches an equal wanted value, so
+/// a matched value never needs an update.
 fn sync_modeled_items<P, F, G>(
     items: &mut Vec<ArrItem>,
     wanted: &[P],
@@ -1295,39 +1420,17 @@ fn sync_modeled_items<P, F, G>(
     F: Fn(&Jsonc) -> Option<P>,
     G: Fn(&P) -> Jsonc,
 {
-    let mut matched = 0usize;
-    let mut index = 0usize;
-    while index < items.len() {
-        let modeled = items.get(index).and_then(|item| project(&item.value));
-        if modeled.is_some() && matched >= wanted.len() {
-            items.remove(index);
-            report.removed = report.removed.saturating_add(1);
-            continue;
-        }
-        if modeled.is_none() {
-            index = index.saturating_add(1);
-            continue;
-        }
-        if let (Some(item), Some(wanted_item)) = (items.get_mut(index), wanted.get(matched))
-            && project(&item.value).as_ref() != Some(wanted_item)
-        {
-            item.value = render(wanted_item);
-            report.changed_lines = report.changed_lines.saturating_add(1);
-        }
-        matched = matched.saturating_add(1);
-        index = index.saturating_add(1);
-    }
-    let fresh: Vec<ArrItem> = wanted
-        .iter()
-        .skip(matched)
-        .map(|wanted_item| ArrItem {
-            value: render(wanted_item),
-            post: String::new(),
-            comma: String::new(),
-            tail: String::new(),
-        })
-        .collect();
-    append_items(items, fresh, report);
+    let equal = |have: &P, want: &P| have == want;
+    let unchanged = |_: &mut Jsonc, _: &P, _: &mut EditReport| {};
+    sync_items(
+        items,
+        wanted,
+        &project,
+        &[&equal],
+        &render,
+        &unchanged,
+        report,
+    );
 }
 
 /// Rewrites one modeled list member of `obj`: absent means "add canonically
@@ -1516,44 +1619,29 @@ fn named_data(value: &Jsonc, wanted: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Pairs model subnets with the modeled subnet items of the `subnet4`/`subnet6`
-/// array, in order, merging each pair member-wise.
+/// Syncs the modeled subnet items of the `subnet4`/`subnet6` array with the
+/// model ([`sync_items`]). A subnet is matched by its `id`, then by its
+/// `subnet` prefix, and merged member-wise.
 fn sync_subnets(items: &mut Vec<ArrItem>, wanted: &[KeaSubnet], report: &mut EditReport) {
-    let mut matched = 0usize;
-    let mut index = 0usize;
-    while index < items.len() {
-        let modeled = items
-            .get(index)
-            .and_then(|item| item.value.as_obj())
-            .and_then(project_subnet);
-        if modeled.is_some() && matched >= wanted.len() {
-            items.remove(index);
-            report.removed = report.removed.saturating_add(1);
-            continue;
-        }
-        if modeled.is_none() {
-            index = index.saturating_add(1);
-            continue;
-        }
-        if let (Some(item), Some(wanted_subnet)) = (items.get_mut(index), wanted.get(matched))
-            && let Jsonc::Obj(obj) = &mut item.value
-        {
-            merge_subnet(obj, wanted_subnet, report);
-        }
-        matched = matched.saturating_add(1);
-        index = index.saturating_add(1);
-    }
-    let fresh: Vec<ArrItem> = wanted
-        .iter()
-        .skip(matched)
-        .map(|wanted_subnet| ArrItem {
-            value: canon_subnet(wanted_subnet),
-            post: String::new(),
-            comma: String::new(),
-            tail: String::new(),
-        })
-        .collect();
-    append_items(items, fresh, report);
+    let project = |value: &Jsonc| value.as_obj().and_then(project_subnet);
+    let same_id = |have: &KeaSubnet, want: &KeaSubnet| have.id == want.id;
+    let same_prefix = |have: &KeaSubnet, want: &KeaSubnet| have.subnet == want.subnet;
+    // `project` read the value as an object, so `as_obj_mut` always has one.
+    let merge = |value: &mut Jsonc, want: &KeaSubnet, report: &mut EditReport| {
+        value
+            .as_obj_mut()
+            .into_iter()
+            .for_each(|obj| merge_subnet(obj, want, report));
+    };
+    sync_items(
+        items,
+        wanted,
+        &project,
+        &[&same_id, &same_prefix],
+        &canon_subnet,
+        &merge,
+        report,
+    );
 }
 
 /// Rewrites the subnets array of a server config object.
@@ -3620,6 +3708,73 @@ mod tests {
             .map_err(|e| e.to_string())?;
         assert_eq!(back.kea_v4.subnets, want);
         let _ = report;
+        Ok(())
+    }
+
+    #[test]
+    fn kea_subnets_and_pools_keep_their_own_unmodeled_members() -> Result<(), String> {
+        let s1 = "{\"id\": 1, \"subnet\": \"192.168.1.0/24\", \"interface\": \"eth0\", \"reservations\": [{\"hw-address\": \"aa:aa:aa:aa:aa:aa\"}]}";
+        let s2 = "{\"id\": 2, \"subnet\": \"10.0.0.0/24\", \"interface\": \"eth1\", \"pools\": [{\"pool\": \"10.0.0.10 - 10.0.0.19\", \"client-class\": \"x\"}, {\"pool\": \"10.0.0.20 - 10.0.0.29\", \"client-class\": \"y\"}]}";
+        let src = format!("{{ \"Dhcp4\": {{ \"subnet4\": [ {s1}, {s2} ] }} }}");
+        let subnet = |id: u32, prefix: &str, pools: &[&str]| KeaSubnet {
+            id,
+            subnet: prefix.to_owned(),
+            pools: pools
+                .iter()
+                .map(|pool| KeaPool {
+                    pool: (*pool).to_owned(),
+                })
+                .collect(),
+            ..KeaSubnet::default()
+        };
+        let both_pools = ["10.0.0.10 - 10.0.0.19", "10.0.0.20 - 10.0.0.29"];
+        let apply = |want: Vec<KeaSubnet>| -> Result<String, String> {
+            let mut doc = DhcpModule::parse(&src).map_err(|e| e.to_string())?;
+            let mut model = Model::default();
+            model.kea_v4.subnets = want.clone();
+            DhcpModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+            let rendered = DhcpModule::render(&doc);
+            let back =
+                DhcpModule::to_model(&DhcpModule::parse(&rendered).map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?;
+            assert_eq!(back.kea_v4.subnets, want, "{rendered}");
+            Ok(rendered)
+        };
+
+        // Delete subnet 1: subnet 2 stays exactly as it was, on eth1, and
+        // subnet 1's interface and reservations go with it.
+        let rendered = apply(vec![subnet(2, "10.0.0.0/24", &both_pools)])?;
+        assert!(rendered.contains(s2), "{rendered}");
+        assert!(!rendered.contains("eth0"), "{rendered}");
+        assert!(!rendered.contains("aa:aa"), "{rendered}");
+
+        // Delete the first pool: the second keeps its own client class.
+        let rendered = apply(vec![
+            subnet(1, "192.168.1.0/24", &[]),
+            subnet(2, "10.0.0.0/24", &["10.0.0.20 - 10.0.0.29"]),
+        ])?;
+        assert!(
+            rendered.contains("{\"pool\": \"10.0.0.20 - 10.0.0.29\", \"client-class\": \"y\"}"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("\"x\""), "{rendered}");
+
+        // Reorder the subnets: each keeps its own interface.
+        let rendered = apply(vec![
+            subnet(2, "10.0.0.0/24", &both_pools),
+            subnet(1, "192.168.1.0/24", &[]),
+        ])?;
+        assert!(rendered.contains(s1) && rendered.contains(s2), "{rendered}");
+
+        // Delete subnet 1 and add subnet 3: the new subnet takes nothing
+        // from the one it replaces.
+        let rendered = apply(vec![
+            subnet(3, "172.16.0.0/24", &[]),
+            subnet(2, "10.0.0.0/24", &both_pools),
+        ])?;
+        assert!(rendered.contains(s2), "{rendered}");
+        assert!(!rendered.contains("eth0"), "{rendered}");
+        assert!(!rendered.contains("aa:aa"), "{rendered}");
         Ok(())
     }
 

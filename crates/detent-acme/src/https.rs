@@ -21,11 +21,7 @@ use hyper_util::rt::TokioExecutor;
 use crate::AcmeError;
 use crate::providers::HttpRequest;
 
-/// One deadline for connect, request and the complete response.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Provider API answers are small JSON documents; anything larger is refused.
-const MAX_RESPONSE_BYTES: usize = 1 << 20;
+use crate::order::{MAX_RESPONSE_BYTES, REQUEST_TIMEOUT};
 
 /// Sends provider API requests over HTTPS.
 pub(crate) struct HttpsTransport {
@@ -339,6 +335,60 @@ mod tests {
             .ok_or("a silent server must time out")?;
         assert!(err.to_string().ends_with(": timed out"), "{err}");
         joined(server)?;
+        Ok(())
+    }
+
+    /// One GET through the ACME client transport, as instant-acme sends it.
+    fn acme_get(
+        roots: rustls::RootCertStore,
+        timeout: Duration,
+        port: u16,
+    ) -> Result<Result<Bytes, String>, Box<dyn std::error::Error>> {
+        use instant_acme::HttpClient as _;
+        let client = crate::order::Tls13HttpClient::new(roots, timeout)?;
+        let request = hyper::Request::get(format!("https://localhost:{port}/directory"))
+            .body(instant_acme::BodyWrapper::default())?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        Ok(runtime.block_on(async {
+            let mut response = client.request(request).await.map_err(|e| e.to_string())?;
+            response.body.into_bytes().await.map_err(|e| e.to_string())
+        }))
+    }
+
+    #[test]
+    fn the_acme_client_reads_a_whole_answer() -> R {
+        let server = serve_once(Reply::With(200, br#"{"newOrder":"x"}"#.to_vec()))?;
+        let body = acme_get(server.roots.clone(), REQUEST_TIMEOUT, server.port)??;
+        assert_eq!(body.as_ref(), br#"{"newOrder":"x"}"#);
+        joined(server)?;
+        Ok(())
+    }
+
+    #[test]
+    fn the_acme_client_gives_up_on_a_silent_ca() -> R {
+        let server = serve_once(Reply::Silent)?;
+        let err = acme_get(
+            server.roots.clone(),
+            Duration::from_millis(300),
+            server.port,
+        )?
+        .err()
+        .ok_or("a silent CA must time out")?;
+        assert!(err.contains("timed out"), "{err}");
+        joined(server)?;
+        Ok(())
+    }
+
+    #[test]
+    fn the_acme_client_refuses_an_oversize_answer() -> R {
+        let server = serve_once(Reply::With(200, vec![b'a'; MAX_RESPONSE_BYTES + 1]))?;
+        let err = acme_get(server.roots.clone(), REQUEST_TIMEOUT, server.port)?
+            .err()
+            .ok_or("an oversize body must fail")?;
+        assert!(err.contains("ACME response body"), "{err}");
+        drop(server.seen.join());
         Ok(())
     }
 
