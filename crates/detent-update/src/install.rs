@@ -11,6 +11,11 @@
 //! The previous binary is kept at `<target>.prev` so [`Installed::rollback`]
 //! can put it back after a failed restart or health check (the later halves
 //! of step 5, not implemented here).
+//!
+//! From just before the rename until the new binary is found healthy or
+//! rolled back, `<target>.pending` names the tag being installed. A run that
+//! dies in between (a crash, a power cut, a killed process) leaves it behind,
+//! and [`recover`] undoes that swap on the next run.
 
 use std::path::{Path, PathBuf};
 
@@ -18,6 +23,9 @@ use crate::update::UpdateError;
 
 /// The suffix the replaced binary is kept under, next to the target.
 const PREVIOUS_SUFFIX: &str = ".prev";
+
+/// The suffix of the marker an unfinished swap leaves, next to the target.
+const PENDING_SUFFIX: &str = ".pending";
 
 /// A completed swap that can still be undone: the target now holds the
 /// candidate, and the binary it replaced is at [`Installed::previous`].
@@ -27,6 +35,8 @@ pub struct Installed {
     target: PathBuf,
     /// Where the replaced binary was kept (`<target>.prev`).
     previous: PathBuf,
+    /// The marker that says this swap is not finished (`<target>.pending`).
+    pending: PathBuf,
 }
 
 impl Installed {
@@ -45,8 +55,55 @@ impl Installed {
     /// [`Installed::previous`].
     pub fn rollback(self) -> Result<(), UpdateError> {
         std::fs::rename(&self.previous, &self.target).map_err(|err| failed("rollback", &err))?;
-        sync_directory(&self.target)
+        sync_directory(&self.target)?;
+        remove_best_effort(&self.pending);
+        Ok(())
     }
+
+    /// Keeps the new binary: it runs, so no later run may undo this swap.
+    /// Best effort: a marker that stays makes [`recover`] compare the target
+    /// with the kept binary again, and the next swap replaces it.
+    pub fn finish(self) {
+        remove_best_effort(&self.pending);
+    }
+}
+
+/// Undoes a swap that a run started and never finished, and returns the tag
+/// it was installing, or `None` when there is nothing to undo.
+///
+/// Nothing to undo when there is no marker, when the kept binary is gone (a
+/// rollback already put it back), or when the target still holds the same
+/// bytes as the kept binary (the run stopped before its rename).
+///
+/// # Errors
+///
+/// [`UpdateError::BadTarget`] for a `target` with no file name,
+/// [`UpdateError::Install`] when the marker or a binary cannot be read or
+/// the rollback fails. The marker then stays for the next run.
+pub fn recover(target: &Path) -> Result<Option<String>, UpdateError> {
+    let pending = suffixed(target, PENDING_SUFFIX)?;
+    let tag = match std::fs::read_to_string(&pending) {
+        Ok(tag) => tag.trim().to_owned(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(failed("pending", &err)),
+    };
+    let previous = suffixed(target, PREVIOUS_SUFFIX)?;
+    let swapped = match std::fs::read(&previous) {
+        Ok(kept) => std::fs::read(target).map_err(|err| failed("recover", &err))? != kept,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(err) => return Err(failed("recover", &err)),
+    };
+    if !swapped {
+        remove_best_effort(&pending);
+        return Ok(None);
+    }
+    Installed {
+        target: target.to_path_buf(),
+        previous,
+        pending,
+    }
+    .rollback()?;
+    Ok(Some(tag))
 }
 
 /// Atomically replaces `target` with the bytes of `candidate`, keeping the
@@ -55,14 +112,15 @@ impl Installed {
 /// `target` must already be a regular file: `detent update` replaces a
 /// binary, it never creates one, and a missing or non-file target is a
 /// misconfiguration. The installed binary keeps the *target's* mode, not the
-/// staged candidate's.
+/// staged candidate's. `tag` goes in the `<target>.pending` marker
+/// until [`Installed::finish`] or [`Installed::rollback`].
 ///
 /// # Errors
 ///
 /// [`UpdateError::BadTarget`] when `target` is missing or is not a regular
 /// file, [`UpdateError::Install`] when a step of the swap fails. On every
 /// error the target still holds the original binary.
-pub fn swap(candidate: &Path, target: &Path) -> Result<Installed, UpdateError> {
+pub fn swap(candidate: &Path, target: &Path, tag: &str) -> Result<Installed, UpdateError> {
     // `symlink_metadata`, not `metadata`: a symlink is refused rather than
     // silently replaced by a regular file. `current_exe` already resolves
     // symlinks, so the real install target is a regular file.
@@ -70,24 +128,41 @@ pub fn swap(candidate: &Path, target: &Path) -> Result<Installed, UpdateError> {
     if !meta.is_file() {
         return Err(bad_target(target));
     }
-    let previous = previous_path(target)?;
+    let previous = suffixed(target, PREVIOUS_SUFFIX)?;
+    let pending = suffixed(target, PENDING_SUFFIX)?;
     let staged = stage(candidate, directory_of(target), meta.permissions())?;
 
+    // The marker goes after the kept copy, so it never names a stale
+    // `.prev`, and is on disk before the rename can be.
     match keep_previous(target, &previous)
+        .and_then(|()| mark_pending(&pending, tag))
         .and_then(|()| persist(staged, target))
         .and_then(|()| sync_directory(target))
     {
         Ok(()) => Ok(Installed {
             target: target.to_path_buf(),
             previous,
+            pending,
         }),
         Err(err) => {
             // Neither step changed the target, so take back the copy that
             // may have been kept: a failed swap leaves nothing behind.
             remove_best_effort(&previous);
+            remove_best_effort(&pending);
             Err(err)
         }
     }
+}
+
+/// Writes the `<target>.pending` marker and flushes it and its directory.
+fn mark_pending(pending: &Path, tag: &str) -> Result<(), UpdateError> {
+    std::fs::File::create(pending)
+        .and_then(|mut file| {
+            std::io::Write::write_all(&mut file, tag.as_bytes())?;
+            file.sync_all()
+        })
+        .map_err(|err| failed("pending", &err))?;
+    sync_directory(pending)
 }
 
 /// Copies `candidate` to a fresh temporary name in `dir` — the target's own
@@ -144,13 +219,13 @@ fn persist(staged: tempfile::NamedTempFile, target: &Path) -> Result<(), UpdateE
         .map_err(|err| failed("install", &err.error))
 }
 
-/// `<target>.prev`, next to the target.
-fn previous_path(target: &Path) -> Result<PathBuf, UpdateError> {
+/// `<target><suffix>`, next to the target.
+fn suffixed(target: &Path, suffix: &str) -> Result<PathBuf, UpdateError> {
     let mut name = target
         .file_name()
         .ok_or_else(|| bad_target(target))?
         .to_os_string();
-    name.push(PREVIOUS_SUFFIX);
+    name.push(suffix);
     Ok(target.with_file_name(name))
 }
 
@@ -200,6 +275,7 @@ mod tests {
 
     const OLD: &[u8] = b"#!/bin/sh\necho old\n";
     const NEW: &[u8] = b"#!/bin/sh\necho new and rather longer\n";
+    const TAG: &str = "v9.9.9";
 
     /// A target file with the mode a deployed binary has.
     fn target_in(dir: &Path, bytes: &[u8]) -> PathBuf {
@@ -269,7 +345,7 @@ mod tests {
         let target = target_in(home.path(), OLD);
         let candidate = candidate_in(staging.path(), NEW);
 
-        let installed = swap(&candidate, &target).expect("swap");
+        let installed = swap(&candidate, &target, TAG).expect("swap");
 
         assert_eq!(read(&target), NEW, "the target must hold the candidate");
         assert_eq!(
@@ -283,8 +359,19 @@ mod tests {
         );
         assert_eq!(
             entries(home.path()),
+            vec![
+                "detent".to_owned(),
+                "detent.pending".to_owned(),
+                "detent.prev".to_owned()
+            ],
+            "no temporary file may be left behind; the marker stays until finish"
+        );
+        assert_eq!(read(&home.path().join("detent.pending")), TAG.as_bytes());
+        installed.finish();
+        assert_eq!(
+            entries(home.path()),
             vec!["detent".to_owned(), "detent.prev".to_owned()],
-            "no temporary file may be left behind"
+            "finish removes the marker and keeps the previous binary"
         );
     }
 
@@ -296,7 +383,7 @@ mod tests {
         let candidate = candidate_in(staging.path(), NEW);
         assert_eq!(mode_of(&candidate), 0o600, "the candidate is not 0o755");
 
-        let installed = swap(&candidate, &target).expect("swap");
+        let installed = swap(&candidate, &target, TAG).expect("swap");
 
         assert_eq!(
             mode_of(&target),
@@ -317,7 +404,7 @@ mod tests {
         let target = target_in(home.path(), OLD);
         let candidate = candidate_in(staging.path(), NEW);
 
-        let installed = swap(&candidate, &target).expect("swap");
+        let installed = swap(&candidate, &target, TAG).expect("swap");
         let kept = installed.previous().to_path_buf();
         installed.rollback().expect("rollback");
 
@@ -333,7 +420,7 @@ mod tests {
         let target = target_in(home.path(), OLD);
         let candidate = candidate_in(staging.path(), NEW);
 
-        let installed = swap(&candidate, &target).expect("swap");
+        let installed = swap(&candidate, &target, TAG).expect("swap");
         std::fs::remove_file(installed.previous()).expect("drop the kept binary");
 
         assert!(
@@ -358,7 +445,7 @@ mod tests {
         let missing = home.path().join("detent");
         assert!(
             matches!(
-                swap(&candidate, &missing),
+                swap(&candidate, &missing, TAG),
                 Err(UpdateError::BadTarget { .. })
             ),
             "a missing target is a misconfiguration"
@@ -369,7 +456,7 @@ mod tests {
         std::fs::create_dir(&directory).expect("create dir");
         assert!(
             matches!(
-                swap(&candidate, &directory),
+                swap(&candidate, &directory, TAG),
                 Err(UpdateError::BadTarget { .. })
             ),
             "a directory is not an install target"
@@ -388,7 +475,10 @@ mod tests {
         let candidate = candidate_in(staging.path(), NEW);
 
         assert!(
-            matches!(swap(&candidate, &link), Err(UpdateError::BadTarget { .. })),
+            matches!(
+                swap(&candidate, &link, TAG),
+                Err(UpdateError::BadTarget { .. })
+            ),
             "a symlink must be refused, never replaced by a regular file"
         );
         assert_eq!(read(&real), OLD, "the real binary is untouched");
@@ -400,7 +490,7 @@ mod tests {
         let staging = tempfile::TempDir::new().expect("staging");
         let target = target_in(home.path(), OLD);
 
-        let err = swap(&staging.path().join("absent"), &target).expect_err("no candidate");
+        let err = swap(&staging.path().join("absent"), &target, TAG).expect_err("no candidate");
 
         assert!(
             matches!(err, UpdateError::Install { step: "read", .. }),
@@ -427,7 +517,7 @@ mod tests {
             return;
         }
 
-        let outcome = swap(&candidate, &target);
+        let outcome = swap(&candidate, &target, TAG);
         set_mode(home.path(), 0o700);
 
         let err = outcome.expect_err("a read-only directory cannot be staged into");
@@ -451,7 +541,7 @@ mod tests {
         std::fs::create_dir(&blocked).expect("create blocking dir");
         std::fs::write(blocked.join("occupant"), b"x").expect("occupy");
 
-        let err = swap(&candidate, &target).expect_err("the previous path is unusable");
+        let err = swap(&candidate, &target, TAG).expect_err("the previous path is unusable");
 
         assert!(
             matches!(err, UpdateError::Install { step: "keep", .. }),
@@ -473,11 +563,12 @@ mod tests {
         let target = target_in(home.path(), OLD);
 
         let first = candidate_in(staging.path(), NEW);
-        let earlier = swap(&first, &target).expect("first swap");
+        let earlier = swap(&first, &target, TAG).expect("first swap");
         assert_eq!(read(earlier.previous()), OLD);
+        earlier.finish();
         let third = staging.path().join("third");
         std::fs::write(&third, b"#!/bin/sh\necho third\n").expect("write third");
-        let installed = swap(&third, &target).expect("second swap");
+        let installed = swap(&third, &target, TAG).expect("second swap");
 
         assert_eq!(read(&target), b"#!/bin/sh\necho third\n");
         assert_eq!(
@@ -485,25 +576,123 @@ mod tests {
             NEW,
             "the .prev must hold the binary the second swap replaced"
         );
+        installed.finish();
         assert_eq!(
             entries(home.path()),
             vec!["detent".to_owned(), "detent.prev".to_owned()]
         );
     }
 
+    /// A run that died after the rename left the marker: the next run puts
+    /// the kept binary back and names the tag it undid.
+    #[test]
+    fn recover_undoes_a_swap_that_never_finished() {
+        let home = tempfile::TempDir::new().expect("home");
+        let staging = tempfile::TempDir::new().expect("staging");
+        let target = target_in(home.path(), OLD);
+        let candidate = candidate_in(staging.path(), NEW);
+        // Dropped without finish or rollback, as a killed run leaves it.
+        drop(swap(&candidate, &target, TAG).expect("swap"));
+
+        assert_eq!(recover(&target).expect("recover"), Some(TAG.to_owned()));
+        assert_eq!(read(&target), OLD, "the kept binary must be back");
+        assert_eq!(entries(home.path()), vec!["detent".to_owned()]);
+        assert_eq!(
+            recover(&target).expect("again"),
+            None,
+            "nothing left to undo"
+        );
+    }
+
+    /// Nothing to undo: no marker, a marker whose run stopped before the
+    /// rename (target and kept binary match), or one whose rollback already
+    /// ran (no kept binary). Only the marker goes.
+    #[test]
+    fn recover_leaves_an_unswapped_target_alone() {
+        let home = tempfile::TempDir::new().expect("home");
+        let target = target_in(home.path(), OLD);
+        let pending = home.path().join("detent.pending");
+        assert_eq!(recover(&target).expect("no marker"), None);
+
+        std::fs::write(&pending, TAG).expect("marker");
+        std::fs::write(home.path().join("detent.prev"), OLD).expect("kept");
+        assert_eq!(recover(&target).expect("before rename"), None);
+        assert_eq!(read(&target), OLD);
+        assert!(!pending.exists(), "the marker goes");
+
+        std::fs::remove_file(home.path().join("detent.prev")).expect("drop kept");
+        std::fs::write(&pending, TAG).expect("marker");
+        assert_eq!(recover(&target).expect("after rollback"), None);
+        assert_eq!(entries(home.path()), vec!["detent".to_owned()]);
+    }
+
+    /// A marker or kept binary that cannot be read is an error, and the
+    /// marker stays for the next run.
+    #[test]
+    fn recover_reports_what_it_cannot_read() {
+        let home = tempfile::TempDir::new().expect("home");
+        let target = target_in(home.path(), OLD);
+        let pending = home.path().join("detent.pending");
+        std::fs::create_dir(&pending).expect("unreadable marker");
+        assert!(matches!(
+            recover(&target),
+            Err(UpdateError::Install {
+                step: "pending",
+                ..
+            })
+        ));
+        std::fs::remove_dir(&pending).expect("clear");
+
+        std::fs::write(&pending, TAG).expect("marker");
+        std::fs::create_dir(home.path().join("detent.prev")).expect("unreadable kept");
+        assert!(matches!(
+            recover(&target),
+            Err(UpdateError::Install {
+                step: "recover",
+                ..
+            })
+        ));
+        assert!(pending.exists(), "the marker stays for the next run");
+    }
+
+    /// A swap that fails after the marker went down takes the marker back.
+    #[test]
+    fn a_failed_swap_leaves_no_marker() {
+        let home = tempfile::TempDir::new().expect("home");
+        let staging = tempfile::TempDir::new().expect("staging");
+        let target = target_in(home.path(), OLD);
+        let candidate = candidate_in(staging.path(), NEW);
+        // The marker path is a directory, so writing the marker fails.
+        std::fs::create_dir(home.path().join("detent.pending")).expect("block marker");
+
+        let err = swap(&candidate, &target, TAG).expect_err("marker blocked");
+        assert!(
+            matches!(
+                err,
+                UpdateError::Install {
+                    step: "pending",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        assert_eq!(read(&target), OLD);
+        assert!(!home.path().join("detent.prev").exists());
+    }
+
     #[test]
     fn the_previous_path_is_the_target_plus_a_suffix() {
         assert_eq!(
-            previous_path(Path::new("/usr/local/bin/detent")).expect("named"),
+            suffixed(Path::new("/usr/local/bin/detent"), PREVIOUS_SUFFIX).expect("named"),
             PathBuf::from("/usr/local/bin/detent.prev")
         );
         assert_eq!(
-            previous_path(Path::new("detent")).expect("bare name"),
+            suffixed(Path::new("detent"), PREVIOUS_SUFFIX).expect("bare name"),
             PathBuf::from("detent.prev")
         );
         assert!(
             matches!(
-                previous_path(Path::new("/")),
+                suffixed(Path::new("/"), PREVIOUS_SUFFIX),
                 Err(UpdateError::BadTarget { .. })
             ),
             "a path with no file name is no install target"

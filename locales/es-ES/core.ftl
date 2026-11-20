@@ -123,6 +123,7 @@ network-tip-bridge-members = nombres de las interfaces miembro de este puente.
 
 ## network module — validation diagnostics
 network-invalid-cidr = `{$value}` no es una dirección CIDR válida.
+network-invalid-interface-name = `{$value}` no es un nombre de interfaz válido.
 network-invalid-ip = `{$value}` no es una dirección IP válida.
 network-gateway-outside-subnet = la puerta de enlace `{$gateway}` está fuera de las subredes de esta interfaz.
 network-vlan-range = el id de VLAN `{$id}` está fuera de 1–4094.

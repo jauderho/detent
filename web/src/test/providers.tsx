@@ -119,6 +119,8 @@ export type ProviderOptions = {
   client?: ApiClient
   /** A stubbed transport for the client this helper builds. */
   fetch?: typeof globalThis.fetch
+  /** The query client to put in context; a fresh one when omitted. */
+  queryClient?: ReturnType<typeof createQueryClient>
   /** The address the memory router starts on. */
   route?: string
 }
@@ -132,7 +134,7 @@ export function renderWithProviders(ui: ReactNode, options: ProviderOptions = {}
     options.client ?? createApiClient(options.fetch === undefined ? {} : { fetch: options.fetch })
   return render(
     <LocalizationProvider l10n={createLocalization(['en-US'])}>
-      <ApiProvider client={client} queryClient={createQueryClient()}>
+      <ApiProvider client={client} queryClient={options.queryClient ?? createQueryClient()}>
         <MemoryRouter initialEntries={[options.route ?? '/']}>
           <AuthProvider>
             <PendingCommitProvider>

@@ -11,6 +11,7 @@
  */
 
 import type { ReactLocalization } from '@fluent/react'
+import { serverNow } from '@/api/client'
 import type { CertReport } from '@/api/system'
 import { formatUnixSeconds, localeOf } from '@/lib/format'
 
@@ -27,7 +28,7 @@ export function certTone(report: CertReport): 'blue' | 'amber' {
   )
     return 'amber'
   if (report.not_after_unix === null || report.not_after_unix === undefined) return 'blue'
-  const leftMs = report.not_after_unix * 1000 - Date.now()
+  const leftMs = report.not_after_unix * 1000 - serverNow()
   return leftMs < 30 * 86_400 * 1000 ? 'amber' : 'blue'
 }
 
@@ -44,7 +45,7 @@ export function certExpired(report: CertReport): boolean {
   return (
     report.not_after_unix !== null &&
     report.not_after_unix !== undefined &&
-    report.not_after_unix * 1000 < Date.now()
+    report.not_after_unix * 1000 < serverNow()
   )
 }
 

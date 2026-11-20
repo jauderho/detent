@@ -123,6 +123,7 @@ network-tip-bridge-members = 此橋接器的成員介面名稱。
 
 ## network module — validation diagnostics
 network-invalid-cidr = `{$value}` 不是有效的 CIDR 位址。
+network-invalid-interface-name = `{$value}` 不是有效的介面名稱。
 network-invalid-ip = `{$value}` 不是有效的 IP 位址。
 network-gateway-outside-subnet = 閘道 `{$gateway}` 不在此介面的子網路之內。
 network-vlan-range = VLAN id `{$id}` 超出了 1–4094 的範圍。

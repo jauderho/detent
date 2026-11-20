@@ -345,6 +345,75 @@ impl ConfigModule for BadModule {
     }
 }
 
+// ------------------------------------------------- a module whose defaults do not apply
+
+/// What `DefaultsFail` refuses.
+const PARSE_EMPTY: u8 = 0;
+const APPLY_DEFAULTS: u8 = 1;
+const READ_BACK: u8 = 2;
+
+/// The key `DefaultsFail`'s defaults hold.
+const DEFAULT_KEY: &str = "default";
+
+/// `KvModule` whose defaults break one step of the defaults round trip in
+/// `check_not_vacuous`: parsing an empty document (`PARSE_EMPTY`), applying the
+/// defaults to it (`APPLY_DEFAULTS`), or reading them back (`READ_BACK`).
+pub struct DefaultsFail<const STEP: u8>;
+
+impl<const STEP: u8> ConfigModule for DefaultsFail<STEP> {
+    const ID: &'static str = "defaults-fail";
+    type Doc = Document;
+    type Model = KvModel;
+
+    fn descriptor() -> &'static ModuleDescriptor {
+        &KV_DESCRIPTOR
+    }
+
+    fn parse(src: &str) -> Result<Self::Doc, ParseError> {
+        if STEP == PARSE_EMPTY && src.is_empty() {
+            return Err(ParseError::Malformed {
+                message: "empty".to_owned(),
+                span: None,
+            });
+        }
+        KvModule::parse(src)
+    }
+
+    fn render(doc: &Self::Doc) -> String {
+        doc.render()
+    }
+
+    fn to_model(doc: &Self::Doc) -> Result<Self::Model, ModelError> {
+        let model = KvModule::to_model(doc)?;
+        if STEP == READ_BACK && model.pairs.contains_key(DEFAULT_KEY) {
+            return Err(ModelError::Unrepresentable {
+                message: "default".to_owned(),
+                span: None,
+            });
+        }
+        Ok(model)
+    }
+
+    fn apply(doc: &mut Self::Doc, model: &Self::Model) -> Result<EditReport, EditError> {
+        if STEP == APPLY_DEFAULTS && model.pairs.contains_key(DEFAULT_KEY) {
+            return Err(EditError::Unsupported {
+                message: "default".to_owned(),
+            });
+        }
+        KvModule::apply(doc, model)
+    }
+
+    fn validate(model: &Self::Model, ctx: &ValidationCtx<'_>) -> Diagnostics {
+        KvModule::validate(model, ctx)
+    }
+
+    fn defaults(_profile: &HostProfile) -> Self::Model {
+        KvModel {
+            pairs: BTreeMap::from([(DEFAULT_KEY.to_owned(), "1".to_owned())]),
+        }
+    }
+}
+
 // ------------------------------------------------------------ a version-gated module
 
 /// `KvModule` whose `pairs` field is declared `since` 2.0: proves `Dyn` enforces
@@ -803,4 +872,24 @@ fn check_not_vacuous_catches_a_module_that_refuses_every_edit() {
     // `BadModule::defaults` reports a hostname `apply`/`to_model` cannot
     // reproduce — a module whose defaults do not round-trip must fail too.
     assert!(check_not_vacuous::<BadModule>(&["plain"], &profile).is_err());
+}
+
+/// Each step of the defaults round trip names itself in the error.
+#[test]
+fn check_not_vacuous_names_the_defaults_step_that_failed() {
+    let profile = HostProfile {
+        os: Os::Linux,
+        init: InitSystem::Systemd,
+        hostname: "detent-test".to_owned(),
+        service_versions: BTreeMap::new(),
+        ram_mib: 1024,
+    };
+    let fixtures = ["a=1\n"];
+
+    let parse = check_not_vacuous::<DefaultsFail<PARSE_EMPTY>>(&fixtures, &profile);
+    assert!(matches!(parse, Err(ref e) if e.contains("parse(\"\") failed")));
+    let apply = check_not_vacuous::<DefaultsFail<APPLY_DEFAULTS>>(&fixtures, &profile);
+    assert!(matches!(apply, Err(ref e) if e.contains("apply(parse(\"\"), defaults) failed")));
+    let read = check_not_vacuous::<DefaultsFail<READ_BACK>>(&fixtures, &profile);
+    assert!(matches!(read, Err(ref e) if e.contains("to_model after applying defaults failed")));
 }

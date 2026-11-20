@@ -665,11 +665,17 @@ fn build_model_from_lines(lines: &[String]) -> (Model, BTreeSet<usize>) {
                         netplan_pending_route_to = Some(to.clone());
                         // Consume the via line
                         i += 1;
-                        if let Some(iface_name) = netplan_iface.clone()
-                            && let Some(entry) = ifaces.get_mut(&iface_name)
-                        {
-                            entry.routes.push(Route { to, via: v });
-                        }
+                        // The interface entry always exists (see above).
+                        netplan_iface
+                            .as_ref()
+                            .and_then(|iface_name| ifaces.get_mut(iface_name))
+                            .into_iter()
+                            .for_each(|entry| {
+                                entry.routes.push(Route {
+                                    to: to.clone(),
+                                    via: v.clone(),
+                                });
+                            });
                         i += 1;
                         continue;
                     }
@@ -1042,13 +1048,15 @@ fn detect_flavor(doc: &Document) -> BackendFlavor {
         if let Some(s) = parse_section(raw) {
             if is_networkd_section(&s) {
                 networkd += 1;
-            } else if is_nm_section(&s) {
+            } else {
+                // `classify` makes only networkd and NM sections directives.
                 nm += 1;
             }
         } else if let Some((k, _)) = parse_kv_equals(raw) {
             if is_networkd_key(&k) {
                 networkd += 1;
-            } else if is_nm_key(&k) {
+            } else {
+                // `classify` makes only networkd and NM keys directives.
                 nm += 1;
             }
         } else if parse_ifupdown_auto(raw).is_some()
@@ -1056,7 +1064,8 @@ fn detect_flavor(doc: &Document) -> BackendFlavor {
             || parse_ifupdown_option(raw).is_some()
         {
             ifupdown += 1;
-        } else if parse_netplan_kv(raw).is_some() || parse_netplan_list_item(raw).is_some() {
+        } else {
+            // Any other directive is a netplan line (see `classify`).
             netplan += 1;
         }
     }
@@ -1194,6 +1203,41 @@ fn render_networkd(iface: &Interface) -> Result<Vec<String>, EditError> {
         out.push(format!("Id={}", vlan.id));
     }
     Ok(out)
+}
+
+/// Refuses a `NetworkManager` keyfile whose `[connection]` holds a key
+/// [`render_nm`] would overwrite: a `type` other than `ethernet`, or an
+/// `interface-name` other than the `id`. The renderer writes both from the
+/// model, so an edit would turn a Wi-Fi connection into an ethernet one, or
+/// bind the connection to another device.
+fn check_nm_connection(doc: &Document) -> Result<(), EditError> {
+    let mut section = String::new();
+    let mut ids = Vec::new();
+    let mut names = Vec::new();
+    for line in doc.lines() {
+        if let Some(name) = parse_section(line.raw()) {
+            section = name;
+        } else if section == "connection"
+            && let Some((key, value)) = parse_kv_equals(line.raw())
+        {
+            match key.as_str() {
+                "id" => ids.push(value),
+                "type" if value != "ethernet" => {
+                    return Err(EditError::Unsupported {
+                        message: format!("NetworkManager connection type {value:?} is not modeled"),
+                    });
+                }
+                "interface-name" => names.push(value),
+                _ => {}
+            }
+        }
+    }
+    if let Some(name) = names.iter().find(|name| !ids.contains(name)) {
+        return Err(EditError::Unsupported {
+            message: format!("NetworkManager interface-name {name:?} differs from the id"),
+        });
+    }
+    Ok(())
 }
 
 /// Render one interface as `NetworkManager` keyfile lines.
@@ -1967,6 +2011,8 @@ fn schema_with_hints() -> serde_json::Value {
 
 /// Fluent id: malformed CIDR or IP.
 const INVALID_CIDR: MessageId = MessageId::new("network-invalid-cidr");
+/// Fluent id: an interface name no renderer writes.
+const INVALID_INTERFACE_NAME: MessageId = MessageId::new("network-invalid-interface-name");
 /// Fluent id: malformed IP.
 const INVALID_IP: MessageId = MessageId::new("network-invalid-ip");
 /// Fluent id: gateway outside interface subnets.
@@ -2257,17 +2303,17 @@ fn pair_aligned(
     let mut inserted: Vec<usize> = Vec::new();
     for step in steps {
         match step {
-            Step::Delete(old) => {
-                if let Some((_, _, scope)) = managed.get(old) {
-                    deleted.entry(scope).or_default().push_back(old);
-                }
-            }
+            Step::Delete(old) => managed
+                .get(old)
+                .into_iter()
+                .for_each(|(_, _, scope)| deleted.entry(scope).or_default().push_back(old)),
             Step::Insert(new) => inserted.push(new),
             Step::Equal(old, new) => {
                 settle_run(&mut deleted, &mut inserted, planned_scopes, &mut partner);
-                if let Some(slot) = partner.get_mut(old) {
-                    *slot = Some(new);
-                }
+                partner
+                    .get_mut(old)
+                    .into_iter()
+                    .for_each(|slot| *slot = Some(new));
             }
         }
     }
@@ -2457,6 +2503,9 @@ impl ConfigModule for NetworkModule {
             return Ok(EditReport::default());
         }
         let flavor = detect_flavor(doc);
+        if flavor == BackendFlavor::NetworkManager {
+            check_nm_connection(doc)?;
+        }
         let new_lines = render_model_lines(flavor, model)?;
         for line in &new_lines {
             if !line.is_empty() && !is_directive_like(line) && !line.trim().is_empty() {
@@ -2537,7 +2586,7 @@ impl ConfigModule for NetworkModule {
             for (field, name) in names {
                 if !is_valid_ifname(name) || name.starts_with('-') {
                     diagnostics.push(
-                        Diagnostic::new(Severity::Error, INVALID_CIDR)
+                        Diagnostic::new(Severity::Error, INVALID_INTERFACE_NAME)
                             .with_field(FieldPath::new(format!("{base}/{field}")))
                             .with_arg("value", name.clone()),
                     );
@@ -2775,10 +2824,10 @@ impl ConfigModule for NetworkModule {
 mod tests {
     use super::{
         DESCRIPTOR, DHCP_STATIC_MIXED, DUPLICATE_INTERFACE, GATEWAY_OUTSIDE_SUBNET, INJECTION,
-        INVALID_CIDR, INVALID_IP, NetworkModule, REC_IPV6_PRIVACY, REC_NO_PROMISC, REC_RA_ACCEPT,
-        STATIC_NO_DNS, STATIC_NO_GATEWAY, VLAN_RANGE, classify, detect_flavor, is_valid_cidr,
-        is_valid_ip, parse_ifupdown_auto, parse_ifupdown_iface, parse_inline_list, parse_kv_equals,
-        parse_netplan_kv, parse_section, schema_with_hints,
+        INVALID_CIDR, INVALID_INTERFACE_NAME, INVALID_IP, NetworkModule, REC_IPV6_PRIVACY,
+        REC_NO_PROMISC, REC_RA_ACCEPT, STATIC_NO_DNS, STATIC_NO_GATEWAY, VLAN_RANGE, classify,
+        detect_flavor, is_valid_cidr, is_valid_ip, parse_ifupdown_auto, parse_ifupdown_iface,
+        parse_inline_list, parse_kv_equals, parse_netplan_kv, parse_section, schema_with_hints,
     };
     use detent_core::descriptor::{HostProfile, InitSystem, Os, ValidationCtx};
     use detent_core::diag::{MessageId, Severity};
@@ -2810,6 +2859,7 @@ mod tests {
             "network-tip-vlan-id",
             "network-tip-bridge-members",
             "network-invalid-cidr",
+            "network-invalid-interface-name",
             "network-invalid-ip",
             "network-gateway-outside-subnet",
             "network-vlan-range",
@@ -2874,7 +2924,7 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_declares_commit_confirm_and_targets() {
+    fn descriptor_declares_commit_confirm_and_targets() -> Result<(), Box<dyn std::error::Error>> {
         let descriptor = NetworkModule::descriptor();
         assert_eq!(descriptor.id, "network");
         assert!(
@@ -2919,13 +2969,13 @@ mod tests {
             .targets
             .iter()
             .find(|t| t.path.as_str() == "/etc/netplan")
-            .unwrap_or_else(|| panic!("/etc/netplan target missing"));
+            .ok_or("/etc/netplan target missing")?;
         assert_eq!(netplan.mode, 0o600);
         let nm = descriptor
             .targets
             .iter()
             .find(|t| t.path.as_str() == "/etc/NetworkManager/system-connections")
-            .unwrap_or_else(|| panic!("nm target missing"));
+            .ok_or("nm target missing")?;
         assert_eq!(nm.mode, 0o700);
         assert_eq!(descriptor.checks.len(), 4);
         // Each validator judges only its own backend's file.
@@ -2958,6 +3008,7 @@ mod tests {
         for svc in descriptor.services {
             assert_eq!(svc.units.bsdrc, [] as [&str; 0]);
         }
+        Ok(())
     }
 
     #[test]
@@ -2993,15 +3044,12 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_valid_and_exhaustive_os_match() {
+    fn defaults_are_valid_and_exhaustive_os_match() -> Result<(), Box<dyn std::error::Error>> {
         for os in [Os::Linux, Os::MacOs, Os::Other] {
             let host = profile(os);
             let model = NetworkModule::defaults(&host);
             assert_eq!(model.interfaces.len(), 1);
-            let first = model
-                .interfaces
-                .first()
-                .unwrap_or_else(|| panic!("defaults empty"));
+            let first = model.interfaces.first().ok_or("defaults empty")?;
             assert_eq!(first.name, "eth0");
             assert!(first.dhcp_v4);
             assert!(first.dhcp_v6);
@@ -3013,6 +3061,7 @@ mod tests {
                 "defaults must have no errors for {os:?}: {diags:?}"
             );
         }
+        Ok(())
     }
 
     #[test]
@@ -3114,7 +3163,7 @@ mod tests {
         let ctx = ValidationCtx::new(&host);
         NetworkModule::validate(model, &ctx)
             .iter()
-            .filter(|d| d.severity == Severity::Error && d.id.as_str() == INVALID_CIDR.as_str())
+            .filter(|d| d.severity == Severity::Error && d.id == INVALID_INTERFACE_NAME)
             .filter_map(|d| d.field.as_ref().map(|f| f.as_str().to_owned()))
             .collect()
     }
@@ -3342,15 +3391,17 @@ mod tests {
 
     /// The fastest of three runs of `apply` with an empty model on `unit`
     /// repeated `times` times. Checks that every line goes.
-    fn time_empty_apply(unit: &str, times: usize) -> Result<std::time::Duration, String> {
+    fn time_empty_apply(
+        unit: &str,
+        times: usize,
+    ) -> Result<std::time::Duration, Box<dyn std::error::Error>> {
         let src = unit.repeat(times);
         let mut fastest = std::time::Duration::MAX;
         for _ in 0..3 {
-            let mut doc = NetworkModule::parse(&src).map_err(|e| e.to_string())?;
+            let mut doc = NetworkModule::parse(&src)?;
             let lines = doc.len();
             let started = std::time::Instant::now();
-            let report = NetworkModule::apply(&mut doc, &super::Model::default())
-                .map_err(|e| e.to_string())?;
+            let report = NetworkModule::apply(&mut doc, &super::Model::default())?;
             fastest = fastest.min(started.elapsed());
             assert_eq!(report.removed, lines, "{unit:?}");
             assert_eq!(NetworkModule::render(&doc), "");
@@ -3359,7 +3410,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_is_linear_in_file_size() -> Result<(), String> {
+    fn apply_is_linear_in_file_size() -> Result<(), Box<dyn std::error::Error>> {
         // M21: ten times the lines must cost far less than a hundred times the
         // time. Linear work gives a ratio near 10, quadratic work near 100. A
         // ratio, not an absolute bound, so a slow or loaded runner still passes.
@@ -3385,11 +3436,10 @@ mod tests {
     /// directive whose text changed, and leave an unchanged one alone — all
     /// in one pass.
     #[test]
-    fn positional_apply_skips_removes_and_replaces() -> Result<(), String> {
+    fn positional_apply_skips_removes_and_replaces() -> Result<(), Box<dyn std::error::Error>> {
         let mut doc = NetworkModule::parse(
             "auto eth0\niface eth0 inet static\n\taddress 10.0.0.5/24\n\taddress 10.0.0.6/24\n# keep me\n\tgateway 10.0.0.9\n",
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
         assert_eq!(detect_flavor(&doc), super::BackendFlavor::Ifupdown);
         let model = super::Model {
             interfaces: vec![super::Interface {
@@ -3405,7 +3455,7 @@ mod tests {
                 bridge: None,
             }],
         };
-        let report = NetworkModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let report = NetworkModule::apply(&mut doc, &model)?;
         assert_eq!(report.removed, 1, "the surplus address line is removed");
         assert_eq!(
             report.changed_lines, 1,
@@ -3429,13 +3479,14 @@ mod tests {
     /// must leave it exactly as it found it instead of pairing or removing
     /// it.
     #[test]
-    fn networkd_sections_leave_a_headerless_directive_verbatim() -> Result<(), String> {
-        let mut doc = NetworkModule::parse("DHCP=yes\n[Match]\nName=eth0\n\n[Network]\nDHCP=yes\n")
-            .map_err(|e| e.to_string())?;
-        let mut model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+    fn networkd_sections_leave_a_headerless_directive_verbatim()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut doc =
+            NetworkModule::parse("DHCP=yes\n[Match]\nName=eth0\n\n[Network]\nDHCP=yes\n")?;
+        let mut model = NetworkModule::to_model(&doc)?;
         model.interfaces[0].dhcp_v4 = false;
         model.interfaces[0].dhcp_v6 = false;
-        NetworkModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        NetworkModule::apply(&mut doc, &model)?;
         let rendered = NetworkModule::render(&doc);
         assert!(
             rendered.starts_with("DHCP=yes\n"),
@@ -3476,19 +3527,19 @@ mod tests {
     /// longer wants (no planned counterpart in its scope group) is removed,
     /// not left behind or overwritten.
     #[test]
-    fn networkd_sections_remove_an_existing_directive_with_no_planned_partner() -> Result<(), String>
-    {
-        let mut doc =
-            NetworkModule::parse("[Match]\nName=eth0\n\n[Network]\nDHCP=yes\nAddress=1.2.3.4/24\n")
-                .map_err(|e| e.to_string())?;
-        let mut model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+    fn networkd_sections_remove_an_existing_directive_with_no_planned_partner()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut doc = NetworkModule::parse(
+            "[Match]\nName=eth0\n\n[Network]\nDHCP=yes\nAddress=1.2.3.4/24\n",
+        )?;
+        let mut model = NetworkModule::to_model(&doc)?;
         assert_eq!(model.interfaces[0].addresses, vec!["1.2.3.4/24".to_owned()]);
         model.interfaces[0].addresses.clear();
-        let report = NetworkModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let report = NetworkModule::apply(&mut doc, &model)?;
         assert!(report.removed > 0);
         let rendered = NetworkModule::render(&doc);
         assert!(!rendered.contains("1.2.3.4/24"));
-        let back = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        let back = NetworkModule::to_model(&doc)?;
         assert_eq!(back.interfaces[0].addresses, [] as [String; 0]);
         Ok(())
     }
@@ -3561,17 +3612,16 @@ mod tests {
     }
 
     #[test]
-    fn apply_edits_all_four_flavors() -> Result<(), String> {
+    fn apply_edits_all_four_flavors() -> Result<(), Box<dyn std::error::Error>> {
         // networkd edit
-        let mut doc = NetworkModule::parse("[Match]\nName=eth0\n\n[Network]\nDHCP=yes\n")
-            .map_err(|e| e.to_string())?;
-        let mut model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        let mut doc = NetworkModule::parse("[Match]\nName=eth0\n\n[Network]\nDHCP=yes\n")?;
+        let mut model = NetworkModule::to_model(&doc)?;
         model.interfaces[0].dhcp_v4 = false;
         model.interfaces[0].addresses = vec!["192.168.1.10/24".to_owned()];
         model.interfaces[0].gateway_v4 = Some("192.168.1.1".to_owned());
-        let report = NetworkModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let report = NetworkModule::apply(&mut doc, &model)?;
         assert!(report.added > 0 || report.removed > 0);
-        let back = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        let back = NetworkModule::to_model(&doc)?;
         assert_eq!(back, model);
         Ok(())
     }
@@ -3588,16 +3638,14 @@ mod tests {
     }
 
     #[test]
-    fn detect_flavor_works() -> Result<(), String> {
-        let doc = NetworkModule::parse("[Match]\nName=eth0\n").map_err(|e| e.to_string())?;
+    fn detect_flavor_works() -> Result<(), Box<dyn std::error::Error>> {
+        let doc = NetworkModule::parse("[Match]\nName=eth0\n")?;
         assert_eq!(detect_flavor(&doc), super::BackendFlavor::Networkd);
-        let doc2 =
-            NetworkModule::parse("auto eth0\niface eth0 inet dhcp\n").map_err(|e| e.to_string())?;
+        let doc2 = NetworkModule::parse("auto eth0\niface eth0 inet dhcp\n")?;
         assert_eq!(detect_flavor(&doc2), super::BackendFlavor::Ifupdown);
         let doc3 = NetworkModule::parse(
             "network:\n  version: 2\n  ethernets:\n    eth0:\n      dhcp4: true\n",
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
         assert_eq!(detect_flavor(&doc3), super::BackendFlavor::Netplan);
         Ok(())
     }
@@ -3690,15 +3738,17 @@ mod tests {
     }
 
     #[test]
-    fn netplan_list_item_rejects_opaque_and_accepts_bare_dash() {
+    fn netplan_list_item_rejects_opaque_and_accepts_bare_dash()
+    -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(super::parse_netplan_list_item("  - &anchor"), None);
         assert_eq!(super::parse_netplan_list_item("  - *alias"), None);
         assert_eq!(super::parse_netplan_list_item("  - !tag"), None);
-        let (indent, value) = super::parse_netplan_list_item("    -")
-            .unwrap_or_else(|| panic!("bare dash must parse"));
+        let (indent, value) =
+            super::parse_netplan_list_item("    -").ok_or("bare dash must parse")?;
         assert_eq!(indent, 4);
         assert_eq!(value, "");
         assert_eq!(super::parse_netplan_list_item("  not-a-list"), None);
+        Ok(())
     }
 
     #[test]
@@ -3758,16 +3808,17 @@ mod tests {
         ));
     }
     #[test]
-    fn netplan_full_doc_parses_gateways_dns_vlan_bridge_routes() -> Result<(), String> {
+    fn netplan_full_doc_parses_gateways_dns_vlan_bridge_routes()
+    -> Result<(), Box<dyn std::error::Error>> {
         let src = "network:\n  version: 2\n  ethernets:\n    eth0:\n      dhcp4: true\n      dhcp6: true\n      addresses:\n        - 192.168.1.10/24\n      gateway4: 192.168.1.1\n      gateway6: 2001:db8::1\n      nameservers:\n        addresses: [8.8.8.8, 2001:4860:4860::8888]\n      routes:\n        - to: 10.0.0.0/24\n          via: 192.168.1.254\n  vlans:\n    vlan10:\n      id: 10\n      link: eth0\n      addresses:\n        - 10.10.10.2/24\n  bridges:\n    br0:\n      interfaces: [eth0]\n      dhcp4: false\n      dhcp6: false\n      addresses:\n        - 192.168.2.10/24\n";
-        let doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
-        let model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        let doc = NetworkModule::parse(src)?;
+        let model = NetworkModule::to_model(&doc)?;
         assert_eq!(model.interfaces.len(), 3);
         let eth0 = model
             .interfaces
             .iter()
             .find(|i| i.name == "eth0")
-            .unwrap_or_else(|| panic!("eth0 missing"));
+            .ok_or("eth0 missing")?;
         assert!(eth0.dhcp_v4 && eth0.dhcp_v6);
         assert_eq!(eth0.addresses, vec!["192.168.1.10/24"]);
         assert_eq!(eth0.gateway_v4.as_deref(), Some("192.168.1.1"));
@@ -3780,7 +3831,7 @@ mod tests {
             .interfaces
             .iter()
             .find(|i| i.name == "vlan10")
-            .unwrap_or_else(|| panic!("vlan10 missing"));
+            .ok_or("vlan10 missing")?;
         assert_eq!(
             vlan.vlan,
             Some(super::Vlan {
@@ -3792,7 +3843,7 @@ mod tests {
             .interfaces
             .iter()
             .find(|i| i.name == "br0")
-            .unwrap_or_else(|| panic!("br0 missing"));
+            .ok_or("br0 missing")?;
         assert_eq!(
             br.bridge,
             Some(super::Bridge {
@@ -3800,40 +3851,42 @@ mod tests {
             })
         );
         // Round-trip: apply of own model is a noop.
-        let mut doc2 = NetworkModule::parse(src).map_err(|e| e.to_string())?;
-        let report = NetworkModule::apply(&mut doc2, &model).map_err(|e| e.to_string())?;
+        let mut doc2 = NetworkModule::parse(src)?;
+        let report = NetworkModule::apply(&mut doc2, &model)?;
         assert_eq!(report, EditReport::default());
         Ok(())
     }
 
     #[test]
-    fn netplan_block_nameservers_are_dns_not_interface_addresses() -> Result<(), String> {
+    fn netplan_block_nameservers_are_dns_not_interface_addresses()
+    -> Result<(), Box<dyn std::error::Error>> {
         let src = "network:\n  ethernets:\n    eth0:\n      addresses:\n        - 192.0.2.10/24\n      nameservers:\n        addresses:\n          - 8.8.8.8\n          - 2001:4860:4860::8888\n";
-        let doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
-        let model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        let doc = NetworkModule::parse(src)?;
+        let model = NetworkModule::to_model(&doc)?;
         let eth0 = model
             .interfaces
             .iter()
             .find(|iface| iface.name == "eth0")
-            .unwrap_or_else(|| panic!("eth0 missing"));
+            .ok_or("eth0 missing")?;
         assert_eq!(eth0.addresses, vec!["192.0.2.10/24"]);
         assert_eq!(eth0.dns, vec!["8.8.8.8", "2001:4860:4860::8888"]);
         Ok(())
     }
 
     #[test]
-    fn netplan_inline_and_scalar_addresses_and_unknown_subtree() -> Result<(), String> {
+    fn netplan_inline_and_scalar_addresses_and_unknown_subtree()
+    -> Result<(), Box<dyn std::error::Error>> {
         // Inline addresses list plus scalar address line.
         let src = "network:\n  version: 2\n  ethernets:\n    eth0:\n      addresses: [192.168.1.10/24]\n      gateway4: 192.168.1.1\n      routes:\n        - to: default\n";
-        let doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
-        let model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        let doc = NetworkModule::parse(src)?;
+        let model = NetworkModule::to_model(&doc)?;
         let eth0 = &model.interfaces[0];
         assert!(eth0.addresses.contains(&"192.168.1.10/24".to_owned()));
         assert_eq!(eth0.gateway_v4.as_deref(), Some("192.168.1.1"));
         let src2 =
             "network:\n  version: 2\n  ethernets:\n    eth0:\n      addresses: 192.168.5.5/24\n";
-        let doc2 = NetworkModule::parse(src2).map_err(|e| e.to_string())?;
-        let model2 = NetworkModule::to_model(&doc2).map_err(|e| e.to_string())?;
+        let doc2 = NetworkModule::parse(src2)?;
+        let model2 = NetworkModule::to_model(&doc2)?;
         assert!(
             model2.interfaces[0]
                 .addresses
@@ -3841,28 +3894,28 @@ mod tests {
         );
         // Unknown subtree (e.g. wifis) preserved byte-identical through apply.
         let src3 = "network:\n  version: 2\n  wifis:\n    wlan0:\n      access-points:\n        myssid:\n          password: secret\n  ethernets:\n    eth0:\n      dhcp4: true\n";
-        let mut doc3 = NetworkModule::parse(src3).map_err(|e| e.to_string())?;
-        let model3 = NetworkModule::to_model(&doc3).map_err(|e| e.to_string())?;
-        let report3 = NetworkModule::apply(&mut doc3, &model3).map_err(|e| e.to_string())?;
+        let mut doc3 = NetworkModule::parse(src3)?;
+        let model3 = NetworkModule::to_model(&doc3)?;
+        let report3 = NetworkModule::apply(&mut doc3, &model3)?;
         assert_eq!(report3, EditReport::default());
         assert!(NetworkModule::render(&doc3).contains("myssid"));
         // Inline `nameservers: [...]` maps straight to DNS; a block list under
         // `nameservers` does too (with bare dashes skipped); a bad `id` leaves
         // the VLAN unset but keeps the link.
         let src4 = "network:\n  version: 2\n  ethernets:\n    eth1:\n      nameservers: [8.8.8.8, 1.1.1.1]\n  vlans:\n    vlan9:\n      id: abc\n      link: eth1\n      nameservers:\n        -\n        - 9.9.9.9\n";
-        let doc4 = NetworkModule::parse(src4).map_err(|e| e.to_string())?;
-        let model4 = NetworkModule::to_model(&doc4).map_err(|e| e.to_string())?;
+        let doc4 = NetworkModule::parse(src4)?;
+        let model4 = NetworkModule::to_model(&doc4)?;
         let eth1 = model4
             .interfaces
             .iter()
             .find(|i| i.name == "eth1")
-            .unwrap_or_else(|| panic!("eth1 missing"));
+            .ok_or("eth1 missing")?;
         assert_eq!(eth1.dns, vec!["8.8.8.8".to_owned(), "1.1.1.1".to_owned()]);
         let vlan9 = model4
             .interfaces
             .iter()
             .find(|i| i.name == "vlan9")
-            .unwrap_or_else(|| panic!("vlan9 missing"));
+            .ok_or("vlan9 missing")?;
         assert_eq!(
             vlan9.vlan,
             Some(super::Vlan {
@@ -3875,8 +3928,8 @@ mod tests {
         // A bare `-` list item under a block `addresses:` is blank and must
         // be skipped, not pushed as an empty address.
         let src5 = "network:\n  version: 2\n  ethernets:\n    eth2:\n      addresses:\n        -\n        - 10.0.0.5/24\n";
-        let doc5 = NetworkModule::parse(src5).map_err(|e| e.to_string())?;
-        let model5 = NetworkModule::to_model(&doc5).map_err(|e| e.to_string())?;
+        let doc5 = NetworkModule::parse(src5)?;
+        let model5 = NetworkModule::to_model(&doc5)?;
         assert_eq!(
             model5.interfaces[0].addresses,
             vec!["10.0.0.5/24".to_owned()]
@@ -3885,13 +3938,13 @@ mod tests {
     }
 
     #[test]
-    fn nm_and_ifupdown_docs_parse_all_leaves() -> Result<(), String> {
+    fn nm_and_ifupdown_docs_parse_all_leaves() -> Result<(), Box<dyn std::error::Error>> {
         // NetworkManager: v4 manual + v6 auto + dns; gateway rides the
         // `addresses` comma form (there is no `route1=` key in the subset).
         // Empty `;` parts and empty `,` gateways are skipped.
         let nm = "[connection]\nid=eth0\ntype=ethernet\n\n[ipv4]\nmethod=manual\naddresses=192.168.1.10/24,192.168.1.1;192.168.9.9/24,;\ngateway=192.168.1.1\ndns=8.8.8.8;1.1.1.1;\n\n[ipv6]\nmethod=auto\naddresses=2001:db8::10/64,fe80::1\ngateway=2001:db8::1\ndns=2001:4860:4860::8888;\n";
-        let doc = NetworkModule::parse(nm).map_err(|e| e.to_string())?;
-        let model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        let doc = NetworkModule::parse(nm)?;
+        let model = NetworkModule::to_model(&doc)?;
         let eth0 = &model.interfaces[0];
         assert!(!eth0.dhcp_v4);
         assert!(eth0.dhcp_v6);
@@ -3902,34 +3955,34 @@ mod tests {
         assert!(eth0.dns.contains(&"2001:4860:4860::8888".to_owned()));
         // `method=auto` on ipv4 and `method=manual` on ipv6.
         let nm2 = "[connection]\nid=eth1\n\n[ipv4]\nmethod=auto\n\n[ipv6]\nmethod=manual\n";
-        let doc_m = NetworkModule::parse(nm2).map_err(|e| e.to_string())?;
-        let model_m = NetworkModule::to_model(&doc_m).map_err(|e| e.to_string())?;
+        let doc_m = NetworkModule::parse(nm2)?;
+        let model_m = NetworkModule::to_model(&doc_m)?;
         assert!(model_m.interfaces[0].dhcp_v4);
         assert!(!model_m.interfaces[0].dhcp_v6);
         // ifupdown: v6 stanza, vlan, bridge, dns, inet6 dhcp, v6 gateway,
         // unknown-but-known-key options, bad vlan_id, and a stanza without `auto`.
         let ifup = "auto eth0\niface eth0 inet dhcp\niface eth0 inet6 dhcp\n\nauto vlan10\niface vlan10 inet static\n\taddress 10.0.0.2/24\n\tgateway 10.0.0.1\n\tvlan-raw-device eth0\n\tvlan_id 10\n\tvlan_id abc\n\nauto br0\niface br0 inet static\n\taddress 192.168.2.1/24\n\tgateway fe80::1\n\tbridge_ports eth0 eth1\n\tdns-nameservers 8.8.8.8\n\tmtu 1500\n\tup echo ignoring this\n\tup ip route add via 192.168.2.254\n\niface eth9 inet static\n\taddress 10.5.5.5/24\n";
-        let doc2 = NetworkModule::parse(ifup).map_err(|e| e.to_string())?;
-        let model2 = NetworkModule::to_model(&doc2).map_err(|e| e.to_string())?;
+        let doc2 = NetworkModule::parse(ifup)?;
+        let model2 = NetworkModule::to_model(&doc2)?;
         let e0 = model2
             .interfaces
             .iter()
             .find(|i| i.name == "eth0")
-            .unwrap_or_else(|| panic!("eth0 missing"));
+            .ok_or("eth0 missing")?;
         assert!(e0.dhcp_v6);
         assert!(e0.dhcp_v4);
         let v10 = model2
             .interfaces
             .iter()
             .find(|i| i.name == "vlan10")
-            .unwrap_or_else(|| panic!("vlan10 missing"));
+            .ok_or("vlan10 missing")?;
         assert_eq!(v10.vlan.as_ref().map(|v| v.id), Some(10));
         assert_eq!(v10.vlan.as_ref().map(|v| v.link.as_str()), Some("eth0"));
         let br = model2
             .interfaces
             .iter()
             .find(|i| i.name == "br0")
-            .unwrap_or_else(|| panic!("br0 missing"));
+            .ok_or("br0 missing")?;
         assert_eq!(br.bridge.as_ref().map(|b| b.members.len()), Some(2));
         assert!(br.dns.contains(&"8.8.8.8".to_owned()));
         assert_eq!(br.gateway_v6.as_deref(), Some("fe80::1"));
@@ -3938,8 +3991,72 @@ mod tests {
             .interfaces
             .iter()
             .find(|i| i.name == "eth9")
-            .unwrap_or_else(|| panic!("eth9 missing"));
+            .ok_or("eth9 missing")?;
         assert_eq!(eth9.addresses, vec!["10.5.5.5/24".to_owned()]);
+        Ok(())
+    }
+
+    #[test]
+    fn empty_or_malformed_values_leave_the_model_untouched()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // networkd: a `VLAN=` value that is not `link:id` sets no vlan.
+        let networkd = "[Match]\nName=eth0\n\n[Network]\nVLAN=nocolon\nVLAN=eth0:abc\n";
+        let model = NetworkModule::to_model(&NetworkModule::parse(networkd)?)?;
+        assert_eq!(model.interfaces.len(), 1);
+        assert_eq!(model.interfaces[0].vlan, None);
+        // NetworkManager: an `addresses` part with only a gateway adds no address.
+        let nm = "[connection]\nid=eth0\n\n[ipv4]\nmethod=manual\naddresses=,192.168.1.1\n";
+        let model = NetworkModule::to_model(&NetworkModule::parse(nm)?)?;
+        assert_eq!(model.interfaces[0].addresses, [] as [String; 0]);
+        assert_eq!(
+            model.interfaces[0].gateway_v4.as_deref(),
+            Some("192.168.1.1")
+        );
+        // ifupdown: option keys with no value add no dns or bridge.
+        let ifup = "auto eth0\niface eth0 inet static\n\tdns-nameservers\n\tbridge_ports\n";
+        let model = NetworkModule::to_model(&NetworkModule::parse(ifup)?)?;
+        assert_eq!(model.interfaces[0].dns, [] as [String; 0]);
+        assert_eq!(model.interfaces[0].bridge, None);
+        // The singular `dns-nameserver` and the dashed `bridge-ports` are read too.
+        let alias =
+            "auto br0\niface br0 inet manual\n\tdns-nameserver 9.9.9.9\n\tbridge-ports eth0 eth1\n";
+        let model = NetworkModule::to_model(&NetworkModule::parse(alias)?)?;
+        assert_eq!(model.interfaces[0].dns, ["9.9.9.9".to_owned()]);
+        assert_eq!(
+            model.interfaces[0].bridge,
+            Some(super::Bridge {
+                members: vec!["eth0".to_owned(), "eth1".to_owned()]
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn render_nm_writes_no_ipv4_list_for_ipv6_only_values() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut iface = NetworkModule::defaults(&profile(Os::Linux)).interfaces[0].clone();
+        iface.dhcp_v4 = false;
+        iface.dhcp_v6 = false;
+        iface.addresses = vec!["2001:db8::10/64".to_owned()];
+        iface.dns = vec!["2001:4860:4860::8888".to_owned()];
+        let lines = super::render_nm(&iface)?;
+        let ipv4 = lines
+            .iter()
+            .position(|line| line == "[ipv4]")
+            .ok_or("no [ipv4]")?;
+        let ipv6 = lines
+            .iter()
+            .position(|line| line == "[ipv6]")
+            .ok_or("no [ipv6]")?;
+        assert_eq!(lines[ipv4 + 1], "method=manual");
+        assert!(
+            lines[ipv4..ipv6]
+                .iter()
+                .all(|line| !line.starts_with("addresses=") && !line.starts_with("dns=")),
+            "{lines:?}"
+        );
+        assert!(lines.contains(&"addresses=2001:db8::10/64".to_owned()));
+        assert!(lines.contains(&"dns=2001:4860:4860::8888".to_owned()));
         Ok(())
     }
 
@@ -4278,20 +4395,19 @@ mod tests {
     }
 
     #[test]
-    fn flavor_detection_and_empty_model_render() -> Result<(), String> {
+    fn flavor_detection_and_empty_model_render() -> Result<(), Box<dyn std::error::Error>> {
         use super::BackendFlavor;
         // Majority wins; tie goes networkd; empty/all-unknown defaults networkd.
         let nm_heavy = NetworkModule::parse(
             "[connection]\nid=a\n[ipv4]\nmethod=auto\n[ipv6]\nmethod=auto\n[Match]\nName=x\n",
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
         assert_eq!(detect_flavor(&nm_heavy), BackendFlavor::NetworkManager);
-        let empty = NetworkModule::parse("").map_err(|e| e.to_string())?;
+        let empty = NetworkModule::parse("")?;
         assert_eq!(detect_flavor(&empty), BackendFlavor::Networkd);
-        let unknown = NetworkModule::parse("garbage line\n").map_err(|e| e.to_string())?;
+        let unknown = NetworkModule::parse("garbage line\n")?;
         assert_eq!(detect_flavor(&unknown), BackendFlavor::Networkd);
         // Empty model renders the netplan header only.
-        let lines = super::render_netplan(&super::Model::default()).map_err(|e| e.to_string())?;
+        let lines = super::render_netplan(&super::Model::default())?;
         assert_eq!(
             lines,
             vec!["network:".to_owned(), "  version: 2".to_owned()]
@@ -4299,17 +4415,42 @@ mod tests {
         // `DHCP=ipv4` arm: v4-only DHCP renders distinctly.
         let mut v4only = NetworkModule::defaults(&profile(Os::Linux));
         v4only.interfaces[0].dhcp_v6 = false;
-        let lines = super::render_model_lines(super::BackendFlavor::Networkd, &v4only)
-            .map_err(|e| e.to_string())?;
+        let lines = super::render_model_lines(super::BackendFlavor::Networkd, &v4only)?;
         assert!(lines.iter().any(|l| l == "DHCP=ipv4"));
         v4only.interfaces[0].dhcp_v6 = true;
         // ifupdown needs a separate inet6 stanza for DHCPv6.
-        let lines = super::render_ifupdown(&v4only.interfaces[0]).map_err(|e| e.to_string())?;
+        let lines = super::render_ifupdown(&v4only.interfaces[0])?;
         assert!(lines.iter().any(|l| l == "iface eth0 inet dhcp"));
         assert!(lines.iter().any(|l| l == "iface eth0 inet6 dhcp"));
         // NetworkManager writes DHCPv6 as `[ipv6]` `method=auto`.
         let nm = "[connection]\nid=eth0\n";
         assert!(assert_apply_keeps_model(nm, &v4only)?);
+        Ok(())
+    }
+
+    #[test]
+    fn nm_edits_refuse_keys_the_renderer_would_overwrite() -> Result<(), String> {
+        let ethernet = "[connection]\nid=eth0\ntype=ethernet\ninterface-name=eth0\n\n[ethernet]\n\n[ipv4]\nmethod=auto\n";
+        for src in [
+            "[connection]\nid=home\ntype=wifi\ninterface-name=home\n\n[wifi]\nssid=home\n\n[ipv4]\nmethod=auto\n",
+            "[connection]\nid=uplink\ntype=ethernet\ninterface-name=eth0\n\n[ipv4]\nmethod=auto\n",
+            ethernet,
+        ] {
+            let mut doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
+            let mut model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+            model.interfaces[0].dns.push("192.0.2.53".to_owned());
+            let result = NetworkModule::apply(&mut doc, &model);
+            if src == ethernet {
+                assert!(result.is_ok(), "{result:?}");
+                assert!(NetworkModule::render(&doc).contains("dns=192.0.2.53"));
+            } else {
+                assert!(
+                    matches!(result, Err(super::EditError::Unsupported { .. })),
+                    "{src:?}: {result:?}"
+                );
+                assert_eq!(NetworkModule::render(&doc), src, "a refusal edits nothing");
+            }
+        }
         Ok(())
     }
 
@@ -4447,17 +4588,17 @@ mod tests {
     }
 
     #[test]
-    fn netplan_via_list_items_and_pending_routes() -> Result<(), String> {
+    fn netplan_via_list_items_and_pending_routes() -> Result<(), Box<dyn std::error::Error>> {
         // `- via:` list items complete a pending `- to:`; when no route exists
         // yet a new one is pushed, and one after a completed route adds another.
         let src = "network:\n  version: 2\n  ethernets:\n    eth0:\n      routes:\n        - to: 10.0.0.0/24\n        - via: 192.168.1.254\n    eth1:\n      routes:\n        - to: 10.0.1.0/24\n          via: 192.168.1.1\n        - via: 192.168.1.9\n";
-        let doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
-        let model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        let doc = NetworkModule::parse(src)?;
+        let model = NetworkModule::to_model(&doc)?;
         let eth0 = model
             .interfaces
             .iter()
             .find(|i| i.name == "eth0")
-            .unwrap_or_else(|| panic!("eth0 missing"));
+            .ok_or("eth0 missing")?;
         assert_eq!(
             eth0.routes,
             vec![super::Route {
@@ -4469,7 +4610,7 @@ mod tests {
             .interfaces
             .iter()
             .find(|i| i.name == "eth1")
-            .unwrap_or_else(|| panic!("eth1 missing"));
+            .ok_or("eth1 missing")?;
         assert_eq!(
             eth1.routes,
             vec![
@@ -4486,8 +4627,8 @@ mod tests {
         // A networkd `[Route] Destination=` route (empty via) is completed in
         // place by a netplan `- via:` item when both flavors share one file.
         let src_m = "[Match]\nName=eth0\n\n[Route]\nDestination=10.0.0.0/24\n\nnetwork:\n  version: 2\n  ethernets:\n    eth0:\n      routes:\n        - to: 10.0.0.0/24\n        - via: 192.168.1.254\n";
-        let doc_m = NetworkModule::parse(src_m).map_err(|e| e.to_string())?;
-        let model_m = NetworkModule::to_model(&doc_m).map_err(|e| e.to_string())?;
+        let doc_m = NetworkModule::parse(src_m)?;
+        let model_m = NetworkModule::to_model(&doc_m)?;
         assert_eq!(
             model_m.interfaces[0].routes,
             vec![super::Route {
@@ -4499,13 +4640,13 @@ mod tests {
         // bare item under `routes:` is ignored; list items under unmodeled
         // parents (`interfaces:`) are ignored.
         let src2 = "network:\n  version: 2\n  routes:\n    - to: 10.0.0.0/24\n    - via: 192.168.1.254\n  ethernets:\n    eth2:\n      routes:\n        - via: 192.168.1.9\n        - 10.0.0.0/24\n      interfaces:\n        - eth0\n";
-        let doc2 = NetworkModule::parse(src2).map_err(|e| e.to_string())?;
-        let model2 = NetworkModule::to_model(&doc2).map_err(|e| e.to_string())?;
+        let doc2 = NetworkModule::parse(src2)?;
+        let model2 = NetworkModule::to_model(&doc2)?;
         let eth2 = model2
             .interfaces
             .iter()
             .find(|i| i.name == "eth2")
-            .unwrap_or_else(|| panic!("eth2 missing"));
+            .ok_or("eth2 missing")?;
         assert_eq!(eth2.routes, [] as [crate::Route; 0]);
         assert!(eth2.bridge.is_none());
         Ok(())
@@ -4637,12 +4778,13 @@ mod tests {
         let mut doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
         assert_eq!(NetworkModule::render(&doc), src);
         let mut model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
-        for iface in &mut model.interfaces {
-            for addr in &mut iface.addresses {
-                if addr == from {
-                    to.clone_into(addr);
-                }
-            }
+        for addr in model
+            .interfaces
+            .iter_mut()
+            .flat_map(|iface| iface.addresses.iter_mut())
+            .filter(|addr| addr.as_str() == from)
+        {
+            to.clone_into(addr);
         }
         NetworkModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
         let out = NetworkModule::render(&doc);
@@ -4775,7 +4917,8 @@ mod tests {
     }
 
     #[test]
-    fn an_ifupdown_edit_keeps_source_lines_comments_and_unknown_stanzas() -> Result<(), String> {
+    fn an_ifupdown_edit_keeps_source_lines_comments_and_unknown_stanzas()
+    -> Result<(), Box<dyn std::error::Error>> {
         // The stock Debian file, as the D3 container had it, plus what an
         // administrator adds by hand.
         let src = "# interfaces(5) file used by ifup(8) and ifdown(8)\n\
@@ -4787,8 +4930,8 @@ mod tests {
                    \n\
                    auto lo\n\
                    iface lo inet loopback\n";
-        let mut doc = NetworkModule::parse(src).map_err(|e| e.to_string())?;
-        let mut model = NetworkModule::to_model(&doc).map_err(|e| e.to_string())?;
+        let mut doc = NetworkModule::parse(src)?;
+        let mut model = NetworkModule::to_model(&doc)?;
         model.interfaces.push(super::Interface {
             name: "mgmt0".to_owned(),
             dhcp_v4: false,
@@ -4801,7 +4944,7 @@ mod tests {
             vlan: None,
             bridge: None,
         });
-        NetworkModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        NetworkModule::apply(&mut doc, &model)?;
         let out = NetworkModule::render(&doc);
         for kept in [
             "# interfaces(5) file used by ifup(8) and ifdown(8)\n",
@@ -4817,13 +4960,9 @@ mod tests {
             out.contains("auto mgmt0\niface mgmt0 inet static\n\taddress 192.0.2.1/24"),
             "{out}"
         );
-        assert_eq!(
-            NetworkModule::to_model(&doc).map_err(|e| e.to_string())?,
-            model
-        );
+        assert_eq!(NetworkModule::to_model(&doc)?, model);
         // The D3 case: a file that holds only the `source` line keeps it.
-        let mut doc = NetworkModule::parse("source /etc/network/interfaces.d/*\n")
-            .map_err(|e| e.to_string())?;
+        let mut doc = NetworkModule::parse("source /etc/network/interfaces.d/*\n")?;
         let one = super::Model {
             interfaces: model
                 .interfaces
@@ -4832,7 +4971,7 @@ mod tests {
                 .cloned()
                 .collect(),
         };
-        NetworkModule::apply(&mut doc, &one).map_err(|e| e.to_string())?;
+        NetworkModule::apply(&mut doc, &one)?;
         let out = NetworkModule::render(&doc);
         assert!(
             out.starts_with("source /etc/network/interfaces.d/*\n"),

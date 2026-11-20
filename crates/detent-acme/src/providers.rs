@@ -324,8 +324,9 @@ impl DnsProvider for AcmeDnsProvider {
     }
 
     fn delete(&self, _record: &DnsRecord) -> Result<(), AcmeError> {
-        // No withdraw API: post the empty TXT.
-        self.post_update("")
+        // acme-dns rejects an empty TXT (it needs 43 characters) and keeps
+        // only the 2 newest values, so there is nothing to delete.
+        Ok(())
     }
 }
 
@@ -369,7 +370,7 @@ impl DeSecProvider {
     /// domain is not a valid DNS name.
     pub fn new(token: impl Into<String>, domain: impl Into<String>) -> Result<Self, AcmeError> {
         let token = token.into();
-        let domain = domain.into();
+        let domain = domain.into().to_ascii_lowercase();
         validate_value(&token).map_err(|_| {
             AcmeError::Config("deSEC: token must be non-empty printable ASCII".into())
         })?;
@@ -399,10 +400,15 @@ impl DeSecProvider {
     /// zone, `@` at the zone apex itself.
     fn subname<'a>(&'a self, record: &'a DnsRecord) -> Result<&'a str, AcmeError> {
         let fqdn = record.fqdn();
-        if fqdn == self.domain {
+        let lower = fqdn.to_ascii_lowercase();
+        if lower == self.domain {
             return Ok("@");
         }
-        fqdn.strip_suffix(&format!(".{}", self.domain))
+        // ASCII lowercasing keeps byte lengths, so the cut lands on the same
+        // boundary in `fqdn`.
+        lower
+            .strip_suffix(&format!(".{}", self.domain))
+            .and_then(|sub| fqdn.get(..sub.len()))
             .ok_or_else(|| {
                 AcmeError::Config(format!(
                     "deSEC: record {fqdn:?} is outside zone {:?}",
@@ -626,7 +632,7 @@ impl Rfc2136Provider {
         tsig_algorithm: impl Into<String>,
     ) -> Result<Self, AcmeError> {
         let server = server.into();
-        let zone = zone.into();
+        let zone = zone.into().to_ascii_lowercase();
         let key_name = key_name.into();
         let key_value = key_value.into();
         let tsig_algorithm = tsig_algorithm.into();
@@ -706,7 +712,8 @@ impl Rfc2136Provider {
     /// with an error that names both halves.
     fn zone_for(&self, record: &DnsRecord) -> Result<&str, AcmeError> {
         let fqdn = record.fqdn();
-        if fqdn == self.zone || fqdn.ends_with(&format!(".{}", self.zone)) {
+        let lower = fqdn.to_ascii_lowercase();
+        if lower == self.zone || lower.ends_with(&format!(".{}", self.zone)) {
             Ok(&self.zone)
         } else {
             Err(AcmeError::Config(format!(
@@ -1024,11 +1031,12 @@ mod tests {
 
         ad.delete(&record)?;
         let req = last(&script)?;
-        // No withdraw API: delete posts the empty TXT.
+        // acme-dns rejects an empty TXT and keeps only the 2 newest values,
+        // so delete sends nothing: the last request is still the present.
         let body: serde_json::Value = serde_json::from_str(&req.body)?;
         assert_eq!(
             body.get("txt").and_then(serde_json::Value::as_str),
-            Some("")
+            Some("digest-value-42")
         );
         assert!(
             req.headers
@@ -1117,6 +1125,24 @@ mod tests {
         let other = DnsRecord::new("_acme-challenge.other.org", "digest-value-42")?;
         let ds = DeSecProvider::new("tok", "example.com")?;
         assert!(matches!(ds.present(&other), Err(AcmeError::Config(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn zones_match_without_regard_to_case() -> R {
+        let record = DnsRecord::new("_acme-challenge.sub.example.com", "digest-value-42")?;
+        let ds = DeSecProvider::new("tok", "Example.COM")?;
+        assert_eq!(ds.subname(&record)?, "_acme-challenge.sub");
+        let apex = DnsRecord::new("example.com", "digest-value-42")?;
+        assert_eq!(ds.subname(&apex)?, "@");
+        let r2 = Rfc2136Provider::new(
+            "ns1.example.com:53",
+            "Example.COM",
+            "k.example.com",
+            TSIG_B64,
+            "hmac-sha256",
+        )?;
+        assert_eq!(r2.zone_for(&record)?, "example.com");
         Ok(())
     }
 

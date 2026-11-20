@@ -97,33 +97,28 @@ pub fn select(
 
     let mut too_young = None;
     for (release, version) in parsed {
-        if version > *current {
-            match gate_age(release, now, policy) {
-                Ok(_) => return Ok(release.clone()),
-                Err(error @ PolicyError::TooYoung { .. }) => {
-                    too_young.get_or_insert(error);
-                }
-                Err(error) => return Err(error),
+        // A release held by the age gate is never passed for an older one:
+        // the walk stops at the first release it would fall back to.
+        if version <= *current
+            && let Some(error) = too_young
+        {
+            return Err(error);
+        }
+        if version == *current {
+            return Err(PolicyError::NoUpdate);
+        }
+        if version < *current && !policy.allow_downgrade {
+            return Err(PolicyError::DowngradeRefused {
+                candidate: release.tag.clone(),
+                current: current.to_string(),
+            });
+        }
+        match gate_age(release, now, policy) {
+            Ok(_) => return Ok(release.clone()),
+            Err(error @ PolicyError::TooYoung { .. }) => {
+                too_young.get_or_insert(error);
             }
-        } else if version == *current {
-            if too_young.is_none() {
-                return Err(PolicyError::NoUpdate);
-            }
-        } else if !policy.allow_downgrade {
-            if too_young.is_none() {
-                return Err(PolicyError::DowngradeRefused {
-                    candidate: release.tag.clone(),
-                    current: current.to_string(),
-                });
-            }
-        } else {
-            match gate_age(release, now, policy) {
-                Ok(_) => return Ok(release.clone()),
-                Err(error @ PolicyError::TooYoung { .. }) => {
-                    too_young.get_or_insert(error);
-                }
-                Err(error) => return Err(error),
-            }
+            Err(error) => return Err(error),
         }
     }
     Err(too_young.unwrap_or(PolicyError::NoUpdate))
@@ -365,6 +360,30 @@ mod tests {
         let chosen = select(&releases, &current(), now(), &policy)
             .expect("downgrade was explicitly allowed");
         assert_eq!(chosen.tag, "v0.0.0");
+    }
+
+    /// `--allow-downgrade` without `--tag`: a newer release held by the age
+    /// gate must not let the walk fall through to an older release.
+    #[test]
+    fn allow_downgrade_does_not_pass_a_release_held_by_the_age_gate() {
+        let releases = [
+            candidate("v1.3.0", 1),
+            candidate("v1.2.0", 30),
+            candidate("v1.1.0", 30),
+        ];
+        let policy = Policy {
+            allow_downgrade: true,
+            ..Policy::default()
+        };
+        assert!(matches!(
+            select(&releases, &semver::Version::new(1, 2, 0), now(), &policy),
+            Err(PolicyError::TooYoung { tag, .. }) if tag == "v1.3.0"
+        ));
+        let releases = [releases[0].clone(), releases[2].clone()];
+        assert!(matches!(
+            select(&releases, &semver::Version::new(1, 2, 0), now(), &policy),
+            Err(PolicyError::TooYoung { tag, .. }) if tag == "v1.3.0"
+        ));
     }
 
     #[test]

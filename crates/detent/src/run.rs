@@ -804,6 +804,7 @@ fn run_update(
         .map_or_else(std::env::temp_dir, std::path::Path::to_path_buf);
     let stamp = detent_update::update::stamp_path(&settings.state_root);
     let bad = detent_update::update::bad_path(&settings.state_root);
+    let lock = detent_update::update::lock_path(&settings.state_root);
     let check_only = args.check;
     let force = args.force;
     run_update_on(
@@ -815,14 +816,19 @@ fn run_update(
         check_only,
         &stamp,
         &bad,
+        &lock,
         force,
         args.tag.as_deref(),
         &staging_parent,
         &|path| detent_update::update::confirm_features(path, &current_features()),
         // The swap runs in this process, with whatever privileges the
         // operator has (PLAN §2.9 step 5b); there is no privsep path.
-        &|candidate| detent_update::install::swap(candidate, &target),
-        &|| restart_and_check(&config_path),
+        &|candidate, tag| detent_update::install::swap(candidate, &target, tag),
+        &|| detent_update::install::recover(&target),
+        &|| {
+            health_target(&config_path)
+                .map(|health| Box::new(move || restart_and_check(&health)) as Box<RestartCheck<'_>>)
+        },
         renderer,
         streams,
     )
@@ -915,35 +921,47 @@ const DETENT_UNITS: detent_core::descriptor::UnitNames = detent_core::descriptor
     bsdrc: &["detent"],
 };
 
-/// Restarts detent's own service and asks the listener whether it came back.
-///
+/// What the post-update health check needs: the address to poll and the
+/// serving certificate to pin.
+#[cfg(feature = "update")]
+struct HealthTarget {
+    addr: std::net::SocketAddr,
+    cert: Vec<u8>,
+}
+
 /// Reads `detent.toml` for the address to poll and the certificate to pin —
 /// the health check is the only reason this command needs the config at all,
-/// and a config it cannot read means a check it cannot make.
+/// and a config it cannot read means a check it cannot make. Read before the
+/// download and the swap: no restart has happened, so a failure here refuses
+/// the update and never marks a release bad.
 #[cfg(feature = "update")]
-fn restart_and_check(config_path: &std::path::Path) -> RestartOutcome {
-    use detent_core::descriptor::ServiceAction;
-    use detent_platform::service::ServiceError;
-
-    let config = match detent_web::Config::load(config_path) {
-        Ok(config) => config,
-        Err(err) => return RestartOutcome::Unhealthy(err.to_string()),
-    };
+fn health_target(config_path: &std::path::Path) -> Result<HealthTarget, String> {
+    let config = detent_web::Config::load(config_path).map_err(|err| err.to_string())?;
     // Capture the expected serving certificate before the restart. Loading it
     // afterwards would let a replacement certificate become the pin.
     let cert_dir = &config.tls.cert_dir;
     let cert = match detent_web::tls::serving_pair(cert_dir) {
         Ok(Some(pair)) => pair.cert_der().to_vec(),
         Ok(None) => {
-            return RestartOutcome::Unhealthy(format!(
+            return Err(format!(
                 "{}: bootstrap certificate is missing",
                 cert_dir.display()
             ));
         }
-        Err(err) => {
-            return RestartOutcome::Unhealthy(format!("{}: {err}", cert_dir.display()));
-        }
+        Err(err) => return Err(format!("{}: {err}", cert_dir.display())),
     };
+    Ok(HealthTarget {
+        addr: config.listen.addr,
+        cert,
+    })
+}
+
+/// Restarts detent's own service and asks the listener whether it came back.
+#[cfg(feature = "update")]
+fn restart_and_check(health: &HealthTarget) -> RestartOutcome {
+    use detent_core::descriptor::ServiceAction;
+    use detent_platform::service::ServiceError;
+
     let manager =
         detent_platform::service::for_host(detent_platform::host::detect_real().profile.init);
     match manager.act(&DETENT_UNITS, ServiceAction::Restart) {
@@ -963,8 +981,8 @@ fn restart_and_check(config_path: &std::path::Path) -> RestartOutcome {
     }
 
     match detent_update::health::wait_healthy(
-        config.listen.addr,
-        &cert,
+        health.addr,
+        &health.cert,
         detent_update::health::DEADLINE,
     ) {
         Ok(()) => RestartOutcome::Healthy,
@@ -992,10 +1010,16 @@ type FeatureProbe =
 
 /// The atomic swap run on a probed candidate (PLAN §2.9 step 5b). A seam for
 /// the same reason as [`FeatureProbe`]: hermetic tests drive both outcomes
-/// without replacing the test runner's own executable.
+/// without replacing the test runner's own executable. The second argument
+/// is the tag being installed, for the unfinished-swap marker.
 #[cfg(feature = "update")]
-type BinarySwap<'a> =
-    dyn Fn(&std::path::Path) -> Result<detent_update::Installed, detent_update::UpdateError> + 'a;
+type BinarySwap<'a> = dyn Fn(&std::path::Path, &str) -> Result<detent_update::Installed, detent_update::UpdateError>
+    + 'a;
+
+/// Undoes a swap an earlier run started and never finished, and names the
+/// tag it undid. Real implementation in [`detent_update::install::recover`].
+#[cfg(feature = "update")]
+type Recover<'a> = dyn Fn() -> Result<Option<String>, detent_update::UpdateError> + 'a;
 
 /// Restarts the service and reports whether it came back serving.
 ///
@@ -1006,6 +1030,13 @@ type BinarySwap<'a> =
 /// [`restart_and_check`]; the tests substitute an answer.
 #[cfg(feature = "update")]
 type RestartCheck<'a> = dyn Fn() -> RestartOutcome + 'a;
+
+/// Reads what the health check needs and returns the [`RestartCheck`] that
+/// uses it, or why it cannot. Runs before the download and the swap, so a
+/// check that cannot be made refuses the update instead of rolling back a
+/// release that never ran.
+#[cfg(feature = "update")]
+type RestartSetup<'a> = dyn Fn() -> Result<Box<RestartCheck<'a>>, String> + 'a;
 
 /// What restarting the service achieved.
 #[cfg(feature = "update")]
@@ -1038,12 +1069,14 @@ fn run_update_on(
     check_only: bool,
     stamp: &std::path::Path,
     bad: &std::path::Path,
+    lock: &std::path::Path,
     force: bool,
     tag: Option<&str>,
     staging_parent: &std::path::Path,
     probe: &FeatureProbe,
     swap: &BinarySwap<'_>,
-    restart: &RestartCheck<'_>,
+    recover: &Recover<'_>,
+    restart: &RestartSetup<'_>,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
@@ -1061,9 +1094,11 @@ fn run_update_on(
         staging_parent,
         stamp,
         bad,
+        lock,
         tag,
         probe,
         swap,
+        recover,
         restart,
         renderer,
         streams,
@@ -1176,9 +1211,10 @@ fn render_available(
     Ok(())
 }
 
-/// The bare-`update` half: verify into staging, run the candidate's own
-/// self-test probe (feature-checked), and only then swap it over the running
-/// binary. Every earlier refusal leaves the binary untouched.
+/// The bare-`update` half: take the update lock, set up the health check,
+/// verify into staging, run the candidate's own self-test probe
+/// (feature-checked), and only then swap it over the running binary. Every
+/// earlier refusal leaves the binary untouched.
 #[cfg(feature = "update")]
 #[allow(clippy::too_many_arguments)]
 fn apply_update(
@@ -1190,13 +1226,52 @@ fn apply_update(
     staging_parent: &std::path::Path,
     stamp: &std::path::Path,
     bad: &std::path::Path,
+    lock: &std::path::Path,
     tag: Option<&str>,
     probe: &FeatureProbe,
     swap: &BinarySwap<'_>,
-    restart: &RestartCheck<'_>,
+    recover: &Recover<'_>,
+    restart: &RestartSetup<'_>,
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
+    // Held to the end of this run: a second run would replace the kept
+    // binary a rollback of this one needs.
+    let _lock = match detent_update::update::lock(lock) {
+        Ok(Some(file)) => file,
+        Ok(None) => {
+            renderer.line(streams.notes, MessageId::new("cli-update-busy"), &[])?;
+            return Ok(Exit::Failed);
+        }
+        Err(err) => return failed(renderer, streams, &format!("{}: {err}", lock.display())),
+    };
+    let restart = match restart() {
+        Ok(restart) => restart,
+        Err(reason) => return failed(renderer, streams, &reason),
+    };
+    // An earlier run that died between its swap and its health check left
+    // a binary nobody found healthy: put the kept one back first, so this
+    // run starts from the release that last ran.
+    match recover() {
+        Ok(None) => {}
+        Ok(Some(tag)) => {
+            detent_update::update::mark_bad(bad, &tag);
+            renderer.line(
+                streams.notes,
+                MessageId::new("cli-update-recovered"),
+                &[("tag", &tag)],
+            )?;
+            if let RestartOutcome::Unhealthy(error) = restart() {
+                renderer.line(
+                    streams.notes,
+                    MessageId::new("cli-update-rollback-failed"),
+                    &[("reason", &tag), ("error", &error)],
+                )?;
+                return Ok(Exit::Failed);
+            }
+        }
+        Err(err) => return failed(renderer, streams, &err.to_string()),
+    }
     let bad_tags = detent_update::update::read_bad(bad);
     match detent_update::update::prepare(
         transport,
@@ -1213,7 +1288,7 @@ fn apply_update(
             // cover this build's feature set before anything is installed.
             match probe(&candidate.binary_path) {
                 Ok(_) => {
-                    install_candidate(&candidate, stamp, bad, swap, restart, renderer, streams)
+                    install_candidate(&candidate, stamp, bad, swap, &*restart, renderer, streams)
                 }
                 Err(err) => failed(renderer, streams, &err.to_string()),
             }
@@ -1236,7 +1311,7 @@ fn install_candidate(
     renderer: &Renderer<'_>,
     streams: &mut Streams<'_>,
 ) -> std::io::Result<Exit> {
-    let installed = match swap(&candidate.binary_path) {
+    let installed = match swap(&candidate.binary_path, &candidate.tag) {
         Ok(installed) => installed,
         Err(err) => return failed(renderer, streams, &err.to_string()),
     };
@@ -1248,6 +1323,7 @@ fn install_candidate(
 
     match restart() {
         RestartOutcome::Healthy => {
+            installed.finish();
             clear_stamp(stamp);
             renderer.line(streams.out, MessageId::new("cli-update-installed"), &args)?;
             Ok(Exit::Ok)
@@ -1256,6 +1332,7 @@ fn install_candidate(
         // under an init system. Rolling back a good binary because the host
         // has no systemd would be wrong, so this succeeds and says so.
         RestartOutcome::NotAService(reason) => {
+            installed.finish();
             clear_stamp(stamp);
             renderer.line(streams.out, MessageId::new("cli-update-installed"), &args)?;
             renderer.line(
@@ -2423,6 +2500,10 @@ mod tests {
             RUNNING_BINARY,
             "the replaced binary must be kept"
         );
+        assert!(
+            !target.with_file_name("detent.pending").exists(),
+            "a healthy install leaves no unfinished-swap marker"
+        );
         let calls = calls.borrow();
         assert_eq!(calls.len(), 1, "the self-test probe must run exactly once");
         assert_eq!(
@@ -2438,6 +2519,104 @@ mod tests {
             calls.as_slice(),
             "the swap must install exactly the binary that was probed"
         );
+        Ok(())
+    }
+
+    /// An earlier run died between its swap and its health check. The next
+    /// run puts the kept binary back, marks that release bad, restarts, and
+    /// only then installs what the feed offers.
+    #[cfg(feature = "update")]
+    #[test]
+    fn an_unfinished_swap_is_undone_before_the_next_update() -> R {
+        let calls = probe_log();
+        let swaps = probe_log();
+        let (home, target) = install_target()?;
+        let broken = home.path().join("broken");
+        std::fs::write(&broken, b"the release that never came up\n")?;
+        // Dropped without finish or rollback, as a killed run leaves it.
+        drop(detent_update::install::swap(&broken, &target, "v98.0.0")?);
+        let restarts = std::rc::Rc::new(std::cell::Cell::new(0));
+        let restart = {
+            let restarts = restarts.clone();
+            move || {
+                restarts.set(restarts.get() + 1);
+                super::RestartOutcome::Healthy
+            }
+        };
+        let run = run_update_recovering(
+            &verified_feed()?,
+            &semver::Version::new(0, 0, 1),
+            &detent_update::Policy::default(),
+            &fixture_trust()?,
+            &recording_ok_probe(&calls, &["hosts", "web", "update"]),
+            &recording_swap(&swaps, &target),
+            &|| detent_update::install::recover(&target),
+            &restart,
+            false,
+        )?;
+        assert_eq!(run.exit, Exit::Ok, "{}", run.notes);
+        assert!(run.notes.contains("v98.0.0"), "{}", run.notes);
+        assert_eq!(
+            detent_update::update::read_bad(&detent_update::update::bad_path(run.dir.path())),
+            vec!["v98.0.0".to_owned()]
+        );
+        assert_eq!(
+            restarts.get(),
+            2,
+            "one restart for the recovery, one for the install"
+        );
+        assert!(run.out.contains("installed v99.0.0"), "{}", run.out);
+        assert_eq!(
+            std::fs::read(target.with_file_name("detent.prev"))?,
+            RUNNING_BINARY,
+            "the binary kept by this run is the one the recovery put back"
+        );
+        assert!(!target.with_file_name("detent.pending").exists());
+        Ok(())
+    }
+
+    /// The recovery cannot read what it needs, or the binary it put back does
+    /// not come up: the run stops before it fetches or swaps anything.
+    #[cfg(feature = "update")]
+    #[test]
+    fn a_failed_recovery_stops_the_update() -> R {
+        let calls = probe_log();
+        let swaps = probe_log();
+        let (_home, target) = install_target()?;
+        let run = run_update_recovering(
+            &verified_feed()?,
+            &semver::Version::new(0, 0, 1),
+            &detent_update::Policy::default(),
+            &fixture_trust()?,
+            &recording_ok_probe(&calls, &["hosts", "web", "update"]),
+            &recording_swap(&swaps, &target),
+            &|| {
+                Err(detent_update::UpdateError::Install {
+                    step: "recover",
+                    reason: "unreadable".to_owned(),
+                })
+            },
+            &healthy_restart(),
+            false,
+        )?;
+        assert_eq!(run.exit, Exit::Failed);
+        assert!(run.notes.contains("unreadable"), "{}", run.notes);
+
+        let run = run_update_recovering(
+            &verified_feed()?,
+            &semver::Version::new(0, 0, 1),
+            &detent_update::Policy::default(),
+            &fixture_trust()?,
+            &recording_ok_probe(&calls, &["hosts", "web", "update"]),
+            &recording_swap(&swaps, &target),
+            &|| Ok(Some("v98.0.0".to_owned())),
+            &|| super::RestartOutcome::Unhealthy("listener never answered".to_owned()),
+            false,
+        )?;
+        assert_eq!(run.exit, Exit::Failed);
+        assert!(run.notes.contains("rollback also failed"), "{}", run.notes);
+        assert!(calls.borrow().is_empty() && swaps.borrow().is_empty());
+        assert_eq!(std::fs::read(&target)?, RUNNING_BINARY);
         Ok(())
     }
 
@@ -2489,6 +2668,76 @@ mod tests {
             vec!["v99.0.0".to_owned()],
             "the rolled-back tag must be marked bad"
         );
+        Ok(())
+    }
+
+    /// A health check that cannot be set up (no readable config, no serving
+    /// certificate to pin) refuses the update before the swap. No restart
+    /// happened, so the release must not be marked bad.
+    #[cfg(feature = "update")]
+    #[test]
+    fn an_unusable_health_check_refuses_before_the_swap() -> R {
+        let calls = probe_log();
+        let swaps = probe_log();
+        let (_home, target) = install_target()?;
+        let run = run_update_hermetic(
+            &verified_feed()?,
+            &semver::Version::new(0, 0, 1),
+            &detent_update::Policy::default(),
+            &fixture_trust()?,
+            &recording_ok_probe(&calls, &["hosts", "web", "update"]),
+            &recording_swap(&swaps, &target),
+            &healthy_restart(),
+            Mode::NoHealthCheck("bootstrap certificate is missing"),
+        )?;
+        assert_eq!(run.exit, Exit::Failed);
+        assert!(
+            run.notes
+                .contains("update failed: bootstrap certificate is missing"),
+            "{}",
+            run.notes
+        );
+        assert!(swaps.borrow().is_empty(), "nothing may be swapped");
+        assert_eq!(std::fs::read(&target)?, RUNNING_BINARY);
+        assert!(!target.with_file_name("detent.prev").exists());
+        assert!(
+            detent_update::update::read_bad(&detent_update::update::bad_path(run.dir.path()))
+                .is_empty(),
+            "a release that never ran must not be marked bad"
+        );
+        Ok(())
+    }
+
+    /// One update run at a time: a second run must not replace the first
+    /// run's kept binary, so it refuses before it fetches or swaps anything.
+    #[cfg(feature = "update")]
+    #[test]
+    fn a_held_update_lock_refuses_a_second_run() -> R {
+        // A lock that cannot be opened refuses too, naming the lock path.
+        for (mode, needle) in [
+            (Mode::Locked, "another update is running"),
+            (Mode::LockUnusable, "update failed: "),
+        ] {
+            let calls = probe_log();
+            let swaps = probe_log();
+            let (_home, target) = install_target()?;
+            let run = run_update_hermetic(
+                &verified_feed()?,
+                &semver::Version::new(0, 0, 1),
+                &detent_update::Policy::default(),
+                &fixture_trust()?,
+                &recording_ok_probe(&calls, &["hosts", "web", "update"]),
+                &recording_swap(&swaps, &target),
+                &healthy_restart(),
+                mode,
+            )?;
+            assert_eq!(run.exit, Exit::Failed);
+            assert!(run.notes.contains(needle), "{}", run.notes);
+            assert!(calls.borrow().is_empty(), "nothing may be probed");
+            assert!(swaps.borrow().is_empty(), "nothing may be swapped");
+            assert_eq!(std::fs::read(&target)?, RUNNING_BINARY);
+            assert!(!target.with_file_name("detent.prev").exists());
+        }
         Ok(())
     }
 
@@ -2798,13 +3047,16 @@ mod tests {
     fn recording_swap(
         log: &ProbeLog,
         target: &std::path::Path,
-    ) -> impl Fn(&std::path::Path) -> Result<detent_update::Installed, detent_update::UpdateError> + use<>
-    {
+    ) -> impl Fn(
+        &std::path::Path,
+        &str,
+    ) -> Result<detent_update::Installed, detent_update::UpdateError>
+    + use<> {
         let log = log.clone();
         let target = target.to_path_buf();
-        move |candidate| {
+        move |candidate, tag| {
             log.borrow_mut().push(candidate.to_owned());
-            detent_update::install::swap(candidate, &target)
+            detent_update::install::swap(candidate, &target, tag)
         }
     }
 
@@ -2813,8 +3065,11 @@ mod tests {
     #[cfg(feature = "update")]
     fn unreachable_swap(
         log: &ProbeLog,
-    ) -> impl Fn(&std::path::Path) -> Result<detent_update::Installed, detent_update::UpdateError> + use<>
-    {
+    ) -> impl Fn(
+        &std::path::Path,
+        &str,
+    ) -> Result<detent_update::Installed, detent_update::UpdateError>
+    + use<> {
         recording_swap(log, std::path::Path::new("/detent-must-not-be-swapped"))
     }
 
@@ -2861,6 +3116,13 @@ mod tests {
         Tag(&'static str),
         /// `--tag` for a tag this host already rolled back (`bad.json`).
         RejectedTag(&'static str),
+        /// The bare `update` on a host whose health check cannot be set up:
+        /// the config or the serving certificate cannot be read.
+        NoHealthCheck(&'static str),
+        /// The bare `update` while another update run holds the lock.
+        Locked,
+        /// The bare `update` with a directory where the lock file goes.
+        LockUnusable,
     }
 
     #[cfg(feature = "update")]
@@ -2880,6 +3142,33 @@ mod tests {
         trust: &detent_update::TrustRoot,
         probe: &super::FeatureProbe,
         swap: &super::BinarySwap<'_>,
+        restart: &super::RestartCheck<'_>,
+        mode: impl Into<Mode>,
+    ) -> Result<BareRun, Box<dyn std::error::Error>> {
+        run_update_recovering(
+            feed,
+            current,
+            policy,
+            trust,
+            probe,
+            swap,
+            &|| Ok(None),
+            restart,
+            mode,
+        )
+    }
+
+    /// [`run_update_hermetic`] with the unfinished-swap recovery seam.
+    #[cfg(feature = "update")]
+    #[allow(clippy::too_many_arguments)]
+    fn run_update_recovering(
+        feed: &impl detent_update::fetch::Transport,
+        current: &semver::Version,
+        policy: &detent_update::Policy,
+        trust: &detent_update::TrustRoot,
+        probe: &super::FeatureProbe,
+        swap: &super::BinarySwap<'_>,
+        recover: &super::Recover<'_>,
         restart: &super::RestartCheck<'_>,
         mode: impl Into<Mode>,
     ) -> Result<BareRun, Box<dyn std::error::Error>> {
@@ -2913,6 +3202,18 @@ mod tests {
             };
             detent_update::update::write_cached(&stamp, &offering, fixed_now()?, true)?;
         }
+        let lock = detent_update::update::lock_path(tmp.path());
+        // Another run's lock, held for the whole of this run.
+        let _held = if matches!(mode, Mode::Locked) {
+            let file = std::fs::File::create(&lock)?;
+            file.try_lock()?;
+            Some(file)
+        } else {
+            None
+        };
+        if matches!(mode, Mode::LockUnusable) {
+            std::fs::create_dir(&lock)?;
+        }
         let exit = super::run_update_on(
             feed,
             current,
@@ -2922,15 +3223,24 @@ mod tests {
             matches!(mode, Mode::Check),
             &stamp,
             &bad,
+            &lock,
             false,
             match mode {
                 Mode::Tag(tag) | Mode::RejectedTag(tag) => Some(tag),
-                Mode::Check | Mode::Bare => None,
+                Mode::Check
+                | Mode::Bare
+                | Mode::NoHealthCheck(_)
+                | Mode::Locked
+                | Mode::LockUnusable => None,
             },
             &std::env::temp_dir(),
             probe,
             swap,
-            restart,
+            recover,
+            &|| match mode {
+                Mode::NoHealthCheck(reason) => Err(reason.to_owned()),
+                _ => Ok(Box::new(restart) as Box<super::RestartCheck<'_>>),
+            },
             &renderer,
             &mut Streams {
                 input: &mut std::io::empty(),
@@ -4591,23 +4901,22 @@ mod tests {
         assert!(features.features.iter().any(|id| id == "update"));
     }
 
-    /// Before restarting anything, the post-update check needs the config
-    /// and the serving certificate it will pin; a config it cannot read, a
-    /// certificate directory with no certificate, or one it cannot read, are
-    /// each an unhealthy outcome naming the cause — the caller rolls back.
+    /// The post-update check needs the config and the serving certificate it
+    /// will pin, read before the swap; a config it cannot read, a certificate
+    /// directory with no certificate, or one it cannot read, each name the
+    /// cause — the caller refuses the update.
     #[cfg(feature = "update")]
     #[test]
-    fn restart_and_check_is_unhealthy_without_a_config_or_a_certificate() -> R {
+    fn health_target_needs_a_config_and_a_certificate() -> R {
         let dir = tempfile::TempDir::new()?;
 
         let malformed = dir.path().join("malformed.toml");
         std::fs::write(&malformed, "not toml")?;
         assert!(
-            matches!(
-                super::restart_and_check(&malformed),
-                super::RestartOutcome::Unhealthy(ref reason) if !reason.is_empty()
-            ),
-            "a malformed config must be unhealthy"
+            super::health_target(&malformed)
+                .err()
+                .is_some_and(|reason| !reason.is_empty()),
+            "a malformed config must be refused"
         );
 
         let empty = dir.path().join("empty-certs");
@@ -4618,8 +4927,8 @@ mod tests {
             format!("[tls]\ncert_dir = {:?}\n", empty.display().to_string()),
         )?;
         assert_eq!(
-            super::restart_and_check(&config),
-            super::RestartOutcome::Unhealthy(format!(
+            super::health_target(&config).err(),
+            Some(format!(
                 "{}: bootstrap certificate is missing",
                 empty.display()
             ))
@@ -4632,16 +4941,17 @@ mod tests {
             &config,
             format!("[tls]\ncert_dir = {:?}\n", not_a_dir.display().to_string()),
         )?;
-        let outcome = super::restart_and_check(&config);
+        let reason = super::health_target(&config).err().unwrap_or_default();
         assert!(
-            matches!(
-                outcome,
-                super::RestartOutcome::Unhealthy(ref reason)
-                    if reason.starts_with(&format!("{}: ", not_a_dir.display()))
-                        && !reason.contains("bootstrap certificate is missing")
-            ),
-            "{outcome:?}"
+            reason.starts_with(&format!("{}: ", not_a_dir.display()))
+                && !reason.contains("bootstrap certificate is missing"),
+            "{reason}"
         );
+
+        let pair = detent_web::tls::bootstrap_self_signed(&["detent.local".to_owned()])?;
+        detent_web::tls::store_bootstrap(&empty, &pair)?;
+        let health = super::health_target(&dir.path().join("no-cert.toml"))?;
+        assert_eq!(health.cert, pair.cert_der());
         Ok(())
     }
 

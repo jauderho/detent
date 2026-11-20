@@ -1015,6 +1015,30 @@ fn systemd_show_timeout_during_resolution_is_reported_as_failed() {
     }
 }
 
+/// `systemctl show` that cannot reach the bus exits non-zero with no
+/// output. That is a failure, not a host without the unit: read as
+/// `NoKnownUnit`, the updater would skip its restart and health check.
+#[test]
+fn systemd_failed_show_during_resolution_is_reported_as_failed() {
+    let units = UnitNames {
+        systemd: &["detent.service", "detent"],
+        openrc: &[],
+        bsdrc: &[],
+    };
+    let fake = Arc::new(
+        FakeRunner::new()
+            .existing(&["/usr/bin/systemctl"])
+            .respond(output_fail(1)),
+    );
+    let mgr = SystemdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
+    let result = mgr.act(&units, ServiceAction::Restart);
+    assert!(
+        matches!(&result, Err(ServiceError::Failed(message)) if message.contains("boom")),
+        "{result:?}"
+    );
+    assert_eq!(fake.calls().len(), 1, "no restart may follow a failed show");
+}
+
 // ---------------------------------------------------------------------------
 // systemd: status parsing
 // ---------------------------------------------------------------------------

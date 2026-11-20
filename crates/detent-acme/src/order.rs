@@ -188,19 +188,19 @@ pub async fn present_challenges(
         }
         presented.push(record.clone());
         if let Err(e) = publish(&record) {
-            let _ = provider.delete(&record);
+            delete_or_warn(provider, &record);
             presented.pop();
             cleanup_challenges(provider, &presented);
             return Err(e);
         }
         if let Err(e) = confirm_propagated(provider, &record).await {
-            let _ = provider.delete(&record);
+            delete_or_warn(provider, &record);
             presented.pop();
             cleanup_challenges(provider, &presented);
             return Err(e);
         }
         if let Err(e) = challenge.set_ready().await.map_err(AcmeError::from) {
-            let _ = provider.delete(&record);
+            delete_or_warn(provider, &record);
             presented.pop();
             cleanup_challenges(provider, &presented);
             return Err(e);
@@ -235,11 +235,19 @@ pub(crate) async fn confirm_propagated(
     }
 }
 
-/// Deletes every record in `records` through `provider`, ignoring delete
+/// Deletes `record`; a failure is logged, never returned, so the caller's own
+/// error stays the one it reports.
+fn delete_or_warn(provider: &dyn DnsProvider, record: &DnsRecord) {
+    if let Err(e) = provider.delete(record) {
+        tracing::warn!(record = %record.fqdn(), error = %e, "challenge TXT delete failed");
+    }
+}
+
+/// Deletes every record in `records` through `provider`, logging delete
 /// errors. Callers run this after `finalize` whatever the outcome.
 pub fn cleanup_challenges(provider: &dyn DnsProvider, records: &[DnsRecord]) {
     for record in records {
-        let _ = provider.delete(record);
+        delete_or_warn(provider, record);
     }
 }
 
@@ -755,6 +763,7 @@ async fn load_or_create_account(
     let builder = account_builder(ca_root)?;
 
     if let Some(json) = cached {
+        check_credentials_directory(&json, directory_url)?;
         let credentials = parse_credentials(&json)?;
         return builder
             .from_credentials(credentials)
@@ -769,6 +778,22 @@ async fn load_or_create_account(
         key.as_ref(),
     )
     .await
+}
+
+/// Refuses saved credentials that name another CA: instant-acme would use the
+/// stored `directory` and ignore `directory_url`, so a moved `directory_url`
+/// would keep ordering from the old CA.
+fn check_credentials_directory(json: &str, directory_url: &str) -> Result<(), AcmeError> {
+    let saved = serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v.get("directory")?.as_str().map(str::to_owned));
+    match saved {
+        Some(saved) if saved != directory_url => Err(AcmeError::Config(format!(
+            "saved ACME credentials are for {saved}, but directory_url is {directory_url}; \
+             remove the credentials file to register a new account"
+        ))),
+        _ => Ok(()),
+    }
 }
 
 /// Parses cached account credentials: garbage must surface as
@@ -1224,6 +1249,19 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn saved_credentials_for_another_ca_are_refused() {
+        let json = r#"{"id":"x","directory":"https://staging.example/dir"}"#;
+        assert!(check_credentials_directory(json, "https://staging.example/dir").is_ok());
+        let err = check_credentials_directory(json, "https://prod.example/dir").err();
+        assert!(
+            matches!(&err, Some(AcmeError::Config(m))
+                if m.contains("https://staging.example/dir") && m.contains("https://prod.example/dir")),
+            "a directory mismatch must name both URLs, got {err:?}"
+        );
+        assert!(check_credentials_directory("{}", "https://prod.example/dir").is_ok());
+    }
+
+    #[test]
     fn corrupt_credential_json_maps_to_a_credentials_error() {
         // `parse_credentials` is the production mapping `load_or_create_account`
         // runs before any network: garbage must surface as `Credentials`,
@@ -1616,6 +1654,51 @@ mod tests {
         let err = confirm_propagated(&Broken, &record).await.err();
         assert!(matches!(err, Some(AcmeError::Config(_))), "{err:?}");
         assert!(started.elapsed() < Duration::from_secs(1));
+        Ok(())
+    }
+
+    /// Counts the events a `tracing` dispatcher sees.
+    struct CountEvents(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    impl tracing::Subscriber for CountEvents {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, _: &tracing::Event<'_>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[test]
+    fn cleanup_goes_past_a_failed_delete_and_warns() -> Result<(), AcmeError> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct FailingDelete(AtomicUsize);
+        impl DnsProvider for FailingDelete {
+            fn present(&self, _: &DnsRecord) -> Result<(), AcmeError> {
+                Ok(())
+            }
+            fn delete(&self, _: &DnsRecord) -> Result<(), AcmeError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(AcmeError::Config("delete refused".into()))
+            }
+        }
+        let records = [
+            DnsRecord::new("_acme-challenge.a.example.test", "v")?,
+            DnsRecord::new("_acme-challenge.b.example.test", "v")?,
+        ];
+        let provider = FailingDelete(AtomicUsize::new(0));
+        let events = std::sync::Arc::new(AtomicUsize::new(0));
+        tracing::subscriber::with_default(CountEvents(events.clone()), || {
+            cleanup_challenges(&provider, &records);
+        });
+        assert_eq!(provider.0.load(Ordering::SeqCst), 2);
+        assert_eq!(events.load(Ordering::SeqCst), 2, "one warning per failure");
         Ok(())
     }
 

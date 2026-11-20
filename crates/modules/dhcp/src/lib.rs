@@ -1482,9 +1482,8 @@ fn apply_interfaces_config(obj: &mut Obj, want: &[String], report: &mut EditRepo
         return;
     }
     let Some(member) = obj.member_mut_by_key("interfaces-config") else {
-        if !want.is_empty() {
-            obj.set_member("interfaces-config", canon_interfaces_config(want), report);
-        }
+        // A missing member projects to an empty list, so `want` is not empty.
+        obj.set_member("interfaces-config", canon_interfaces_config(want), report);
         return;
     };
     match &mut member.value {
@@ -1512,20 +1511,18 @@ fn apply_valid_lifetime(obj: &mut Obj, want: Option<u32>, report: &mut EditRepor
         return;
     }
     match obj.member_mut_by_key("valid-lifetime") {
-        None => {
-            if let Some(lifetime) = want {
-                obj.set_member("valid-lifetime", canon_u32(lifetime), report);
-            }
-        }
+        // A missing member projects to `None`, so `want` holds a value.
+        None => want
+            .into_iter()
+            .for_each(|lifetime| obj.set_member("valid-lifetime", canon_u32(lifetime), report)),
         Some(member) => match &member.value {
-            Jsonc::Lit(Lit::Raw(raw)) if raw.parse::<u32>().is_ok() => {
-                if want.is_none() {
-                    obj.remove_member("valid-lifetime", report);
-                } else if let Some(lifetime) = want {
+            Jsonc::Lit(Lit::Raw(raw)) if raw.parse::<u32>().is_ok() => match want {
+                None => obj.remove_member("valid-lifetime", report),
+                Some(lifetime) => {
                     member.value = canon_u32(lifetime);
                     report.changed_lines = report.changed_lines.saturating_add(1);
                 }
-            }
+            },
             // Unmodeled garbage: replace only when the model wants a value.
             _ => {
                 if let Some(lifetime) = want {
@@ -1567,15 +1564,12 @@ fn merge_subnet(obj: &mut Obj, want: &KeaSubnet, report: &mut EditReport) {
         return;
     }
     match obj.member_mut_by_key("option-data") {
-        None => {
-            if !want.routers.is_empty() || !want.domain_servers.is_empty() {
-                obj.set_member(
-                    "option-data",
-                    canon_option_data(&want.routers, &want.domain_servers),
-                    report,
-                );
-            }
-        }
+        // A missing member projects to no options, so the model wants some.
+        None => obj.set_member(
+            "option-data",
+            canon_option_data(&want.routers, &want.domain_servers),
+            report,
+        ),
         Some(member) => {
             // One sync pass per managed option name: a pass projects only
             // entries carrying its `name`, so `routers` entries pair with
@@ -1597,7 +1591,9 @@ fn merge_subnet(obj: &mut Obj, want: &KeaSubnet, report: &mut EditReport) {
                     |data| canon_option_entry("domain-name-servers", data),
                     report,
                 );
-            } else if !want.routers.is_empty() || !want.domain_servers.is_empty() {
+            } else {
+                // A non-array member projects to no options, so the model
+                // wants some.
                 member.value = canon_option_data(&want.routers, &want.domain_servers);
                 report.changed_lines = report.changed_lines.saturating_add(1);
             }
@@ -1652,9 +1648,8 @@ fn apply_subnets(obj: &mut Obj, flavor: KeaFlavor, want: &[KeaSubnet], report: &
         return;
     }
     let Some(member) = obj.member_mut_by_key(key) else {
-        if !want.is_empty() {
-            obj.set_member(key, canon_subnets(want), report);
-        }
+        // A missing member projects to an empty list, so `want` is not empty.
+        obj.set_member(key, canon_subnets(want), report);
         return;
     };
     match &mut member.value {
@@ -2799,11 +2794,11 @@ mod tests {
     }
 
     #[test]
-    fn jsonc_read_write_keeps_unknown_keys() -> Result<(), String> {
+    fn jsonc_read_write_keeps_unknown_keys() -> Result<(), Box<dyn std::error::Error>> {
         let src = "{\n  \"Dhcp4\": {\n    // kept\n    \"lease-database\": {\"type\": \"memfile\"},\n    \"interfaces-config\": {\"interfaces\": [\"eth0\"], \"dhcp-socket-type\": \"raw\"},\n    \"valid-lifetime\": 4000\n  },\n  \"Logging\": {\"loggers\": []}\n}\n";
-        let mut doc = DhcpModule::parse(src).map_err(|e| e.to_string())?;
+        let mut doc = DhcpModule::parse(src)?;
         let model = kea4(&["eth1"], Some(3600), Vec::new());
-        let report = DhcpModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let report = DhcpModule::apply(&mut doc, &model)?;
         assert_eq!(report.changed_lines, 2);
         let rendered = DhcpModule::render(&doc);
         // Unknown keys and comments survive; only the two managed values moved.
@@ -2814,8 +2809,7 @@ mod tests {
         assert!(rendered.contains("\"eth1\""));
         assert!(rendered.contains("\"valid-lifetime\": 3600"));
         assert!(!rendered.contains("4000"));
-        let back = DhcpModule::to_model(&DhcpModule::parse(&rendered).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
+        let back = DhcpModule::to_model(&DhcpModule::parse(&rendered)?)?;
         assert_eq!(back, model);
         Ok(())
     }
@@ -2834,10 +2828,10 @@ mod tests {
     }
 
     #[test]
-    fn kea_option_data_round_trips_per_entry() -> Result<(), String> {
+    fn kea_option_data_round_trips_per_entry() -> Result<(), Box<dyn std::error::Error>> {
         let src = "{ \"Dhcp4\": { \"subnet4\": [ {\"id\": 1, \"subnet\": \"192.0.2.0/24\", \"option-data\": [\n        {\"name\": \"routers\", \"data\": \"192.0.2.1\"},\n        {\"name\": \"domain-name-servers\", \"data\": \"192.0.2.53\"},\n        {\"name\": \"ntp-servers\", \"data\": \"192.0.2.9\"}\n      ]} ] } }";
-        let mut doc = DhcpModule::parse(src).map_err(|e| e.to_string())?;
-        let model = DhcpModule::to_model(&doc).map_err(|e| e.to_string())?;
+        let mut doc = DhcpModule::parse(src)?;
+        let model = DhcpModule::to_model(&doc)?;
         let projected = model.kea_v4.subnets.first();
         assert_eq!(
             projected.map(|s| s.routers.as_slice()),
@@ -2847,15 +2841,14 @@ mod tests {
             projected.map(|s| s.domain_servers.as_slice()),
             Some(&["192.0.2.53".to_owned()][..])
         );
-        let report = DhcpModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let report = DhcpModule::apply(&mut doc, &model)?;
         assert_eq!(report, EditReport::default());
         assert_eq!(DhcpModule::render(&doc), src);
         // Adding a second router touches only the option-data member.
         let mut model2 = model.clone();
-        if let Some(first) = model2.kea_v4.subnets.first_mut() {
-            first.routers.push("192.0.2.2".to_owned());
-        }
-        let report = DhcpModule::apply(&mut doc, &model2).map_err(|e| e.to_string())?;
+        let first = model2.kea_v4.subnets.first_mut().ok_or("no subnet")?;
+        first.routers.push("192.0.2.2".to_owned());
+        let report = DhcpModule::apply(&mut doc, &model2)?;
         // Byte-minimal: the two existing managed entries match in place and
         // only the new router is appended; `ntp-servers` is untouched.
         assert_eq!(
@@ -2872,23 +2865,22 @@ mod tests {
     }
 
     #[test]
-    fn kea_unmodeled_array_entries_are_preserved() -> Result<(), String> {
+    fn kea_unmodeled_array_entries_are_preserved() -> Result<(), Box<dyn std::error::Error>> {
         let src = "{ \"Dhcp6\": { \"subnet6\": [ {\"id\": 1, \"subnet\": \"2001:db8:1::/64\"}, 42, {\"subnet\": \"no-id\"} ] } }";
-        let mut doc = DhcpModule::parse(src).map_err(|e| e.to_string())?;
-        let mut model = DhcpModule::to_model(&doc).map_err(|e| e.to_string())?;
+        let mut doc = DhcpModule::parse(src)?;
+        let mut model = DhcpModule::to_model(&doc)?;
         assert_eq!(model.kea_v6.subnets.len(), 1);
-        let report = DhcpModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let report = DhcpModule::apply(&mut doc, &model)?;
         assert_eq!(report, EditReport::default());
         // Appending a subnet keeps the unmodeled 42 and the id-less object.
         model.kea_v6.subnets.push(subnet(2, "2001:db8:2::/64", &[]));
-        let report = DhcpModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let report = DhcpModule::apply(&mut doc, &model)?;
         assert_eq!(report.added, 1);
         let rendered = DhcpModule::render(&doc);
         assert!(rendered.contains("42"));
         assert!(rendered.contains("\"no-id\""));
         assert!(rendered.contains("\"2001:db8:2::/64\""));
-        let back = DhcpModule::to_model(&DhcpModule::parse(&rendered).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
+        let back = DhcpModule::to_model(&DhcpModule::parse(&rendered)?)?;
         assert_eq!(back, model);
         Ok(())
     }
@@ -2914,35 +2906,34 @@ mod tests {
     }
 
     #[test]
-    fn kea_missing_members_are_inserted() -> Result<(), String> {
+    fn kea_missing_members_are_inserted() -> Result<(), Box<dyn std::error::Error>> {
         // No interfaces-config, no valid-lifetime, no subnet4: all three are
         // appended canonically inside the existing Dhcp4 object.
         let src = "{ \"Dhcp4\": {\n    // untouched comment\n    \"lease-database\": {\"type\": \"memfile\"}\n} }";
-        let mut doc = DhcpModule::parse(src).map_err(|e| e.to_string())?;
+        let mut doc = DhcpModule::parse(src)?;
         let model = kea4(
             &["eth0"],
             Some(3600),
             vec![subnet(1, "192.0.2.0/24", &["192.0.2.1 - 192.0.2.50"])],
         );
-        let report = DhcpModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let report = DhcpModule::apply(&mut doc, &model)?;
         assert_eq!(report.added, 3);
         let rendered = DhcpModule::render(&doc);
         assert!(rendered.contains("\"interfaces-config\""));
         assert!(rendered.contains("\"valid-lifetime\":3600"));
         assert!(rendered.contains("\"subnet4\""));
         assert!(rendered.contains("// untouched comment"));
-        let back = DhcpModule::to_model(&DhcpModule::parse(&rendered).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
+        let back = DhcpModule::to_model(&DhcpModule::parse(&rendered)?)?;
         assert_eq!(back, model);
         Ok(())
     }
 
     #[test]
-    fn kea_partial_member_merges_preserve_unknown_keys() -> Result<(), String> {
+    fn kea_partial_member_merges_preserve_unknown_keys() -> Result<(), Box<dyn std::error::Error>> {
         // interfaces-config exists without `interfaces`; `interfaces` is not an
         // array; the subnet carries unknown members and garbage option-data.
         let src = "{ \"Dhcp4\": {\n    \"interfaces-config\": {\"dhcp-socket-type\": \"raw\"},\n    \"subnet4\": [\n      {\"id\": 1, \"subnet\": \"192.0.2.0/24\", \"interface\": \"eth0\", \"valid-lifetime\": 60, \"option-data\": \"junk\"}\n    ]\n} }";
-        let mut doc = DhcpModule::parse(src).map_err(|e| e.to_string())?;
+        let mut doc = DhcpModule::parse(src)?;
         let model = kea4(
             &["eth1"],
             None,
@@ -2956,7 +2947,7 @@ mod tests {
                 domain_servers: Vec::new(),
             }],
         );
-        let report = DhcpModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let report = DhcpModule::apply(&mut doc, &model)?;
         // `interfaces` inside the existing interfaces-config, plus `pools`
         // inside the matched subnet; the garbage option-data is replaced.
         assert_eq!(report.added, 2);
@@ -2965,24 +2956,22 @@ mod tests {
         assert!(rendered.contains("\"interface\": \"eth0\""));
         assert!(rendered.contains("\"valid-lifetime\": 60"));
         assert!(rendered.contains("\"option-data\""));
-        let back = DhcpModule::to_model(&DhcpModule::parse(&rendered).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
+        let back = DhcpModule::to_model(&DhcpModule::parse(&rendered)?)?;
         assert_eq!(back, model);
         Ok(())
     }
 
     #[test]
-    fn kea_removed_model_entries_disappear() -> Result<(), String> {
+    fn kea_removed_model_entries_disappear() -> Result<(), Box<dyn std::error::Error>> {
         let src = "{ \"Dhcp4\": { \"interfaces-config\": {\"interfaces\": [\"eth0\", \"eth1\"]}, \"valid-lifetime\": 3600, \"subnet4\": [ {\"id\": 1, \"subnet\": \"192.0.2.0/24\", \"pools\": [{\"pool\": \"192.0.2.1 - 192.0.2.50\"}]} ] } }";
-        let mut doc = DhcpModule::parse(src).map_err(|e| e.to_string())?;
+        let mut doc = DhcpModule::parse(src)?;
         let model = Model::default();
-        let report = DhcpModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let report = DhcpModule::apply(&mut doc, &model)?;
         assert_eq!(report.removed, 4); // eth0, eth1, valid-lifetime, subnet entry
         let rendered = DhcpModule::render(&doc);
         assert!(rendered.contains("\"interfaces-config\""));
         assert!(!rendered.contains("eth0"));
-        let back = DhcpModule::to_model(&DhcpModule::parse(&rendered).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
+        let back = DhcpModule::to_model(&DhcpModule::parse(&rendered)?)?;
         assert_eq!(back, model);
         Ok(())
     }
@@ -3244,11 +3233,10 @@ mod tests {
     }
 
     #[test]
-    fn cidr_and_pool_parsers_follow_the_documented_rules() -> Result<(), String> {
+    fn cidr_and_pool_parsers_follow_the_documented_rules() -> Result<(), Box<dyn std::error::Error>>
+    {
         let v4: IpAddr = Ipv4Addr::new(192, 0, 2, 0).into();
-        let v6: IpAddr = "2001:db8::"
-            .parse()
-            .map_err(|e: std::net::AddrParseError| e.to_string())?;
+        let v6: IpAddr = "2001:db8::".parse()?;
         assert_eq!(parse_cidr("192.0.2.0/24"), Some((v4, 24)));
         assert_eq!(parse_cidr("  2001:db8::/64 "), Some((v6, 64)));
         assert_eq!(parse_cidr("192.0.2.0/33"), None);
@@ -3286,19 +3274,17 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_valid_and_apply_to_an_empty_file() -> Result<(), String> {
+    fn defaults_are_valid_and_apply_to_an_empty_file() -> Result<(), Box<dyn std::error::Error>> {
         for os in [Os::Linux, Os::MacOs, Os::Other] {
             let host = profile(os, "node1");
             let ctx = ValidationCtx::new(&host);
             let model = DhcpModule::defaults(&host);
             assert!(!DhcpModule::validate(&model, &ctx).has_errors());
-            let mut doc = DhcpModule::parse("").map_err(|e| e.to_string())?;
-            let report = DhcpModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+            let mut doc = DhcpModule::parse("")?;
+            let report = DhcpModule::apply(&mut doc, &model)?;
             assert_eq!(report.added, model.dnsmasq.len());
             let rendered = DhcpModule::render(&doc);
-            let back =
-                DhcpModule::to_model(&DhcpModule::parse(&rendered).map_err(|e| e.to_string())?)
-                    .map_err(|e| e.to_string())?;
+            let back = DhcpModule::to_model(&DhcpModule::parse(&rendered)?)?;
             assert_eq!(back, model);
         }
         Ok(())
@@ -3639,11 +3625,12 @@ mod tests {
     }
 
     #[test]
-    fn kea_full_subnet_edit_rewrites_every_managed_member() -> Result<(), String> {
+    fn kea_full_subnet_edit_rewrites_every_managed_member() -> Result<(), Box<dyn std::error::Error>>
+    {
         // A subnet carrying pools, routers and domain-name-servers exercises
         // every canonical builder and every merge branch at once.
         let src = "{ \"Dhcp4\": { \"keep\": true } }";
-        let mut doc = DhcpModule::parse(src).map_err(|e| e.to_string())?;
+        let mut doc = DhcpModule::parse(src)?;
         let want = vec![KeaSubnet {
             id: 2,
             subnet: "192.0.2.0/24".to_owned(),
@@ -3655,23 +3642,22 @@ mod tests {
         }];
         let mut model = Model::default();
         model.kea_v4.subnets = want.clone();
-        let report = DhcpModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let report = DhcpModule::apply(&mut doc, &model)?;
         let rendered = DhcpModule::render(&doc);
         assert!(rendered.contains("192.0.2.9"), "{rendered}");
         assert!(rendered.contains("192.0.2.53"), "{rendered}");
-        let back = DhcpModule::to_model(&DhcpModule::parse(&rendered).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
+        let back = DhcpModule::to_model(&DhcpModule::parse(&rendered)?)?;
         assert_eq!(back.kea_v4.subnets, want);
         let _ = report;
         Ok(())
     }
 
     #[test]
-    fn kea_subnet_and_pools_merge_branches() -> Result<(), String> {
+    fn kea_subnet_and_pools_merge_branches() -> Result<(), Box<dyn std::error::Error>> {
         // Changing the id and subnet string, a pools array with modeled and
         // unmodeled entries, and a non-array pools member.
         let src = "{ \"Dhcp4\": { \"subnet4\": [ {\"id\": 1, \"subnet\": \"192.0.2.0/24\", \"pools\": [{\"pool\": \"192.0.2.1 - 192.0.2.9\"}, {\"garbage\": 1}]}, {\"id\": 2, \"subnet\": \"192.0.2.8.0/24\", \"pools\": \"junk\"} ] } }";
-        let mut doc = DhcpModule::parse(src).map_err(|e| e.to_string())?;
+        let mut doc = DhcpModule::parse(src)?;
         let want = vec![
             KeaSubnet {
                 id: 7,
@@ -3697,22 +3683,22 @@ mod tests {
         ];
         let mut model = Model::default();
         model.kea_v4.subnets = want.clone();
-        let report = DhcpModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let report = DhcpModule::apply(&mut doc, &model)?;
         let rendered = DhcpModule::render(&doc);
         // Subnet 1: id rewritten in place, pools kept + appended canonically;
         // the unmodeled garbage pool entry survives. Subnet 2 is unmodeled
         // (its `pools` is not an array), so the model's copy is appended.
         assert!(rendered.contains("192.0.2.10"), "{rendered}");
         assert!(rendered.contains("\"garbage\": 1"), "{rendered}");
-        let back = DhcpModule::to_model(&DhcpModule::parse(&rendered).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
+        let back = DhcpModule::to_model(&DhcpModule::parse(&rendered)?)?;
         assert_eq!(back.kea_v4.subnets, want);
         let _ = report;
         Ok(())
     }
 
     #[test]
-    fn kea_subnets_and_pools_keep_their_own_unmodeled_members() -> Result<(), String> {
+    fn kea_subnets_and_pools_keep_their_own_unmodeled_members()
+    -> Result<(), Box<dyn std::error::Error>> {
         let s1 = "{\"id\": 1, \"subnet\": \"192.168.1.0/24\", \"interface\": \"eth0\", \"reservations\": [{\"hw-address\": \"aa:aa:aa:aa:aa:aa\"}]}";
         let s2 = "{\"id\": 2, \"subnet\": \"10.0.0.0/24\", \"interface\": \"eth1\", \"pools\": [{\"pool\": \"10.0.0.10 - 10.0.0.19\", \"client-class\": \"x\"}, {\"pool\": \"10.0.0.20 - 10.0.0.29\", \"client-class\": \"y\"}]}";
         let src = format!("{{ \"Dhcp4\": {{ \"subnet4\": [ {s1}, {s2} ] }} }}");
@@ -3728,15 +3714,13 @@ mod tests {
             ..KeaSubnet::default()
         };
         let both_pools = ["10.0.0.10 - 10.0.0.19", "10.0.0.20 - 10.0.0.29"];
-        let apply = |want: Vec<KeaSubnet>| -> Result<String, String> {
-            let mut doc = DhcpModule::parse(&src).map_err(|e| e.to_string())?;
+        let apply = |want: Vec<KeaSubnet>| -> Result<String, Box<dyn std::error::Error>> {
+            let mut doc = DhcpModule::parse(&src)?;
             let mut model = Model::default();
             model.kea_v4.subnets = want.clone();
-            DhcpModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+            DhcpModule::apply(&mut doc, &model)?;
             let rendered = DhcpModule::render(&doc);
-            let back =
-                DhcpModule::to_model(&DhcpModule::parse(&rendered).map_err(|e| e.to_string())?)
-                    .map_err(|e| e.to_string())?;
+            let back = DhcpModule::to_model(&DhcpModule::parse(&rendered)?)?;
             assert_eq!(back.kea_v4.subnets, want, "{rendered}");
             Ok(rendered)
         };
@@ -3779,13 +3763,13 @@ mod tests {
     }
 
     #[test]
-    fn kea_option_data_is_set_and_replaced_from_the_model() -> Result<(), String> {
+    fn kea_option_data_is_set_and_replaced_from_the_model() -> Result<(), Box<dyn std::error::Error>>
+    {
         // Absent option-data with routers wanted, then garbage option-data
         // with domain servers wanted.
         let mut doc = DhcpModule::parse(
             "{ \"Dhcp4\": { \"subnet4\": [ {\"id\": 1, \"subnet\": \"192.0.2.0/24\"} ] } }",
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
         let model = Model {
             kea_v4: KeaConfig {
                 subnets: vec![KeaSubnet {
@@ -3798,15 +3782,15 @@ mod tests {
             },
             ..Model::default()
         };
-        let report = DhcpModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let report = DhcpModule::apply(&mut doc, &model)?;
         let rendered = DhcpModule::render(&doc);
         assert!(rendered.contains("192.0.2.1"), "{rendered}");
         let _ = report;
         // Now the whole option-data member is garbage.
-        let mut doc =
-            DhcpModule::parse("{ \"Dhcp4\": { \"subnet4\": [ {\"id\": 1, \"subnet\": \"192.0.2.0/24\", \"option-data\": \"junk\"} ] } }")
-                .map_err(|e| e.to_string())?;
-        let report = DhcpModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let mut doc = DhcpModule::parse(
+            "{ \"Dhcp4\": { \"subnet4\": [ {\"id\": 1, \"subnet\": \"192.0.2.0/24\", \"option-data\": \"junk\"} ] } }",
+        )?;
+        let report = DhcpModule::apply(&mut doc, &model)?;
         let rendered = DhcpModule::render(&doc);
         assert!(rendered.contains("192.0.2.1"), "{rendered}");
         let _ = report;
@@ -3814,9 +3798,8 @@ mod tests {
     }
 
     #[test]
-    fn kea_subnet4_garbage_is_replaced_when_wanted() -> Result<(), String> {
-        let mut doc = DhcpModule::parse("{ \"Dhcp4\": { \"subnet4\": \"junk\" } }")
-            .map_err(|e| e.to_string())?;
+    fn kea_subnet4_garbage_is_replaced_when_wanted() -> Result<(), Box<dyn std::error::Error>> {
+        let mut doc = DhcpModule::parse("{ \"Dhcp4\": { \"subnet4\": \"junk\" } }")?;
         let model = Model {
             kea_v4: KeaConfig {
                 subnets: vec![subnet(1, "192.0.2.0/24", &[])],
@@ -3824,7 +3807,7 @@ mod tests {
             },
             ..Model::default()
         };
-        let report = DhcpModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let report = DhcpModule::apply(&mut doc, &model)?;
         assert_eq!(report.changed_lines, 1);
         let rendered = DhcpModule::render(&doc);
         assert!(rendered.contains("192.0.2.0/24"), "{rendered}");
@@ -3832,13 +3815,13 @@ mod tests {
     }
 
     #[test]
-    fn kea_interfaces_member_garbage_is_replaced_when_wanted() -> Result<(), String> {
+    fn kea_interfaces_member_garbage_is_replaced_when_wanted()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut doc = DhcpModule::parse(
             "{ \"Dhcp4\": { \"interfaces-config\": { \"interfaces\": \"junk\" } } }",
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
         let model = kea4(&["eth0"], None, Vec::new());
-        let report = DhcpModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let report = DhcpModule::apply(&mut doc, &model)?;
         assert_eq!(report.changed_lines, 1);
         let rendered = DhcpModule::render(&doc);
         assert!(rendered.contains("eth0"), "{rendered}");
@@ -4021,19 +4004,19 @@ mod tests {
     }
 
     #[test]
-    fn kea_trailing_commas_parse_as_kea_and_survive_an_edit() -> Result<(), String> {
+    fn kea_trailing_commas_parse_as_kea_and_survive_an_edit()
+    -> Result<(), Box<dyn std::error::Error>> {
         // Kea accepts a comma before `}` and `]`; the stock Debian and Ubuntu
         // kea-dhcp4.conf has one before a comment and the close.
         let src = "{ \"Dhcp4\": { \"interfaces-config\": { \"interfaces\": [ \"eth0\", ], },\n  \"subnet4\": [],\n  // \"maxsize\": 1,\n}, }\n";
-        let mut doc = DhcpModule::parse(src).map_err(|e| e.to_string())?;
+        let mut doc = DhcpModule::parse(src)?;
         assert!(matches!(doc, DhcpDoc::Kea { .. }), "{doc:?}");
         assert_eq!(DhcpModule::render(&doc), src);
-        DhcpModule::apply(&mut doc, &kea4(&["eth0"], Some(3600), Vec::new()))
-            .map_err(|e| e.to_string())?;
+        DhcpModule::apply(&mut doc, &kea4(&["eth0"], Some(3600), Vec::new()))?;
         let rendered = DhcpModule::render(&doc);
-        let again = DhcpModule::parse(&rendered).map_err(|e| e.to_string())?;
+        let again = DhcpModule::parse(&rendered)?;
         assert_eq!(
-            DhcpModule::to_model(&again).map_err(|e| e.to_string())?,
+            DhcpModule::to_model(&again)?,
             kea4(&["eth0"], Some(3600), Vec::new()),
             "{rendered}"
         );
@@ -4042,19 +4025,24 @@ mod tests {
     }
 
     #[test]
-    fn kea_edit_whose_render_no_longer_parses_is_refused() -> Result<(), String> {
+    fn kea_edit_whose_render_no_longer_parses_is_refused() -> Result<(), Box<dyn std::error::Error>>
+    {
         // A Kea element whose rendered text no longer re-parses refuses the
         // whole edit instead of writing a broken file. The parser yields no
         // such tree, so the test breaks an unmanaged member by hand: no `:`.
-        let mut doc = DhcpModule::parse("{ \"Dhcp4\": { \"subnet4\": [], \"x\": 1 } }")
-            .map_err(|e| e.to_string())?;
-        if let DhcpDoc::Kea { root, .. } = &mut doc
-            && let Some(dhcp4) = root.root.member_mut_by_key("Dhcp4")
-            && let Some(obj) = dhcp4.value.as_obj_mut()
-            && let Some(x) = obj.member_mut_by_key("x")
-        {
-            x.colon = String::new();
-        }
+        let mut root =
+            parse_jsonc("{ \"Dhcp4\": { \"subnet4\": [], \"x\": 1 } }").map_err(|()| "parse")?;
+        let x = root
+            .root
+            .member_mut_by_key("Dhcp4")
+            .and_then(|dhcp4| dhcp4.value.as_obj_mut())
+            .and_then(|obj| obj.member_mut_by_key("x"))
+            .ok_or("expected the member x")?;
+        x.colon = String::new();
+        let mut doc = DhcpDoc::Kea {
+            flavor: KeaFlavor::V4,
+            root,
+        };
         let model = kea4(&[], Some(3600), Vec::new());
         let err = DhcpModule::apply(&mut doc, &model)
             .err()
@@ -4067,15 +4055,15 @@ mod tests {
     }
 
     #[test]
-    fn removing_the_last_kea_member_leaves_a_trailing_comma_kea_accepts() -> Result<(), String> {
+    fn removing_the_last_kea_member_leaves_a_trailing_comma_kea_accepts()
+    -> Result<(), Box<dyn std::error::Error>> {
         // `remove_member` fixes no commas: removing the last member of the
         // flavor object leaves the previous member's comma behind. Kea
         // accepts that trailing comma, so the edit goes through.
         let mut doc =
-            DhcpModule::parse("{ \"Dhcp4\": { \"subnet4\": [], \"valid-lifetime\": 3600 } }")
-                .map_err(|e| e.to_string())?;
+            DhcpModule::parse("{ \"Dhcp4\": { \"subnet4\": [], \"valid-lifetime\": 3600 } }")?;
         let model = kea4(&[], None, Vec::new());
-        DhcpModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        DhcpModule::apply(&mut doc, &model)?;
         assert_eq!(
             DhcpModule::render(&doc),
             "{ \"Dhcp4\": { \"subnet4\": [],  } }"
@@ -4084,9 +4072,9 @@ mod tests {
     }
 
     #[test]
-    fn non_array_pools_are_replaced_when_wanted() -> Result<(), String> {
+    fn non_array_pools_are_replaced_when_wanted() -> Result<(), Box<dyn std::error::Error>> {
         let src = "{ \"Dhcp4\": { \"subnet4\": [ {\"id\": 1, \"subnet\": \"192.0.2.0/24\", \"pools\": \"junk\"} ] } }";
-        let mut doc = DhcpModule::parse(src).map_err(|e| e.to_string())?;
+        let mut doc = DhcpModule::parse(src)?;
         let model = Model {
             kea_v4: KeaConfig {
                 subnets: vec![subnet(1, "192.0.2.0/24", &["192.0.2.1 - 192.0.2.9"])],
@@ -4094,24 +4082,24 @@ mod tests {
             },
             ..Model::default()
         };
-        let report = DhcpModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let report = DhcpModule::apply(&mut doc, &model)?;
         assert_eq!(report.changed_lines, 0);
         let rendered = DhcpModule::render(&doc);
         // The unmodeled subnet is preserved; the model's copy is appended.
         assert!(rendered.contains("\"junk\""), "{rendered}");
-        let back = DhcpModule::to_model(&DhcpModule::parse(&rendered).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
+        let back = DhcpModule::to_model(&DhcpModule::parse(&rendered)?)?;
         assert_eq!(back.kea_v4.subnets, model.kea_v4.subnets);
         let _ = report;
         Ok(())
     }
 
     #[test]
-    fn kea_domain_servers_sync_through_an_existing_option_data_array() -> Result<(), String> {
+    fn kea_domain_servers_sync_through_an_existing_option_data_array()
+    -> Result<(), Box<dyn std::error::Error>> {
         // A subnet already carrying a modeled `routers` entry: the model
         // adds domain servers, so the second sync pass runs.
         let src = "{ \"Dhcp4\": { \"subnet4\": [ {\"id\": 1, \"subnet\": \"192.0.2.0/24\", \"option-data\": [{\"name\": \"routers\", \"data\": \"192.0.2.1\"}]} ] } }";
-        let mut doc = DhcpModule::parse(src).map_err(|e| e.to_string())?;
+        let mut doc = DhcpModule::parse(src)?;
         let model = Model {
             kea_v4: KeaConfig {
                 subnets: vec![KeaSubnet {
@@ -4123,12 +4111,11 @@ mod tests {
             },
             ..Model::default()
         };
-        let report = DhcpModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+        let report = DhcpModule::apply(&mut doc, &model)?;
         assert_eq!(report.changed_lines, 0);
         let rendered = DhcpModule::render(&doc);
         assert!(rendered.contains("192.0.2.53"), "{rendered}");
-        let back = DhcpModule::to_model(&DhcpModule::parse(&rendered).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
+        let back = DhcpModule::to_model(&DhcpModule::parse(&rendered)?)?;
         assert_eq!(back.kea_v4.subnets, model.kea_v4.subnets);
         let _ = report;
         Ok(())
@@ -4154,6 +4141,54 @@ mod tests {
         assert_eq!(report, EditReport::default());
         Ok(())
     }
+    #[test]
+    fn remove_member_ignores_a_missing_key() -> Result<(), Box<dyn std::error::Error>> {
+        let mut parsed = parse_jsonc("{ \"a\": 1, \"b\": 2 }").map_err(|()| "parse failed")?;
+        let mut report = EditReport::default();
+        parsed.root.remove_member("c", &mut report);
+        assert_eq!(report, EditReport::default());
+        assert_eq!(parsed.render(), "{ \"a\": 1, \"b\": 2 }");
+        parsed.root.remove_member("a", &mut report);
+        assert_eq!(report.removed, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn domain_servers_are_written_into_a_new_option_data_member()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut doc = DhcpModule::parse(
+            "{ \"Dhcp4\": { \"subnet4\": [ {\"id\": 1, \"subnet\": \"192.0.2.0/24\"} ] } }",
+        )?;
+        let mut with_dns = subnet(1, "192.0.2.0/24", &[]);
+        with_dns.routers = vec!["192.0.2.1".to_owned()];
+        with_dns.domain_servers = vec!["192.0.2.53".to_owned()];
+        let model = kea4(&[], None, vec![with_dns]);
+        DhcpModule::apply(&mut doc, &model)?;
+        let rendered = DhcpModule::render(&doc);
+        assert!(rendered.contains("\"domain-name-servers\""), "{rendered}");
+        let back = DhcpModule::to_model(&DhcpModule::parse(&rendered)?)?;
+        assert_eq!(back, model);
+        Ok(())
+    }
+
+    #[test]
+    fn a_pool_is_appended_to_an_empty_pools_array() -> Result<(), Box<dyn std::error::Error>> {
+        let mut doc = DhcpModule::parse(
+            "{ \"Dhcp4\": { \"subnet4\": [ {\"id\": 1, \"subnet\": \"192.0.2.0/24\", \"pools\": []} ] } }",
+        )?;
+        let model = kea4(
+            &[],
+            None,
+            vec![subnet(1, "192.0.2.0/24", &["192.0.2.10 - 192.0.2.20"])],
+        );
+        let report = DhcpModule::apply(&mut doc, &model)?;
+        assert_eq!(report.added, 1);
+        let rendered = DhcpModule::render(&doc);
+        let back = DhcpModule::to_model(&DhcpModule::parse(&rendered)?)?;
+        assert_eq!(back, model);
+        Ok(())
+    }
+
     // --------------------------------------------------------------- fuzzing
 
     #[cfg(feature = "fuzzing")]

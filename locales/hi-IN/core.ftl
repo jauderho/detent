@@ -123,6 +123,7 @@ network-tip-bridge-members = इस ब्रिज के सदस्य इ�
 
 ## network module — validation diagnostics
 network-invalid-cidr = `{$value}` मान्य CIDR पता नहीं है।
+network-invalid-interface-name = `{$value}` मान्य इंटरफ़ेस नाम नहीं है।
 network-invalid-ip = `{$value}` मान्य IP पता नहीं है।
 network-gateway-outside-subnet = गेटवे `{$gateway}` इस इंटरफ़ेस के सबनेट के बाहर है।
 network-vlan-range = VLAN आईडी `{$id}` 1–4094 के बाहर है।

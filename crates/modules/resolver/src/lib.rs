@@ -42,7 +42,7 @@ use detent_core::descriptor::{
     TargetKind, UiGroup, Upstream, ValidationCtx, apply_hints,
 };
 use detent_core::diag::{Diagnostic, Diagnostics, FieldPath, MessageId, Severity};
-use detent_core::doc::{Document, LineKind};
+use detent_core::doc::{Document, Line, LineKind};
 use detent_core::module::{ConfigModule, EditError, EditReport, ModelError, ParseError};
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr};
@@ -563,6 +563,9 @@ fn parse_unbound(raw: &str) -> Option<UnboundEntry> {
     let (key, value) = trimmed.split_once(':')?;
     let key = key.trim();
     let value = value.trim();
+    if !is_one_token(value) {
+        return None;
+    }
     match key {
         "name" => Some(UnboundEntry::ForwardName {
             name: strip_quotes(value),
@@ -578,6 +581,19 @@ fn parse_unbound(raw: &str) -> Option<UnboundEntry> {
             enabled: parse_yes_no(value)?,
         }),
         _ => None,
+    }
+}
+
+/// Whether an unbound value is one token: a quoted string, or a bare word
+/// that does not open a comment. A `#` inside a bare word is part of it
+/// (`9.9.9.9@853#dns.quad9.net`); a trailing `# comment` or a second word is
+/// not modeled, so the line stays [`LineKind::Unknown`].
+fn is_one_token(value: &str) -> bool {
+    match value.strip_prefix('"') {
+        Some(rest) => rest
+            .split_once('"')
+            .is_some_and(|(_, after)| after.is_empty()),
+        None => !value.contains([' ', '\t']) && !value.starts_with('#'),
     }
 }
 
@@ -658,6 +674,51 @@ fn opens_unbound_section(raw: &str) -> bool {
     raw.trim()
         .strip_suffix(':')
         .is_some_and(|name| !name.is_empty() && !name.contains([':', ' ', '\t', '"', '#']))
+}
+
+/// A copy of `doc` in which the forward-zone items outside a `forward-zone:`
+/// clause are [`LineKind::Unknown`]: `name:` is also a `stub-zone:`,
+/// `auth-zone:` or `view:` attribute, which this module does not model. Any
+/// other clause header ends a forward zone. `to_model` reads and `apply`
+/// plans against this copy, so those lines are never modeled or touched.
+fn modeled(doc: &Document) -> Document {
+    let mut masked = doc.clone();
+    masked.rebuild(|lines| {
+        let mut in_zone = false;
+        for line in lines.iter_mut() {
+            if opens_unbound_section(line.raw()) {
+                in_zone = line.raw().trim() == "forward-zone:";
+            } else if !in_zone
+                && matches!(
+                    parse_unbound(line.raw()),
+                    Some(
+                        UnboundEntry::ForwardName { .. }
+                            | UnboundEntry::ForwardAddr { .. }
+                            | UnboundEntry::ForwardTls { .. }
+                    )
+                )
+            {
+                *line = Line::new(line.raw().to_owned(), LineKind::Unknown, line.ending());
+            }
+        }
+    });
+    masked
+}
+
+/// The model of `doc`: every directive [`modeled`] keeps, in file order.
+fn project(doc: &Document) -> Model {
+    let mut model = Model::default();
+    for entry in modeled(doc)
+        .lines_of_kind(LineKind::Directive)
+        .filter_map(|line| parse_entry(line.raw()))
+    {
+        match entry {
+            Entry::Resolv(entry) => model.resolv.push(entry),
+            Entry::Resolved(entry) => model.resolved.push(entry),
+            Entry::Unbound(entry) => model.unbound.push(entry),
+        }
+    }
+    model
 }
 
 /// Renders a resolv.conf entry, refusing anything that would not round-trip.
@@ -1490,18 +1551,7 @@ impl ConfigModule for ResolverModule {
     /// `Unknown` and `Comment` lines stay in the `Doc` and are what makes
     /// `render` lossless.
     fn to_model(doc: &Self::Doc) -> Result<Self::Model, ModelError> {
-        let mut model = Model::default();
-        for entry in doc
-            .lines_of_kind(LineKind::Directive)
-            .filter_map(|line| parse_entry(line.raw()))
-        {
-            match entry {
-                Entry::Resolv(entry) => model.resolv.push(entry),
-                Entry::Resolved(entry) => model.resolved.push(entry),
-                Entry::Unbound(entry) => model.unbound.push(entry),
-            }
-        }
-        Ok(model)
+        Ok(project(doc))
     }
 
     /// The minimal-edit two-pass shape shared with `hosts`, run once per
@@ -1510,23 +1560,37 @@ impl ConfigModule for ResolverModule {
     /// built, read-only, before one pass applies them, so a refused value leaves
     /// the file exactly as it was; a line whose parsed entry already equals the
     /// model's is never rendered, so hand indentation and spacing survive, and
-    /// dropping or adding an entry never rewrites or moves another.
+    /// dropping or adding an entry never rewrites or moves another. An edit
+    /// that would not read back as `model` (a forward-zone item with no
+    /// `forward-zone:` header before it) is refused.
     fn apply(doc: &mut Self::Doc, model: &Self::Model) -> Result<EditReport, EditError> {
         let no_sections = |_: &str| false;
-        let mut plan = doc.plan_entries(&model.resolv, resolv_of, render_resolv, no_sections)?;
-        plan.extend(doc.plan_entries(
+        let entries = modeled(doc);
+        let mut plan =
+            entries.plan_entries(&model.resolv, resolv_of, render_resolv, no_sections)?;
+        plan.extend(entries.plan_entries(
             &model.resolved,
             resolved_of,
             render_resolved,
             no_sections,
         )?);
-        plan.extend(doc.plan_entries(
+        plan.extend(entries.plan_entries(
             &model.unbound,
             unbound_of,
             render_unbound,
             opens_unbound_section,
         )?);
-        Ok(doc.apply_plan(plan))
+        let mut edited = doc.clone();
+        let report = edited.apply_plan(plan);
+        if project(&edited) != *model {
+            return Err(EditError::Unsupported {
+                message: "the edit would not read back as the model; \
+                          a forward-zone item must follow a forward-zone: header"
+                    .to_owned(),
+            });
+        }
+        *doc = edited;
+        Ok(report)
     }
 
     /// Findings carry Fluent ids, never rendered sentences (ADR-003), a field
@@ -1871,6 +1935,21 @@ mod tests {
         assert_eq!(parse_unbound("stub-zone:"), None);
         assert_eq!(parse_unbound("no-colon-here"), None);
         assert_eq!(parse_unbound("    hide-identity:"), None, "empty value");
+        for commented in [
+            "    forward-addr: 9.9.9.9 # quad9",
+            "    forward-addr: 9.9.9.9\t#quad9",
+            "    name: \".\" # root",
+            "    name: \".\"#root",
+            "    name: \"lan",
+            "    name: #root",
+            "    name: a b",
+        ] {
+            assert_eq!(
+                parse_unbound(commented),
+                None,
+                "a trailing comment or a second token leaves {commented:?} unmodeled"
+            );
+        }
     }
 
     #[test]
@@ -1910,33 +1989,29 @@ mod tests {
     // ------------------------------------------------------------ render tests
 
     #[test]
-    fn render_resolv_is_canonical() -> Result<(), String> {
+    fn render_resolv_is_canonical() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(
             render_resolv(&ResolvEntry::Nameserver {
                 ip: ip("192.0.2.53")
-            })
-            .map_err(|e| e.to_string())?,
+            })?,
             "nameserver 192.0.2.53"
         );
         assert_eq!(
             render_resolv(&ResolvEntry::Search {
                 domains: vec!["example.com".to_owned()]
-            })
-            .map_err(|e| e.to_string())?,
+            })?,
             "search example.com"
         );
         assert_eq!(
             render_resolv(&ResolvEntry::Domain {
                 domain: "example.com".to_owned()
-            })
-            .map_err(|e| e.to_string())?,
+            })?,
             "domain example.com"
         );
         assert_eq!(
             render_resolv(&ResolvEntry::Options {
                 options: vec!["ndots:2".to_owned()]
-            })
-            .map_err(|e| e.to_string())?,
+            })?,
             "options ndots:2"
         );
 
@@ -1944,37 +2019,30 @@ mod tests {
     }
 
     #[test]
-    fn render_resolved_is_canonical() -> Result<(), String> {
-        assert_eq!(
-            render_resolved(&ResolvedEntry::Resolve).map_err(|e| e.to_string())?,
-            "[Resolve]"
-        );
+    fn render_resolved_is_canonical() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(render_resolved(&ResolvedEntry::Resolve)?, "[Resolve]");
         assert_eq!(
             render_resolved(&ResolvedEntry::Dns {
                 servers: vec![name("9.9.9.9", Some("dns.quad9.net"))]
-            })
-            .map_err(|e| e.to_string())?,
+            })?,
             "DNS=9.9.9.9#dns.quad9.net"
         );
         assert_eq!(
             render_resolved(&ResolvedEntry::DnsSec {
                 mode: ResolvedDnsSec::AllowDowngrade
-            })
-            .map_err(|e| e.to_string())?,
+            })?,
             "DNSSEC=allow-downgrade"
         );
         assert_eq!(
             render_resolved(&ResolvedEntry::DnsOverTls {
                 mode: ResolvedDnsOverTls::Opportunistic
-            })
-            .map_err(|e| e.to_string())?,
+            })?,
             "DNSOverTLS=opportunistic"
         );
         assert_eq!(
             render_resolved(&ResolvedEntry::Domains {
                 domains: vec!["~.".to_owned()]
-            })
-            .map_err(|e| e.to_string())?,
+            })?,
             "Domains=~."
         );
 
@@ -1982,40 +2050,30 @@ mod tests {
     }
 
     #[test]
-    fn render_unbound_is_canonical() -> Result<(), String> {
-        assert_eq!(
-            render_unbound(&UnboundEntry::Server).map_err(|e| e.to_string())?,
-            "server:"
-        );
-        assert_eq!(
-            render_unbound(&UnboundEntry::ForwardZone).map_err(|e| e.to_string())?,
-            "forward-zone:"
-        );
+    fn render_unbound_is_canonical() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(render_unbound(&UnboundEntry::Server)?, "server:");
+        assert_eq!(render_unbound(&UnboundEntry::ForwardZone)?, "forward-zone:");
         assert_eq!(
             render_unbound(&UnboundEntry::Hardening {
                 key: "aggressive-nsec".to_owned(),
                 enabled: true
-            })
-            .map_err(|e| e.to_string())?,
+            })?,
             "    aggressive-nsec: yes"
         );
         assert_eq!(
             render_unbound(&UnboundEntry::ForwardName {
                 name: ".".to_owned()
-            })
-            .map_err(|e| e.to_string())?,
+            })?,
             "    name: ."
         );
         assert_eq!(
             render_unbound(&UnboundEntry::ForwardAddr {
                 addr: "9.9.9.9@853#dns.quad9.net".to_owned()
-            })
-            .map_err(|e| e.to_string())?,
+            })?,
             "    forward-addr: 9.9.9.9@853#dns.quad9.net"
         );
         assert_eq!(
-            render_unbound(&UnboundEntry::ForwardTls { enabled: true })
-                .map_err(|e| e.to_string())?,
+            render_unbound(&UnboundEntry::ForwardTls { enabled: true })?,
             "    forward-tls-upstream: yes"
         );
 
@@ -2287,6 +2345,70 @@ mod tests {
     }
 
     #[test]
+    fn names_outside_a_forward_zone_are_not_modeled() -> Result<(), String> {
+        let src = concat!(
+            "server:\n",
+            "stub-zone:\n",
+            "    name: \"lan\"\n",
+            "    stub-addr: 192.168.1.1\n",
+            "forward-zone:\n",
+            "    name: \".\"\n",
+            "    forward-addr: 192.0.2.1\n",
+            "auth-zone:\n",
+            "    name: \"example.org\"\n",
+            "    forward-tls-upstream: yes\n"
+        );
+        let mut doc = ResolverModule::parse(src).map_err(|e| e.to_string())?;
+        let model = ResolverModule::to_model(&doc).map_err(|e| e.to_string())?;
+        assert_eq!(
+            model.unbound,
+            vec![
+                UnboundEntry::Server,
+                UnboundEntry::ForwardZone,
+                UnboundEntry::ForwardName {
+                    name: ".".to_owned()
+                },
+                UnboundEntry::ForwardAddr {
+                    addr: "192.0.2.1".to_owned()
+                },
+            ],
+            "stub-zone and auth-zone names are not forward-zone names"
+        );
+        assert!(!ResolverModule::validate(&model, &ctx(&profile())).has_errors());
+        let mut wanted = model;
+        wanted.unbound.truncate(3);
+        ResolverModule::apply(&mut doc, &wanted).map_err(|e| e.to_string())?;
+        assert_eq!(
+            ResolverModule::render(&doc),
+            src.replace("    forward-addr: 192.0.2.1\n", ""),
+            "lines outside the forward zone survive the edit"
+        );
+
+        let stray = m(
+            Vec::new(),
+            Vec::new(),
+            vec![UnboundEntry::ForwardName {
+                name: ".".to_owned(),
+            }],
+        );
+        let before = ResolverModule::render(&doc);
+        assert!(
+            matches!(
+                ResolverModule::apply(&mut doc, &stray),
+                Err(EditError::Unsupported { .. })
+            ),
+            "a name with no forward-zone: header would not read back"
+        );
+        assert_eq!(
+            ResolverModule::render(&doc),
+            before,
+            "a refusal edits nothing"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn apply_is_a_noop_on_a_fresh_copy() -> Result<(), String> {
         let src = concat!(
             "# /etc/resolv.conf\n",
@@ -2343,8 +2465,8 @@ mod tests {
     }
 
     #[test]
-    fn apply_removes_and_appends() -> Result<(), String> {
-        let mut doc = ResolverModule::parse("nameserver 192.0.2.1\n").map_err(|e| e.to_string())?;
+    fn apply_removes_and_appends() -> Result<(), Box<dyn std::error::Error>> {
+        let mut doc = ResolverModule::parse("nameserver 192.0.2.1\n")?;
         let wanted = m(
             vec![
                 ResolvEntry::Nameserver {
@@ -2357,7 +2479,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
         );
-        let report = ResolverModule::apply(&mut doc, &wanted).map_err(|e| e.to_string())?;
+        let report = ResolverModule::apply(&mut doc, &wanted)?;
         assert_eq!(report.changed_lines, 1);
         assert_eq!(report.added, 1);
         assert_eq!(
@@ -2366,8 +2488,7 @@ mod tests {
         );
 
         // And the inverse: a model with fewer entries drops the surplus line.
-        let mut doc = ResolverModule::parse("nameserver 192.0.2.1\noptions edns0\n")
-            .map_err(|e| e.to_string())?;
+        let mut doc = ResolverModule::parse("nameserver 192.0.2.1\noptions edns0\n")?;
         let wanted = m(
             vec![ResolvEntry::Nameserver {
                 ip: ip("192.0.2.1"),
@@ -2375,7 +2496,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
         );
-        let report = ResolverModule::apply(&mut doc, &wanted).map_err(|e| e.to_string())?;
+        let report = ResolverModule::apply(&mut doc, &wanted)?;
         assert_eq!(report.removed, 1);
         assert_eq!(ResolverModule::render(&doc), "nameserver 192.0.2.1\n");
 
@@ -2525,12 +2646,10 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_copy_validates_without_findings() -> Result<(), String> {
-        let model = ResolverModule::to_model(
-            &ResolverModule::parse("nameserver 192.0.2.1\nsearch example.com\noptions ndots:2\n")
-                .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
+    fn a_fresh_copy_validates_without_findings() -> Result<(), Box<dyn std::error::Error>> {
+        let model = ResolverModule::to_model(&ResolverModule::parse(
+            "nameserver 192.0.2.1\nsearch example.com\noptions ndots:2\n",
+        )?)?;
         let diagnostics = ResolverModule::validate(&model, &ctx(&profile()));
         assert_eq!(diagnostics, Diagnostics::new());
 
@@ -2714,11 +2833,10 @@ mod tests {
     }
 
     #[test]
-    fn each_section_names_its_own_file() -> Result<(), String> {
+    fn each_section_names_its_own_file() -> Result<(), Box<dyn std::error::Error>> {
         let target = |model: &Model| {
             ResolverModule::model_target(model)
                 .map(|path| path.map(detent_core::descriptor::PathSpec::as_str))
-                .map_err(|e| e.to_string())
         };
         assert_eq!(target(&m(Vec::new(), Vec::new(), Vec::new()))?, None);
         let nameserver = ResolvEntry::Nameserver {
@@ -3321,7 +3439,8 @@ mod tests {
     }
     #[cfg(feature = "fuzzing")]
     #[test]
-    fn arbitrary_impls_cover_every_arm_and_apply_cleanly() -> Result<(), String> {
+    fn arbitrary_impls_cover_every_arm_and_apply_cleanly() -> Result<(), Box<dyn std::error::Error>>
+    {
         use super::{arbitrary_dns_servers, arbitrary_domain, arbitrary_forward_addr};
         use arbitrary::{Arbitrary, Unstructured};
 
@@ -3341,18 +3460,12 @@ mod tests {
             &[0xff; 256],
         ];
         for data in buffers {
-            let resolv =
-                ResolvEntry::arbitrary(&mut Unstructured::new(data)).map_err(|e| e.to_string())?;
-            let resolved = ResolvedEntry::arbitrary(&mut Unstructured::new(data))
-                .map_err(|e| e.to_string())?;
-            let unbound =
-                UnboundEntry::arbitrary(&mut Unstructured::new(data)).map_err(|e| e.to_string())?;
-            let domain =
-                arbitrary_domain(&mut Unstructured::new(data)).map_err(|e| e.to_string())?;
-            let servers =
-                arbitrary_dns_servers(&mut Unstructured::new(data)).map_err(|e| e.to_string())?;
-            let addr =
-                arbitrary_forward_addr(&mut Unstructured::new(data)).map_err(|e| e.to_string())?;
+            let resolv = ResolvEntry::arbitrary(&mut Unstructured::new(data))?;
+            let resolved = ResolvedEntry::arbitrary(&mut Unstructured::new(data))?;
+            let unbound = UnboundEntry::arbitrary(&mut Unstructured::new(data))?;
+            let domain = arbitrary_domain(&mut Unstructured::new(data))?;
+            let servers = arbitrary_dns_servers(&mut Unstructured::new(data))?;
+            let addr = arbitrary_forward_addr(&mut Unstructured::new(data))?;
 
             assert!(
                 is_valid_domain(&domain),
@@ -3373,10 +3486,11 @@ mod tests {
             let applied = Model {
                 resolv: vec![resolv],
                 resolved: vec![resolved],
-                unbound: vec![unbound],
+                // A forward item reads back only inside a forward zone.
+                unbound: vec![UnboundEntry::ForwardZone, unbound],
             };
-            let mut doc = ResolverModule::parse("").map_err(|e| e.to_string())?;
-            ResolverModule::apply(&mut doc, &applied).map_err(|e| e.to_string())?;
+            let mut doc = ResolverModule::parse("")?;
+            ResolverModule::apply(&mut doc, &applied)?;
         }
         Ok(())
     }

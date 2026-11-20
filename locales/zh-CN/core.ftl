@@ -123,6 +123,7 @@ network-tip-bridge-members = 此网桥的成员接口名称。
 
 ## network module — validation diagnostics
 network-invalid-cidr = `{$value}` 不是有效的 CIDR 地址。
+network-invalid-interface-name = `{$value}` 不是有效的接口名称。
 network-invalid-ip = `{$value}` 不是有效的 IP 地址。
 network-gateway-outside-subnet = 网关 `{$gateway}` 不在此接口的子网之内。
 network-vlan-range = VLAN id `{$id}` 超出了 1–4094 的范围。

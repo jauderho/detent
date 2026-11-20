@@ -653,6 +653,37 @@ pub use cache::{
     write_cached,
 };
 
+/// The lock one update run holds from start to end:
+/// `<state_root>/update/lock`.
+#[must_use]
+pub fn lock_path(state_root: &std::path::Path) -> PathBuf {
+    state_root.join("update/lock")
+}
+
+/// Takes the update lock at `path` without waiting: `Ok(None)` when another
+/// run holds it. The lock goes when the returned file is closed, also when
+/// the process dies, so a crashed run never leaves it held.
+///
+/// # Errors
+///
+/// Whatever the filesystem reports when creating the directory, opening the
+/// file or locking it.
+pub fn lock(path: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(err)) => Err(err),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
@@ -910,6 +941,28 @@ mod tests {
             write_cached(&stamp, &report, now(), true)
                 .expect("forced")
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn the_update_lock_admits_one_holder_at_a_time() {
+        let dir = tempfile::TempDir::new().expect("lock dir");
+        let path = lock_path(dir.path());
+        let held = lock(&path).expect("open lock").expect("first holder");
+        assert!(
+            lock(&path).expect("open lock").is_none(),
+            "a second holder must be refused"
+        );
+        drop(held);
+        assert!(
+            lock(&path).expect("open lock").is_some(),
+            "a closed lock is free again"
+        );
+        let blocked = dir.path().join("file");
+        std::fs::write(&blocked, b"x").expect("write file");
+        assert!(
+            lock(&lock_path(&blocked)).is_err(),
+            "a lock directory that cannot be made is an error"
         );
     }
 

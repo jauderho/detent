@@ -149,6 +149,10 @@ function ModuleDetailView({ id }: { id: string }) {
   const [planReport, setPlanReport] = useState<PlanReport | null>(null)
   const [planOpen, setPlanOpen] = useState(false)
   const [applyContext, setApplyContext] = useState<ApplyContext | null>(null)
+  // The file hash the model was seeded from. Apply sends this, not the newest
+  // refetch's hash, so the server's stale-hash guard sees edits made on an old
+  // file.
+  const [seededHash, setSeededHash] = useState<string | null>(null)
   const [serviceAction, setServiceAction] = useState<ServiceActionValue | ''>('')
 
   // The control that opened the plan dialog, so closing the dialog can put
@@ -170,6 +174,7 @@ function ModuleDetailView({ id }: { id: string }) {
   useEffect(() => {
     if (model !== null || viewData === undefined) return
     setModel(seedModel(viewData))
+    setSeededHash(viewData.current_hash ?? null)
     setDiagnostics(parseDiagnostics(viewData.diagnostics))
   }, [viewData, model])
 
@@ -257,7 +262,7 @@ function ModuleDetailView({ id }: { id: string }) {
     if (viewData === undefined) return
     setServiceAction('')
     setApplyContext({
-      hash: viewData.current_hash ?? null,
+      hash: seededHash,
       path: viewData.descriptor.targets[0]?.path ?? '',
     })
   }
@@ -291,6 +296,7 @@ function ModuleDetailView({ id }: { id: string }) {
     apply.mutate(body, {
       onSuccess: (report) => {
         setApplyContext(null)
+        setSeededHash(report.new_hash)
         setAppliedMessage({
           path: report.path,
           created: report.created,
