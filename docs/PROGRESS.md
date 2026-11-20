@@ -5,6 +5,28 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-11-20 - Second audit: the last three gaps
+
+Closes three of the four open gaps in the entry below. The fourth, the
+resolver refusals on hand-made files, is a behaviour change and stays as it is.
+- NetworkManager: a profile with an `id` and no `interface-name` is refused.
+  Such a profile matches any device; the renderer writes
+  `interface-name=<id>`, which ties it to one device.
+- `mount_unit_state` treats a non-zero `systemctl show` exit as
+  `ServiceError::Failed`. It shares the check with the unit status read.
+- `coverage-baseline.json` gates `crates/detent-update/` at 84%. macOS
+  measures 85.45%; `src/bin/gen-fixtures.rs` (574 lines, run by hand) is
+  most of the gap.
+- Trap: a fresh build with Rust 1.100 counts implicit-else paths and
+  closures that never run. A CI cache from an older toolchain hid this
+  until #170, which covered the gap in core, i18n, ops and modules.
+
+**Checks.** The two new tests failed on the old code and pass now.
+`cargo clippy --workspace --all-targets --locked -- -D warnings` exit 0
+with and without `--all-features`; `cargo test --locked --all-features` for
+detent-platform and detent-module-network pass; `scripts/coverage-merge.sh`
+passes with the new floor.
+
 ## 2026-11-19 - Second audit: the remaining fixes (3, 5 to 20)
 
 - Updater:
