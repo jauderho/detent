@@ -833,6 +833,23 @@ fn systemd_reads_mount_unit_states_without_acting() -> TestResult {
     Ok(())
 }
 
+/// A `systemctl show` that exits non-zero (no bus, no permission) says
+/// nothing about the mount: it is a failure, not an inactive unit.
+#[test]
+fn systemd_failed_mount_show_is_reported_as_failed() {
+    let fake = Arc::new(
+        FakeRunner::new()
+            .existing(&["/usr/bin/systemctl"])
+            .respond(output_fail(1)),
+    );
+    let mgr = SystemdManager::with_runner(Box::new(SharedFake(Arc::clone(&fake))));
+    let result = mgr.mount_unit_states(&units(&["srv-a.mount"]));
+    assert!(
+        matches!(&result, Err(ServiceError::Failed(message)) if message.contains("boom")),
+        "{result:?}"
+    );
+}
+
 #[test]
 fn systemd_refuses_a_name_that_is_not_a_mount_unit_before_any_call() {
     for bad in [
