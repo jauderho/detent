@@ -119,12 +119,10 @@ impl TotpSecret {
         // HMAC accepts a key of any length, so `new_from_slice` cannot
         // actually fail here; folding the impossible error into the value
         // keeps an untestable branch out of the module.
-        let tag = Hmac::<Sha1>::new_from_slice(&self.0)
-            .map(|mut mac| {
-                mac.update(&counter.to_be_bytes());
-                mac.finalize().into_bytes()
-            })
-            .unwrap_or_default();
+        let tag = Hmac::<Sha1>::new_from_slice(&self.0).map_or_default(|mut mac| {
+            mac.update(&counter.to_be_bytes());
+            mac.finalize().into_bytes()
+        });
 
         // RFC 4226 §5.4 dynamic truncation: the low nibble of the last byte
         // selects a four-byte window, which is always inside a 20-byte tag.

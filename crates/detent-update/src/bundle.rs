@@ -459,8 +459,7 @@ fn rfc3161_timestamps(material: &VerificationMaterialJson) -> Result<Vec<Vec<u8>
     let timestamps = material
         .timestamp_verification_data
         .as_ref()
-        .map(|data| data.rfc3161_timestamps.as_slice())
-        .unwrap_or_default();
+        .map_or_default(|data| data.rfc3161_timestamps.as_slice());
     if timestamps.len() > MAX_RFC3161_TIMESTAMPS {
         return Err(BundleError::Malformed(format!(
             "more than {MAX_RFC3161_TIMESTAMPS} RFC 3161 timestamps"

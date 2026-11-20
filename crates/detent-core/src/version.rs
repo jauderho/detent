@@ -377,10 +377,7 @@ mod tests {
             .map(|d| {
                 (
                     d.severity,
-                    d.field
-                        .as_ref()
-                        .map(|f| f.as_str().to_owned())
-                        .unwrap_or_default(),
+                    d.field.as_ref().map_or_default(|f| f.as_str().to_owned()),
                 )
             })
             .collect()

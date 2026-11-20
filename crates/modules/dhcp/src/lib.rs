@@ -2180,8 +2180,7 @@ impl ConfigModule for DhcpModule {
                     .root
                     .member_by_key(flavor.config_key())
                     .and_then(|member| member.value.as_obj())
-                    .map(|obj| project_kea_config(obj, *flavor))
-                    .unwrap_or_default();
+                    .map_or_default(|obj| project_kea_config(obj, *flavor));
                 let (kea_v4, kea_v6) = match flavor {
                     KeaFlavor::V4 => (config, KeaConfig::default()),
                     KeaFlavor::V6 => (KeaConfig::default(), config),

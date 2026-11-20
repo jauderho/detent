@@ -565,7 +565,7 @@ fn timestamp_token(tsa: &Tsa, signed_bytes: &[u8], gen_time: i64, corrupt: bool)
 
 /// `timestampVerificationData` with one token, or none.
 fn timestamps(token: Option<Vec<u8>>) -> Value {
-    json!({ "rfc3161Timestamps": token.map(|token| vec![json!({ "signedTimestamp": BASE64.encode(token) })]).unwrap_or_default() })
+    json!({ "rfc3161Timestamps": token.map_or_default(|token| vec![json!({ "signedTimestamp": BASE64.encode(token) })]) })
 }
 
 /// A Rekor v2 bundle around `material`: a `hashedrekord` 0.0.2 entry over the

@@ -2658,8 +2658,7 @@ mod tests {
             .current()
             .cert
             .first()
-            .map(|der| der.as_ref().to_vec())
-            .unwrap_or_default()
+            .map_or_default(|der| der.as_ref().to_vec())
     }
 
     #[test]

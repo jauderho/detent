@@ -28,7 +28,7 @@
 //! calls [`Operation::RollbackCommit`].
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use detent_core::descriptor::{ModuleDescriptor, PathSpec, ValidationCtx};
 use detent_core::diag::{Diagnostic, MessageId, Severity};
@@ -106,7 +106,9 @@ pub struct OpsEngine {
     next_commit: u32,
     /// Last commit-confirm window armed by this engine, used to rehydrate its
     /// full report without inventing fields from the protocol's id-only query.
-    pending_commit: Option<PendingCommit>,
+    /// The `Instant` is when the window was armed, on the monotonic clock, so
+    /// the remaining time it reports never depends on the wall clock.
+    pending_commit: Option<(PendingCommit, Instant)>,
     /// Answers `CertStatus` and `CertRenew`; see [`CertFrontEnd`].
     cert: Option<Box<dyn CertFrontEnd>>,
 }
@@ -170,8 +172,12 @@ impl OpsEngine {
             return Ok(None);
         };
         self.pending_commit
-            .clone()
-            .filter(|pending| pending.commit_id == active)
+            .as_ref()
+            .filter(|(pending, _)| pending.commit_id == active)
+            .map(|(pending, armed)| PendingCommit {
+                remaining_s: remaining_secs(pending.timeout_s, armed.elapsed()),
+                ..pending.clone()
+            })
             .map(Some)
             .ok_or(OpsError::CommitPending(active))
     }
@@ -487,10 +493,7 @@ impl OpsEngine {
             diff: hunks,
             unified_diff,
             rendered,
-            affected_services: wiring
-                .binding
-                .map(|(_, service)| vec![service])
-                .unwrap_or_default(),
+            affected_services: wiring.binding.map_or_default(|(_, service)| vec![service]),
             checks,
             diagnostics,
             current_hash: contents.digest,
@@ -669,7 +672,7 @@ impl OpsEngine {
             let commit =
                 self.arm_or_undo(confirm, pending_service, descriptor, &wiring, &receipt)?;
             hashes.commit_id = Some(commit.commit_id.get());
-            self.pending_commit = Some(commit.clone());
+            self.pending_commit = Some((commit.clone(), Instant::now()));
             Some(commit)
         } else {
             None
@@ -849,6 +852,7 @@ impl OpsEngine {
             commit_id,
             timeout_s,
             deadline: deadline_rfc3339(timeout_s),
+            remaining_s: timeout_s,
             rollback_targets,
         })
     }
@@ -994,8 +998,7 @@ fn wiring(
 
     let checks = client
         .tables()
-        .map(|ack| ack.checks.as_slice())
-        .unwrap_or_default()
+        .map_or_default(|ack| ack.checks.as_slice())
         .iter()
         .filter(|check| check.module == module && check.targets.contains(&chosen.id))
         .map(|check| (check.id, check.program.clone()))
@@ -1119,6 +1122,16 @@ fn deadline_rfc3339(timeout_s: u16) -> String {
         .unwrap_or_default()
 }
 
+/// Whole seconds left of a `timeout_s` window after `elapsed`, rounded up so
+/// an open window never reads zero.
+fn remaining_secs(timeout_s: u16, elapsed: Duration) -> u16 {
+    let left = Duration::from_secs(u64::from(timeout_s)).saturating_sub(elapsed);
+    let whole = left
+        .as_secs()
+        .saturating_add(u64::from(left.subsec_nanos() > 0));
+    u16::try_from(whole).unwrap_or(timeout_s)
+}
+
 /// The text of a failed `Mount` request: the monitor's own message for a
 /// hook failure, the full error otherwise.
 fn mount_error_text(err: ClientError) -> String {
@@ -1173,11 +1186,12 @@ mod tests {
         ));
     }
 
-    use super::{Hashes, command, deadline_rfc3339, decode, map_client};
+    use super::{Hashes, command, deadline_rfc3339, decode, map_client, remaining_secs};
     use crate::op::ServiceCommand;
     use detent_platform::fs::atomic::Sha256Digest;
     use detent_platform::privsep::proto::{IdKind, ProtoError, ServiceAction as WireServiceAction};
     use detent_platform::privsep::worker::ClientError;
+    use std::time::Duration;
 
     use crate::error::OpsError;
 
@@ -1206,8 +1220,7 @@ mod tests {
         assert!(matches!(err, Err(OpsError::Module(_))));
         assert!(
             err.err()
-                .map(|err| err.to_string())
-                .unwrap_or_default()
+                .map_or_default(|err| err.to_string())
                 .contains("not valid UTF-8")
         );
     }
@@ -1248,6 +1261,15 @@ mod tests {
         let deadline = deadline_rfc3339(90);
         assert!(deadline.ends_with('Z'), "{deadline} is not UTC RFC 3339");
         assert_ne!(deadline_rfc3339(0), "");
+    }
+
+    #[test]
+    fn remaining_seconds_round_up_and_stop_at_zero() {
+        assert_eq!(remaining_secs(90, Duration::ZERO), 90);
+        assert_eq!(remaining_secs(90, Duration::from_millis(88_500)), 2);
+        assert_eq!(remaining_secs(90, Duration::from_secs(90)), 0);
+        assert_eq!(remaining_secs(90, Duration::from_secs(500)), 0);
+        assert_eq!(remaining_secs(u16::MAX, Duration::ZERO), u16::MAX);
     }
 
     #[test]

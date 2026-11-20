@@ -601,7 +601,7 @@ mod tests {
     }
 
     fn message(result: Result<(), AcmeError>) -> String {
-        result.err().map(|err| err.to_string()).unwrap_or_default()
+        result.err().map_or_default(|err| err.to_string())
     }
 
     #[test]
@@ -726,8 +726,7 @@ mod tests {
         for secret in ["not base64!", ""] {
             let text = Key::new("k.example.com", Algorithm::Sha256, secret)
                 .err()
-                .map(|err| err.to_string())
-                .unwrap_or_default();
+                .map_or_default(|err| err.to_string());
             assert!(
                 text.starts_with("dns provider error: rfc2136: TSIG key value is"),
                 "{text}"
@@ -807,16 +806,14 @@ mod tests {
         drop(listener);
         let text = exchange_tcp(&server, b"x")
             .err()
-            .map(|err| err.to_string())
-            .unwrap_or_default();
+            .map_or_default(|err| err.to_string());
         assert!(
             text.contains(&format!("rfc2136: {server}: cannot connect")),
             "{text}"
         );
         let text = exchange_tcp("no port here", b"x")
             .err()
-            .map(|err| err.to_string())
-            .unwrap_or_default();
+            .map_or_default(|err| err.to_string());
         assert!(text.contains("cannot resolve"), "{text}");
         Ok(())
     }
@@ -844,8 +841,7 @@ mod tests {
         let closer = std::thread::spawn(move || listener.accept().map(drop));
         let text = exchange_tcp(&server, b"x")
             .err()
-            .map(|err| err.to_string())
-            .unwrap_or_default();
+            .map_or_default(|err| err.to_string());
         assert!(text.contains("receive"), "{text}");
         closer.join().map_err(|_| "server panicked")??;
         Ok(())

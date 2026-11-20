@@ -204,19 +204,23 @@ run() {
 install_file() {
   local src="$1" rel="$2" mode="$3"
   local dest="$DEST_ROOT/$rel"
-  local destdir
+  local destdir staged
   destdir="$(dirname "$dest")"
+  # Stage next to the target and rename over it: a running binary cannot be
+  # opened for writing (ETXTBSY), but it can be replaced by a rename.
+  staged="$destdir/.$(basename "$dest").new"
 
   log_info "installing $rel"
   run "mkdir -p $destdir" mkdir -p "$destdir"
-  run "copy $src -> $dest" cp "$src" "$dest"
-  run "chmod $mode $dest" chmod "$mode" "$dest"
+  run "copy $src -> $staged" cp "$src" "$staged"
+  run "chmod $mode $staged" chmod "$mode" "$staged"
 
   # Only chown when doing a real, non-prefixed install (root, on the real
   # filesystem) — chown requires root and is meaningless under --prefix.
   if ((DRYRUN == 0)) && [[ -z "$PREFIX" ]]; then
-    run "chown root:root $dest" chown root:root "$dest"
+    run "chown root:root $staged" chown root:root "$staged"
   fi
+  run "rename $staged -> $dest" mv -f "$staged" "$dest"
 }
 
 # polkit_present: true when a polkit daemon is installed (its path differs by

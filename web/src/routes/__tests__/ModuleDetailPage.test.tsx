@@ -585,6 +585,7 @@ describe('ModuleDetailPage — apply', () => {
       commit: {
         commit_id: 7,
         deadline: new Date(Date.now() + 60_000).toISOString(),
+        remaining_s: 60,
         rollback_targets: 1,
         timeout_s: 60,
       },

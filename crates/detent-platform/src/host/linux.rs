@@ -20,8 +20,7 @@ pub(super) fn detect_distro(fs: &dyn HostFs) -> Option<Distro> {
     let id = map.get("ID")?.clone();
     let id_like = map
         .get("ID_LIKE")
-        .map(|v| v.split_whitespace().map(str::to_string).collect())
-        .unwrap_or_default();
+        .map_or_default(|v| v.split_whitespace().map(str::to_string).collect());
     let version_id = map.get("VERSION_ID").cloned();
     Some(Distro {
         id,

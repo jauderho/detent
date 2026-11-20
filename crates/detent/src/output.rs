@@ -253,10 +253,7 @@ impl Renderer<'_> {
             &[
                 (
                     "prev",
-                    &report
-                        .prev_hash
-                        .map(|hash| hash.to_string())
-                        .unwrap_or_default(),
+                    &report.prev_hash.map_or_default(|hash| hash.to_string()),
                 ),
                 ("new", &report.new_hash.to_string()),
                 ("backup", &self.yes_no(report.backed_up)),

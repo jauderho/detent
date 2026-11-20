@@ -1232,13 +1232,11 @@ impl<'a> Monitor<'a> {
                     name: entry
                         .path
                         .file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
+                        .map_or_default(|name| name.to_string_lossy().into_owned()),
                     created_unix_s: entry
                         .created_utc
                         .duration_since(UNIX_EPOCH)
-                        .map(|since| since.as_secs())
-                        .unwrap_or_default(),
+                        .map_or_default(|since| since.as_secs()),
                     digest: entry.digest,
                     len: entry.original_len,
                 };
@@ -1305,8 +1303,7 @@ impl<'a> Monitor<'a> {
                 let entries = self
                     .pending
                     .take()
-                    .map(|pending| pending.entries)
-                    .unwrap_or_default();
+                    .map_or_default(|pending| pending.entries);
                 if self.starts_mounts(&entries)
                     && let Err(err) = self.hooks.services.forget_started_mounts()
                 {
@@ -1907,8 +1904,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 fn unix_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|since| since.as_millis())
-        .unwrap_or_default()
+        .map_or_default(|since| since.as_millis())
 }
 
 // ---------------------------------------------------------------------------
@@ -2401,7 +2397,7 @@ mod tests {
     struct RecordingChecks(std::sync::Mutex<Vec<(PathBuf, Vec<u8>)>>);
     impl RecordingChecks {
         fn seen(&self) -> Vec<(PathBuf, Vec<u8>)> {
-            self.0.lock().map(|seen| seen.clone()).unwrap_or_default()
+            self.0.lock().map_or_default(|seen| seen.clone())
         }
     }
     impl CheckRunner for RecordingChecks {
@@ -3860,11 +3856,7 @@ mod tests {
     fn capture<T>(body: impl FnOnce() -> T) -> (T, Vec<LoggedEvent>) {
         let capture = Capture::default();
         let out = tracing::subscriber::with_default(capture.clone(), body);
-        let events = capture
-            .0
-            .lock()
-            .map(|events| events.clone())
-            .unwrap_or_default();
+        let events = capture.0.lock().map_or_default(|events| events.clone());
         (out, events)
     }
 

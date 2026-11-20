@@ -428,10 +428,7 @@ impl TokenStore {
     /// A snapshot of the records; empty if the lock was poisoned, which
     /// refuses every token rather than accepting one.
     fn records(&self) -> Vec<TokenRecord> {
-        self.inner
-            .lock()
-            .map(|g| g.tokens.clone())
-            .unwrap_or_default()
+        self.inner.lock().map_or_default(|g| g.tokens.clone())
     }
 
     /// Apply `change` and persist, leaving the in-memory copy untouched if the

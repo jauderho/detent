@@ -28,6 +28,12 @@ import { Countdown } from '@/components/Countdown'
 
 export type PendingCommitContextValue = {
   readonly pending: PendingCommit | null
+  /**
+   * Browser clock, epoch ms, when `pending` reached this tab. The countdown
+   * runs `remaining_s` from here, so a device clock behind the browser's
+   * cannot shorten the window.
+   */
+  readonly receivedAt: number
   /** Records the window an `apply` just armed. */
   arm(commit: PendingCommit): void
   /** Clears it — confirmed, rolled back, or expired. */
@@ -64,8 +70,8 @@ export function PendingCommitProvider({ children }: { children: ReactNode }) {
   }, [queryClient])
 
   const value = useMemo<PendingCommitContextValue>(
-    () => ({ pending, arm, clear }),
-    [pending, arm, clear],
+    () => ({ pending, receivedAt: query.dataUpdatedAt, arm, clear }),
+    [pending, query.dataUpdatedAt, arm, clear],
   )
 
   return <PendingCommitContext.Provider value={value}>{children}</PendingCommitContext.Provider>
@@ -80,11 +86,12 @@ export function usePendingCommit(): PendingCommitContextValue {
 }
 
 const SLOT_STYLE = { paddingTop: 12 } as const
+const MS_PER_SECOND = 1000
 
 /** Renders the pending state and its confirmation action in the shell. */
 export function PendingCommitSlot() {
   const { l10n } = useLocalization()
-  const { pending, clear } = usePendingCommit()
+  const { pending, receivedAt, clear } = usePendingCommit()
   const confirm = useConfirmCommit()
   const rollback = useRollbackCommit()
   const errorMessage = useApiErrorMessage()
@@ -93,8 +100,7 @@ export function PendingCommitSlot() {
     return null
   }
 
-  const deadline = Date.parse(pending.deadline)
-  const hasDeadline = !Number.isNaN(deadline)
+  const deadline = receivedAt + pending.remaining_s * MS_PER_SECOND
 
   return (
     <div className="wrap" style={SLOT_STYLE}>
@@ -102,13 +108,11 @@ export function PendingCommitSlot() {
         tone="amber"
         actions={
           <>
-            {hasDeadline ? (
-              <Countdown
-                deadline={deadline}
-                onExpire={clear}
-                label={l10n.getString('pending-commit-countdown-label')}
-              />
-            ) : null}
+            <Countdown
+              deadline={deadline}
+              onExpire={clear}
+              label={l10n.getString('pending-commit-countdown-label')}
+            />
             <Button
               variant="primary"
               disabled={confirm.isPending || rollback.isPending}

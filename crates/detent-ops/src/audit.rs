@@ -614,7 +614,7 @@ impl TailLines {
             self.file.read_exact_at(&mut chunk, self.pos)?;
             chunk.append(&mut self.carry);
             let mut parts = chunk.split(|byte| *byte == b'\n');
-            self.carry = parts.next().map(<[u8]>::to_vec).unwrap_or_default();
+            self.carry = parts.next().map_or_default(<[u8]>::to_vec);
             self.ready = parts.map(<[u8]>::to_vec).collect();
         }
     }
@@ -765,8 +765,7 @@ impl CaptureAudit {
     pub fn records(&self) -> Vec<AuditRecord> {
         self.records
             .lock()
-            .map(|records| records.clone())
-            .unwrap_or_default()
+            .map_or_default(|records| records.clone())
     }
 }
 

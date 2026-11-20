@@ -367,8 +367,7 @@ impl CaptureAuthAudit {
     pub fn records(&self) -> Vec<AuthRecord> {
         self.records
             .lock()
-            .map(|records| records.clone())
-            .unwrap_or_default()
+            .map_or_default(|records| records.clone())
     }
 
     /// The events captured so far, oldest first.

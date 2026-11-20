@@ -1630,7 +1630,7 @@ async fn cert_status_describes_the_certificate_the_listener_serves() -> R {
     // The answer must describe the certificate the store actually holds, not
     // a re-derived one: compare against the live resolver.
     let served = live.state().cert_store.current();
-    let der = served.cert.first().map(|c| c.to_vec()).unwrap_or_default();
+    let der = served.cert.first().map_or_default(|c| c.to_vec());
     assert_eq!(
         body.get("fingerprint").and_then(serde_json::Value::as_str),
         Some(crate::tls::fingerprint(&der).as_str())
@@ -1818,10 +1818,7 @@ async fn a_read_token_never_sees_a_rendered_file() -> R {
     let read_get = get(&gfix.state, "/api/v1/modules/stub", Some(&read2)).await?;
     assert_eq!(read_get.status(), StatusCode::OK);
     let read_get_body = json(read_get).await?;
-    let read_model_str = read_get_body
-        .get("model")
-        .map(|v| v.to_string())
-        .unwrap_or_default();
+    let read_model_str = read_get_body.get("model").map_or_default(|v| v.to_string());
     assert!(
         !read_model_str.contains("hunter2"),
         "read GetModule leaked secret: {read_model_str}"
@@ -1849,8 +1846,7 @@ async fn a_read_token_never_sees_a_rendered_file() -> R {
     let write_get_body = json(write_get).await?;
     let write_model_str = write_get_body
         .get("model")
-        .map(|v| v.to_string())
-        .unwrap_or_default();
+        .map_or_default(|v| v.to_string());
     assert!(
         write_model_str.contains("hunter2"),
         "write GetModule should contain secret"
@@ -1947,9 +1943,8 @@ mod contract_fuzz {
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::from(body.clone()))
                 .map_err(|error| TestCaseError::fail(error.to_string()))?;
-            let response = runtime
-                .block_on(app(live.state()).oneshot(request))
-                .map_err(|error| TestCaseError::fail(error.to_string()))?;
+            // The router's error type is `Infallible`.
+            let Ok(response) = runtime.block_on(app(live.state()).oneshot(request));
             prop_assert!(
                 !response.status().is_server_error(),
                 "{path} answered {} to {body:?}",

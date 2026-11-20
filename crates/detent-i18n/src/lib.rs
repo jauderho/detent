@@ -134,8 +134,7 @@ fn en_us_files() -> Vec<&'static str> {
     CATALOGUE
         .iter()
         .find(|locale| locale.tag == EN_US_TAG)
-        .map(LocaleSource::texts)
-        .unwrap_or_default()
+        .map_or_default(LocaleSource::texts)
 }
 
 /// Parses `.ftl` sources into a bundle for `tag`, tolerating parse errors in any
@@ -394,8 +393,7 @@ impl Localizer {
         let files = CATALOGUE
             .iter()
             .find(|locale| locale.tag == tag)
-            .map(LocaleSource::texts)
-            .unwrap_or_default();
+            .map_or_default(LocaleSource::texts);
         Self::from_files(tag, &files)
     }
 

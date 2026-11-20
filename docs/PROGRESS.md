@@ -5,6 +5,32 @@ A running handoff log, so another agent can pick the work up cold.
 file is the rolling state**. Append a dated entry at the top of the log when a
 phase or a self-contained piece of work finishes.
 
+## 2026-11-19 - Second audit fixes and CI repair
+
+- `packaging/install.sh` stages each file next to its target and renames it
+  over the target. A copy onto the running `detent` binary fails with ETXTBSY
+  (seen on the test host), so a second install run stopped.
+- `scripts/upstream-watch.sh check` exits 1 when it cannot find a module's
+  newest release or cannot list open issues, instead of skipping.
+- `detent-web` TLS: the legacy two-file certificate layout migration is gone.
+  No release used that layout.
+- CI on `main` was red since stable Rust 1.100: clippy `map_unwrap_or` (now
+  `map_or_default`), an `unreachable_code` error in a web test, and
+  RUSTSEC-2026-0486 on rustix 1.1.5 (now 1.1.6, past the cooldown).
+- Not changed: the x86_64 seccomp allow list still has `unlink`, which the
+  legacy migration used. Remove it only after a new syscall trace.
+
+## 2026-11-19 - The commit window counts from the server's remaining time
+
+A device with no RTC can report a commit-confirm deadline minutes behind the browser clock. The console counted down from that wall-clock `deadline`, so a device 90 s behind started at zero: the banner expired, polling stopped, and the admin could not confirm.
+
+- `PendingCommit` gains `remaining_s`: seconds left when the report was produced, rounded up. The engine keeps the arm time as a monotonic `Instant` and derives `remaining_s` on read with saturating math; at arm time it equals `timeout_s`. `deadline` stays for the CLI and MCP.
+- The console runs the countdown from `remaining_s` plus `query.dataUpdatedAt`, the browser's receive time, the same pattern as `AuthProvider`.
+- `usePendingCommitQuery` sets `notifyOnChangeProps: ['data']`. Reading `dataUpdatedAt` during render made every 5 s poll re-render the shell, and in the fake-timer polling test in `PendingCommit.test.tsx` that left React stalled, so a later test file (`CredentialNotices`) timed out. Found by bisecting; the fake-timer test is unchanged.
+- Tests: `a_commit_confirm_module_arms_a_window_that_confirm_closes` (Rust, `remaining_s`), `remaining_seconds_round_up_and_stop_at_zero` (Rust), and `counts down the server remaining time when its deadline is behind the browser clock` (TS). The TS test failed before the fix: `Unable to find an element with the text: 01:00`.
+
+**Checks.** `cargo fmt --all --check` clean. `cargo test -p detent-ops --locked` 157 passed; `-p detent-web` 515 passed, 2 ignored; `-p detent` 297 passed. Web: typecheck clean, `api:check` OK, `lint` no errors (one pre-existing `biome.json` schema-version notice), `test` 614 passed.
+
 ## 2026-10-31 - Rust follows stable everywhere
 
 Owner decision 2026-10-31 (`DECISIONS.md`, "Rust toolchain").

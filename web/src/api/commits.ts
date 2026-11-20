@@ -32,13 +32,21 @@ export function fetchPendingCommit(
   return client.get('/api/v1/commits/pending', { ...(signal === undefined ? {} : { signal }) })
 }
 
-/** Loads the monitor's current commit-confirm window and keeps it fresh. */
+/**
+ * Loads the monitor's current commit-confirm window and keeps it fresh.
+ *
+ * `notifyOnChangeProps: ['data']` makes observers re-render only when the
+ * report changes, not on every poll. The shell reads `dataUpdatedAt` on those
+ * renders, so the countdown is anchored to the poll that delivered the report
+ * it shows.
+ */
 export function usePendingCommitQuery(): UseQueryResult<PendingCommit | null, ApiRequestError> {
   const client = useApiClient()
   return useQuery({
     queryKey: PENDING_COMMIT_QUERY_KEY,
     queryFn: ({ signal }) => unwrap(fetchPendingCommit(client, signal)),
     refetchInterval: (query) => (query.state.data ? PENDING_COMMIT_POLL_MS : false),
+    notifyOnChangeProps: ['data'],
   })
 }
 

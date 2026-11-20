@@ -345,6 +345,7 @@ pub fn every_outcome() -> Vec<OpOutcome> {
                 commit_id: CommitId(1),
                 timeout_s: 90,
                 deadline: "2026-09-04T00:00:00Z".to_owned(),
+                remaining_s: 90,
                 rollback_targets: 1,
             }),
             checks: Vec::new(),
@@ -544,8 +545,7 @@ pub fn capture<T>(body: impl FnOnce() -> T) -> (T, String) {
     let text = logs
         .0
         .lock()
-        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-        .unwrap_or_default();
+        .map_or_default(|bytes| String::from_utf8_lossy(&bytes).into_owned());
     (out, text)
 }
 

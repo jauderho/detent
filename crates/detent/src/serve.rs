@@ -2566,14 +2566,12 @@ mod web_tests {
         assert_ne!(bound.local_addr().port(), 0);
         let certs = dir.path().join("certs");
         assert!(
-            certs.join("bootstrap.pair").exists() || certs.join("bootstrap.cert.der").exists(),
+            certs.join("bootstrap.pair").exists(),
             "bootstrap cert missing in {certs:?}: {:?}",
-            std::fs::read_dir(&certs)
-                .map(|r| r
-                    .filter_map(Result::ok)
-                    .map(|e| e.file_name())
-                    .collect::<Vec<_>>())
-                .unwrap_or_default()
+            std::fs::read_dir(&certs).map_or_default(|r| r
+                .filter_map(Result::ok)
+                .map(|e| e.file_name())
+                .collect::<Vec<_>>())
         );
         let text = String::from_utf8(notes)?;
         assert!(text.contains("fingerprint"), "{text}");
