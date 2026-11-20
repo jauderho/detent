@@ -1297,23 +1297,21 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_valid_and_apply_to_an_empty_file() -> Result<(), String> {
+    fn defaults_are_valid_and_apply_to_an_empty_file() -> Result<(), Box<dyn std::error::Error>> {
         for os in [Os::Linux, Os::MacOs, Os::Other] {
             let host = profile(os, "node1");
             let ctx = ValidationCtx::new(&host);
             let model = ChronyModule::defaults(&host);
             assert!(!ChronyModule::validate(&model, &ctx).has_errors());
-            let mut doc = ChronyModule::parse("").map_err(|e| e.to_string())?;
-            let report = ChronyModule::apply(&mut doc, &model).map_err(|e| e.to_string())?;
+            let mut doc = ChronyModule::parse("")?;
+            let report = ChronyModule::apply(&mut doc, &model)?;
             assert_eq!(report.added, model.settings.len());
             let rendered = ChronyModule::render(&doc);
             assert_eq!(
                 rendered,
                 "pool time.cloudflare.com iburst nts\nmakestep 1 3\nrtcsync\ncmdport 0\n"
             );
-            let back =
-                ChronyModule::to_model(&ChronyModule::parse(&rendered).map_err(|e| e.to_string())?)
-                    .map_err(|e| e.to_string())?;
+            let back = ChronyModule::to_model(&ChronyModule::parse(&rendered)?)?;
             assert_eq!(back, model);
         }
         Ok(())
@@ -1447,11 +1445,7 @@ mod tests {
         let defaults = serde_json::to_value(ChronyModule::defaults(&host)).unwrap_or_default();
         let found = Dyn::<ChronyModule>::new()
             .validate_json(&defaults, &ValidationCtx::new(&host))
-            .map(|all| {
-                all.iter()
-                    .filter(|d| d.id.as_str().starts_with("core-version-"))
-                    .count()
-            });
+            .map(|all| all.len());
         assert_eq!(found.ok(), Some(0));
     }
 

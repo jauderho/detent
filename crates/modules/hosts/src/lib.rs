@@ -453,7 +453,7 @@ fn validate_localhost(model: &Model, diagnostics: &mut Diagnostics) {
         present |= is_localhost;
         if entry.ip.is_loopback() {
             ipv6_present |= entry.ip.is_ipv6() && (is_localhost || is_ipv6_alias);
-        } else if is_localhost || is_ipv6_alias {
+        } else {
             diagnostics.push(
                 Diagnostic::new(Severity::Error, LOCALHOST_NOT_LOOPBACK)
                     .with_field(FieldPath::new(format!("entries/{index}/ip")))
