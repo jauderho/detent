@@ -100,9 +100,19 @@ impl SystemdManager {
             unit.to_owned(),
             SHOW_PROPERTIES.to_owned(),
         ];
+        self.show_properties(program, &args, unit)
+    }
+
+    /// Runs `systemctl show` with `args` and parses its properties.
+    fn show_properties(
+        &self,
+        program: &'static str,
+        args: &[String],
+        unit: &str,
+    ) -> Result<HashMap<String, String>, ServiceError> {
         let output = self
             .runner
-            .run(program, &args, STATUS_TIMEOUT)
+            .run(program, args, STATUS_TIMEOUT)
             .map_err(|err| ServiceError::Failed(err.to_string()))?;
         if output.timed_out {
             return Err(ServiceError::Failed(format!(
@@ -175,16 +185,7 @@ impl SystemdManager {
             "--".to_owned(),
             unit.to_owned(),
         ];
-        let output = self
-            .runner
-            .run(program, &args, STATUS_TIMEOUT)
-            .map_err(|err| ServiceError::Failed(err.to_string()))?;
-        if output.timed_out {
-            return Err(ServiceError::Failed(format!(
-                "systemctl show {unit} timed out"
-            )));
-        }
-        let props = parse_key_values(&output.stdout);
+        let props = self.show_properties(program, &args, unit)?;
         Ok(parse_active_state(
             props.get("ActiveState").map(String::as_str),
         ))
