@@ -4205,16 +4205,13 @@ mod tests {
         // Routes and bridges have no keyfile form, so NM refuses them rather
         // than drop them. Addresses and interface shape survive the NM round
         // trip.
-        let mut nm = NetworkModule::parse("[connection]\nid=eth0\ninterface-name=eth0\n")
-            .map_err(|e| e.to_string())?;
+        let nm_seed = "[connection]\nid=eth0\ninterface-name=eth0\n";
+        let mut nm = NetworkModule::parse(nm_seed).map_err(|e| e.to_string())?;
         assert!(matches!(
             NetworkModule::apply(&mut nm, &model),
             Err(super::EditError::Unsupported { .. })
         ));
-        assert_eq!(
-            NetworkModule::render(&nm),
-            "[connection]\nid=eth0\ninterface-name=eth0\n"
-        );
+        assert_eq!(NetworkModule::render(&nm), nm_seed);
         let mut routeless = bridgeless.clone();
         for iface in &mut routeless.interfaces {
             iface.routes.clear();
@@ -4225,10 +4222,7 @@ mod tests {
             NetworkModule::apply(&mut nm, &routeless),
             Err(super::EditError::Unsupported { .. })
         ));
-        assert_eq!(
-            NetworkModule::render(&nm),
-            "[connection]\nid=eth0\ninterface-name=eth0\n"
-        );
+        assert_eq!(NetworkModule::render(&nm), nm_seed);
         routeless.interfaces.truncate(1);
         NetworkModule::apply(&mut nm, &routeless).map_err(|e| e.to_string())?;
         let nm_rendered = NetworkModule::render(&nm);
